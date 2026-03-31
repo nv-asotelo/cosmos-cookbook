@@ -1,12 +1,73 @@
 # CLAUDE.md — Worker Safety · Cosmos Reason 2 Inference
 
+## Step 0 — Install and authenticate Brev CLI
+
+Before any `brev` command can run, the Brev CLI must be installed and the user must be logged in.
+
+### Check if brev is already installed
+
+```bash
+which brev
+brev --version
+```
+
+If `brev` is found and the version is ≥ 0.6.322, skip to "Authenticate" below.
+
+### Install brev-cli (if not found)
+
+**macOS:**
+```bash
+brew install brevdev/homebrew-brev/brev
+```
+
+**Linux / WSL (curl installer):**
+```bash
+# Download first, inspect, then execute — do NOT pipe directly to bash
+curl -fsSL https://raw.githubusercontent.com/brevdev/brev-cli/main/bin/install-latest.sh -o /tmp/install-brev.sh
+# Review the script before running: cat /tmp/install-brev.sh
+sudo bash /tmp/install-brev.sh
+```
+
+> **Security notice:** The Linux installer runs with `sudo` and modifies system paths.
+> The script is open-source at https://github.com/brevdev/brev-cli — review it before execution.
+> Never pipe unknown scripts directly to `sudo bash` without inspection.
+
+Verify installation:
+```bash
+which brev
+brev --version
+```
+
+### Authenticate (REQUIRED — cannot be automated)
+
+```
+⚠️  HUMAN ACTION REQUIRED — Claude cannot complete this step.
+```
+
+`brev login` opens a browser for OAuth. This must be done by the user, once per machine, before any `brev create` or `brev exec` call will work.
+
+**Tell the user:**
+> To use this recipe, you need to authenticate with Brev once. Please run the following in your terminal:
+>
+> ```bash
+> brev login
+> ```
+>
+> A browser window will open. Log in with your NVIDIA SSO or GitHub account. When the terminal shows "Logged in!", you're done. Claude will continue from there.
+
+After the user confirms login is complete, proceed to the Quick Start below.
+
+---
+
 ## Quick Start for Agents
 
 ```bash
-# ── PRE-FLIGHT (human must do these once) ──────────────────────────────────
-# 1. brev login                            ← browser OAuth, one-time per machine
-# 2. Accept NVIDIA Open Model License at https://huggingface.co/nvidia/Cosmos-Reason2-2B
-# 3. Set HF_TOKEN in your shell: export HF_TOKEN=hf_...
+# ── PRE-FLIGHT CHECKLIST ────────────────────────────────────────────────────
+# [✓] brev installed (Step 0 above)
+# [✓] brev login completed by user (browser OAuth — one-time per machine)
+# [✓] User has accepted NVIDIA Open Model License at:
+#     https://huggingface.co/nvidia/Cosmos-Reason2-2B
+# [✓] HF_TOKEN set: export HF_TOKEN=hf_...
 
 # ── AGENT EXECUTION ────────────────────────────────────────────────────────
 brev org set asotelo-test-org              # ALWAYS set org first — wrong org = wrong bill
@@ -23,7 +84,7 @@ brev port-forward worker-safety -p 5151:5151
 # Then open: http://localhost:5151
 ```
 
-**Minimum inputs from user:** `HF_TOKEN` (once per session). `brev login` must have been run at least once on this machine.
+**Minimum inputs from user:** `HF_TOKEN` (once per session). `brev login` must have been run at least once on this machine. `brev` must be installed (see Step 0).
 
 ---
 
