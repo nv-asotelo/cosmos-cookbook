@@ -23,24 +23,30 @@ on a configurable port so a remote user can port-forward and browse results.
 
 Usage
 -----
-# Inference only — save results to JSON and exit
+# Default: run on the built-in HuggingFace dataset
 python run_headless.py
+
+# Bring your own videos (local directory on the instance)
+python run_headless.py --video-dir ~/my_videos/
+
+# Use a different HuggingFace dataset
+python run_headless.py --hf-dataset your-org/your-dataset
 
 # Inference + serve FiftyOne on port 5151 (port-forward from local machine)
 python run_headless.py --serve
 
-# Specify a different port
-python run_headless.py --serve --port 5152
+# Full custom example
+python run_headless.py --video-dir ~/my_videos/ --results ~/my_results.json --serve --port 5151
 
-# If weights are stored outside the default path, override MODEL_DIR
-MODEL_DIR=/data/models python run_headless.py --serve
+Upload your own videos to the instance first:
+  brev copy ./my_videos/ <instance-name>:/home/shadeform/my_videos/
 
 Output
 ------
 inference_results.json  — one record per video:
   {
     "filepath":     "/path/to/video.mp4",
-    "ground_truth": "Safe Walkway",          # from dataset metadata
+    "ground_truth": "Safe Walkway",          # from dataset metadata (if available)
     "safety_label": "Safe Walkway",          # Cosmos Reason2 prediction
     "hazard":       false,                   # is_hazardous flag from model
     "description":  "...",                   # video_description from model
@@ -59,6 +65,12 @@ import json
 import os
 import pathlib
 import sys
+
+# Supported video extensions
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+
+# Default HuggingFace dataset for the Worker Safety recipe
+DEFAULT_HF_DATASET = "pjramg/Safe_Unsafe_Test"
 
 
 def parse_args():
@@ -79,6 +91,26 @@ def parse_args():
         default="inference_results.json",
         help="Path to write JSON results (default: inference_results.json)",
     )
+    p.add_argument(
+        "--video-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Directory of video files to run inference on. "
+            "Supported formats: .mp4 .avi .mov .mkv .webm .m4v. "
+            "Upload videos first with: "
+            "brev copy ./my_videos/ <instance>:/home/shadeform/my_videos/"
+        ),
+    )
+    p.add_argument(
+        "--hf-dataset",
+        default=DEFAULT_HF_DATASET,
+        metavar="ORG/REPO",
+        help=(
+            "HuggingFace dataset slug to load (default: %(default)s). "
+            "Ignored when --video-dir is set."
+        ),
+    )
     return p.parse_args()
 
 
@@ -88,6 +120,59 @@ def patch_fiftyone_launch():
 
     _noop = type("_Session", (), {"wait": lambda self: None})()
     fo.launch_app = lambda *args, **kwargs: _noop
+
+
+def load_custom_dataset(video_dir):
+    """
+    Create a FiftyOne dataset from a local directory of video files.
+    Returns the dataset name so it can be used by patch_dataset_loading().
+    """
+    import fiftyone as fo
+
+    video_dir = pathlib.Path(video_dir).expanduser().resolve()
+    if not video_dir.is_dir():
+        print(f"ERROR: --video-dir '{video_dir}' is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    videos = sorted(
+        f for f in video_dir.iterdir() if f.suffix.lower() in VIDEO_EXTENSIONS
+    )
+    if not videos:
+        print(
+            f"ERROR: no video files found in '{video_dir}'. "
+            f"Supported: {', '.join(sorted(VIDEO_EXTENSIONS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    name = "custom_inference"
+    if fo.dataset_exists(name):
+        fo.delete_dataset(name)
+
+    dataset = fo.Dataset(name=name, persistent=True)
+    dataset.add_samples([fo.Sample(filepath=str(v)) for v in videos])
+    print(f"Loaded {len(dataset)} videos from '{video_dir}'")
+    return name
+
+
+def patch_dataset_loading(custom_name, hf_slug):
+    """
+    Monkey-patch fiftyone so worker_safety.py uses our pre-loaded dataset
+    instead of making a HuggingFace download call.
+    """
+    import fiftyone as fo
+    import fiftyone.utils.huggingface as fouh
+
+    _original_load = fo.load_dataset
+
+    def _patched_load(name, *args, **kwargs):
+        if name in (hf_slug, custom_name):
+            return _original_load(custom_name)
+        return _original_load(name, *args, **kwargs)
+
+    fo.load_dataset = _patched_load
+    # Also intercept the load_from_hub call at the top of worker_safety.py
+    fouh.load_from_hub = lambda *args, **kwargs: _original_load(custom_name)
 
 
 def run_inference():
@@ -175,6 +260,16 @@ def main():
     # Patch fo.launch_app before executing the recipe so the recipe's own
     # `session = fo.launch_app(dataset); session.wait()` becomes a no-op.
     patch_fiftyone_launch()
+
+    # If the user supplied their own videos, load them into FiftyOne and
+    # redirect worker_safety.py's dataset calls to that local dataset.
+    if args.video_dir:
+        custom_name = load_custom_dataset(args.video_dir)
+        patch_dataset_loading(custom_name, args.hf_dataset)
+    elif args.hf_dataset != DEFAULT_HF_DATASET:
+        # User specified a different HF dataset but no local dir — pass through.
+        # worker_safety.py will download it from HuggingFace as normal.
+        print(f"Using HuggingFace dataset: {args.hf_dataset}")
 
     run_inference()
 

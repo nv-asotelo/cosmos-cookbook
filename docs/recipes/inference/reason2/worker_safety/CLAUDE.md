@@ -348,6 +348,55 @@ Quantization takes ~25 min one-time. Use the quantized model for all subsequent 
 
 ---
 
+## Using Your Own Videos
+
+The default setup runs inference on `pjramg/Safe_Unsafe_Test` (40 HuggingFace videos). To classify your own warehouse footage instead, use `run_headless.py --video-dir`. No changes to `worker_safety.py` are needed.
+
+### Step 1 — Upload your videos to the instance
+
+```bash
+# From your LOCAL machine
+brev copy ./my_videos/ worker-safety:/home/shadeform/my_videos/
+```
+
+Supported video formats: `.mp4` `.avi` `.mov` `.mkv` `.webm` `.m4v`
+
+### Step 2 — Run inference on your videos
+
+```bash
+# On the instance (via brev exec or brev shell)
+$HOME/cosmos-reason2/.venv/bin/python3 run_headless.py \
+  --video-dir ~/my_videos/ \
+  --results ~/my_results.json
+```
+
+### Step 3 — Browse results in FiftyOne
+
+```bash
+$HOME/cosmos-reason2/.venv/bin/python3 run_headless.py \
+  --video-dir ~/my_videos/ \
+  --results ~/my_results.json \
+  --serve --port 5151
+```
+
+Then on your local machine: `brev port-forward worker-safety -p 5151:5151` → open `http://localhost:5151`
+
+### Using a different HuggingFace dataset
+
+```bash
+$HOME/cosmos-reason2/.venv/bin/python3 run_headless.py \
+  --hf-dataset your-org/your-dataset \
+  --results ~/my_results.json
+```
+
+The `--hf-dataset` flag is ignored when `--video-dir` is also set.
+
+### How it works
+
+`run_headless.py` intercepts `fo.load_dataset()` and `fouh.load_from_hub()` before executing `worker_safety.py`. Your local video directory is pre-loaded into a FiftyOne dataset named `custom_inference`. The recipe sees the same FiftyOne API regardless of data source. Output format is identical (`inference_results.json`).
+
+---
+
 ## Companion Files
 
 | File | Purpose |
