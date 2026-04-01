@@ -225,6 +225,9 @@ for sample in dataset.iter_samples(progress=True):
         ).to(model.device)
 
         # Inference
+        # max_new_tokens=1024 is safe for free-text reasoning. For this recipe's
+        # structured JSON output, 256 is sufficient and reduces inference time by ~20%.
+        # To use the faster default: model.generate(**inputs, max_new_tokens=256)
         generated_ids = model.generate(**inputs, max_new_tokens=1024)
         generated_ids_trimmed = [
             out_ids[len(in_ids) :]

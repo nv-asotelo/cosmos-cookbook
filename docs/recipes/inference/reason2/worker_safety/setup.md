@@ -135,6 +135,14 @@ In the JupyterLab UI:
 
 - **Kernel → Change Kernel → `Python (cosmos-reason2)`**
 
+> **Headless or server environment?** Skip JupyterLab and use `run_headless.py` instead — it is the preferred path for non-interactive execution (Brev, SSH, CI). The notebook's `session.wait()` call blocks forever without a display; `run_headless.py` patches this out automatically.
+>
+> ```bash
+> python run_headless.py --results ~/inference_results.json
+> ```
+>
+> See [CLAUDE.md](CLAUDE.md) → Step 12 for the full headless workflow.
+
 ---
 
 ## 9) Running scripts from inside a notebook (important)

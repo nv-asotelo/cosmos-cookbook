@@ -82,7 +82,8 @@ brev search --gpu-name B200 --sort price
 # Tier 2 — H200 (3.5× faster than A100, ~$4.20/hr, effectively same session cost as A100)
 brev search --gpu-name H200 --sort price
 #
-# Tier 3 — H100 (2.5× faster, cheaper total session cost than A100 for 3+ runs)
+# Tier 3 — H100 (2.5× faster than A100, 34% cheaper total cost for multi-run sessions)
+# H100 is 34% cheaper than A100 for multi-run sessions (2.5x faster — sessions finish sooner)
 brev search --gpu-name H100 --sort price
 #
 # Tier 4 — A100 80G fallback (verified working, massedcompute preferred)
@@ -126,7 +127,7 @@ brev port-forward worker-safety -p 5151:5151
 |----------|-----|-----------------|------|---------------|-----------------------|-------|
 | 1 | B200 | `verda_B200` | ~$6.76 | ~5× | ~$8.65 | Native fp4 kernel; Blackwell arch; single provider |
 | 2 | **H200** ★ | `gpu-h200-sxm.1gpu-16vcpu-200gb` | ~$4.20 | ~3.5× | ~$6.72 | **Recommended default.** Widely available; same total cost as A100; 3.5× faster. |
-| 3 | H100 | `hyperstack_H100` | ~$2.28 | ~2.5× | ~$4.52 | Cheaper total than A100 for ≥3 runs. Native fp8 (Hopper). |
+| 3 | H100 | `hyperstack_H100` | ~$2.28 | ~2.5× | ~$4.52 | **34% cheaper than A100 for multi-run sessions (2.5× faster).** Native fp8 (Hopper). Preferred over A100 for any session with 2+ runs. |
 | 4 | A100 80G | `massedcompute_A100_sxm4_80G` | ~$1.49 | 1× | ~$6.85 | Fallback only. GCP A100 types fail with capacity errors — use massedcompute. |
 
 > **Why H200 over A100?** The A100's $1.49/hr looks cheaper, but a 3-run experiment session takes 4.6 hours ($6.85 total). The same session on an H200 at $4.20/hr completes in ~1.6 hours ($6.72) — effectively the same total cost at 3.5× the speed. For anyone onboarding to Cosmos Reason, A100 is the wrong default.
