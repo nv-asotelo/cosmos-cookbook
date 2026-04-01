@@ -69,11 +69,30 @@ After the user confirms login is complete, proceed to the Quick Start below.
 #     https://huggingface.co/nvidia/Cosmos-Reason2-2B
 # [✓] HF_TOKEN set: export HF_TOKEN=hf_...
 
-# ── AGENT EXECUTION ────────────────────────────────────────────────────────
+# ── STEP 1: Select org ──────────────────────────────────────────────────────
 brev org set asotelo-test-org              # ALWAYS set org first — wrong org = wrong bill
 
+# ── STEP 2: Select best available instance (run before brev create) ─────────
+# Priority order: availability > inference speed > cost.
+# Query each tier and use the first one with results. Do NOT skip this step.
+#
+# Tier 1 — B200 (native fp4, ~5× faster than A100, ~$6.76/hr)
+brev search --gpu-name B200 --sort price
+#
+# Tier 2 — H200 (3.5× faster than A100, ~$4.20/hr, effectively same session cost as A100)
+brev search --gpu-name H200 --sort price
+#
+# Tier 3 — H100 (2.5× faster, cheaper total session cost than A100 for 3+ runs)
+brev search --gpu-name H100 --sort price
+#
+# Tier 4 — A100 80G fallback (verified working, massedcompute preferred)
+brev search --gpu-name A100 --min-vram 80 --sort price
+
+# ── STEP 3: Create instance using chosen type ───────────────────────────────
+# Replace <CHOSEN_TYPE> with the first available result from Step 2 above.
+# Default if all tiers available: use H200 (best availability:speed:cost ratio).
 brev create worker-safety \
-  --type massedcompute_A100_sxm4_80G_DGX \
+  --type <CHOSEN_TYPE> \
   --startup-script @launch.sh             # launch.sh must be in the same directory
 
 # Monitor (poll until complete):
@@ -99,12 +118,22 @@ brev port-forward worker-safety -p 5151:5151
 
 ## Compute Requirements
 
-1× NVIDIA GPU with 40 GB+ VRAM. Tested: `massedcompute_A100_sxm4_80G_DGX` (A100 80 GB SXM4).
+1× NVIDIA GPU with 40 GB+ VRAM. Select the best available instance using the priority ladder below.
 
-**Verified working instance type:** `massedcompute_A100_sxm4_80G_DGX`
-GCP A100 types (e.g. `g2-standard-96`) fail with capacity errors. Use massedcompute.
+**Priority order: availability → inference speed → cost**
 
-**Instance user:** `shadeform` (not `ubuntu`). Use `$HOME` throughout — do not hardcode `/home/ubuntu`.
+| Priority | GPU | Example instance | $/hr | vs A100 speed | Session cost (3 runs) | Notes |
+|----------|-----|-----------------|------|---------------|-----------------------|-------|
+| 1 | B200 | `verda_B200` | ~$6.76 | ~5× | ~$8.65 | Native fp4 kernel; Blackwell arch; single provider |
+| 2 | **H200** ★ | `gpu-h200-sxm.1gpu-16vcpu-200gb` | ~$4.20 | ~3.5× | ~$6.72 | **Recommended default.** Widely available; same total cost as A100; 3.5× faster. |
+| 3 | H100 | `hyperstack_H100` | ~$2.28 | ~2.5× | ~$4.52 | Cheaper total than A100 for ≥3 runs. Native fp8 (Hopper). |
+| 4 | A100 80G | `massedcompute_A100_sxm4_80G` | ~$1.49 | 1× | ~$6.85 | Fallback only. GCP A100 types fail with capacity errors — use massedcompute. |
+
+> **Why H200 over A100?** The A100's $1.49/hr looks cheaper, but a 3-run experiment session takes 4.6 hours ($6.85 total). The same session on an H200 at $4.20/hr completes in ~1.6 hours ($6.72) — effectively the same total cost at 3.5× the speed. For anyone onboarding to Cosmos Reason, A100 is the wrong default.
+
+> **Why not always B200?** B200 is currently single-provider (`verda`) — if that provider is at capacity, there is no fallback within the same tier. H200 is available across multiple providers. Always query availability before deciding.
+
+**Instance user:** depends on provider. massedcompute/shadeform instances use `shadeform`; nebius uses `user`. Use `$HOME` throughout — do not hardcode `/home/ubuntu` or any other username.
 
 ---
 
@@ -118,7 +147,24 @@ brev org set asotelo-test-org
 
 `asotelo-test-org` is the correct personal org. **Never skip this step.** Brev CLI org context resets between calls — set it before every `brev create`.
 
-### Step 2 — System dependencies
+### Step 2 — Select best available instance
+
+Query each tier in order. Use the first tier that returns results. The agent must run these queries at runtime — do not assume any instance type is available without checking.
+
+```bash
+brev search --gpu-name B200 --sort price
+brev search --gpu-name H200 --sort price
+brev search --gpu-name H100 --sort price
+brev search --gpu-name A100 --min-vram 80 --sort price
+```
+
+**Decision logic:**
+- If B200 results returned → use first result (native fp4, highest throughput)
+- If H200 results returned → use first result (default recommendation)
+- If H100 results returned → use first result (cheapest total for 3+ run sessions)
+- Fallback → `massedcompute_A100_sxm4_80G` (verified working; GCP A100 types fail)
+
+### Step 3 — System dependencies
 
 ```bash
 sudo apt-get update -y
@@ -126,14 +172,14 @@ sudo apt-get install -y curl ffmpeg git git-lfs
 git lfs install
 ```
 
-### Step 3 — Install uv
+### Step 4 — Install uv
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 ```
 
-### Step 4 — HuggingFace authentication
+### Step 5 — HuggingFace authentication
 
 ```bash
 export HF_TOKEN=hf_YOUR_TOKEN_HERE
@@ -141,22 +187,22 @@ export HF_TOKEN=hf_YOUR_TOKEN_HERE
 
 Do NOT run `huggingface-cli login` — it is interactive and will hang. The `HF_TOKEN` environment variable is sufficient for model downloads.
 
-### Step 5 — Clone cosmos-reason2
+### Step 6 — Clone cosmos-reason2
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/nvidia-cosmos/cosmos-reason2.git $HOME/cosmos-reason2
 cd $HOME/cosmos-reason2
 ```
 
-`GIT_LFS_SKIP_SMUDGE=1` is required — the public LFS quota on cosmos-reason2 is frequently exhausted. Skip LFS on clone; model weights are downloaded separately via HuggingFace in Step 7.
+`GIT_LFS_SKIP_SMUDGE=1` is required — the public LFS quota on cosmos-reason2 is frequently exhausted. Skip LFS on clone; model weights are downloaded separately via HuggingFace in Step 8.
 
-### Step 6 — Clone cosmos-cookbook
+### Step 7 — Clone cosmos-cookbook
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/nvidia-cosmos/cosmos-cookbook.git $HOME/cosmos-cookbook
 ```
 
-### Step 7 — Create Python environment
+### Step 8 — Create Python environment
 
 ```bash
 cd $HOME/cosmos-reason2
@@ -171,7 +217,7 @@ $HOME/cosmos-reason2/.venv/bin/python3
 
 Or use `uv run` from within the cosmos-reason2 directory.
 
-### Step 8 — Install recipe dependencies
+### Step 9 — Install recipe dependencies
 
 ```bash
 cd $HOME/cosmos-reason2
@@ -180,7 +226,7 @@ uv pip install fiftyone
 
 Do NOT use `pip install` — uv venvs have no pip binary. Always use `uv pip install`.
 
-### Step 9 — Download model weights
+### Step 10 — Download model weights
 
 ```bash
 HF_TOKEN=$HF_TOKEN $HOME/cosmos-reason2/.venv/bin/python3 -c "
@@ -194,7 +240,7 @@ print('Model download complete')
 "
 ```
 
-### Step 10 — Copy recipe files
+### Step 11 — Copy recipe files
 
 ```bash
 cp $HOME/cosmos-cookbook/docs/recipes/inference/reason2/worker_safety/worker_safety.py \
@@ -205,7 +251,7 @@ cp $HOME/cosmos-cookbook/docs/recipes/inference/reason2/worker_safety/run_headle
    $HOME/cosmos-reason2/run_headless.py
 ```
 
-### Step 11 — Run inference headlessly
+### Step 12 — Run inference headlessly
 
 ```bash
 cd $HOME/cosmos-reason2
@@ -226,7 +272,7 @@ Serve FiftyOne when done:
 $HOME/cosmos-reason2/.venv/bin/python3 run_headless.py --serve --port 5151
 ```
 
-### Step 12 — Verify results
+### Step 13 — Verify results
 
 ```bash
 $HOME/cosmos-reason2/.venv/bin/python3 -c "
@@ -244,28 +290,40 @@ print(f'Total: {len(data)}  Classified: {len(labeled)}  Errors: {len(errors)}')
 
 | # | Symptom | Fix |
 |---|---------|-----|
-| 1 | `brev create` fails with capacity error | Use `massedcompute_A100_sxm4_80G_DGX` — GCP A100 types fail |
-| 2 | `pip: command not found` | Use `uv pip install` instead of `pip install` |
-| 3 | `source .venv/bin/activate` has no effect in `brev exec` | Use full path: `$HOME/cosmos-reason2/.venv/bin/python3` |
-| 4 | `GIT_LFS_SKIP_SMUDGE` not set → clone fails/hangs | Set `GIT_LFS_SKIP_SMUDGE=1` before every git clone |
-| 5 | `huggingface-cli login` hangs | Use `export HF_TOKEN=hf_...` — no interactive login needed |
-| 6 | `DatasetNotFoundError: safe-unsafe-worker-behavior` | Use `fo.list_datasets()[0]` — dataset name is the HF slug |
-| 7 | `session.wait()` blocks headless execution | Use `run_headless.py` — patches `fo.launch_app` to no-op |
-| 8 | FiftyOne port unreachable | Bind with `address="0.0.0.0"`, then `brev port-forward -p 5151:5151` |
-| 9 | Wrong org billed | Always run `brev org set asotelo-test-org` before `brev create` |
-| 10 | Instance user is `shadeform` not `ubuntu` | Use `$HOME` everywhere; never hardcode `/home/ubuntu` |
-| 11 | Recipe ends in Python REPL with `session.wait()` | Use `run_headless.py` — avoids interactive shell requirement |
+| 1 | `brev create` fails with capacity error | Run the instance selection ladder in Step 2 — query B200 → H200 → H100 → A100 in order and use the first available type |
+| 2 | GCP A100 types fail (`a2-ultragpu`, `a2-highgpu`) | Use `massedcompute_A100_sxm4_80G` for A100 — GCP A100 quota is frequently exhausted |
+| 3 | `pip: command not found` | Use `uv pip install` instead of `pip install` |
+| 4 | `source .venv/bin/activate` has no effect in `brev exec` | Use full path: `$HOME/cosmos-reason2/.venv/bin/python3` |
+| 5 | `GIT_LFS_SKIP_SMUDGE` not set → clone fails/hangs | Set `GIT_LFS_SKIP_SMUDGE=1` before every git clone |
+| 6 | `huggingface-cli login` hangs | Use `export HF_TOKEN=hf_...` — no interactive login needed |
+| 7 | `DatasetNotFoundError: safe-unsafe-worker-behavior` | Use `fo.list_datasets()[0]` — dataset name is the HF slug |
+| 8 | `session.wait()` blocks headless execution | Use `run_headless.py` — patches `fo.launch_app` to no-op |
+| 9 | FiftyOne port unreachable | Bind with `address="0.0.0.0"`, then `brev port-forward -p 5151:5151` |
+| 10 | Wrong org billed | Always run `brev org set asotelo-test-org` before `brev create` |
+| 11 | Instance user is not `ubuntu` | Use `$HOME` everywhere; massedcompute/shadeform uses `shadeform`, nebius uses `user` |
+| 12 | `torch._inductor` stalls nvfp4/fp8 inference for 4+ hours | Set `os.environ["TORCHDYNAMO_DISABLE"] = "1"` as the **first line** before any torch import |
 
 ---
 
 ## Performance Optimization
 
-| Configuration | max_new_tokens | fps | Est. inference time (40 videos) |
-|---------------|---------------|-----|----------------------------------|
-| Baseline float16 | 1024 | 4 | ~83 min |
-| Optimized float16 | 512 | 2 | ~25–35 min (est.) |
-| nvfp4 quantized | 512 | 2 | ~15–25 min (est.) |
-| fp8 quantized | 512 | 2 | ~15–25 min (est.) |
+Reference timings on A100 SXM4 80G. H200/H100 will be faster — scale by multiplier in the instance table above.
+
+| Configuration | max_new_tokens | fps | Est. time (40 videos) on A100 | Est. time on H200 |
+|---------------|---------------|-----|-------------------------------|-------------------|
+| Baseline float16 | 1024 | 4 | ~83 min | ~24 min |
+| Optimized float16 | 512 | 2 | ~50–60 min (est.) | ~15–17 min |
+| nvfp4 quantized | 512 | 2 | ~25–35 min (est.) | ~7–10 min |
+| fp8 quantized | 512 | 2 | ~25–35 min (est.) | ~7–10 min |
+
+**TORCHDYNAMO_DISABLE=1 is required for nvfp4 and fp8 quantized checkpoints.** Without it, `torch._inductor` triggers JIT kernel compilation on first forward pass — 16 compile_worker processes, GPU at <40% utilization, 0 videos processed after 4+ hours. Add this before any torch import:
+
+```python
+import os
+os.environ["TORCHDYNAMO_DISABLE"] = "1"  # must be before any torch import
+import torch
+import transformers
+```
 
 **To quantize before inference:**
 ```bash
@@ -282,7 +340,7 @@ Quantization takes ~25 min one-time. Use the quantized model for all subsequent 
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| GPU visible | `nvidia-smi` | A100 80 GB shown |
+| GPU visible | `nvidia-smi` | H200/H100/A100 80 GB shown (whichever was provisioned) |
 | CUDA available | `python3 -c "import torch; print(torch.cuda.is_available())"` | `True` |
 | Inference complete | `cat ~/inference_results.json \| python3 -c "import json,sys; d=json.load(sys.stdin); print(len([r for r in d if r['safety_label']]), 'classified')"` | `40 classified` (or N/40) |
 | No errors | Same script, check `cosmos_error` | `0 errors` |

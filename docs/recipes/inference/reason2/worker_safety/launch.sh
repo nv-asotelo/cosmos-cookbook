@@ -6,8 +6,15 @@
 #
 #   export HF_TOKEN=hf_your_token_here
 #   brev org set asotelo-test-org
+#
+#   # Select best available instance — query in priority order before running:
+#   #   brev search --gpu-name B200 --sort price   (Tier 1: ~5x faster than A100)
+#   #   brev search --gpu-name H200 --sort price   (Tier 2: ~3.5x faster, DEFAULT)
+#   #   brev search --gpu-name H100 --sort price   (Tier 3: ~2.5x faster)
+#   #   brev search --gpu-name A100 --min-vram 80 --sort price  (Tier 4: fallback)
+#
 #   brev create worker-safety \
-#     --type massedcompute_A100_sxm4_80G_DGX \
+#     --type <CHOSEN_TYPE> \               # e.g. gpu-h200-sxm.1gpu-16vcpu-200gb
 #     --startup-script @launch.sh
 #
 #   Then locally: brev port-forward worker-safety -p 5151:5151
@@ -18,7 +25,11 @@
 #   2. Accept NVIDIA Open Model License at https://huggingface.co/nvidia/Cosmos-Reason2-2B
 #   3. export HF_TOKEN=hf_...               (from huggingface.co/settings/tokens)
 #
-# Cost: ~$1.49/hr (massedcompute A100 80GB). Total runtime: ~2 hours.
+# Cost reference (40-video single run):
+#   B200  $6.76/hr  ~17 min  → ~$1.92   (native fp4; best throughput)
+#   H200  $4.20/hr  ~24 min  → ~$1.68   (recommended default)
+#   H100  $2.28/hr  ~33 min  → ~$1.25   (cheapest per-run; best for 3+ run sessions)
+#   A100  $1.49/hr  ~83 min  → ~$2.06   (fallback only — slowest, highest per-run cost)
 # =============================================================================
 
 set -uo pipefail   # note: NOT -e, so non-critical steps don't kill the run
