@@ -236,15 +236,18 @@ def load_model(model_name: str):
     import transformers
 
     if is_w4a16(model_name):
-        print(f"[HARNESS] W4A16 model detected — loading via transformers native AWQ: {model_name}")
-        # transformers 4.45+ has built-in AWQ support; no separate autoawq package needed.
-        # The quantization_config in the model repo is detected automatically.
-        model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
+        print(f"[HARNESS] W4A16 model detected — loading via AutoModel (trust_remote_code): {model_name}")
+        # Embedl models use a custom model_type (flash_head_qwen3_vl) and compressed-tensors
+        # quantization format. AutoModelForCausalLM + trust_remote_code handles both.
+        model = transformers.AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             device_map="auto",
+            trust_remote_code=True,
         )
-        processor = transformers.Qwen3VLProcessor.from_pretrained(model_name)
+        processor = transformers.AutoProcessor.from_pretrained(
+            model_name, trust_remote_code=True
+        )
     else:
         print(f"[HARNESS] Loading float16 model: {model_name}")
         model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
