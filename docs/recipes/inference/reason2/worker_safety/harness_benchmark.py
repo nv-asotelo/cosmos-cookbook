@@ -310,9 +310,12 @@ def collect_video_paths(args) -> list:
         pairs = []
         for sample in dataset:
             gt = None
-            gt_field = sample.get_field("ground_truth")
-            if gt_field is not None:
-                gt = getattr(gt_field, "label", None)
+            try:
+                gt_field = sample.get_field("ground_truth")
+                if gt_field is not None:
+                    gt = getattr(gt_field, "label", None)
+            except AttributeError:
+                pass
             pairs.append((sample.filepath, gt))
         print(f"[HARNESS] Dataset loaded: {len(pairs)} videos")
         return pairs
