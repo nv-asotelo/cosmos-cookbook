@@ -293,9 +293,20 @@ def collect_video_paths(args) -> list:
         return [(str(v), None) for v in videos]
     else:
         print(f"[HARNESS] Source: HuggingFace dataset '{args.hf_dataset}'")
+        import fiftyone as fo
         import fiftyone.utils.huggingface as fouh
 
-        dataset = fouh.load_from_hub(args.hf_dataset, persistent=True)
+        # Dataset may already exist from a prior run — load it rather than re-downloading.
+        existing = fo.list_datasets()
+        if args.hf_dataset in existing:
+            print(f"[HARNESS] Existing FiftyOne dataset found — loading '{args.hf_dataset}'")
+            dataset = fo.load_dataset(args.hf_dataset)
+        elif existing:
+            # FiftyOne stored it under its own slug (HF repo ID without org prefix, etc.)
+            print(f"[HARNESS] Dataset '{args.hf_dataset}' not found by name; using first available: '{existing[0]}'")
+            dataset = fo.load_dataset(existing[0])
+        else:
+            dataset = fouh.load_from_hub(args.hf_dataset, persistent=True)
         pairs = []
         for sample in dataset:
             gt = None
