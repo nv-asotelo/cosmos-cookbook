@@ -231,23 +231,19 @@ def is_w4a16(model_name: str) -> bool:
 
 
 def load_model(model_name: str):
-    """Load model and processor. Uses AutoAWQ for W4A16 checkpoints."""
+    """Load model and processor. Uses transformers native AWQ for W4A16 checkpoints."""
     import torch
     import transformers
 
     if is_w4a16(model_name):
-        print(f"[HARNESS] W4A16 model detected — loading via AutoAWQ: {model_name}")
-        try:
-            from awq import AutoAWQForCausalLM
-        except ImportError:
-            print(
-                "\n[ERROR] AutoAWQ is not installed. Install it with:\n"
-                "  pip install autoawq\n"
-                "or, inside a uv venv:\n"
-                "  uv pip install autoawq\n"
-            )
-            sys.exit(1)
-        model = AutoAWQForCausalLM.from_quantized(model_name, fuse_layers=True)
+        print(f"[HARNESS] W4A16 model detected — loading via transformers native AWQ: {model_name}")
+        # transformers 4.45+ has built-in AWQ support; no separate autoawq package needed.
+        # The quantization_config in the model repo is detected automatically.
+        model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+        )
         processor = transformers.Qwen3VLProcessor.from_pretrained(model_name)
     else:
         print(f"[HARNESS] Loading float16 model: {model_name}")
