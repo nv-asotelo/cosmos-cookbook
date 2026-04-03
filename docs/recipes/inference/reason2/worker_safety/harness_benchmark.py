@@ -34,6 +34,9 @@ python3 harness_benchmark.py
 # Embedl W4A16 quantized (AutoAWQ):
 python3 harness_benchmark.py --model embedl/Cosmos-Reason2-2B-W4A16-Edge2-FlashHead
 
+# Nemotron-Nano-12B-v2-VL (frame-based, isolated venv required):
+~/nemotron-venv/bin/python3 harness_benchmark.py --model nemotron --results ~/inference_results_nemotron.json --fps 2 --watchdog-warn 10 --watchdog-kill 20
+
 # Custom dataset or local videos:
 python3 harness_benchmark.py --hf-dataset pjramg/Safe_Unsafe_Test
 python3 harness_benchmark.py --video-dir ~/my_videos/
@@ -230,10 +233,21 @@ def is_w4a16(model_name: str) -> bool:
     return "W4A16" in model_name or "w4a16" in model_name
 
 
+def is_nemotron(model_name: str) -> bool:
+    return model_name == "nemotron" or "Nemotron-Nano" in model_name
+
+
 def load_model(model_name: str):
-    """Load model and processor. Uses transformers native AWQ for W4A16 checkpoints."""
+    """Load model and processor. Returns (NemotronAdapter, None) for Nemotron models."""
     import torch
     import transformers
+
+    if is_nemotron(model_name):
+        from nemotron_adapter import NemotronAdapter
+        actual_id = NemotronAdapter.MODEL_ID if model_name == "nemotron" else model_name
+        print(f"[HARNESS] Nemotron model detected — loading via NemotronAdapter: {actual_id}")
+        adapter = NemotronAdapter(model_id=actual_id)
+        return adapter, None
 
     if is_w4a16(model_name):
         print(f"[HARNESS] W4A16 model detected — loading via AutoModel (trust_remote_code): {model_name}")
@@ -324,6 +338,11 @@ def collect_video_paths(args) -> list:
 
 def run_inference_on_video(model, processor, video_path: str, fps: int, max_new_tokens: int) -> dict:
     """Run the worker-safety prompt on one video. Returns parsed JSON dict or error dict."""
+    # Nemotron uses its own adapter — processor is None for this path.
+    from nemotron_adapter import NemotronAdapter
+    if isinstance(model, NemotronAdapter):
+        return model.run_inference(video_path, fps=float(fps), max_new_tokens=max_new_tokens)
+
     import transformers
 
     conversation = [
@@ -564,11 +583,17 @@ def main():
             result = run_inference_on_video(
                 model, processor, video_path, args.fps, args.max_new_tokens
             )
-            hazard_info = result.get("hazard_detection", {})
-            record["safety_label"] = result.get("prediction_label")
-            record["prediction_class_id"] = result.get("prediction_class_id")
-            record["hazard"] = hazard_info.get("is_hazardous")
-            record["description"] = result.get("video_description")
+            # Nemotron adapter returns error keys inline rather than raising
+            inline_err = result.get("cosmos_error") or result.get("nemotron_error")
+            if inline_err:
+                record["cosmos_error"] = inline_err
+                tee.write(f"  [WARN] Inline error for {video_name}: {inline_err}\n")
+            else:
+                hazard_info = result.get("hazard_detection", {})
+                record["safety_label"] = result.get("prediction_label")
+                record["prediction_class_id"] = result.get("prediction_class_id")
+                record["hazard"] = hazard_info.get("is_hazardous")
+                record["description"] = result.get("video_description")
         except json.JSONDecodeError as e:
             record["cosmos_error"] = f"JSON parse error: {e}"
             tee.write(f"  [WARN] JSON parse failed for {video_name}: {e}\n")
