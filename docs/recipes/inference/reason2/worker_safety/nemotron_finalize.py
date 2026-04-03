@@ -334,15 +334,20 @@ def patch_html(html: str, m: dict) -> str:
     # ── 4. Inject <td> into each tbody row ────────────────────────────────────
     cells = build_cells(m)
 
-    # Each tbody row ends with one </tr>. We inject the new cell before it.
-    # Strategy: find the tbody section, process row-by-row.
-    tbody_match = re.search(
-        r'(<tbody>)(.*?)(</tbody>)',
-        html,
-        re.DOTALL,
-    )
+    # The HTML contains many tables. We must scope the tbody search to the
+    # specific perf-comparison-table, not the first <tbody> in the document.
+    table_start_pos = html.find('id="perf-comparison-table"')
+    if table_start_pos == -1:
+        print("[WARN] Could not locate perf-comparison-table in HTML. Row injection skipped.")
+        return html
+
+    table_tag_start = html.rfind('<table', 0, table_start_pos)
+    table_end_pos_raw = html.find('</table>', table_start_pos) + 8
+    table_html = html[table_tag_start:table_end_pos_raw]
+
+    tbody_match = re.search(r'(<tbody>)(.*?)(</tbody>)', table_html, re.DOTALL)
     if not tbody_match:
-        print("[WARN] Could not locate <tbody> in HTML. Row injection skipped.")
+        print("[WARN] Could not locate <tbody> in perf-comparison-table. Row injection skipped.")
         return html
 
     tbody_content = tbody_match.group(2)
@@ -360,7 +365,8 @@ def patch_html(html: str, m: dict) -> str:
         patched_rows.append(row)
 
     new_tbody = tbody_match.group(1) + ''.join(patched_rows) + tbody_match.group(3)
-    html = html[:tbody_match.start()] + new_tbody + html[tbody_match.end():]
+    new_table = table_html[:tbody_match.start()] + new_tbody + table_html[tbody_match.end():]
+    html = html[:table_tag_start] + new_table + html[table_end_pos_raw:]
 
     # ── 5. Update insight box ─────────────────────────────────────────────────
     old_insight = (
