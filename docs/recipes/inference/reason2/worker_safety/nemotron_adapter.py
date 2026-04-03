@@ -38,8 +38,7 @@ class NemotronAdapter:
 
     MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
 
-    # /no_think disables chain-of-thought reasoning as required by model card.
-    NEMOTRON_SYSTEM_PROMPT = "/no_think\n" + SYSTEM_INSTRUCTIONS
+    NEMOTRON_SYSTEM_PROMPT = SYSTEM_INSTRUCTIONS
 
     def __init__(self, model_id: str = None, device: str = "cuda:0"):
         """Load the model, processor, and tokenizer.
