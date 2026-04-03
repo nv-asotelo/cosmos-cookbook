@@ -286,6 +286,29 @@ def load_model(model_name: str):
 
 # ── Video source ──────────────────────────────────────────────────────────────
 
+# Ground-truth class map encoded in filenames: {class_id}_tr{N}.mp4
+_GT_CLASS_MAP = {
+    0: "Safe Walkway Violation",
+    1: "Unauthorized Intervention",
+    2: "Opened Panel Cover",
+    3: "Carrying Overload with Forklift",
+    4: "Safe Walkway",
+    5: "Authorized Intervention",
+    6: "Closed Panel Cover",
+    7: "Safe Carrying",
+}
+
+
+def _gt_from_filename(filepath: str):
+    """Extract ground-truth label from filename prefix (e.g. '3_tr02.mp4' → class 3)."""
+    name = pathlib.Path(filepath).stem  # e.g. '3_tr02'
+    try:
+        class_id = int(name.split("_")[0])
+        return _GT_CLASS_MAP.get(class_id)
+    except (ValueError, IndexError):
+        return None
+
+
 def collect_video_paths(args) -> list:
     """Return a list of (filepath, ground_truth_label_or_None) tuples."""
     if args.video_dir:
@@ -303,7 +326,7 @@ def collect_video_paths(args) -> list:
             )
             sys.exit(1)
         print(f"[HARNESS] Source: local directory  ({len(videos)} videos)")
-        return [(str(v), None) for v in videos]
+        return [(str(v), _gt_from_filename(str(v))) for v in videos]
     else:
         print(f"[HARNESS] Source: HuggingFace dataset '{args.hf_dataset}'")
         import fiftyone as fo
