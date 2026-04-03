@@ -97,8 +97,15 @@ class NemotronAdapter:
         try:
             frame_paths, cleanup_dir = extract_frames(video_path, fps=fps)
 
-            # Nemotron processor requires PIL images, not file path strings
-            pil_images = [Image.open(p).convert("RGB") for p in frame_paths]
+            # Nemotron processor requires PIL images, not file path strings.
+            # Resize to 336×336 to keep per-frame token count manageable —
+            # the RADIO encoder expands high-res images into thousands of tokens,
+            # which overflows A100 VRAM when multiplied across many frames.
+            _TARGET_SIZE = (336, 336)
+            pil_images = [
+                Image.open(p).convert("RGB").resize(_TARGET_SIZE, Image.LANCZOS)
+                for p in frame_paths
+            ]
 
             messages = [
                 {"role": "system", "content": self.NEMOTRON_SYSTEM_PROMPT},
