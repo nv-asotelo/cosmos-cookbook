@@ -122,7 +122,12 @@ class NemotronAdapter:
                 return_tensors="pt",
             ).to(self.model.device)
 
-            output_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+            # Filter out processor-only keys that model.generate does not accept.
+            # Nemotron's processor may return 'num_patches' and similar metadata keys
+            # that are used internally but not valid generate() kwargs.
+            _GENERATE_SKIP_KEYS = {"num_patches", "pixel_values_videos"}
+            inputs_for_generate = {k: v for k, v in inputs.items() if k not in _GENERATE_SKIP_KEYS}
+            output_ids = self.model.generate(**inputs_for_generate, max_new_tokens=max_new_tokens)
 
             output_text = self.processor.batch_decode(
                 [output_ids[0][inputs.input_ids.shape[-1]:]],
