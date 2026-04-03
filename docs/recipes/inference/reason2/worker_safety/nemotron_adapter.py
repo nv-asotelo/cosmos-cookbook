@@ -22,6 +22,8 @@ import json
 import re
 import shutil
 
+from PIL import Image
+
 from harness_benchmark import SYSTEM_INSTRUCTIONS, USER_PROMPT_CONTENT
 from nemotron_frames import extract_frames
 
@@ -94,6 +96,9 @@ class NemotronAdapter:
         try:
             frame_paths, cleanup_dir = extract_frames(video_path, fps=fps)
 
+            # Nemotron processor requires PIL images, not file path strings
+            pil_images = [Image.open(p).convert("RGB") for p in frame_paths]
+
             messages = [
                 {"role": "system", "content": self.NEMOTRON_SYSTEM_PROMPT},
                 {
@@ -113,7 +118,7 @@ class NemotronAdapter:
 
             inputs = self.processor(
                 text=[text],
-                images=frame_paths,
+                images=pil_images,
                 return_tensors="pt",
             ).to(self.model.device)
 
