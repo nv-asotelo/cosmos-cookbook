@@ -18,6 +18,7 @@ Loads model once, exposes run_inference(video_path) that extracts frames and
 runs the worker-safety classification prompt.
 """
 
+import gc
 import json
 import re
 import shutil
@@ -134,6 +135,12 @@ class NemotronAdapter:
                 skip_special_tokens=True,
             )[0]
 
+            # Release GPU tensors immediately to prevent accumulation across videos
+            del output_ids, inputs, inputs_for_generate, pil_images
+            gc.collect()
+            import torch
+            torch.cuda.empty_cache()
+
             # Strip chain-of-thought think blocks
             output_text = re.sub(
                 r"<think>.*?</think>", "", output_text, flags=re.DOTALL
@@ -158,3 +165,10 @@ class NemotronAdapter:
         finally:
             if cleanup_dir is not None:
                 shutil.rmtree(cleanup_dir, ignore_errors=True)
+            # Always attempt to free GPU memory even on error paths
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass

@@ -24,7 +24,7 @@ import tempfile
 from pathlib import Path
 
 MIN_FRAMES = 8
-MAX_FRAMES = 128
+MAX_FRAMES = 32
 
 
 def extract_frames(
