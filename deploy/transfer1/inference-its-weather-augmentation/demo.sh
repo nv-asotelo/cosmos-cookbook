@@ -87,16 +87,10 @@ else
   echo "Already present ✓"
 fi
 
-# ── Step 4: HF login ─────────────────────────────────────────────────────────
+# ── Step 4: Python environment ───────────────────────────────────────────────
+# (must come before HF login — huggingface-cli lives in the venv)
 
-echo "=== Step 4: HuggingFace auth ==="
-echo "$HF_TOKEN" | huggingface-cli login --token 2>/dev/null || \
-  huggingface-cli login --token "$HF_TOKEN"
-echo "Authenticated ✓"
-
-# ── Step 5: Python environment ───────────────────────────────────────────────
-
-echo "=== Step 5: Python environment ==="
+echo "=== Step 4: Python environment ==="
 cd "$COSMOS_TRANSFER1"
 if [ -f "pyproject.toml" ]; then
   uv sync 2>&1 | tail -5
@@ -106,6 +100,13 @@ elif [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
 fi
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'"
 echo "CUDA available ✓"
+
+# ── Step 5: HF login ─────────────────────────────────────────────────────────
+
+echo "=== Step 5: HuggingFace auth ==="
+echo "$HF_TOKEN" | huggingface-cli login --token 2>/dev/null || \
+  huggingface-cli login --token "$HF_TOKEN"
+echo "Authenticated ✓"
 
 # ── Step 6: Model checkpoints ────────────────────────────────────────────────
 
