@@ -8,22 +8,19 @@
 #   bash deploy/reason2/worker_safety/demo.sh
 #
 # Output: /tmp/worker_safety_results.json
+#
+# Environment setup is handled by deploy/shared/brev-env.sh — no manual
+# dependency management needed regardless of Brev provider (Nebius, Hyperstack).
 
 set -e
 
-# Prefer /workspace (Brev default), fall back to BASH_SOURCE-relative path (local dev)
-COSMOS_REASON2="${COSMOS_REASON2:-/workspace/cosmos-reason2}"
-if [ ! -d "$COSMOS_REASON2" ]; then
-  COSMOS_REASON2="$HOME/cosmos-reason2"
-fi
-COOKBOOK="${COOKBOOK:-/workspace/cosmos-cookbook}"
-if [ ! -d "$COOKBOOK" ]; then
-  COOKBOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-fi
-REPO_ROOT="$COOKBOOK"
+# Resolve COOKBOOK root relative to this script so it works regardless of cwd
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COOKBOOK="${COOKBOOK:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+
 RESULTS_FILE="/tmp/worker_safety_results.json"
 
-# ── Pre-flight ──────────────────────────────────────────────────────────────
+# ── Pre-flight: GPU check (fast-fail before any setup) ───────────────────────
 
 echo "=== Pre-flight checks ==="
 
@@ -34,79 +31,31 @@ fi
 nvidia-smi --query-gpu=name,memory.free,driver_version --format=csv,noheader
 echo ""
 
-# VRAM check (require >= 40000 MiB free for Cosmos-Reason2-2B)
 VRAM_FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -d ' ')
 if [ "$VRAM_FREE" -lt 40000 ]; then
   echo "ERROR: Only ${VRAM_FREE} MiB VRAM free. Cosmos-Reason2-2B requires >= 40000 MiB."
   exit 1
 fi
 echo "VRAM: ${VRAM_FREE} MiB free ✓"
-
-if [ -z "$HF_TOKEN" ]; then
-  echo ""
-  echo "HuggingFace token required. Enter your token (hf_...):"
-  read -r -s HF_TOKEN
-  export HF_TOKEN
-fi
-echo "HF_TOKEN: set ✓"
 echo ""
 
-# ── Step 1: System dependencies ─────────────────────────────────────────────
+# ── Environment setup ─────────────────────────────────────────────────────────
+# brev-env.sh handles: HOME detection, git-lfs, uv, repo clone, Python venv,
+# uv pip installs, and HF auth — consistently across all Brev providers.
 
-echo "=== Step 1: System dependencies ==="
-if ! command -v ffmpeg &>/dev/null || ! command -v git-lfs &>/dev/null; then
-  sudo apt-get update -q
-  sudo apt-get install -y -q curl ffmpeg git git-lfs
-fi
-git lfs install --skip-repo 2>/dev/null || true
-echo "System deps ✓"
+export COSMOS_REPO_URL="https://github.com/nvidia-cosmos/cosmos-reason2.git"
+export COSMOS_DIR="cosmos-reason2"
+export COSMOS_UV_EXTRA="cu128"
+export COSMOS_EXTRA_DEPS="fiftyone"
 
-# ── Step 2: uv ───────────────────────────────────────────────────────────────
+source "$COOKBOOK/deploy/shared/brev-env.sh"
 
-echo "=== Step 2: uv ==="
-if ! command -v uv &>/dev/null; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-source "$HOME/.local/bin/env" 2>/dev/null || true
-echo "uv $(uv --version) ✓"
+# brev-env.sh exports BREV_COSMOS_DIR — use it from here on
+COSMOS_REASON2="$BREV_COSMOS_DIR"
 
-# ── Step 3: Clone cosmos-reason2 ─────────────────────────────────────────────
+# ── Model download ────────────────────────────────────────────────────────────
 
-echo "=== Step 3: cosmos-reason2 ==="
-if [ ! -d "$COSMOS_REASON2" ]; then
-  git clone https://github.com/nvidia-cosmos/cosmos-reason2.git "$COSMOS_REASON2"
-  git -C "$COSMOS_REASON2" lfs pull
-  echo "Cloned ✓"
-else
-  echo "Already present ✓"
-fi
-
-# ── Step 4: Python environment ───────────────────────────────────────────────
-# (must come before HF login — huggingface-cli lives in the venv)
-
-echo "=== Step 4: Python environment (cu128) ==="
-cd "$COSMOS_REASON2"
-uv sync --extra cu128 2>&1 | tail -5
-source .venv/bin/activate
-python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'"
-echo "CUDA available ✓"
-
-# ── Step 5: HF login ─────────────────────────────────────────────────────────
-
-echo "=== Step 5: HuggingFace auth ==="
-echo "$HF_TOKEN" | huggingface-cli login --token 2>/dev/null || \
-  huggingface-cli login --token "$HF_TOKEN"
-echo "Authenticated ✓"
-
-# ── Step 6: Recipe dependencies ──────────────────────────────────────────────
-
-echo "=== Step 6: Recipe dependencies ==="
-uv pip install -q -U fiftyone
-echo "FiftyOne ✓"
-
-# ── Step 7: Model download ───────────────────────────────────────────────────
-
-echo "=== Step 7: Model download (~4 GB) ==="
+echo "=== Model download (~4 GB) ==="
 MODEL_DIR="$COSMOS_REASON2/models/Cosmos-Reason2-2B"
 if [ ! -d "$MODEL_DIR" ]; then
   huggingface-cli download nvidia/Cosmos-Reason2-2B \
@@ -117,17 +66,17 @@ else
   echo "Already present ✓"
 fi
 
-# ── Step 8: Copy recipe script ───────────────────────────────────────────────
+# ── Recipe script ─────────────────────────────────────────────────────────────
 
-echo "=== Step 8: Recipe script ==="
+echo "=== Recipe script ==="
 RECIPE="$COOKBOOK/docs/recipes/inference/reason2/worker_safety"
 cp "$RECIPE/worker_safety.py" "$COSMOS_REASON2/worker_safety.py"
 echo "worker_safety.py in place ✓"
 
-# ── Step 9: Run inference (headless) ─────────────────────────────────────────
+# ── Run inference (headless) ──────────────────────────────────────────────────
 
 echo ""
-echo "=== Step 9: Running inference (headless) ==="
+echo "=== Running inference (headless) ==="
 echo "Dataset: pjramg/Safe_Unsafe_Test (downloaded via FiftyOne)"
 echo "Model: Cosmos-Reason2-2B"
 echo ""
@@ -150,7 +99,6 @@ _noop = type("S", (), {"wait": lambda self: None})()
 fo.launch_app = lambda *a, **kw: _noop
 
 # Execute the recipe script (jupytext-converted notebook)
-# worker_safety.py uses exec-style cell execution
 exec(open("worker_safety.py").read())
 
 # Export results to JSON
@@ -179,10 +127,10 @@ PYEOF
 END=$(date +%s%N)
 ELAPSED=$(( (END - START) / 1000000 ))
 
-# ── Step 10: Assemble structured results JSON ────────────────────────────────
+# ── Assemble structured results JSON ─────────────────────────────────────────
 
 echo ""
-echo "=== Step 10: Assembling results ==="
+echo "=== Assembling results ==="
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d ' ')
 
@@ -209,7 +157,6 @@ n_errors  = len(errors)
 mean_latency = round(ELAPSED / total, 1) if total > 0 else 0
 throughput   = round(n_success / (ELAPSED / 1000), 4) if ELAPSED > 0 else 0
 
-# First 3 sample results
 sample_results = []
 for r in raw[:3]:
     sample_results.append({
@@ -234,11 +181,11 @@ output = {
 with open(OUT_FILE, "w") as f:
     json.dump(output, f, indent=2)
 
-print(f"Total samples:          {total}")
+print(f"Total samples:           {total}")
 print(f"Successfully classified: {n_success}")
-print(f"Errors:                 {n_errors}")
-print(f"Wall time:              {ELAPSED} ms")
-print(f"Throughput:             {throughput} queries/sec")
+print(f"Errors:                  {n_errors}")
+print(f"Wall time:               {ELAPSED} ms")
+print(f"Throughput:              {throughput} queries/sec")
 
 if n_success == 0:
     print("\nWARNING: No samples classified. Check /tmp/worker_safety_raw.json for errors.")
