@@ -59,9 +59,15 @@ if ! command -v uv &>/dev/null; then
 fi
 source "$HOME/.local/bin/env" 2>/dev/null || true
 
+if ! command -v git-lfs &>/dev/null; then
+  sudo apt-get update -q
+  sudo apt-get install -y -q git-lfs
+  git lfs install --skip-repo 2>/dev/null || true
+fi
+
 if [ ! -d "$COSMOS_REASON2" ]; then
   git clone https://github.com/nvidia-cosmos/cosmos-reason2.git "$COSMOS_REASON2"
-  git -C "$COSMOS_REASON2" lfs pull
+  git -C "$COSMOS_REASON2" lfs pull 2>/dev/null || true
 fi
 
 cd "$COSMOS_REASON2"
