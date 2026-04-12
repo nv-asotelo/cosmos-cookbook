@@ -101,7 +101,7 @@ echo "Authenticated ✓"
 # ── Step 6: Recipe dependencies ──────────────────────────────────────────────
 
 echo "=== Step 6: Recipe dependencies ==="
-pip install -q -U fiftyone
+uv pip install -q -U fiftyone
 echo "FiftyOne ✓"
 
 # ── Step 7: Model download ───────────────────────────────────────────────────

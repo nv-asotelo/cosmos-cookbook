@@ -108,7 +108,7 @@ echo "Authenticated ✓"
 # ── Step 6: Recipe dependencies ──────────────────────────────────────────────
 
 echo "=== Step 6: Recipe dependencies ==="
-pip install -q fiftyone opencv-python
+uv pip install -q fiftyone opencv-python
 echo "FiftyOne + OpenCV ✓"
 
 # ── Step 7: Download BioTrove moth subset ────────────────────────────────────
