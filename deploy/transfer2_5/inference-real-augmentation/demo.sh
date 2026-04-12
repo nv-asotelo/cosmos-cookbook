@@ -24,7 +24,11 @@
 set -e
 
 RECIPE="real_augmentation"
-COSMOS_DIR="$HOME/cosmos-transfer2.5"
+# Prefer /workspace (Brev default), fall back to $HOME (local dev)
+COSMOS_DIR="${COSMOS_DIR:-/workspace/cosmos-transfer2_5}"
+if [ ! -d "$COSMOS_DIR" ]; then
+  COSMOS_DIR="$HOME/cosmos-transfer2.5"
+fi
 OUTPUT_DIR="/tmp/${RECIPE}_output"
 RESULTS_JSON="/tmp/${RECIPE}_results.json"
 

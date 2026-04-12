@@ -11,9 +11,16 @@
 
 set -e
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-COSMOS_REASON2="$HOME/cosmos-reason2"
-COOKBOOK="$REPO_ROOT"
+# Prefer /workspace (Brev default), fall back to BASH_SOURCE-relative path (local dev)
+COSMOS_REASON2="${COSMOS_REASON2:-/workspace/cosmos-reason2}"
+if [ ! -d "$COSMOS_REASON2" ]; then
+  COSMOS_REASON2="$HOME/cosmos-reason2"
+fi
+COOKBOOK="${COOKBOOK:-/workspace/cosmos-cookbook}"
+if [ ! -d "$COOKBOOK" ]; then
+  COOKBOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+fi
+REPO_ROOT="$COOKBOOK"
 RESULTS_FILE="/tmp/worker_safety_results.json"
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────

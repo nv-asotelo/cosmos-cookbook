@@ -18,7 +18,11 @@
 set -e
 
 RECIPE="its"
-COSMOS_DIR="$HOME/cosmos-predict2"
+# Prefer /workspace (Brev default), fall back to $HOME (local dev)
+COSMOS_DIR="${COSMOS_DIR:-/workspace/cosmos-predict2}"
+if [ ! -d "$COSMOS_DIR" ]; then
+  COSMOS_DIR="$HOME/cosmos-predict2"
+fi
 OUTPUT_DIR="/tmp/${RECIPE}_output"
 RESULTS_JSON="/tmp/${RECIPE}_results.json"
 
