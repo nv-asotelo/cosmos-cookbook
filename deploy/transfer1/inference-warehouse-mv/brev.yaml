@@ -1,0 +1,112 @@
+# Brev Launchable — Sim2Real Multi-View Warehouse with Cosmos Transfer 1
+#
+# One-click GPU environment for:
+#   Sim-to-real domain adaptation of multi-camera warehouse scenes
+#   using Cosmos Transfer 1 with edge + depth controls
+#
+# Reference: docs/recipes/inference/transfer1/inference-warehouse-mv/
+#
+# Hardware: 1x H100-80GB or A100-80GB (>= 70 GB VRAM required)
+# Driver:   >= 555 (CUDA 12.8 support required)
+# Runtime:  ~30-45 min setup + 6× inference runs (one per camera view)
+#           Expect ~20-30 min per camera on H100; total ~2-3 hours for 6 cameras
+
+name: cosmos-transfer1-warehouse-mv
+description: >
+  Sim-to-real domain adaptation for multi-view warehouse detection and tracking.
+  Transforms Omniverse-generated synthetic warehouse videos into realistic scenes
+  using Cosmos Transfer 1 with edge and depth controls.
+  Processes 6 synchronized camera views (SURF_Booth_030825 sample dataset).
+
+instance:
+  gpu: "H100-80GB"
+  gpu_count: 1
+  disk_gb: 250    # Cosmos Transfer 1 checkpoints (~100 GB) + 6-camera output videos + assets
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl ffmpeg git git-lfs python3-pip wget
+  git lfs install
+
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-transfer1
+  git clone https://github.com/nvidia-cosmos/cosmos-transfer1.git /workspace/cosmos-transfer1
+  cd /workspace/cosmos-transfer1
+  git lfs pull
+
+  # Clone cosmos-cookbook (bundled SURF_Booth_030825 dataset + demo script)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+  # Pull LFS assets (warehouse sample videos)
+  git lfs pull
+
+  # Copy recipe example assets into cosmos-transfer1 examples directory
+  mkdir -p /workspace/cosmos-transfer1/examples/cookbook
+  cp -r /workspace/cosmos-cookbook/scripts/examples/transfer1/* \
+    /workspace/cosmos-transfer1/examples/cookbook/ 2>/dev/null || true
+
+  # Create Python environment (CUDA 12.8)
+  cd /workspace/cosmos-transfer1
+  pip install -e ".[cu128]" 2>/dev/null || pip install -e "." 2>/dev/null || true
+  uv sync 2>/dev/null || true
+
+  # Install JupyterLab
+  pip install -U jupyterlab ipykernel
+  python -m ipykernel install --user --name cosmos-transfer1 \
+    --display-name "Python (cosmos-transfer1)"
+
+  echo ""
+  echo "=========================================="
+  echo "Setup complete."
+  echo ""
+  echo "Next: authenticate with HuggingFace to download model checkpoints:"
+  echo "  huggingface-cli login"
+  echo ""
+  echo "Then run the demo (processes all 6 camera views):"
+  echo "  bash /workspace/cosmos-cookbook/deploy/transfer1/inference-warehouse-mv/demo.sh"
+  echo "=========================================="
+
+ports:
+  - 8888   # JupyterLab
+
+launch: |
+  cd /workspace/cosmos-transfer1
+  source /workspace/cosmos-transfer1/.venv/bin/activate 2>/dev/null || true
+  jupyter lab \
+    --ip=0.0.0.0 \
+    --port=8888 \
+    --no-browser \
+    --allow-root \
+    --NotebookApp.token='' \
+    --NotebookApp.password=''
+
+notes: |
+  Before running the demo:
+
+  1. Open a terminal in JupyterLab and authenticate with HuggingFace:
+       huggingface-cli login
+     (Requires Cosmos Transfer 1 model license accepted on HuggingFace)
+
+  2. Run the demo script (processes all 6 camera views sequentially):
+       bash /workspace/cosmos-cookbook/deploy/transfer1/inference-warehouse-mv/demo.sh
+
+  The demo uses the bundled SURF_Booth_030825 multi-camera warehouse dataset
+  from scripts/examples/transfer1/inference-warehouse-mv/assets/.
+
+  For extended multi-camera datasets:
+    huggingface-cli download nvidia/PhysicalAI-SmartSpaces --repo-type dataset
+
+  Output: 6 augmented videos in /tmp/warehouse_mv_output/ (one per camera)
+  Metrics: /tmp/warehouse_mv_results.json
+
+  Recipe: docs/recipes/inference/transfer1/inference-warehouse-mv/inference.md

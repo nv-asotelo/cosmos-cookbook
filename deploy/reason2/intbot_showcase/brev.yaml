@@ -4,7 +4,7 @@
 #   Egocentric social and physical reasoning using Cosmos-Reason2-8B
 #   Benchmarked against Qwen3-VL-8B-Instruct
 #
-# Hardware: 1x H100-80GB (required — 8B model needs 80 GB VRAM)
+# Hardware: 1x H100-80GB (required — 8B model needs ~75 GB VRAM)
 # Driver:   >= 555 (CUDA 12.8 support required)
 # Runtime:  ~25-35 min setup on first launch (16 GB model download from HuggingFace)
 

@@ -3,19 +3,20 @@
 # One-click GPU environment for:
 #   Zero-shot warehouse safety inspection using Cosmos-Reason2-2B
 #
-# Hardware: 1x H100-80GB or A100-80GB (minimum)
+# Hardware: 1x H100-80GB or A100-80GB (minimum — 2B model needs ~40 GB VRAM)
 # Driver:   >= 555 (CUDA 12.8 support required)
-# Runtime:  ~15-20 min setup on first launch (model download from HuggingFace)
+# Runtime:  ~15-20 min setup on first launch (~4 GB model download from HuggingFace)
 
 name: cosmos-reason2-worker-safety
 description: >
-  Zero-shot safety compliance and hazard detection using Cosmos Reason 2.
+  Zero-shot safety compliance and hazard detection using Cosmos-Reason2-2B.
   Classifies worker behaviors in brownfield warehouse videos without custom training.
+  Uses FiftyOne to load the pjramg/Safe_Unsafe_Test dataset and export results.
 
 instance:
-  gpu: "H100-80GB"
+  gpu: "H100-80GB"    # A100-80GB is acceptable fallback — 2B model fits in ~40 GB VRAM
   gpu_count: 1
-  disk_gb: 120    # model weights (~4GB) + dataset + cosmos-reason2 + cosmos-cookbook
+  disk_gb: 120    # 2B model weights (~4GB) + dataset + cosmos-reason2 + cosmos-cookbook
 
 base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
 
@@ -37,7 +38,7 @@ setup: |
   cd /workspace/cosmos-reason2
   git lfs pull
 
-  # Clone cosmos-cookbook (recipe notebooks and scripts)
+  # Clone cosmos-cookbook (recipe scripts and assets)
   git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
   cd /workspace/cosmos-cookbook
   git checkout recipe/cosmos-reason2-deploy-overlay
@@ -53,10 +54,8 @@ setup: |
     --display-name "Python (cosmos-reason2)"
 
   # Copy recipe files into workspace
-  cp /workspace/cosmos-cookbook/docs/recipes/inference/reason2/worker_safety/worker_safety.ipynb \
-     /workspace/cosmos-reason2/worker_safety.ipynb
-  cp -r /workspace/cosmos-cookbook/docs/recipes/inference/reason2/worker_safety/assets \
-     /workspace/cosmos-reason2/assets
+  cp /workspace/cosmos-cookbook/docs/recipes/inference/reason2/worker_safety/worker_safety.py \
+     /workspace/cosmos-reason2/worker_safety.py
 
   echo ""
   echo "=========================================="
@@ -64,10 +63,10 @@ setup: |
   echo ""
   echo "Next: authenticate with HuggingFace to download the model:"
   echo "  huggingface-cli login"
+  echo "  (Requires NVIDIA Open Model License accepted at huggingface.co/nvidia/Cosmos-Reason2-2B)"
   echo ""
-  echo "Then open the notebook in JupyterLab:"
-  echo "  /workspace/cosmos-reason2/worker_safety.ipynb"
-  echo "  Kernel: Python (cosmos-reason2)"
+  echo "Then run the demo:"
+  echo "  bash /workspace/cosmos-cookbook/deploy/reason2/worker_safety/demo.sh"
   echo "=========================================="
 
 ports:
@@ -85,14 +84,14 @@ launch: |
     --NotebookApp.password=''
 
 notes: |
-  Before running the notebook:
+  Before running the demo:
 
   1. Open a terminal in JupyterLab and authenticate with HuggingFace:
        huggingface-cli login
      (Requires NVIDIA Open Model License accepted at huggingface.co/nvidia/Cosmos-Reason2-2B)
 
-  2. Open: /workspace/cosmos-reason2/worker_safety.ipynb
-  3. Select kernel: Python (cosmos-reason2)
-  4. Run all cells — inference takes ~20-30 min on first run (model download included)
+  2. Run the headless demo script:
+       bash /workspace/cosmos-cookbook/deploy/reason2/worker_safety/demo.sh
 
-  Output: FiftyOne dataset with per-clip safety classifications (safe/unsafe + label)
+  Output: Per-clip safety classifications saved to /tmp/worker_safety_results.json
+  Recipe: docs/recipes/inference/reason2/worker_safety/inference.md

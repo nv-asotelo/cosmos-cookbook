@@ -1,0 +1,104 @@
+# Brev Launchable — ITS Weather Augmentation with Cosmos Transfer 1
+#
+# One-click GPU environment for:
+#   Weather augmentation of ITS (Intelligent Transportation System) images
+#   using Cosmos Transfer 1 with depth + segmentation controls
+#
+# Reference: docs/recipes/inference/transfer1/inference-its-weather-augmentation/
+#
+# Hardware: 1x H100-80GB or A100-80GB (>= 70 GB VRAM required)
+# Driver:   >= 555 (CUDA 12.8 support required)
+# Runtime:  ~30-45 min setup on first launch (model checkpoints ~100 GB from HuggingFace)
+
+name: cosmos-transfer1-its-weather-augmentation
+description: >
+  Weather augmentation of ITS images using Cosmos Transfer 1.
+  Transforms clear-weather highway scenes into adverse weather conditions
+  (rainy night, fog, snow) using depth and segmentation controls,
+  enabling robust training data for downstream ITS object detection models.
+
+instance:
+  gpu: "H100-80GB"
+  gpu_count: 1
+  disk_gb: 250    # Cosmos Transfer 1 checkpoints (~100 GB) + input/output videos + working space
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl ffmpeg git git-lfs python3-pip wget
+  git lfs install
+
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-transfer1
+  git clone https://github.com/nvidia-cosmos/cosmos-transfer1.git /workspace/cosmos-transfer1
+  cd /workspace/cosmos-transfer1
+  git lfs pull
+
+  # Clone cosmos-cookbook (recipe assets: sample ITS images + demo script)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+
+  # Create Python environment (CUDA 12.8)
+  cd /workspace/cosmos-transfer1
+  pip install -e ".[cu128]" 2>/dev/null || pip install -e "." 2>/dev/null || true
+  uv sync 2>/dev/null || true
+
+  # Install JupyterLab
+  pip install -U jupyterlab ipykernel
+  python -m ipykernel install --user --name cosmos-transfer1 \
+    --display-name "Python (cosmos-transfer1)"
+
+  echo ""
+  echo "=========================================="
+  echo "Setup complete."
+  echo ""
+  echo "Next: authenticate with HuggingFace to download model checkpoints:"
+  echo "  huggingface-cli login"
+  echo ""
+  echo "Then run the demo:"
+  echo "  bash /workspace/cosmos-cookbook/deploy/transfer1/inference-its-weather-augmentation/demo.sh"
+  echo "=========================================="
+
+ports:
+  - 8888   # JupyterLab
+
+launch: |
+  cd /workspace/cosmos-transfer1
+  source /workspace/cosmos-transfer1/.venv/bin/activate 2>/dev/null || true
+  jupyter lab \
+    --ip=0.0.0.0 \
+    --port=8888 \
+    --no-browser \
+    --allow-root \
+    --NotebookApp.token='' \
+    --NotebookApp.password=''
+
+notes: |
+  Before running the demo:
+
+  1. Open a terminal in JupyterLab and authenticate with HuggingFace:
+       huggingface-cli login
+     (Requires Cosmos Transfer 1 model license accepted on HuggingFace)
+
+  2. Run the demo script:
+       bash /workspace/cosmos-cookbook/deploy/transfer1/inference-its-weather-augmentation/demo.sh
+
+  The demo uses the bundled sample ITS image from the recipe assets directory.
+  For full dataset evaluation, download ACDC / SUTD / DAWN datasets separately:
+    - ACDC:  https://acdc.vision.ee.ethz.ch/
+    - SUTD:  https://sutdcv.github.io/SUTD-TrafficQA/#/download
+    - DAWN:  https://www.kaggle.com/datasets/shuvoalok/dawn-dataset
+
+  Output: Weather-augmented video saved to /tmp/its_weather_output/
+  Metrics: /tmp/its_weather_results.json
+
+  Recipe: docs/recipes/inference/transfer1/inference-its-weather-augmentation/inference.md

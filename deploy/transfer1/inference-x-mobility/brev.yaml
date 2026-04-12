@@ -1,0 +1,124 @@
+# Brev Launchable — Sim2Real X-Mobility Navigation with Cosmos Transfer 1
+#
+# One-click GPU environment for:
+#   Sim-to-real data augmentation of X-Mobility navigation dataset
+#   using Cosmos Transfer 1 with seg + edge controls
+#
+# SCOPE: This launchable covers INFERENCE (data augmentation) only.
+# Training phase requires 8x H100 GPUs — see inference.md for the full workflow.
+#
+# Reference: docs/recipes/inference/transfer1/inference-x-mobility/
+#
+# Hardware: 1x H100-80GB or A100-80GB (>= 70 GB VRAM required)
+# Driver:   >= 555 (CUDA 12.8 support required)
+# Runtime:  ~30-45 min setup + inference time per video batch
+#
+# Training phase (not covered here): 8x H100, 100 epochs each stage
+# See: inference.md — "Training X-Mobility Using Cosmos-Augmented Data"
+
+name: cosmos-transfer1-x-mobility
+description: >
+  Sim-to-real data augmentation for X-Mobility robotics navigation.
+  Uses Cosmos Transfer 1 to transform Mobility Gen / Isaac Sim synthetic
+  navigation videos into photorealistic training data for the X-Mobility policy.
+  INFERENCE ONLY — training requires 8x H100 GPUs (see inference.md).
+
+instance:
+  gpu: "H100-80GB"
+  gpu_count: 1
+  disk_gb: 250    # Cosmos Transfer 1 checkpoints (~100 GB) + X-Mobility dataset subset + outputs
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl ffmpeg git git-lfs python3-pip wget unzip
+  git lfs install
+
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-transfer1
+  git clone https://github.com/nvidia-cosmos/cosmos-transfer1.git /workspace/cosmos-transfer1
+  cd /workspace/cosmos-transfer1
+  git lfs pull
+
+  # Clone cosmos-cookbook (recipe scripts: xmob_dataset_to_videos.py + demo)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+
+  # Copy X-Mobility recipe scripts into cosmos-transfer1
+  mkdir -p /workspace/cosmos-transfer1/examples/cookbook/inference-x-mobility
+  cp -r /workspace/cosmos-cookbook/scripts/examples/transfer1/inference-x-mobility/* \
+    /workspace/cosmos-transfer1/examples/cookbook/inference-x-mobility/ 2>/dev/null || true
+
+  # Create Python environment (CUDA 12.8)
+  cd /workspace/cosmos-transfer1
+  pip install -e ".[cu128]" 2>/dev/null || pip install -e "." 2>/dev/null || true
+  uv sync 2>/dev/null || true
+
+  # Install JupyterLab
+  pip install -U jupyterlab ipykernel
+  python -m ipykernel install --user --name cosmos-transfer1 \
+    --display-name "Python (cosmos-transfer1)"
+
+  echo ""
+  echo "=========================================="
+  echo "Setup complete."
+  echo ""
+  echo "SCOPE REMINDER: This environment runs INFERENCE (data augmentation) only."
+  echo "Training phase requires 8x H100 GPUs — see inference.md."
+  echo ""
+  echo "Next: authenticate with HuggingFace for model checkpoints + dataset:"
+  echo "  huggingface-cli login"
+  echo ""
+  echo "Then run the demo:"
+  echo "  bash /workspace/cosmos-cookbook/deploy/transfer1/inference-x-mobility/demo.sh"
+  echo "=========================================="
+
+ports:
+  - 8888   # JupyterLab
+
+launch: |
+  cd /workspace/cosmos-transfer1
+  source /workspace/cosmos-transfer1/.venv/bin/activate 2>/dev/null || true
+  jupyter lab \
+    --ip=0.0.0.0 \
+    --port=8888 \
+    --no-browser \
+    --allow-root \
+    --NotebookApp.token='' \
+    --NotebookApp.password=''
+
+notes: |
+  SCOPE: Inference (Cosmos Transfer 1 data augmentation) only.
+  Training requires 8x H100 GPUs — see inference.md for the full two-stage pipeline.
+
+  Before running the demo:
+
+  1. Open a terminal in JupyterLab and authenticate with HuggingFace:
+       huggingface-cli login
+     (Required for Cosmos Transfer 1 model checkpoints and X-Mobility dataset)
+
+  2. Run the demo script:
+       bash /workspace/cosmos-cookbook/deploy/transfer1/inference-x-mobility/demo.sh
+
+  The demo downloads a small subset of the X-Mobility random action dataset,
+  converts frames to video, and runs Cosmos Transfer 1 augmentation
+  (seg control_weight=1.0, edge control_weight=0.3).
+
+  For full dataset:
+    huggingface-cli download nvidia/X-Mobility \
+      x_mobility_isaac_sim_random_160k.zip \
+      --repo-type dataset --local-dir ./data/X-Mobility
+
+  Output: Augmented navigation videos in /tmp/x_mobility_output/
+  Metrics: /tmp/x_mobility_results.json
+
+  Full training pipeline: docs/recipes/inference/transfer1/inference-x-mobility/inference.md

@@ -7,13 +7,14 @@
 #   export HF_TOKEN=hf_...
 #   bash deploy/reason2/intbot_showcase/demo.sh
 #
-# Output: intbot_results.json in the current directory
+# Output: /tmp/intbot_results.json
 
 set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COSMOS_REASON2="$HOME/cosmos-reason2"
 ASSETS="$REPO_ROOT/docs/recipes/inference/reason2/intbot_showcase/assets"
+RESULTS_FILE="/tmp/intbot_results.json"
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────
 
@@ -89,11 +90,14 @@ echo "=== Running egocentric reasoning tests ==="
 echo "Tests: fist-bump gesture, hat trajectory, shared attention"
 echo ""
 
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d ' ')
+
+START=$(date +%s%N)
+
 python - <<PYEOF
-import json, os, sys
+import json, os, sys, time
 from pathlib import Path
 
-# Add cosmos-reason2 to path
 sys.path.insert(0, "$COSMOS_REASON2")
 os.chdir("$COSMOS_REASON2")
 
@@ -148,6 +152,8 @@ TESTS = [
 ]
 
 results = []
+latencies = []
+
 for test in TESTS:
     img_path = os.path.join(ASSETS, test["image"])
     if not os.path.exists(img_path):
@@ -166,6 +172,7 @@ for test in TESTS:
         }
     ]
 
+    t0 = time.time()
     try:
         from transformers import AutoProcessor
         processor = AutoProcessor.from_pretrained(MODEL_PATH)
@@ -181,27 +188,95 @@ for test in TESTS:
             sampling_params=sampling_params,
         )
         response = outputs[0].outputs[0].text.strip()
+        latency_ms = int((time.time() - t0) * 1000)
+        latencies.append(latency_ms)
         results.append({
             "id": test["id"],
             "status": "success",
             "prompt": test["prompt"],
             "response": response,
             "expected_theme": test["expected_theme"],
+            "latency_ms": latency_ms,
         })
-        print(f"    → {response[:120]}{'...' if len(response) > 120 else ''}")
+        print(f"    [{latency_ms} ms] {response[:120]}{'...' if len(response) > 120 else ''}")
     except Exception as e:
         results.append({"id": test["id"], "status": "error", "error": str(e)})
         print(f"    ERROR: {e}")
 
-# Save results
-with open("intbot_results.json", "w") as f:
-    json.dump(results, f, indent=2)
+# Write raw sample results (first 3 already — all tests are sample results)
+with open("/tmp/intbot_raw.json", "w") as f:
+    json.dump({"results": results, "latencies": latencies}, f, indent=2)
 
 success = sum(1 for r in results if r["status"] == "success")
 print(f"\nDone. {success}/{len(TESTS)} tests completed.")
-print("Results saved: intbot_results.json")
+PYEOF
+
+END=$(date +%s%N)
+ELAPSED=$(( (END - START) / 1000000 ))
+
+# ── Assemble structured results JSON ─────────────────────────────────────────
+
+echo ""
+echo "=== Assembling results ==="
+
+python - <<PYEOF
+import json, sys
+
+ELAPSED = $ELAPSED
+GPU_NAME = "$GPU_NAME"
+
+try:
+    with open("/tmp/intbot_raw.json") as f:
+        raw = json.load(f)
+    results = raw["results"]
+    latencies = raw.get("latencies", [])
+except Exception:
+    results = []
+    latencies = []
+
+total = len(results)
+success_items = [r for r in results if r.get("status") == "success"]
+n_success = len(success_items)
+
+mean_latency = round(sum(latencies) / len(latencies), 1) if latencies else 0
+throughput   = round(n_success / (ELAPSED / 1000), 4) if ELAPSED > 0 and n_success > 0 else 0
+
+# First 3 sample results (all tests qualify)
+sample_results = []
+for r in results[:3]:
+    sample_results.append({
+        "id": r.get("id"),
+        "status": r.get("status"),
+        "expected_theme": r.get("expected_theme"),
+        "response_excerpt": r.get("response", "")[:200] if r.get("response") else None,
+    })
+
+output = {
+    "recipe": "reason2/intbot_showcase",
+    "model": "nvidia/Cosmos-Reason2-8B",
+    "gpu": GPU_NAME,
+    "wall_time_ms": ELAPSED,
+    "samples_total": total,
+    "samples_success": n_success,
+    "mean_latency_ms": mean_latency,
+    "throughput_queries_per_sec": throughput,
+    "sample_results": sample_results,
+}
+
+with open("$RESULTS_FILE", "w") as f:
+    json.dump(output, f, indent=2)
+
+print(f"Total tests:     {total}")
+print(f"Successful:      {n_success}")
+print(f"Wall time:       {ELAPSED} ms")
+print(f"Mean latency:    {mean_latency} ms")
+print(f"Throughput:      {throughput} queries/sec")
+
+if n_success == 0:
+    print("\nWARNING: No tests completed. Check logs above.")
+    sys.exit(1)
 PYEOF
 
 echo ""
 echo "=== Done ==="
-echo "Full results: $COSMOS_REASON2/intbot_results.json"
+echo "Full results: $RESULTS_FILE"

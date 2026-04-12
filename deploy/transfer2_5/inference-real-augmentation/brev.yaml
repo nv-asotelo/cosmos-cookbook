@@ -1,0 +1,110 @@
+# Brev Launchable — Multi-Control Augmentation with Cosmos Transfer 2.5
+#
+# One-click GPU environment for:
+#   Multi-control video editing: background change, lighting, color/texture, object transform
+#   Omniverse sim-to-real photorealistic generation workflow
+#
+# Hardware: 1x A100-80GB or H100-80GB (80 GB VRAM required)
+# Driver:   >= 570 (CUDA 12.8 support required)
+# Runtime:  ~25-35 min setup on first launch (model weights download)
+# Data:     BYO — requires source video; control modalities computed or exported from Omniverse
+
+name: cosmos-transfer25-real-augmentation
+description: >
+  Multi-control recipe framework using Cosmos Transfer 2.5 for background replacement,
+  lighting change, color/texture change, and object transformation. Includes Omniverse
+  sim-to-real photorealistic generation using edge, segmentation, vis, and mask controls.
+
+instance:
+  gpu: "A100-80GB"
+  gpu_count: 1
+  disk_gb: 200    # Transfer 2.5 weights + input/control videos + augmented outputs
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl ffmpeg git git-lfs python3-pip libgl1 libglib2.0-0
+  git lfs install
+
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-transfer2.5
+  git clone https://github.com/nvidia-cosmos/cosmos-transfer2.5.git /workspace/cosmos-transfer2.5
+  cd /workspace/cosmos-transfer2.5
+  git lfs pull
+
+  # Clone cosmos-cookbook (recipe assets)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+
+  # Create Python environment (CUDA 12.8)
+  cd /workspace/cosmos-transfer2.5
+  uv sync --extra cu128
+  source .venv/bin/activate
+
+  # Install recipe-specific dependencies (opencv for edge/mask generation)
+  pip install -q opencv-python
+
+  # Install JupyterLab
+  pip install -U jupyterlab ipykernel
+  python -m ipykernel install --user --name cosmos-transfer2-5 \
+    --display-name "Python (cosmos-transfer2.5)"
+
+  echo ""
+  echo "=========================================="
+  echo "Setup complete."
+  echo ""
+  echo "Next: authenticate with HuggingFace to download the model:"
+  echo "  huggingface-cli login"
+  echo ""
+  echo "Upload your source video, then run the demo:"
+  echo "  export BYO_VIDEO=/path/to/your/video.mp4"
+  echo "  bash /workspace/cosmos-cookbook/deploy/transfer2_5/inference-real-augmentation/demo.sh"
+  echo ""
+  echo "For Omniverse workflows, export RGB + edge + seg + mask from IsaacSim first."
+  echo "See: https://docs.isaacsim.omniverse.nvidia.com/"
+  echo "=========================================="
+
+ports:
+  - 8888   # JupyterLab
+
+launch: |
+  cd /workspace/cosmos-transfer2.5
+  source .venv/bin/activate
+  jupyter lab \
+    --ip=0.0.0.0 \
+    --port=8888 \
+    --no-browser \
+    --allow-root \
+    --NotebookApp.token='' \
+    --NotebookApp.password=''
+
+notes: |
+  Before running the demo:
+
+  1. Open a terminal in JupyterLab and authenticate with HuggingFace:
+       huggingface-cli login
+     (Required for Cosmos Transfer 2.5 model weights)
+
+  2. Upload your source video (MP4). For multi-control recipes, optionally provide:
+     - Segmentation map video (seg.mp4)
+     - Binary mask video (mask.mp4)
+     - Omniverse exports: edge, depth, seg, mask
+     Filtered edge and inverted mask are computed automatically by the demo.
+
+  3. Set BYO_VIDEO and run:
+       export BYO_VIDEO=/path/to/your/video.mp4
+       bash /workspace/cosmos-cookbook/deploy/transfer2_5/inference-real-augmentation/demo.sh
+
+  Output: Background-changed video (default recipe) + timing JSON.
+          Results in /tmp/real_augmentation_output/ + /tmp/real_augmentation_results.json
+
+  Recipe: docs/recipes/inference/transfer2_5/inference-real-augmentation/inference.md

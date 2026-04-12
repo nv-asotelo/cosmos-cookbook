@@ -1,25 +1,25 @@
 #!/bin/bash
 # demo.sh — Worker Safety Cosmos Reason 2
-# Headless inference for Horde or any Linux GPU machine.
-# No browser or JupyterLab required.
+# Headless inference for Brev or any Linux GPU machine.
+# Runs worker_safety.py against pjramg/Safe_Unsafe_Test (loaded via FiftyOne).
 #
 # Usage:
 #   export HF_TOKEN=hf_...
 #   bash deploy/reason2/worker_safety/demo.sh
 #
-# Output: inference_results.json in the current directory
+# Output: /tmp/worker_safety_results.json
 
 set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COSMOS_REASON2="$HOME/cosmos-reason2"
 COOKBOOK="$REPO_ROOT"
+RESULTS_FILE="/tmp/worker_safety_results.json"
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────
 
 echo "=== Pre-flight checks ==="
 
-# GPU check
 if ! command -v nvidia-smi &>/dev/null; then
   echo "ERROR: nvidia-smi not found. A CUDA-capable GPU is required."
   exit 1
@@ -27,7 +27,7 @@ fi
 nvidia-smi --query-gpu=name,memory.free,driver_version --format=csv,noheader
 echo ""
 
-# VRAM check (require >= 40000 MiB free)
+# VRAM check (require >= 40000 MiB free for Cosmos-Reason2-2B)
 VRAM_FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -d ' ')
 if [ "$VRAM_FREE" -lt 40000 ]; then
   echo "ERROR: Only ${VRAM_FREE} MiB VRAM free. Cosmos-Reason2-2B requires >= 40000 MiB."
@@ -35,7 +35,6 @@ if [ "$VRAM_FREE" -lt 40000 ]; then
 fi
 echo "VRAM: ${VRAM_FREE} MiB free ✓"
 
-# HF token check
 if [ -z "$HF_TOKEN" ]; then
   echo ""
   echo "HuggingFace token required. Enter your token (hf_...):"
@@ -94,10 +93,8 @@ echo "CUDA available ✓"
 # ── Step 6: Recipe dependencies ──────────────────────────────────────────────
 
 echo "=== Step 6: Recipe dependencies ==="
-pip install -q -U fiftyone jupyterlab ipykernel
-python -m ipykernel install --user --name cosmos-reason2 \
-  --display-name "Python (cosmos-reason2)" 2>/dev/null
-echo "FiftyOne + JupyterLab ✓"
+pip install -q -U fiftyone
+echo "FiftyOne ✓"
 
 # ── Step 7: Model download ───────────────────────────────────────────────────
 
@@ -112,81 +109,134 @@ else
   echo "Already present ✓"
 fi
 
-# ── Step 8: Copy recipe files ────────────────────────────────────────────────
+# ── Step 8: Copy recipe script ───────────────────────────────────────────────
 
-echo "=== Step 8: Copy recipe files ==="
+echo "=== Step 8: Recipe script ==="
 RECIPE="$COOKBOOK/docs/recipes/inference/reason2/worker_safety"
 cp "$RECIPE/worker_safety.py" "$COSMOS_REASON2/worker_safety.py"
-cp -r "$RECIPE/assets" "$COSMOS_REASON2/assets" 2>/dev/null || true
-echo "Recipe files in place ✓"
+echo "worker_safety.py in place ✓"
 
 # ── Step 9: Run inference (headless) ─────────────────────────────────────────
 
 echo ""
 echo "=== Step 9: Running inference (headless) ==="
-echo "This may take 20-30 minutes on first run."
+echo "Dataset: pjramg/Safe_Unsafe_Test (downloaded via FiftyOne)"
+echo "Model: Cosmos-Reason2-2B"
 echo ""
 
 cd "$COSMOS_REASON2"
 
-python - <<'PYEOF'
-import fiftyone as fo
+START=$(date +%s%N)
 
-# Skip FiftyOne app launch in headless mode
+python - <<'PYEOF'
+import json
+import os
+import sys
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# Patch FiftyOne app launch so it doesn't block headlessly
+import fiftyone as fo
 _noop = type("S", (), {"wait": lambda self: None})()
 fo.launch_app = lambda *a, **kw: _noop
 
+# Execute the recipe script (jupytext-converted notebook)
+# worker_safety.py uses exec-style cell execution
 exec(open("worker_safety.py").read())
 
-# Export results
-import json
+# Export results to JSON
 try:
-    dataset = fo.load_dataset("safe-unsafe-worker-behavior")
+    dataset = fo.load_dataset("pjramg/Safe_Unsafe_Test")
     results = []
-    for sample in dataset:
-        gt = sample.get_field("ground_truth")
-        sl = sample.get_field("safety_label")
+    for sample in dataset.iter_samples():
+        cosmos_analysis = sample.get_field("cosmos_analysis")
+        safety_label = sample.get_field("safety_label")
         results.append({
             "filepath": sample.filepath,
-            "ground_truth": gt.label if gt else None,
-            "safety_label": sl.label if sl else None,
+            "ground_truth": sample.get_field("ground_truth").label if sample.get_field("ground_truth") else None,
+            "safety_label": safety_label.label if safety_label else None,
+            "cosmos_analysis": cosmos_analysis,
             "error": sample.get_field("cosmos_error"),
         })
-    with open("inference_results.json", "w") as f:
+    with open("/tmp/worker_safety_raw.json", "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\nResults saved: inference_results.json ({len(results)} samples)")
+    print(f"\nRaw results: {len(results)} samples written to /tmp/worker_safety_raw.json")
 except Exception as e:
-    print(f"WARNING: Could not export results: {e}")
+    print(f"WARNING: Could not export FiftyOne results: {e}")
+    with open("/tmp/worker_safety_raw.json", "w") as f:
+        json.dump([], f)
 PYEOF
 
-# ── Step 10: Verify ──────────────────────────────────────────────────────────
+END=$(date +%s%N)
+ELAPSED=$(( (END - START) / 1000000 ))
+
+# ── Step 10: Assemble structured results JSON ────────────────────────────────
 
 echo ""
-echo "=== Step 10: Results summary ==="
-python - <<'PYEOF'
-import json, sys
+echo "=== Step 10: Assembling results ==="
+
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr -d ' ')
+
+python - <<PYEOF
+import json, os, sys
+
+ELAPSED = $ELAPSED
+GPU_NAME = "$GPU_NAME"
+RAW_FILE = "/tmp/worker_safety_raw.json"
+OUT_FILE = "$RESULTS_FILE"
+
 try:
-    with open("inference_results.json") as f:
-        data = json.load(f)
-    errors = [r for r in data if r.get("error")]
-    labeled = [r for r in data if r.get("safety_label")]
-    print(f"Total samples:          {len(data)}")
-    print(f"Successfully classified: {len(labeled)}")
-    print(f"Errors:                 {len(errors)}")
-    if labeled:
-        print(f"\nSample result:")
-        r = labeled[0]
-        print(f"  File:         {r['filepath']}")
-        print(f"  Ground truth: {r['ground_truth']}")
-        print(f"  Prediction:   {r['safety_label']}")
-    if len(labeled) == 0:
-        print("\nWARNING: No samples were classified. Check inference_results.json for errors.")
-        sys.exit(1)
-except FileNotFoundError:
-    print("ERROR: inference_results.json not found.")
+    with open(RAW_FILE) as f:
+        raw = json.load(f)
+except Exception:
+    raw = []
+
+total = len(raw)
+success = [r for r in raw if r.get("safety_label") and not r.get("error")]
+errors  = [r for r in raw if r.get("error")]
+n_success = len(success)
+n_errors  = len(errors)
+
+mean_latency = round(ELAPSED / total, 1) if total > 0 else 0
+throughput   = round(n_success / (ELAPSED / 1000), 4) if ELAPSED > 0 else 0
+
+# First 3 sample results
+sample_results = []
+for r in raw[:3]:
+    sample_results.append({
+        "filepath": r.get("filepath"),
+        "ground_truth": r.get("ground_truth"),
+        "safety_label": r.get("safety_label"),
+        "status": "success" if r.get("safety_label") else "error",
+    })
+
+output = {
+    "recipe": "reason2/worker_safety",
+    "model": "nvidia/Cosmos-Reason2-2B",
+    "gpu": GPU_NAME,
+    "wall_time_ms": ELAPSED,
+    "samples_total": total,
+    "samples_success": n_success,
+    "mean_latency_ms": mean_latency,
+    "throughput_queries_per_sec": throughput,
+    "sample_results": sample_results,
+}
+
+with open(OUT_FILE, "w") as f:
+    json.dump(output, f, indent=2)
+
+print(f"Total samples:          {total}")
+print(f"Successfully classified: {n_success}")
+print(f"Errors:                 {n_errors}")
+print(f"Wall time:              {ELAPSED} ms")
+print(f"Throughput:             {throughput} queries/sec")
+
+if n_success == 0:
+    print("\nWARNING: No samples classified. Check /tmp/worker_safety_raw.json for errors.")
     sys.exit(1)
 PYEOF
 
 echo ""
 echo "=== Done ==="
-echo "Full results: $COSMOS_REASON2/inference_results.json"
+echo "Full results: $RESULTS_FILE"

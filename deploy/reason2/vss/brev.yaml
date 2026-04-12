@@ -1,0 +1,108 @@
+# Brev Launchable — Video Search and Summarization (VSS) with Cosmos Reason 2
+#
+# One-click GPU environment scaffold for:
+#   Large-scale video search and summarization using Cosmos-Reason2-8B
+#
+# NOTE: VSS requires a multi-service Docker Compose stack.
+#   This brev.yaml scaffolds the environment (Docker, NGC login, GPU check)
+#   and clones the cookbook + VSS repo. Full deployment requires following
+#   the VSS documentation: https://docs.nvidia.com/vss/latest/content/cloud_brev.html
+#
+# Hardware: 8x H100-80GB recommended (full local deployment profile)
+#           1x H100-80GB minimum (single-GPU profile with smaller models)
+# Driver:   >= 555 (CUDA 12.8 support required)
+# Runtime:  VSS Docker images are large (~30-60 min pull on first launch)
+
+name: cosmos-reason2-vss
+description: >
+  Video Search and Summarization using Cosmos-Reason2-8B.
+  Scaffold environment for the NVIDIA VSS Blueprint: ingestion pipeline
+  (VLM captioning, audio transcription, detection) + retrieval pipeline
+  (Graph-RAG, vector DB, LLM summarization). Follow VSS docs for full deployment.
+
+instance:
+  gpu: "H100-80GB"
+  gpu_count: 8    # Recommended for local deployment profile with Cosmos-Reason2-8B.
+                  # Use gpu_count: 1 for single-GPU profile with smaller models.
+  disk_gb: 200    # VSS Docker images + model weights + video data workspace
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl git git-lfs docker.io docker-compose-plugin
+
+  # Install uv (for cookbook tooling)
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-cookbook (recipe assets and scripts)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+
+  # Clone VSS Blueprint repository
+  git clone https://github.com/NVIDIA-AI-Blueprints/video-search-and-summarization.git \
+    /workspace/vss
+
+  echo ""
+  echo "=========================================="
+  echo "Scaffold complete."
+  echo ""
+  echo "VSS requires multi-service stack — see setup.md for full deployment."
+  echo ""
+  echo "Next steps:"
+  echo "1. Set your NGC API key:"
+  echo "   export NGC_API_KEY=nvapi-..."
+  echo ""
+  echo "2. Log in to NGC container registry:"
+  echo "   echo \$NGC_API_KEY | docker login nvcr.io -u '\$oauthtoken' --password-stdin"
+  echo ""
+  echo "3. Follow the VSS deployment guide:"
+  echo "   https://docs.nvidia.com/vss/latest/content/vss_dep_docker_compose_x86.html"
+  echo ""
+  echo "4. Or use the official Brev Launchable:"
+  echo "   https://docs.nvidia.com/vss/latest/content/cloud_brev.html"
+  echo "=========================================="
+
+ports:
+  - 8100   # VSS REST API backend
+  - 8888   # JupyterLab (optional, for exploration)
+
+launch: |
+  # VSS is launched via Docker Compose, not a simple script.
+  # This launch block starts a basic shell for access while you follow the VSS docs.
+  echo "Brev instance ready."
+  echo ""
+  echo "To deploy VSS, follow:"
+  echo "  https://docs.nvidia.com/vss/latest/content/vss_dep_docker_compose_x86.html"
+  echo ""
+  echo "Or run the scaffold demo:"
+  echo "  bash /workspace/cosmos-cookbook/deploy/reason2/vss/demo.sh"
+
+notes: |
+  VSS requires multi-service stack — see setup.md for full deployment.
+
+  Before running VSS:
+
+  1. Set your NGC API key (required for pulling VSS Docker images):
+       export NGC_API_KEY=nvapi-...
+
+  2. Authenticate with NGC container registry:
+       echo $NGC_API_KEY | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+  3. Follow the deployment guide for your hardware profile:
+     Multi-GPU (8x H100): https://docs.nvidia.com/vss/latest/content/vss_dep_docker_compose_x86.html#local-deployment
+     Single-GPU (1x H100): https://docs.nvidia.com/vss/latest/content/vss_dep_docker_compose_x86.html#fully-local-deployment-single-gpu
+
+  4. Access the VSS REST API at http://localhost:8100 once deployed.
+
+  5. Or use the official VSS Brev Launchable:
+       https://docs.nvidia.com/vss/latest/content/cloud_brev.html
+
+  Recipe: docs/recipes/inference/reason2/vss/inference.md
+  Setup: docs/recipes/inference/reason2/vss/setup.md

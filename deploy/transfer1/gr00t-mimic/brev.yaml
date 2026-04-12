@@ -1,0 +1,113 @@
+# Brev Launchable — Isaac GR00T-Mimic with Cosmos Transfer 1
+#
+# One-click GPU environment for:
+#   Synthetic manipulation motion generation using Cosmos Transfer 1
+#   Part of the Isaac GR00T-Mimic blueprint (NVIDIA Omniverse / Isaac Sim + Cosmos Transfer 1)
+#
+# IMPORTANT: This environment provisions the Cosmos Transfer 1 VIDEO GENERATION step only.
+# Isaac Sim / Omniverse (simulation and motion export) must be run on a separate
+# workstation with NVIDIA Omniverse installed. Export your control video from Isaac Sim,
+# then transfer it to this instance before running demo.sh.
+#
+# Hardware: 1x H100-80GB (required — Cosmos Transfer 1 needs >= 70 GB VRAM)
+# Driver:   >= 555 (CUDA 12.8 support required)
+# Runtime:  ~30-45 min setup on first launch (model checkpoints download from HuggingFace)
+
+name: cosmos-transfer1-gr00t-mimic
+description: >
+  Synthetic manipulation motion generation for humanoid robots using Cosmos Transfer 1.
+  Isaac GR00T-Mimic blueprint — video generation step only.
+  Isaac Sim / Omniverse (simulation) must be run separately on a compatible workstation.
+
+instance:
+  gpu: "H100-80GB"
+  gpu_count: 1
+  disk_gb: 250    # Cosmos Transfer 1 checkpoints (~100GB) + output videos + working space
+
+base_image: "nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+
+setup: |
+  #!/bin/bash
+  set -e
+
+  # System dependencies
+  apt-get update -q
+  apt-get install -y -q curl ffmpeg git git-lfs python3-pip wget
+  git lfs install
+
+  # Install uv
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source $HOME/.local/bin/env
+
+  # Clone cosmos-transfer1
+  git clone https://github.com/nvidia-cosmos/cosmos-transfer1.git /workspace/cosmos-transfer1
+  cd /workspace/cosmos-transfer1
+  git lfs pull
+
+  # Clone cosmos-cookbook (recipe assets and demo script)
+  git clone https://github.com/nv-asotelo/cosmos-cookbook.git /workspace/cosmos-cookbook
+  cd /workspace/cosmos-cookbook
+  git checkout recipe/cosmos-reason2-deploy-overlay
+
+  # Create Python environment (CUDA 12.8)
+  cd /workspace/cosmos-transfer1
+  pip install -e ".[cu128]" 2>/dev/null || pip install -e "." || true
+  # Fallback: install via uv if pyproject.toml supports it
+  uv sync 2>/dev/null || true
+
+  # Install JupyterLab
+  pip install -U jupyterlab ipykernel
+  python -m ipykernel install --user --name cosmos-transfer1 \
+    --display-name "Python (cosmos-transfer1)"
+
+  echo ""
+  echo "=========================================="
+  echo "Setup complete."
+  echo ""
+  echo "IMPORTANT: This environment handles Cosmos Transfer 1 inference only."
+  echo "Isaac Sim / Omniverse must be run on a separate workstation."
+  echo ""
+  echo "Next steps:"
+  echo "  1. Transfer your Isaac Sim control video to this instance"
+  echo "  2. Authenticate with HuggingFace (for model checkpoints):"
+  echo "       huggingface-cli login"
+  echo "  3. Set your video path and run the demo:"
+  echo "       export BYO_VIDEO=/path/to/your/control_video.mp4"
+  echo "       bash /workspace/cosmos-cookbook/deploy/transfer1/gr00t-mimic/demo.sh"
+  echo "=========================================="
+
+ports:
+  - 8888   # JupyterLab
+
+launch: |
+  cd /workspace/cosmos-transfer1
+  source /workspace/cosmos-transfer1/.venv/bin/activate 2>/dev/null || true
+  jupyter lab \
+    --ip=0.0.0.0 \
+    --port=8888 \
+    --no-browser \
+    --allow-root \
+    --NotebookApp.token='' \
+    --NotebookApp.password=''
+
+notes: |
+  SCOPE: This Brev launchable handles Cosmos Transfer 1 video generation only.
+  Isaac Sim / Omniverse (simulation and motion export) requires a separate workstation.
+
+  Before running the demo:
+
+  1. On your Omniverse workstation:
+     - Run Isaac Sim with the GR00T-Mimic blueprint
+     - Export your manipulation control video (RGB or depth/seg map)
+     - Transfer the video to this Brev instance (e.g., via scp or upload)
+
+  2. In a JupyterLab terminal, authenticate with HuggingFace:
+       huggingface-cli login
+
+  3. Set your control video path and run:
+       export BYO_VIDEO=/path/to/your/control_video.mp4
+       bash /workspace/cosmos-cookbook/deploy/transfer1/gr00t-mimic/demo.sh
+
+  Blueprint: https://build.nvidia.com/nvidia/isaac-gr00t-synthetic-manipulation
+  GitHub:    https://github.com/NVIDIA-Omniverse-blueprints/synthetic-manipulation-motion-generation
+  Recipe:    docs/recipes/inference/transfer1/gr00t-mimic/inference.md
