@@ -274,6 +274,11 @@ echo ""
 
 cd "$COSMOS_TRANSFER1"
 
+# transformer_engine bundles libcudnn.so.9 and libnccl inside the venv's nvidia packages.
+# Without these on LD_LIBRARY_PATH, TE fails to load its shared libs at runtime.
+NVIDIA_LIBS="$(pwd)/.venv/lib/python3.12/site-packages/nvidia"
+export LD_LIBRARY_PATH="${NVIDIA_LIBS}/cudnn/lib:${NVIDIA_LIBS}/nccl/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
 START_NS=$(date +%s%N)
 
 PYTHONPATH="$(pwd)" torchrun \
