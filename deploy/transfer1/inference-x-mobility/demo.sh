@@ -149,10 +149,13 @@ fi
 echo "=== Step 7: X-Mobility dataset ==="
 mkdir -p "$DATA_DIR"
 
-XMOB_SUBSET_DIR="$DATA_DIR/x_mobility_isaac_sim_random_160k"
 XMOB_ZIP="$DATA_DIR/x_mobility_isaac_sim_random_160k.zip"
 
-if [ ! -d "$XMOB_SUBSET_DIR" ]; then
+# The zip extracts to a subdirectory (may differ from the zip filename).
+# Discover the actual extracted dir; fall back to downloading if absent.
+XMOB_SUBSET_DIR=$(find "$DATA_DIR" -maxdepth 1 -type d -name "*isaac_sim*" 2>/dev/null | head -1)
+
+if [ -z "$XMOB_SUBSET_DIR" ]; then
   echo "Downloading X-Mobility random action dataset..."
   echo "(Full dataset is 160K frames — for demo we download and use a small subset)"
   huggingface-cli download nvidia/X-Mobility \
@@ -172,11 +175,19 @@ if [ ! -d "$XMOB_SUBSET_DIR" ]; then
 
   if [ -f "$XMOB_ZIP" ]; then
     echo "Extracting dataset..."
-    unzip -q "$XMOB_ZIP" -d "$DATA_DIR"
+    unzip -oq "$XMOB_ZIP" -d "$DATA_DIR"
     echo "Extracted ✓"
   fi
+
+  # Re-discover the extracted dir after extraction
+  XMOB_SUBSET_DIR=$(find "$DATA_DIR" -maxdepth 1 -type d -name "*isaac_sim*" 2>/dev/null | head -1)
 else
-  echo "Dataset already present ✓"
+  echo "Dataset already present at $XMOB_SUBSET_DIR ✓"
+fi
+
+if [ -z "$XMOB_SUBSET_DIR" ]; then
+  echo "ERROR: Could not find extracted X-Mobility dataset in $DATA_DIR"
+  exit 1
 fi
 
 # ── Step 8: Convert X-Mobility frames to videos ──────────────────────────────
