@@ -108,13 +108,14 @@ if [ -f "pyproject.toml" ]; then
 elif [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
   pip install -e . 2>&1 | tail -5
 fi
-# cosmos-transfer1 may pin a torch version requiring CUDA > 12.8.
-# If CUDA is unavailable after uv sync, force-reinstall with cu128 wheels
-# so the recipe runs on Hyperstack/Nebius H100s with driver 570.xx (CUDA 12.8).
+# cosmos-transfer1 may pin torch with CUDA > 12.8 (cu130 requires driver for CUDA 13.0).
+# Hyperstack/Nebius H100 instances have driver 570.xx (CUDA 12.8 max).
+# Force cu124 wheels — they run on any driver >= CUDA 12.4 and cosmos-transfer1.yaml
+# declares cuda=12.4 as the reference environment.
 if ! python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-  echo "CUDA unavailable with default torch — reinstalling with cu128 wheels..."
+  echo "CUDA unavailable with default torch — reinstalling with cu124 wheels..."
   uv pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128 \
+    --index-url https://download.pytorch.org/whl/cu124 \
     --force-reinstall 2>&1 | tail -5
 fi
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'"
