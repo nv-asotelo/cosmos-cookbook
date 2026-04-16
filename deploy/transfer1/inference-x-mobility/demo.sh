@@ -119,6 +119,9 @@ if ! python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; the
 fi
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'"
 echo "CUDA available ✓"
+# xmob_dataset_to_videos.py reads parquet files — pyarrow not in cosmos-transfer1 deps
+uv pip install pyarrow 2>&1 | tail -3
+echo "pyarrow ✓"
 
 # ── Step 5: HF login (after venv so huggingface-cli is available) ─────────────
 
