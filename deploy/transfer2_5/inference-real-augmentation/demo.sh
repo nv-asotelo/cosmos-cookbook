@@ -232,7 +232,9 @@ echo ""
 
 INFER_SCRIPT="$COSMOS_DIR/examples/inference.py"
 if [ ! -f "$INFER_SCRIPT" ]; then
-  INFER_SCRIPT=$(find "$COSMOS_DIR" -name "inference.py" | head -1)
+  echo "ERROR: inference.py not found at expected path: $INFER_SCRIPT"
+  echo "  Verify cosmos-transfer2.5 repo cloned correctly and examples/inference.py exists."
+  exit 1
 fi
 
 # Get frame count
