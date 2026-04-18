@@ -222,6 +222,23 @@
     </div>
     <div class="recipe-category-body">
       <div class="recipe-track" data-page-size="6" aria-label="Robotics recipes">
+        <a class="recipe-card" href="./inference/reason2/intbot_edge_vlm/inference.html">
+          <div class="recipe-media recipe-media--image" aria-hidden="true">
+            <img src="./inference/reason2/intbot_edge_vlm/assets/intbot_gtc_2026.jpg" alt="" loading="lazy" />
+          </div>
+          <div class="recipe-title">Real-Time Vision-Language Models on Edge: Cosmos-Reason2 on Jetson Thor</div>
+          <div class="recipe-tag recipe-tag--inference">Inference</div>
+        </a>
+        <a class="recipe-card" href="./end2end/gr00t-dreams/post-training.html">
+          <div class="recipe-media recipe-media--video" aria-hidden="true">
+            <video autoplay loop muted playsinline preload="none" tabindex="-1">
+              <source src="./end2end/gr00t-dreams/assets/3.mp4" type="video/mp4">
+              Your browser does not support the video tag.
+            </video>
+          </div>
+          <div class="recipe-title">GR00T-Dreams: Synthetic Trajectory Generation for Robot Learning</div>
+          <div class="recipe-tag recipe-tag--workflow">Workflow</div>
+        </a>
         <a class="recipe-card" href="./post_training/predict2/cosmos_policy/post_training.html">
           <div class="recipe-media recipe-media--video" aria-hidden="true">
             <video autoplay loop muted playsinline preload="none" tabindex="-1">
@@ -230,6 +247,13 @@
             </video>
           </div>
           <div class="recipe-title">Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning</div>
+          <div class="recipe-tag recipe-tag--post-training">Post-Training</div>
+        </a>
+        <a class="recipe-card" href="./post_training/predict2_5/surgical_robotics/post_training.html">
+          <div class="recipe-media recipe-media--image" aria-hidden="true">
+            <img src="./post_training/predict2_5/surgical_robotics/assets/needle_throw_3x_compact.gif" alt="Cosmos-H-Surgical-Simulator" loading="lazy" />
+          </div>
+          <div class="recipe-title">Post-Training Cosmos-H-Surgical-Simulator for Surgical Robotics</div>
           <div class="recipe-tag recipe-tag--post-training">Post-Training</div>
         </a>
         <a class="recipe-card" href="./inference/reason2/intbot_showcase/inference.html">
@@ -292,6 +316,13 @@
     </div>
     <div class="recipe-category-body">
       <div class="recipe-track" data-page-size="6" aria-label="Autonomous Vehicles recipes">
+        <a class="recipe-card" href="./data_curation/cosmos_cabr/cabr_recipe.html">
+          <div class="recipe-media recipe-media--image" aria-hidden="true">
+            <img src="./data_curation/cosmos_cabr/assets/beamr.png" alt="" loading="lazy" />
+          </div>
+          <div class="recipe-title">Content-Adaptive Video Compression for Cosmos Curator</div>
+          <div class="recipe-tag recipe-tag--curation">Curation</div>
+        </a>
         <a class="recipe-card" href="./post_training/reason2/av_3d_grounding/post_training.html">
           <div class="recipe-media recipe-media--image" aria-hidden="true">
             <img src="./post_training/reason2/av_3d_grounding/assets/training_images_overlay_overview.png" alt="" loading="lazy" />
@@ -383,6 +414,13 @@
     </div>
     <div class="recipe-category-body">
       <div class="recipe-track" data-page-size="6" aria-label="Vision AI recipes">
+        <a class="recipe-card" href="./data_curation/outlier_detection/outlier_detection.html">
+          <div class="recipe-media recipe-media--image" aria-hidden="true">
+            <img src="./data_curation/outlier_detection/assets/outlier_trajectories.png" alt="" loading="lazy" />
+          </div>
+          <div class="recipe-title">Outlier Detection in Embedding Vector Trajectories</div>
+          <div class="recipe-tag recipe-tag--curation">Curation</div>
+        </a>
         <a class="recipe-card" href="./inference/reason2/worker_safety/inference.html">
           <div class="recipe-media recipe-media--image" aria-hidden="true">
             <img src="./inference/reason2/worker_safety/assets/assets_1_worker_safety.png" alt="" loading="lazy" />
