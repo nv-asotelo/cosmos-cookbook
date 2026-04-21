@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Cosmos Reason2 — BYO Video Demo setup + launch.
+Version: 2026-04-18
+Canonical source: ~/.claude/scripts/byo_video_setup.py
 Runs on the GPU instance. Prints live progress with ETAs.
 At the end, prints a clickable OSC 8 hyperlink to the Gradio URL.
+URL is also written to /tmp/gradio_url.txt for agent capture.
 """
 import os, sys, time, subprocess, re, shutil, json
 
@@ -26,11 +29,14 @@ def hyperlink(url, label=None):
 
 def run_cmd(args, cwd=None, env=None, timeout=None):
     """Run a command, return (returncode, stdout+stderr)."""
-    result = subprocess.run(
-        args, cwd=cwd, env=env, timeout=timeout,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    return result.returncode, result.stdout
+    try:
+        result = subprocess.run(
+            args, cwd=cwd, env=env, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        return result.returncode, result.stdout
+    except FileNotFoundError:
+        return 1, f"command not found: {args[0]}"
 
 def stream_cmd(args, cwd=None, env=None, prefix=""):
     """Stream command output with a prefix, return returncode."""
@@ -54,11 +60,14 @@ HF_TOKEN    = os.environ.get("HF_TOKEN", "")
 MODEL_NAME  = os.environ.get("MODEL_NAME", "nvidia/Cosmos-Reason2-2B")
 MODEL_DIR   = os.environ.get("MODEL_DIR", f"{HOME}/cosmos-reason2/models/Cosmos-Reason2-2B")
 REASON2_DIR = f"{HOME}/cosmos-reason2"
-COOKBOOK_DIR= f"{HOME}/cosmos-cookbook"
 GRADIO_PORT = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_APP  = "/tmp/gradio_cr2_byo.py"
 URL_FILE    = "/tmp/gradio_url.txt"
 LOG_FILE    = "/tmp/gradio_demo.log"
+
+# ── Pre-step: kill old Gradio so VRAM measurement is accurate ────────────────
+subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
+time.sleep(2)  # brief pause for GPU memory to release
 
 # ── Step 1: GPU check ────────────────────────────────────────────────────────
 header("Step 1 — GPU")
@@ -75,22 +84,42 @@ vram_total = int(parts[2].split()[0])
 
 LOW_VRAM = vram_free < 24000
 
-if vram_free >= 80000:
-    model_label = "CR2-8B (80GB+ VRAM)"
-    if "8B" not in MODEL_NAME:
-        MODEL_NAME = "nvidia/Cosmos-Reason2-8B"
-        MODEL_DIR = f"{HOME}/cosmos-reason2/models/Cosmos-Reason2-8B"
-elif vram_free >= 40000:
+# CR2-2B is always used for the live demo — 8B fails the <60s inference target.
+# To force 8B (quality over speed), set MODEL_NAME=nvidia/Cosmos-Reason2-8B externally.
+if vram_free >= 40000:
     model_label = "CR2-2B (40GB+ VRAM)"
 elif vram_free >= 24000:
     model_label = "CR2-2B (below recommended 40GB — will use fps=1)"
     LOW_VRAM = True
 else:
-    model_label = f"CR2-2B ⚠ LOW VRAM ({vram_free}MiB / 12GB) — fps=1, reduced resolution"
+    model_label = f"CR2-2B ⚠ LOW VRAM ({vram_free}MiB) — fps=1, reduced resolution"
     LOW_VRAM = True
+
+# VRAM-adaptive tier selection for Gradio
+# Higher fps → more frames → more temporal merging (temporal_patch_size=2) → fewer net tokens → lower TTFT.
+# Empirical on RTX PRO 6000: fps=1→8 frames→1083 tokens→52s TTFT; fps=8→64 frames→431 tokens→18s TTFT.
+# Use fps=8 as default on all tiers; auto-cap steps down max_pixels as needed to stay under budget.
+_gpu_upper = gpu_name.upper()
+_h100_class = any(tag in _gpu_upper for tag in ("H100", "A100", "H200", "GB200"))
+if _h100_class and vram_free >= 60000:
+    tier_name       = "H100/A100"
+    gradio_fps      = 8
+    max_pixels      = 1048576   # 1M pixels
+    prefill_tps     = 90        # tokens/s — H100 empirical
+elif vram_free >= 40000:
+    tier_name       = "high-VRAM (not H100-class)"
+    gradio_fps      = 8         # fps=8 → temporal compression → ~18s TTFT on RTX PRO 6000 Blackwell
+    max_pixels      = 524288    # 512K pixels; auto-cap reduces for long clips
+    prefill_tps     = 23        # tokens/s — RTX PRO 6000 Blackwell empirical
+else:
+    tier_name       = "low-VRAM (<40GB)"
+    gradio_fps      = 4
+    max_pixels      = 131072    # 128K pixels
+    prefill_tps     = 15        # tokens/s — conservative estimate for <40GB GPUs
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"Selected model: {MODEL_NAME} ({model_label})")
+ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}")
 if LOW_VRAM:
     info("LOW VRAM MODE: fps=1, resolution reduced — use short clips (< 60s) for best results")
 
@@ -201,21 +230,27 @@ else:
     info("Progress below — download continues even if it looks stalled:")
     t0 = time.time()
     dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
-    rc = stream_cmd(
-        ["uv", "run", "huggingface-cli", "download", MODEL_NAME,
-         "--local-dir", MODEL_DIR],
-        cwd=REASON2_DIR, env=dl_env, prefix="HF │ "
-    )
-    if rc != 0:
-        print("  ✗  Model download failed. Check HF_TOKEN and model access."); sys.exit(1)
+    MAX_RETRIES = 5
+    rc = 1
+    for attempt in range(1, MAX_RETRIES + 1):
+        rc = stream_cmd(
+            ["uv", "run", "huggingface-cli", "download", MODEL_NAME,
+             "--local-dir", MODEL_DIR],
+            cwd=REASON2_DIR, env=dl_env, prefix="HF │ "
+        )
+        if rc == 0:
+            break
+        if attempt < MAX_RETRIES:
+            print(f"  ✗  Download attempt {attempt} failed. {f'Retry {attempt}/{MAX_RETRIES} after 30s (HF rate limit or transient error)'}", flush=True)
+            time.sleep(30)
+        else:
+            print(f"  ✗  All {MAX_RETRIES} download attempts failed. Check HF_TOKEN and model access.")
+            sys.exit(1)
     elapsed = time.time() - t0
     ok(f"Downloaded in {elapsed/60:.1f} min")
 
 # ── Step 9: Launch Gradio ────────────────────────────────────────────────────
 header("Step 9 — Launch Gradio web demo")
-
-# Kill any old Gradio on this port
-subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
 
 if not os.path.exists(GRADIO_APP):
     print(f"  ✗  {GRADIO_APP} not found — deploy gradio_cr2_byo.py first"); sys.exit(1)
@@ -233,12 +268,15 @@ launch_env = {
     "PYTHONUNBUFFERED": "1",
     "HF_TOKEN": HF_TOKEN,
     "LOW_VRAM": "true" if LOW_VRAM else "false",
+    "GRADIO_FPS": str(gradio_fps),
+    "GRADIO_MAX_PIXELS": str(max_pixels),
+    "GRADIO_PREFILL_TPS": str(prefill_tps),
 }
 
 run(f"Starting Cosmos Reason2 demo on port {GRADIO_PORT}  (~5-10s for model load)")
 
 proc = subprocess.Popen(
-    ["uv", "run", "python", "/tmp/gradio_cr2_byo.py"],
+    ["uv", "run", "python", "-u", "/tmp/gradio_cr2_byo.py"],
     cwd=REASON2_DIR,
     env=launch_env,
     stdout=subprocess.PIPE,
@@ -247,9 +285,11 @@ proc = subprocess.Popen(
     bufsize=1,
 )
 
-# Stream output and capture URL
+# Stream output and capture URL (5-minute timeout)
 url = None
 url_pattern = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
+URL_CAPTURE_TIMEOUT = 300  # seconds
+t_launch = time.time()
 with open(LOG_FILE, "w") as log:
     for line in proc.stdout:
         log.write(line)
@@ -261,6 +301,11 @@ with open(LOG_FILE, "w") as log:
         if m:
             url = m.group(1).rstrip(".")
             break  # Got the URL — model is up
+        elapsed = time.time() - t_launch
+        if elapsed > URL_CAPTURE_TIMEOUT:
+            print(f"  ✗  Timed out after {URL_CAPTURE_TIMEOUT}s waiting for Gradio URL. Check /tmp/gradio_demo.log")
+            proc.terminate()
+            sys.exit(1)
 
 if not url:
     print("  ✗  Gradio did not print a public URL. Check /tmp/gradio_demo.log")
@@ -280,6 +325,7 @@ print(f"  {BOLD}URL:{RESET}  {hyperlink(url)}", flush=True)
 print(f"  {DIM}Upload any MP4 → type a prompt → click Run Inference{RESET}", flush=True)
 print(f"  {DIM}Results also saved to /tmp/byo_video_reason2_results.json{RESET}", flush=True)
 print(f"  {DIM}Link valid for 72h. Kill instance when done.{RESET}", flush=True)
+print(f"  {DIM}URL also written to /tmp/gradio_url.txt{RESET}", flush=True)
 print(f"{'─'*60}", flush=True)
 print(flush=True)
 
