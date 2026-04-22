@@ -76,6 +76,13 @@ brev ls
 - **`brev stop` is a NO-OP — VM keeps running and billing**
 - Use `brev delete` to actually terminate and stop charges
 - git-lfs NOT pre-installed (brev-env.sh handles this)
+- OS disk is ~97GB — too small for multi-model byo-video use (FP8+BF16+NVFP4). Use MassedCompute instead.
+
+**MassedCompute H100 (byo-video only):**
+- Use `--type massedcompute_H100` when provisioning for byo-video with multiple model variants
+- Provides ~1TB disk (vs Hyperstack ~97GB) — required for FP8 + NVFP4 + BF16 side-by-side
+- SSH username: confirm with `brev ls` (typically `ubuntu`)
+- `brev stop` behavior: test before relying on it — MassedCompute policies differ from Hyperstack
 
 ### 6. Deploy the Recipe
 

@@ -1,8 +1,8 @@
 List all available Cosmos Cookbook recipes organized by category and model.
 
 Steps:
-1. Read /f/git/cosmos-cookbook/docs/recipes/all_recipes.md for the canonical recipe list.
-2. Scan the directory tree under docs/recipes/ to find all directories containing a CLAUDE.md. This catches any recipes added after all_recipes.md was last updated.
+1. Read docs/recipes/all_recipes.md (relative to repo root) for the canonical recipe list.
+2. Scan the directory tree under docs/recipes/ to find all recipe directories. A recipe directory is any leaf directory containing a CLAUDE.md, inference.md, post_training.md, or README.md. CLAUDE.md is optional — do not skip directories that lack one.
 3. Display recipes in four groups:
 
 **Inference Recipes** (grouped by model)

@@ -121,6 +121,8 @@ brev exec byo-video-vllm "git clone https://github.com/nvidia-cosmos/cosmos-reas
 
 # Install dependencies
 brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
+# Note: byo_video_setup.py auto-detects CUDA 12.8 (driver <575.x) and downgrades
+# vLLM to 0.11.0 automatically. On CUDA 12.9+ instances this step is not needed.
 
 # Install PyAV
 brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
@@ -129,13 +131,13 @@ brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.car
 brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
 
 # Download NVFP4 (first model, smallest, ~7GB)
-brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && export HF_TOKEN=hf_... && uv run huggingface-cli download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
+brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && export HF_TOKEN=hf_... && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
 ```
 
 ### Step 3 — Start vLLM server
 
 ```bash
-brev exec byo-video-vllm "nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 8192 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1 &"
+brev exec byo-video-vllm "nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1 &"
 ```
 
 Wait ~60–90s for vLLM to load, then confirm:
@@ -196,7 +198,7 @@ cd ~/cosmos-reason2
 uv sync --extra cu128
 uv pip install "av==16.1.0" gradio
 export HF_TOKEN=hf_...
-uv run huggingface-cli download nvidia/Cosmos-Reason2-2B \
+uv run hf download nvidia/Cosmos-Reason2-2B \
   --local-dir ~/cosmos-reason2/models/Cosmos-Reason2-2B
 
 # Launch (HF mode, CR2-2B)
@@ -314,13 +316,19 @@ video_processing_utils.BaseVideoProcessor.fetch_videos = _patched_fetch_videos
 | Symptom | Fix |
 |---|---|
 | Port 7860 unreachable | Check `ss -tlnp` on instance. Gradio failed — check `/tmp/gradio.log`. |
+| Horde: no public share URL | NVIDIA network blocks outgoing to gradio.live. Normal — access via SSH tunnel: `ssh -L 7860:localhost:7860 horde@<ip>` then open localhost:7860. |
+| Horde: `ffprobe` not found | Horde's snap ffmpeg doesn't include ffprobe in PATH. Fix: `wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -O /tmp/ff.tar.xz && cd /tmp && tar -xf ff.tar.xz && sudo cp /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe`. |
 | Black frames / torchcodec error | PyAV patch not applied. Confirm `gradio_cr2_byo.py` was deployed. |
 | OOM during inference | Kill other GPU processes. CR2-8B needs ~80GB VRAM. |
-| `uv sync --extra cu128` fails | Wrong CUDA driver. Check `nvidia-smi` shows CUDA 12.x. |
+| vLLM 0.12.0 fails to start | CUDA 12.8 (driver 570.x) is incompatible. `byo_video_setup.py` auto-detects and pins vLLM to 0.11.0. Manual fix: `cd ~/cosmos-reason2 && uv pip install vllm==0.11.0`. |
 | Horde SSH rejected | Username must be `horde`. Key: `~/.ssh/id_ed25519`. |
 | vLLM "Server not running" | vLLM process died. Restart with vLLM serve command from Step 3. |
 | Download fails ENOSPC | Disk full. Open Storage panel in Gradio UI. Clean HF cache or delete partial downloads. 32B models need ≥64GB free — use massedcompute_H100. |
 | Dropdown swap stalls >150s | vLLM failed to start. SSH to instance, check `cat /tmp/vllm.log`. |
 | BF16 8B not on disk | Click "Download & Load" from dropdown banner. Needs ~16GB free + HF token. |
+| FP8 download fails with 401 | CR2-8B-FP8 is a gated HuggingFace model — requires HF_TOKEN with accepted license. Use "Apply Token" in Gradio Advanced Settings → HuggingFace Auth. |
 | HF 429 rate limit on download | Script retries with sleep. Usually succeeds by attempt 3–4. |
 | hyperstack_H100 disk full at 97GB | Wrong instance type. Use massedcompute_H100 (1TB). hyperstack OS disk is too small for multi-model. |
+| Gradio theme error on startup | Gradio 6.0 moved `theme=` from `gr.Blocks()` to `demo.launch()`. Deploy the latest canonical `gradio_cr2_byo.py` from `~/.claude/scripts/`. |
+| `flashinfer-cubin` version mismatch after vLLM downgrade | `RuntimeError: flashinfer-cubin version (0.6.6) does not match flashinfer version (0.5.3)`. Set `FLASHINFER_DISABLE_VERSION_CHECK=1` in env. `byo_video_setup.py` sets this automatically in `launch_env`. |
+| vLLM startup fails: `ninja` not found | `FileNotFoundError: ninja` from flashinfer JIT. Run `sudo apt-get install -y ninja-build`. `byo_video_setup.py` Step 6c does this automatically. |

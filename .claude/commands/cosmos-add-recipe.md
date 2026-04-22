@@ -48,3 +48,9 @@ Steps:
    3. Add your scripts to the scripts/examples/ directory if applicable.
    4. Run: python .github/scripts/validate_claude_md.py <dir>/CLAUDE.md
    5. Submit a PR following CONTRIBUTING.md"
+
+## Notes
+
+**CLAUDE.md is required for scaffolded recipes** — the validator (step 8) enforces this. However, `/cosmos-run-recipe` soft-falls back to inference.md/README.md if CLAUDE.md is absent, so existing recipes without one still run. New recipes scaffolded here always get a CLAUDE.md from the template.
+
+**CUDA extras:** recipes that use vLLM should use `uv sync --extra cu128`. The setup script auto-downgrades vLLM to 0.11.0 on CUDA 12.8 (driver < 575.x). Do not reference `cu128_torch28` — that extra is not defined at the top-level repo.

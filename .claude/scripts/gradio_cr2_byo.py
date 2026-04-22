@@ -1222,7 +1222,7 @@ _VLLM_PROC = None  # track last vLLM subprocess so we can kill it cleanly
 
 _VLLM_SWAP_TIMEOUT = 150  # seconds to wait for vLLM to become ready
 
-def _launch_vllm_swap(local_path, served_name, gpu_util="0.85", max_model_len="8192"):
+def _launch_vllm_swap(local_path, served_name, gpu_util="0.85", max_model_len="32768"):
     """
     Kill the current vLLM server and launch a new one for `local_path`.
     Returns immediately — caller is responsible for polling /v1/models.
@@ -1558,7 +1558,6 @@ def _clean_hf_cache():
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 with gr.Blocks(
     title="Cosmos Reason2 — BYO Video Demo",
-    theme=gr.themes.Base(primary_hue="green", font=gr.themes.GoogleFont("Inter")),
 ) as demo:
 
     _variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
@@ -1911,7 +1910,8 @@ with gr.Blocks(
         )
 
 _app, _local_url, _share_url = demo.launch(
-    server_name="0.0.0.0", server_port=PORT, share=SHARE, prevent_thread_lock=True
+    server_name="0.0.0.0", server_port=PORT, share=SHARE, prevent_thread_lock=True,
+    theme=gr.themes.Base(primary_hue="green", font=gr.themes.GoogleFont("Inter")),
 )
 _pub = _share_url or _local_url or f"http://0.0.0.0:{PORT}"
 print(f"[launch] {_pub}", flush=True)

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
 Cosmos Reason2 — BYO Video Demo setup + launch.
-Version: 2026-04-18
+Version: 2026-04-21
 Canonical source: ~/.claude/scripts/byo_video_setup.py
+
 Runs on the GPU instance. Prints live progress with ETAs.
+MODEL_SIZE-driven: downloads all variants for the selected model size.
 At the end, prints a clickable OSC 8 hyperlink to the Gradio URL.
 URL is also written to /tmp/gradio_url.txt for agent capture.
+
+Env vars:
+  HF_TOKEN          — required for gated model download
+  NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only)
+  MODEL_SIZE        — 2B | 8B | 32B  (default: 2B)
+  MODEL_DIR         — override local download path for primary model
+  GRADIO_PORT       — port for Gradio (default: 7860)
 """
 import os, sys, time, subprocess, re, shutil, json
 
@@ -17,18 +26,19 @@ BOLD   = "\033[1m"
 DIM    = "\033[2m"
 RESET  = "\033[0m"
 
-def ok(msg):    print(f"  {GREEN}✓{RESET}  {msg}", flush=True)
-def run(msg):   print(f"  {YELLOW}⟳{RESET}  {msg}", flush=True)
-def info(msg):  print(f"  {CYAN}→{RESET}  {msg}", flush=True)
-def header(msg): print(f"\n{BOLD}{msg}{RESET}", flush=True)
+def ok(msg):     print(f"  {GREEN}✓{RESET}  {msg}", flush=True)
+def run(msg):    print(f"  {YELLOW}⟳{RESET}  {msg}", flush=True)
+def info(msg):   print(f"  {CYAN}→{RESET}  {msg}", flush=True)
+def warn(msg):   print(f"  {YELLOW}⚠{RESET}  {msg}", flush=True)
+def header(msg, eta=None):
+    eta_str = f"  {DIM}[est. {eta}]{RESET}" if eta else ""
+    print(f"\n{BOLD}{msg}{RESET}{eta_str}", flush=True)
 
 def hyperlink(url, label=None):
-    """OSC 8 clickable hyperlink — works in iTerm2, Terminal.app, most modern terminals."""
     label = label or url
     return f"\033]8;;{url}\033\\{BOLD}{CYAN}{label}{RESET}\033]8;;\033\\"
 
 def run_cmd(args, cwd=None, env=None, timeout=None):
-    """Run a command, return (returncode, stdout+stderr)."""
     try:
         result = subprocess.run(
             args, cwd=cwd, env=env, timeout=timeout,
@@ -37,9 +47,10 @@ def run_cmd(args, cwd=None, env=None, timeout=None):
         return result.returncode, result.stdout
     except FileNotFoundError:
         return 1, f"command not found: {args[0]}"
+    except subprocess.TimeoutExpired:
+        return 1, "timeout"
 
 def stream_cmd(args, cwd=None, env=None, prefix=""):
-    """Stream command output with a prefix, return returncode."""
     proc = subprocess.Popen(
         args, cwd=cwd, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
@@ -51,80 +62,105 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
     proc.wait()
     return proc.returncode
 
+# ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
+_MODEL_CONFIGS = {
+    "2B": {
+        "variants": [
+            ("CR2-2B BF16", "Cosmos-Reason2-2B",     "nvidia/Cosmos-Reason2-2B",     "~4 GB"),
+            ("CR2-2B FP8",  "Cosmos-Reason2-2B-FP8", "nvidia/Cosmos-Reason2-2B-FP8", "~2 GB"),
+        ],
+        "nim": None,
+    },
+    "8B": {
+        "variants": [
+            ("CR2-8B BF16",  "Cosmos-Reason2-8B",       "nvidia/Cosmos-Reason2-8B",       "~16 GB"),
+            ("CR2-8B NVFP4", "Cosmos-Reason2-8B-NVFP4", "nvidia/Cosmos-Reason2-8B-NVFP4", "~4 GB"),
+        ],
+        "nim": "nvidia/cosmos-reason2-8b",
+    },
+    "32B": {
+        "variants": [
+            ("CR2-32B BF16", "Cosmos-Reason2-32B",    "nvidia/Cosmos-Reason2-32B",    "~64 GB"),
+            ("CR2-32B AV",   "Cosmos-Reason2-32B-AV", "nvidia/Cosmos-Reason2-32B-AV", "~64 GB"),
+        ],
+        "nim": None,
+    },
+}
+
 # ── Config ──────────────────────────────────────────────────────────────────
-HOME        = os.path.expanduser("~")
-PATH_EXTRA  = f"{HOME}/.local/bin:{HOME}/.cargo/bin"
-ENV         = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', '')}",
-               "PYTHONUNBUFFERED": "1"}
-HF_TOKEN    = os.environ.get("HF_TOKEN", "")
-MODEL_NAME  = os.environ.get("MODEL_NAME", "nvidia/Cosmos-Reason2-2B")
-MODEL_DIR   = os.environ.get("MODEL_DIR", f"{HOME}/cosmos-reason2/models/Cosmos-Reason2-2B")
-REASON2_DIR = f"{HOME}/cosmos-reason2"
-GRADIO_PORT = int(os.environ.get("GRADIO_PORT", "7860"))
-GRADIO_APP  = "/tmp/gradio_cr2_byo.py"
-URL_FILE    = "/tmp/gradio_url.txt"
-LOG_FILE    = "/tmp/gradio_demo.log"
+HOME          = os.path.expanduser("~")
+PATH_EXTRA    = f"{HOME}/.local/bin:{HOME}/.cargo/bin"
+ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', '')}",
+                 "PYTHONUNBUFFERED": "1"}
+HF_TOKEN      = os.environ.get("HF_TOKEN", "")
+NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
+MODEL_SIZE    = os.environ.get("MODEL_SIZE", "2B").upper()
+REASON2_DIR   = f"{HOME}/cosmos-reason2"
+MODELS_BASE   = f"{REASON2_DIR}/models"
+GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
+GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
+URL_FILE      = "/tmp/gradio_url.txt"
+LOG_FILE      = "/tmp/gradio_demo.log"
+
+if MODEL_SIZE not in _MODEL_CONFIGS:
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, or 32B.")
+    sys.exit(1)
+
+_cfg = _MODEL_CONFIGS[MODEL_SIZE]
+
+# Primary variant (first in list) drives MODEL_DIR/MODEL_NAME defaults
+_primary_label, _primary_dirname, _primary_hf_id, _ = _cfg["variants"][0]
+MODEL_DIR  = os.environ.get("MODEL_DIR",  f"{MODELS_BASE}/{_primary_dirname}")
+MODEL_NAME = _primary_hf_id
 
 # ── Pre-step: kill old Gradio so VRAM measurement is accurate ────────────────
 subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
-time.sleep(2)  # brief pause for GPU memory to release
+time.sleep(2)
 
-# ── Step 1: GPU check ────────────────────────────────────────────────────────
-header("Step 1 — GPU")
+# ── Step 1: GPU check ─────────────────────────────────────────────────────────
+header("Step 1 — GPU detect", eta="<5s")
 rc, out = run_cmd(["nvidia-smi", "--query-gpu=name,memory.free,memory.total",
                    "--format=csv,noheader"])
 if rc != 0:
-    print(f"  ✗  nvidia-smi failed — no GPU detected", flush=True)
+    print("  ✗  nvidia-smi failed — no GPU detected", flush=True)
     sys.exit(1)
-gpu_line = out.strip().splitlines()[0]
-parts = [p.strip() for p in gpu_line.split(",")]
-gpu_name = parts[0]
-vram_free = int(parts[1].split()[0])
-vram_total = int(parts[2].split()[0])
+gpu_line   = out.strip().splitlines()[0]
+parts_     = [p.strip() for p in gpu_line.split(",")]
+gpu_name   = parts_[0]
+vram_free  = int(parts_[1].split()[0])
+vram_total = int(parts_[2].split()[0])
 
 LOW_VRAM = vram_free < 24000
 
-# CR2-2B is always used for the live demo — 8B fails the <60s inference target.
-# To force 8B (quality over speed), set MODEL_NAME=nvidia/Cosmos-Reason2-8B externally.
-if vram_free >= 40000:
-    model_label = "CR2-2B (40GB+ VRAM)"
-elif vram_free >= 24000:
-    model_label = "CR2-2B (below recommended 40GB — will use fps=1)"
-    LOW_VRAM = True
-else:
-    model_label = f"CR2-2B ⚠ LOW VRAM ({vram_free}MiB) — fps=1, reduced resolution"
-    LOW_VRAM = True
-
-# VRAM-adaptive tier selection for Gradio
-# Higher fps → more frames → more temporal merging (temporal_patch_size=2) → fewer net tokens → lower TTFT.
-# Empirical on RTX PRO 6000: fps=1→8 frames→1083 tokens→52s TTFT; fps=8→64 frames→431 tokens→18s TTFT.
-# Use fps=8 as default on all tiers; auto-cap steps down max_pixels as needed to stay under budget.
 _gpu_upper = gpu_name.upper()
 _h100_class = any(tag in _gpu_upper for tag in ("H100", "A100", "H200", "GB200"))
 if _h100_class and vram_free >= 60000:
-    tier_name       = "H100/A100"
-    gradio_fps      = 8
-    max_pixels      = 1048576   # 1M pixels
-    prefill_tps     = 90        # tokens/s — H100 empirical
+    tier_name   = "H100/A100"
+    gradio_fps  = 8
+    max_pixels  = 1048576
+    prefill_tps = 90
 elif vram_free >= 40000:
-    tier_name       = "high-VRAM (not H100-class)"
-    gradio_fps      = 8         # fps=8 → temporal compression → ~18s TTFT on RTX PRO 6000 Blackwell
-    max_pixels      = 524288    # 512K pixels; auto-cap reduces for long clips
-    prefill_tps     = 23        # tokens/s — RTX PRO 6000 Blackwell empirical
+    tier_name   = "high-VRAM"
+    gradio_fps  = 8
+    max_pixels  = 524288
+    prefill_tps = 23
 else:
-    tier_name       = "low-VRAM (<40GB)"
-    gradio_fps      = 4
-    max_pixels      = 131072    # 128K pixels
-    prefill_tps     = 15        # tokens/s — conservative estimate for <40GB GPUs
+    tier_name   = "low-VRAM (<40GB)"
+    gradio_fps  = 4
+    max_pixels  = 131072
+    prefill_tps = 15
+    LOW_VRAM    = True
+
+_variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
+if _cfg["nim"]:
+    _variant_labels += f" → NIM-{MODEL_SIZE}"
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
-ok(f"Selected model: {MODEL_NAME} ({model_label})")
-ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}")
-if LOW_VRAM:
-    info("LOW VRAM MODE: fps=1, resolution reduced — use short clips (< 60s) for best results")
+ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
+ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
 
-# ── Step 2: HF token ─────────────────────────────────────────────────────────
-header("Step 2 — HuggingFace auth")
+# ── Step 2: HF token ──────────────────────────────────────────────────────────
+header("Step 2 — HuggingFace auth", eta="<5s")
 hf_cache = os.path.expanduser("~/.cache/huggingface/token")
 if HF_TOKEN:
     ok(f"HF_TOKEN set ({len(HF_TOKEN)} chars)")
@@ -138,8 +174,22 @@ else:
     print("     Run: export HF_TOKEN=hf_... and re-run this script.")
     sys.exit(1)
 
-# ── Step 3: uv ───────────────────────────────────────────────────────────────
-header("Step 3 — uv package manager")
+# ── Step 3: NGC API key check (for NIM mode) ──────────────────────────────────
+header("Step 3 — NGC API key (NIM mode)", eta="<5s")
+if _cfg["nim"]:
+    if NGC_API_KEY:
+        if NGC_API_KEY.startswith("nvapi-"):
+            ok(f"NGC_API_KEY set ({len(NGC_API_KEY)} chars, nvapi- prefix) — NIM-{MODEL_SIZE} enabled")
+        else:
+            warn(f"NGC_API_KEY set but does not start with 'nvapi-' — NIM calls may fail")
+    else:
+        info(f"NGC_API_KEY not set — NIM-{MODEL_SIZE} will be skipped in Gradio UI")
+        info("To enable NIM: export NGC_API_KEY=nvapi-...")
+else:
+    info(f"MODEL_SIZE={MODEL_SIZE} has no NIM endpoint in catalog — NIM step skipped")
+
+# ── Step 4: uv ────────────────────────────────────────────────────────────────
+header("Step 4 — uv package manager", eta="<5s if cached, ~10s first time")
 rc, _ = run_cmd(["uv", "--version"], env=ENV)
 if rc == 0:
     _, ver = run_cmd(["uv", "--version"], env=ENV)
@@ -147,16 +197,13 @@ if rc == 0:
 else:
     run("Installing uv  (~10s)")
     t0 = time.time()
-    rc = stream_cmd(
-        ["bash", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-        env=ENV
-    )
+    rc = stream_cmd(["bash", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"], env=ENV)
     if rc != 0:
         print("  ✗  uv install failed"); sys.exit(1)
     ok(f"uv installed in {time.time()-t0:.0f}s")
 
-# ── Step 4: cosmos-reason2 repo ──────────────────────────────────────────────
-header("Step 4 — cosmos-reason2 repo")
+# ── Step 5: cosmos-reason2 repo ───────────────────────────────────────────────
+header("Step 5 — cosmos-reason2 repo", eta="<5s if cached, ~15s first time")
 if os.path.exists(f"{REASON2_DIR}/.git"):
     ok(f"cosmos-reason2 already cloned at {REASON2_DIR}")
 else:
@@ -170,24 +217,63 @@ else:
         print("  ✗  git clone failed"); sys.exit(1)
     ok(f"Cloned in {time.time()-t0:.0f}s")
 
-# ── Step 5: Python dependencies ──────────────────────────────────────────────
-header("Step 5 — Python dependencies (uv sync)")
+# ── Step 6: Python dependencies ───────────────────────────────────────────────
+header("Step 6 — Python dependencies (uv sync)", eta="<5s if cached, ~2-3 min first time")
 venv_marker = f"{REASON2_DIR}/.venv/lib"
 if os.path.exists(venv_marker):
     ok("virtualenv already present — skipping uv sync")
 else:
-    run("Running uv sync --extra cu128  (~2-3 min)")
+    _extras = os.environ.get("COSMOS_EXTRAS", "cu128")
+    run(f"Running uv sync --extra {_extras}  (~2-3 min)")
     t0 = time.time()
-    rc, out = run_cmd(["uv", "sync", "--extra", "cu128"], cwd=REASON2_DIR, env=ENV, timeout=600)
+    rc, out = run_cmd(["uv", "sync", "--extra", _extras], cwd=REASON2_DIR, env=ENV, timeout=600)
     if rc != 0:
-        run("cu128 failed, trying uv sync without extras")
+        run(f"{_extras} failed, trying uv sync without extras")
         rc, out = run_cmd(["uv", "sync"], cwd=REASON2_DIR, env=ENV, timeout=600)
     if rc != 0:
         print("  ✗  uv sync failed:", out[-500:]); sys.exit(1)
     ok(f"Dependencies installed in {time.time()-t0:.0f}s")
 
-# ── Step 6: PyAV ─────────────────────────────────────────────────────────────
-header("Step 6 — PyAV video backend (av==16.1.0)")
+# ── Step 6b: CUDA 12.8 vLLM pin ──────────────────────────────────────────────
+# cu128 installs vLLM 0.12.0 (torch 2.9.0) which requires CUDA 12.9+ driver.
+# On CUDA 12.8 (Hyperstack H100, driver 570.x), downgrade to vLLM 0.11.0.
+_cuda_major_minor = None
+try:
+    import subprocess as _sp_cuda
+    _smi = _sp_cuda.check_output(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        timeout=10, text=True
+    ).strip().split(".")[0:2]
+    _driver_major = int(_smi[0])
+    if _driver_major < 575:  # 575.x is the first driver with CUDA 12.9 support
+        header("Step 6b — vLLM downgrade for CUDA 12.8", eta="~30s")
+        rc_vllm, _ = run_cmd(
+            ["uv", "pip", "install", "vllm==0.11.0"],
+            cwd=REASON2_DIR, env=ENV, timeout=120
+        )
+        if rc_vllm == 0:
+            ok("vLLM pinned to 0.11.0 (torch 2.8.0) — compatible with CUDA 12.8")
+        else:
+            warn("vLLM 0.11.0 pin failed — vLLM 0.12.0 may not start on CUDA 12.8")
+except Exception:
+    pass  # CUDA check is best-effort; if nvidia-smi fails, proceed as-is
+
+# ── Step 6c: ninja build system (required by flashinfer / torch compile) ─────
+try:
+    import subprocess as _sp_ninja
+    _sp_ninja.check_output(["ninja", "--version"], timeout=5, stderr=_sp_ninja.DEVNULL)
+except Exception:
+    header("Step 6c — ninja build system", eta="<5s")
+    try:
+        import subprocess as _sp_ninja2
+        _sp_ninja2.run(["apt-get", "install", "-y", "ninja-build"],
+                       timeout=60, check=True, capture_output=True)
+        ok("ninja-build installed")
+    except Exception as _e_ninja:
+        warn(f"ninja install failed ({_e_ninja}) — vLLM may fail with flashinfer JIT")
+
+# ── Step 7: PyAV ──────────────────────────────────────────────────────────────
+header("Step 7 — PyAV video backend", eta="<5s if cached, ~10s first time")
 rc, av_check = run_cmd(
     ["uv", "run", "python", "-c", "import av; print(av.__version__)"],
     cwd=REASON2_DIR, env=ENV
@@ -195,15 +281,15 @@ rc, av_check = run_cmd(
 if rc == 0 and "16.1.0" in av_check:
     ok(f"PyAV already installed ({av_check.strip()})")
 else:
-    run("Installing av==16.1.0  (~5s)")
+    run("Installing av==16.1.0  (~10s)")
     t0 = time.time()
     rc, out = run_cmd(["uv", "pip", "install", "av==16.1.0"], cwd=REASON2_DIR, env=ENV)
     if rc != 0:
         print("  ✗  av install failed:", out); sys.exit(1)
     ok(f"PyAV installed in {time.time()-t0:.0f}s")
 
-# ── Step 7: Gradio ───────────────────────────────────────────────────────────
-header("Step 7 — Gradio UI library")
+# ── Step 8: Gradio + requests ─────────────────────────────────────────────────
+header("Step 8 — Gradio + requests", eta="<5s if cached, ~30s first time")
 rc, gr_check = run_cmd(
     ["uv", "run", "python", "-c", "import gradio; print(gradio.__version__)"],
     cwd=REASON2_DIR, env=ENV
@@ -218,62 +304,101 @@ else:
         print("  ✗  gradio install failed:", out); sys.exit(1)
     ok(f"Gradio installed in {time.time()-t0:.0f}s")
 
-# ── Step 8: Model weights ─────────────────────────────────────────────────────
-header("Step 8 — Model weights")
-model_marker = os.path.join(MODEL_DIR, "model.safetensors")
-if os.path.exists(model_marker):
-    size_mb = os.path.getsize(model_marker) // (1024*1024)
-    ok(f"Weights already downloaded ({MODEL_NAME}, {size_mb:,} MB main shard)")
+rc, rq_check = run_cmd(
+    ["uv", "run", "python", "-c", "import requests; print(requests.__version__)"],
+    cwd=REASON2_DIR, env=ENV
+)
+if rc == 0:
+    ok(f"requests already installed ({rq_check.strip()})")
 else:
-    size_hint = "~8 GB" if "2B" in MODEL_NAME else "~16 GB"
-    run(f"Downloading {MODEL_NAME} from HuggingFace  ({size_hint}, ~10-15 min on first run)")
+    run("Installing requests  (~5s)")
+    rc, out = run_cmd(["uv", "pip", "install", "requests"], cwd=REASON2_DIR, env=ENV)
+    if rc != 0:
+        warn(f"requests install failed — NIM API mode unavailable: {out}")
+    else:
+        ok("requests installed")
+
+# ── Step 9: Model weights ──────────────────────────────────────────────────────
+
+def download_model(model_name, model_dir, size_hint, dl_env):
+    """Download one HF model. Returns True on success."""
+    model_marker  = os.path.join(model_dir, "model.safetensors")
+    config_marker = os.path.join(model_dir, "config.json")
+    if os.path.exists(model_marker) or os.path.exists(config_marker):
+        size_mb = 0
+        if os.path.exists(model_marker):
+            size_mb = os.path.getsize(model_marker) // (1024 * 1024)
+        info_str = f"{size_mb:,} MB" if size_mb else "already present"
+        ok(f"Weights already downloaded ({model_name}, {info_str})")
+        return True
+
+    run(f"Downloading {model_name}  ({size_hint}, may take several minutes)")
     info("Progress below — download continues even if it looks stalled:")
     t0 = time.time()
-    dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
     MAX_RETRIES = 5
     rc = 1
     for attempt in range(1, MAX_RETRIES + 1):
         rc = stream_cmd(
-            ["uv", "run", "huggingface-cli", "download", MODEL_NAME,
-             "--local-dir", MODEL_DIR],
+            ["uv", "run", "hf", "download", model_name,
+             "--local-dir", model_dir],
             cwd=REASON2_DIR, env=dl_env, prefix="HF │ "
         )
         if rc == 0:
             break
         if attempt < MAX_RETRIES:
-            print(f"  ✗  Download attempt {attempt} failed. {f'Retry {attempt}/{MAX_RETRIES} after 30s (HF rate limit or transient error)'}", flush=True)
+            print(f"  ✗  Attempt {attempt} failed. Retry {attempt}/{MAX_RETRIES} after 30s", flush=True)
             time.sleep(30)
         else:
-            print(f"  ✗  All {MAX_RETRIES} download attempts failed. Check HF_TOKEN and model access.")
-            sys.exit(1)
+            print(f"  ✗  All {MAX_RETRIES} attempts failed for {model_name}.")
+            return False
     elapsed = time.time() - t0
-    ok(f"Downloaded in {elapsed/60:.1f} min")
+    ok(f"Downloaded {model_name} in {elapsed/60:.1f} min")
+    return True
 
-# ── Step 9: Launch Gradio ────────────────────────────────────────────────────
-header("Step 9 — Launch Gradio web demo")
+
+dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
+
+for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants"]):
+    step_label = f"Step 9{'abcde'[i]} — {var_label} weights ({var_dirname})"
+    header(step_label, eta=f"<5s if cached, longer first time ({var_size})")
+    var_dir = os.path.join(MODELS_BASE, var_dirname)
+    ok_ = download_model(var_hf_id, var_dir, var_size, dl_env)
+    if not ok_ and i == 0:
+        sys.exit(1)  # primary variant is required
+    elif not ok_:
+        warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
+
+# ── Step 10: Launch Gradio ────────────────────────────────────────────────────
+header("Step 10 — Launch Gradio web demo", eta="~5-10s for model load")
 
 if not os.path.exists(GRADIO_APP):
     print(f"  ✗  {GRADIO_APP} not found — deploy gradio_cr2_byo.py first"); sys.exit(1)
 
-# Remove stale URL file
 if os.path.exists(URL_FILE):
     os.remove(URL_FILE)
 
 launch_env = {
     **ENV,
-    "MODEL_DIR": MODEL_DIR,
-    "MODEL_NAME": MODEL_NAME,
-    "GRADIO_PORT": str(GRADIO_PORT),
-    "GRADIO_SHARE": "true",
-    "PYTHONUNBUFFERED": "1",
-    "HF_TOKEN": HF_TOKEN,
-    "LOW_VRAM": "true" if LOW_VRAM else "false",
-    "GRADIO_FPS": str(gradio_fps),
-    "GRADIO_MAX_PIXELS": str(max_pixels),
+    "MODEL_SIZE":         MODEL_SIZE,
+    "MODEL_DIR":          MODEL_DIR,
+    "MODEL_NAME":         MODEL_NAME,
+    "GRADIO_PORT":        str(GRADIO_PORT),
+    "GRADIO_SHARE":       "true",
+    "PYTHONUNBUFFERED":   "1",
+    "HF_TOKEN":           HF_TOKEN,
+    "NGC_API_KEY":        NGC_API_KEY,
+    "LOW_VRAM":           "true" if LOW_VRAM else "false",
+    "GRADIO_FPS":         str(gradio_fps),
+    "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
+    "INFERENCE_BACKEND":  os.environ.get("INFERENCE_BACKEND", "hf"),
+    "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+    "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
+    "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
+    "FLASHINFER_DISABLE_VERSION_CHECK": "1",
 }
 
-run(f"Starting Cosmos Reason2 demo on port {GRADIO_PORT}  (~5-10s for model load)")
+run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
 
 proc = subprocess.Popen(
     ["uv", "run", "python", "-u", "/tmp/gradio_cr2_byo.py"],
@@ -285,10 +410,9 @@ proc = subprocess.Popen(
     bufsize=1,
 )
 
-# Stream output and capture URL (5-minute timeout)
 url = None
-url_pattern = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
-URL_CAPTURE_TIMEOUT = 300  # seconds
+url_pattern        = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
+URL_CAPTURE_TIMEOUT = 300
 t_launch = time.time()
 with open(LOG_FILE, "w") as log:
     for line in proc.stdout:
@@ -300,10 +424,9 @@ with open(LOG_FILE, "w") as log:
         m = url_pattern.search(stripped)
         if m:
             url = m.group(1).rstrip(".")
-            break  # Got the URL — model is up
-        elapsed = time.time() - t_launch
-        if elapsed > URL_CAPTURE_TIMEOUT:
-            print(f"  ✗  Timed out after {URL_CAPTURE_TIMEOUT}s waiting for Gradio URL. Check /tmp/gradio_demo.log")
+            break
+        if time.time() - t_launch > URL_CAPTURE_TIMEOUT:
+            print(f"  ✗  Timed out after {URL_CAPTURE_TIMEOUT}s waiting for Gradio URL.")
             proc.terminate()
             sys.exit(1)
 
@@ -314,20 +437,22 @@ if not url:
 with open(URL_FILE, "w") as f:
     f.write(url + "\n")
 
-ok(f"Demo server up, public tunnel established")
+ok("Demo server up, public tunnel established")
 
 # ── Final: print clickable hyperlink ────────────────────────────────────────
 print(flush=True)
-print(f"{BOLD}{'─'*60}{RESET}", flush=True)
-print(f"{BOLD}  Cosmos Reason2 Demo — Ready{RESET}", flush=True)
-print(f"{'─'*60}", flush=True)
+print(f"{BOLD}{'─'*62}{RESET}", flush=True)
+print(f"{BOLD}  Cosmos Reason2 {MODEL_SIZE} Demo — Ready{RESET}", flush=True)
+print(f"{'─'*62}", flush=True)
 print(f"  {BOLD}URL:{RESET}  {hyperlink(url)}", flush=True)
-print(f"  {DIM}Upload any MP4 → type a prompt → click Run Inference{RESET}", flush=True)
-print(f"  {DIM}Results also saved to /tmp/byo_video_reason2_results.json{RESET}", flush=True)
+print(f"  {DIM}Upload any MP4 → select checkpoint → Run Inference{RESET}", flush=True)
+print(f"  {DIM}Run All Variants: {_variant_labels}{RESET}", flush=True)
+print(f"  {DIM}Results: /tmp/byo_video_reason2_results.json{RESET}", flush=True)
+print(f"  {DIM}Benchmark: /tmp/byo_video_benchmark.json{RESET}", flush=True)
 print(f"  {DIM}Link valid for 72h. Kill instance when done.{RESET}", flush=True)
-print(f"  {DIM}URL also written to /tmp/gradio_url.txt{RESET}", flush=True)
-print(f"{'─'*60}", flush=True)
+if _cfg["nim"] and not NGC_API_KEY:
+    print(f"  {YELLOW}⚠  NIM-{MODEL_SIZE} mode requires NGC_API_KEY=nvapi-...{RESET}", flush=True)
+print(f"{'─'*62}", flush=True)
 print(flush=True)
 
-# Keep process alive in background
 proc.stdout.close()

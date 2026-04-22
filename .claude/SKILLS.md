@@ -165,7 +165,7 @@ deploy/
 | 1 | Wrong HOME | `mkdir: cannot create '/root': Permission denied` |
 | 2 | Empty /workspace/ | repo not found on startup |
 | 3 | Missing git-lfs | `git: 'lfs' is not a git command` |
-| 4 | HF auth before venv | `huggingface-cli: command not found` |
+| 4 | HF auth before venv | `hf: command not found` or `huggingface-cli: command not found` |
 | 5 | pip blocked PEP 668 | `error: externally-managed-environment` |
 | 6 | uv wrong path | `uv: command not found` after install |
 
