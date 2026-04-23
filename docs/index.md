@@ -130,6 +130,7 @@ The Cosmos Cookbook includes comprehensive use cases demonstrating real-world ap
 |--------------|-----------------|----------|
 | **GR00T-Dreams** | End-to-end pipeline for synthetic robot trajectory generation: post-train Cosmos Predict 2.5 on GR1 data, generate trajectories, and use Cosmos Reason 2 as a video critic for rejection sampling | [GR00T-Dreams](recipes/end2end/gr00t-dreams/post-training.md) |
 | **SDG Pipeline** | Complete synthetic data generation pipeline for traffic scenarios using CARLA, Cosmos Transfer 2.5, and Cosmos Reason 1 | [Smart City SDG](recipes/end2end/smart_city_sdg/workflow_e2e.md) |
+| **Explainable Palletizer** | Intelligent warehouse palletizing with Cosmos Reason2 8B fine-tuned via LoRA on synthetic Isaac Sim data — infers box contents, detects damage, and generates auditable chain-of-thought placement decisions | [Explainable Palletizer](recipes/end2end/explainable-palletizer/inference.md) |
 
 ## Cosmos Models for Physical AI
 

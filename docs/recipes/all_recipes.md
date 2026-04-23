@@ -222,6 +222,13 @@
     </div>
     <div class="recipe-category-body">
       <div class="recipe-track" data-page-size="6" aria-label="Robotics recipes">
+        <a class="recipe-card" href="./end2end/explainable-palletizer/inference.html">
+          <div class="recipe-media recipe-media--image" aria-hidden="true">
+            <img src="./end2end/explainable-palletizer/assets/hero.png" alt="" loading="lazy" />
+          </div>
+          <div class="recipe-title">See How It Thinks: Mixed Palletizing with Explainable Visual Reasoning</div>
+          <div class="recipe-tag recipe-tag--workflow">Workflow</div>
+        </a>
         <a class="recipe-card" href="./inference/reason2/intbot_edge_vlm/inference.html">
           <div class="recipe-media recipe-media--image" aria-hidden="true">
             <img src="./inference/reason2/intbot_edge_vlm/assets/intbot_gtc_2026.jpg" alt="" loading="lazy" />
