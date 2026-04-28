@@ -148,6 +148,19 @@ MODEL_CONFIGS = {
         ],
         "nim": None,  # TBD
     },
+    # ── Cosmos3-Reasoner (private gated — requires HF_TOKEN with nvidia org access) ──
+    "C3-2B": {
+        "variants": [
+            ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "bf16"),
+        ],
+        "nim": None,
+    },
+    "C3-8B": {
+        "variants": [
+            ("C3R-8B BF16", "Cosmos3-Reasoner-8B", "nvidia/Cosmos3-Reasoner-8B-Private", "bf16"),
+        ],
+        "nim": None,
+    },
 }
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
@@ -182,6 +195,8 @@ CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
+    ("C3R-2B BF16",  "Cosmos3-Reasoner-2B",      "nvidia/Cosmos3-Reasoner-2B-Private", "bf16"),
+    ("C3R-8B BF16",  "Cosmos3-Reasoner-8B",      "nvidia/Cosmos3-Reasoner-8B-Private", "bf16"),
     ("CR2-2B BF16",  "Cosmos-Reason2-2B",        "nvidia/Cosmos-Reason2-2B",        "bf16"),
     ("CR2-2B FP8",   "Cosmos-Reason2-2B-FP8",    "nvidia/Cosmos-Reason2-2B-FP8",    "fp8"),
     ("CR2-2B NVFP4", "Cosmos-Reason2-2B-NVFP4",  "nvidia/Cosmos-Reason2-2B-NVFP4",  "nvfp4"),
@@ -1198,14 +1213,23 @@ def run_all_variants(video_path, user_prompt, system_prompt, fps, max_pixels, ma
 
 
 # ── Startup: pre-load default model if available locally ───────────────────────
+# PRELOAD-001: skip HF preload in vLLM mode — model is served by vLLM process, not Python.
+# Loading here wastes ~9 GB VRAM (weights loaded twice) and risks OOM on 80 GB GPUs.
+# Set SKIP_HF_PRELOAD=1 to force-skip even in HF mode (useful when VRAM is tight).
+_SKIP_PRELOAD = (
+    INFERENCE_BACKEND == "vllm"
+    or os.environ.get("SKIP_HF_PRELOAD", "").lower() in ("1", "true", "yes")
+)
 _preloaded_ok = False
-if os.path.exists(MODEL_DIR):
+if os.path.exists(MODEL_DIR) and not _SKIP_PRELOAD:
     print(f"[demo] Pre-loading {MODEL_DIR} ...", flush=True)
     try:
         _load(MODEL_DIR)
         _preloaded_ok = True
     except Exception as e:
         print(f"[demo] Pre-load failed ({e}) — model loads on first inference", flush=True)
+elif _SKIP_PRELOAD and INFERENCE_BACKEND == "vllm":
+    print(f"[demo] vLLM mode — skipping HF preload (PRELOAD-001 fix)", flush=True)
 else:
     print(f"[demo] MODEL_DIR not found — model loads on first inference", flush=True)
 
@@ -1755,8 +1779,9 @@ with gr.Blocks(
             gr.HTML(
                 '<div style="color:#f87171;font-size:12px;padding-top:4px">'
                 '⚠ <b>Not recommended.</b> Auto-cap keeps inference under ~55s on H100. '
-                'Disabling it passes full-resolution frames to the model — '
-                'results vary widely by video length and may OOM or hang silently.'
+                'Disabling it passes full-resolution frames — for longer videos this can '
+                'run <b>3–5× slower</b>, and may OOM or hang. Upload a video to see the '
+                'estimated time multiplier for your clip.'
                 '</div>'
             )
 
@@ -1826,17 +1851,27 @@ with gr.Blocks(
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                     f"{n_frames} frames sampled")
         est_s_full = _est_tokens(n_frames, DEFAULT_MAX_PIXELS) / PREFILL_TPS
+        capped_px, est_s_capped = _auto_cap(n_frames, DEFAULT_MAX_PIXELS)
         if not disable_autocap:
-            capped_px, est_s = _auto_cap(n_frames, DEFAULT_MAX_PIXELS)
             if capped_px < DEFAULT_MAX_PIXELS:
                 info_str += (f"\n> ⚠ **Auto-cap:** {capped_px:,} px/frame"
-                             f" → ~{est_s:.0f}s est (was ~{est_s_full:.0f}s)")
+                             f" → ~{est_s_capped:.0f}s est (was ~{est_s_full:.0f}s)")
                 return info_str, gr.update(value=capped_px)
         else:
-            info_str += f"\n> ⚠ **Auto-cap disabled** — full resolution, {est_s_full:.0f}s est (may OOM)"
+            if capped_px < DEFAULT_MAX_PIXELS:
+                ratio = est_s_full / max(est_s_capped, 1.0)
+                info_str += (
+                    f"\n> ⚠ **Auto-cap DISABLED** — ~{est_s_full:.0f}s est · "
+                    f"**~{ratio:.1f}× longer** than auto-cap (~{est_s_capped:.0f}s)"
+                )
+            else:
+                info_str += f"\n> ℹ Auto-cap not needed for this video · ~{est_s_full:.0f}s est"
+            return info_str, gr.update()
         return info_str + f" · ~{est_s_full:.0f}s est", gr.update()
 
     video_input.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
+    fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
+    disable_autocap_chk.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
 
     def on_demo(name):
         for n, p in DEMO_PROMPTS:

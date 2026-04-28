@@ -21,3 +21,7 @@ Steps:
 **Video backend:** If `torchcodec` fails with "ffmpeg not found" or "codec error", the PyAV backend is the correct fallback. The `gradio_cr2_byo.py` and `smoke_cr2_byo.py` scripts ship with a PyAV monkey-patch that applies automatically — do not remove it.
 
 **SSH tunnel:** When the recipe output includes a localhost URL (e.g., `http://localhost:7860`), the SSH tunnel command (`ssh -L 7860:localhost:7860 ...`) runs on the **user's laptop**, not on the GPU instance. Instruct the user to run it in a local terminal tab.
+
+**Cosmos3-Reasoner recipes:** Use `MODEL_SIZE=C3-2B` (default) or `MODEL_SIZE=C3-8B`. Both use the `cosmos-reason2` working directory (Qwen3-VL compatible). HF_TOKEN with nvidia org access required — check `hf auth whoami` confirms `orgs: nvidia`. NGC not required.
+
+**aarch64 instances (Horde 2026-04-27 pool):** Verify `python3 -c "import torch; print(torch.cuda.is_available())"` before running any recipe. If False, the CUDA Python environment needs to be set up for ARM64+CUDA first — do not proceed until this passes.

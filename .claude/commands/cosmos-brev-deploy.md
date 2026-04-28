@@ -15,12 +15,26 @@ all environment setup failures, not model failures).
 
 ## Steps
 
+### 0. PRE-PROCESS — gather before first Brev command
+
+Ask these in a single message block. Do not start Brev work until all are answered.
+
+```
+1. Recipe: cosmos3-reasoner-2b | cosmos3-reasoner-8b | <other recipe path>
+2. Model size: 2B [default] | 8B [needs ~80 GB H100]
+3. Backend: hf-transformers [default] | vllm [H100 only, sub-second TTFT]
+4. Provider: massedcompute_H100 [default] | hyperstack_H100 | nebius
+5. Org: [confirm — default asotelo-test-org]
+```
+
+**HF_TOKEN:** Use `brev env set HF_TOKEN=hf_...` — stored as a Brev secret, not in command history. Never pass as command-line arg. For Cosmos3-Reasoner: requires nvidia org membership (confirm `hf auth whoami` shows `orgs: nvidia`). NGC not required.
+
 ### 1. Pre-flight Gate (Non-negotiable)
 
 Run these checks before touching Brev:
 
+- Is `HF_TOKEN` set via brev env or `echo $HF_TOKEN`? Required for all gated nvidia/ models.
 - Is `COOKBOOK` set? (`echo $COOKBOOK` — must point to cosmos-cookbook repo root)
-- Is `HF_TOKEN` set? (`echo $HF_TOKEN` — required for all gated nvidia/ models)
 - Does `deploy/<category>/<recipe>/demo.sh` exist? Check with `ls deploy/`.
 - Does `deploy/<category>/<recipe>/brev.yaml` exist? Read it for hardware spec.
 - Has a smoke test been run on this recipe at least once on real hardware?
@@ -179,7 +193,31 @@ deploy/
 
 **Model download fails:**
 - Confirm `HF_TOKEN` is set AND the model license was accepted on huggingface.co/nvidia
-- Some models require NGC auth additionally: `ngc config set`
+- For Cosmos3-Reasoner private models: confirm `hf auth whoami` shows `orgs: nvidia` — model is gated to nvidia org members only. NGC is NOT required.
+- NGC auth is only required for NIM endpoint mode (not standard inference).
+
+## Cosmos3-Reasoner on Brev (quick reference)
+
+```bash
+# 1. Set HF token as Brev secret (not in command history)
+brev env set HF_TOKEN=hf_...
+
+# 2. Create massedcompute_H100 instance (1TB disk; 2B needs ~60GB, 8B needs ~100GB with cache)
+brev create cosmos3-reasoner-demo --type massedcompute_H100
+
+# 3. Bootstrap and launch
+brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-2B python3 /tmp/byo_video_setup.py"
+```
+
+**vLLM flags required for video (apply to any Cosmos/Nemotron VLM on Brev):**
+```bash
+VLLM_VIDEO_LOADER_BACKEND=opencv \
+SKIP_HF_PRELOAD=1 \
+vllm serve <model-path> \
+  --max-model-len 32768 \    # MAXLEN-001: 8192 default breaks video queries
+  --trust-remote-code \
+  --gpu-memory-utilization 0.85
+```
 
 **Out of disk during model download:**
 - Most inference recipes: need 20–80GB; post-training: 100–600GB

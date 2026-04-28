@@ -1,6 +1,6 @@
 # /byo-video — Cosmos BYO-Video Demo
 
-Upload a video, pick a prompt, get structured analysis from Cosmos Reason2.
+Upload a video, pick a prompt, get structured analysis from Cosmos Reason2 or Cosmos3-Reasoner.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
 - `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio demo app (vLLM + HF + NIM backends)
@@ -8,14 +8,49 @@ Upload a video, pick a prompt, get structured analysis from Cosmos Reason2.
 
 ---
 
+## AGENT PROTOCOL — PRE-PROCESS FIRST
+
+**Before running any remote command, ask ALL of the following in a single message block.**
+Do not start any remote work until all are answered. Do not ask again mid-run.
+
+```
+───────────────────────────────────────────────────────────────
+COSMOS BYO-VIDEO — SETUP (answer all, then I run autonomously)
+───────────────────────────────────────────────────────────────
+1. Environment:   local | horde | brev
+2. Host / IP:     [skip if local]
+3. Model family:  cosmos3-reasoner [recommended, private] | cosmos-reason2 [public]
+4. Model size:    2B [default, fits 40+ GB VRAM] | 8B [needs 80 GB]
+5. Backend:       hf-transformers [default] | vllm [sub-second TTFT, H100+]
+───────────────────────────────────────────────────────────────
+```
+
+**HF_TOKEN handling (secure — never echo to terminal output):**
+1. Check remote cache first: `ssh horde@<ip> "cat ~/.cache/huggingface/token 2>/dev/null || echo MISSING"`
+2. If found: use silently. If `MISSING`: ask once, then copy via: `ssh horde@<ip> "mkdir -p ~/.cache/huggingface && tee ~/.cache/huggingface/token > /dev/null"` with token piped via stdin — NOT as a command-line argument.
+3. Never pass HF_TOKEN as a command-line arg (`export HF_TOKEN=hf_...` in commands appears in `ps aux`, shell history, and agent logs).
+4. For Brev: use `brev env set HF_TOKEN=hf_...` (stored as Brev secret, not in command history).
+
+**NGC_API_KEY:** Not required for Cosmos3-Reasoner or any CR2 model. Only needed for NIM endpoint mode.
+
+---
+
 ## Supported models
 
-| Model | Size | Min VRAM | Preferred backend |
-|---|---|---|---|
-| Cosmos Reason2 (CR2-2B) | 2B VLM | 40 GB | HF Transformers |
-| Cosmos Reason2 (CR2-8B) | 8B VLM | 80 GB | vLLM (hot-swap via dropdown) |
-| Cosmos Reason2 (CR2-8B-NVFP4) | 8B VLM | 80 GB | vLLM |
-| Cosmos Reason2 (CR2-8B-FP8) | 8B VLM | 80 GB | vLLM |
+| Model | Family | Size | Min VRAM | Preferred backend | Access |
+|---|---|---|---|---|---|
+| Cosmos3-Reasoner-2B-Private (C3R-2B) | Cosmos3 | 2B VLM | ~40 GB | HF Transformers | 🔒 Private (nvidia org) |
+| Cosmos3-Reasoner-8B-Private (C3R-8B) | Cosmos3 | 8B VLM | ~80 GB | vLLM | 🔒 Private (nvidia org) |
+| Cosmos Reason2 (CR2-2B) | CR2 | 2B VLM | 40 GB | HF Transformers | Public |
+| Cosmos Reason2 (CR2-8B) | CR2 | 8B VLM | 80 GB | vLLM (hot-swap via dropdown) | Public |
+| Cosmos Reason2 (CR2-8B-NVFP4) | CR2 | 8B VLM | 80 GB | vLLM | Public |
+| Cosmos Reason2 (CR2-8B-FP8) | CR2 | 8B VLM | 80 GB | vLLM | Public |
+
+**Cosmos3-Reasoner notes:**
+- Requires HF_TOKEN from an account with approved access to `nvidia/Cosmos3-Reasoner-2B-Private` / `nvidia/Cosmos3-Reasoner-8B-Private` on HuggingFace.
+- Uses `MODEL_SIZE=C3-2B` or `MODEL_SIZE=C3-8B` in setup script.
+- Architecture: Qwen3-VL family (same HF Transformers API as CR2 — compatible with existing Gradio app).
+- L40S (46 GB): C3-2B fits; C3-8B requires ~80 GB → use C3-2B on L40S.
 
 CR2-2B runs on workstation hardware (≥40GB). CR2-8B requires an H100 or A100 80GB; use vLLM backend for sub-second TTFT (HF gives ~44s on H100 vs ~174ms on vLLM).
 
@@ -74,6 +109,36 @@ The setup script (`byo_video_setup.py`) handles tier selection automatically:
 **When to use HF mode:** Demos where startup time matters more than TTFT. CR2-2B on workstations. Environments where vLLM is not installed.
 
 **When to use vLLM mode:** Benchmarking, customer demos requiring sub-second TTFT, any 8B variant. The Gradio dropdown triggers live server hot-swap between NVFP4/FP8/BF16 without restarting the UI.
+
+---
+
+## vLLM best practices (from Nemotron-Nano-12B vLLM recipe)
+
+These flags apply to any video VLM served via vLLM. Always set explicitly — never rely on defaults.
+
+| Flag / env var | Required value | Why |
+|---|---|---|
+| `VLLM_VIDEO_LOADER_BACKEND=opencv` | opencv | Required for vLLM video frame extraction; default ffmpeg backend is unreliable on many cloud images |
+| `--max-model-len` | **32768 minimum** (MAXLEN-001) | Default 8192 causes 400 Bad Request on typical video queries (8 frames × 1920×1080 > 8192 tokens) |
+| `--trust-remote-code` | (always) | Required for all Cosmos/Nemotron models |
+| `--gpu-memory-utilization` | 0.85 | Leaves headroom for KV cache |
+| `SKIP_HF_PRELOAD=1` | (in vLLM mode) | PRELOAD-001: prevents double-loading model into Python + vLLM simultaneously (~9 GB wasted) |
+
+**vLLM version:** 0.11.0 is the last stable version on CUDA 12.8 (driver 570.x, Hyperstack H100). v0.12.0 breaks on this driver. `byo_video_setup.py` auto-detects driver and pins to 0.11.0 when needed.
+
+**Full vLLM launch command (reference):**
+```bash
+VLLM_VIDEO_LOADER_BACKEND=opencv \
+SKIP_HF_PRELOAD=1 \
+nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/<model-dir> \
+  --served-model-name nvidia/<hf-model-id> \
+  --port 8000 \
+  --dtype auto \
+  --trust-remote-code \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.85 \
+  > /tmp/vllm.log 2>&1 &
+```
 
 ---
 
@@ -228,22 +293,38 @@ uv run python /tmp/smoke_cr2_byo.py
 
 **SSH username is `horde`** — confirmed 2026-04-17. Not `ubuntu`, `nvidia`, or `root`.
 
-Deploy scripts:
+**Active Horde instances (2026-04-27):**
+| IP | GPU | VRAM | Arch | Status |
+|---|---|---|---|---|
+| 10.57.235.180 | L40S | 46 GB | aarch64 | Active — deploy C3-2B (8B doesn't fit) |
+| 10.57.235.179 | L40S | 46 GB | aarch64 | Active |
+
+**⚠️ aarch64 note:** Both 2026-04 machines run ARM64. Standard PyPI wheels (x86_64) will fail. Use the Horde-native Python environment — check `python3 -c "import torch; print(torch.cuda.is_available())"` before attempting install. If False, the environment needs to be set up for ARM64+CUDA first.
+
+**HF_TOKEN — check cached first (never echo to commands):**
+```bash
+ssh horde@<ip> "cat ~/.cache/huggingface/token 2>/dev/null || echo MISSING"
+```
+If MISSING, set it via stdin pipe (avoids command-line exposure):
+```bash
+echo "hf_..." | ssh horde@<ip> "mkdir -p ~/.cache/huggingface && cat > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token"
+```
+
+Deploy scripts (base64 transfer — no scp required):
 ```bash
 for script in byo_video_setup gradio_cr2_byo; do
   B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
-  ssh -i ~/.ssh/id_ed25519 horde@<ip> \
+  ssh horde@<ip> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
 ```
 
-Run setup:
+Run setup (reads HF_TOKEN from cached file automatically):
 ```bash
-ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-  "export HF_TOKEN=hf_... && python3 /tmp/byo_video_setup.py"
+ssh horde@<ip> "MODEL_SIZE=C3-2B python3 /tmp/byo_video_setup.py"
 ```
 
-**Horde capacity API is stale** — reports availability that doesn't match actual pool. Confirmed 2026-04-17. Retry or use Brev. Existing instance `asotelo-uzof99` (A40) is the reliable fallback.
+**Horde capacity API is stale** — reports availability that doesn't match actual pool. Confirmed 2026-04-17.
 
 ---
 
@@ -260,18 +341,13 @@ ssh -i ~/.ssh/id_ed25519 horde@<ip> \
 
 ---
 
-## AGENT PROTOCOL
+## AGENT EXECUTION PROTOCOL
 
-**USER MUST BRING:**
-
-| What | How to provide |
-|---|---|
-| Environment | "local", "brev", "horde", or "nebius" |
-| Instance name / IP | `brev ls` to confirm, or paste the IP |
-| HF_TOKEN | `export HF_TOKEN=hf_...` in session |
-| BYO video file | Path to MP4 on instance, or upload via Gradio UI |
-
-**AGENT RUNS AUTONOMOUSLY:** environment detection, deploy steps, bootstrap, URL capture, kill alert.
+After pre-process answers are received, the agent runs autonomously:
+- Environment detection, deploy steps, bootstrap, URL capture, kill alert.
+- HF_TOKEN: read from remote cache (never asked mid-run).
+- BYO video: upload via Gradio UI after launch, or pre-place at a path on the instance.
+- Kill alert: sent via Teams (pa-cli) at end — never auto-terminate.
 
 ---
 

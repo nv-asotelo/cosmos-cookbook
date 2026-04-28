@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Cosmos Reason2 — BYO Video Demo setup + launch.
-Version: 2026-04-21
+Cosmos BYO Video Demo setup + launch.
+Version: 2026-04-27
 Canonical source: ~/.claude/scripts/byo_video_setup.py
 
 Runs on the GPU instance. Prints live progress with ETAs.
@@ -10,11 +10,13 @@ At the end, prints a clickable OSC 8 hyperlink to the Gradio URL.
 URL is also written to /tmp/gradio_url.txt for agent capture.
 
 Env vars:
-  HF_TOKEN          — required for gated model download
-  NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only)
-  MODEL_SIZE        — 2B | 8B | 32B  (default: 2B)
+  HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
+  NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only; not needed for Cosmos3)
+  MODEL_SIZE        — 2B | 8B | 32B | C3-2B | C3-8B  (default: C3-2B)
   MODEL_DIR         — override local download path for primary model
   GRADIO_PORT       — port for Gradio (default: 7860)
+  SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
+  VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
 import os, sys, time, subprocess, re, shutil, json
 
@@ -64,6 +66,20 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
 
 # ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
 _MODEL_CONFIGS = {
+    # ── Cosmos3-Reasoner (private gated — HF_TOKEN with nvidia org required) ──
+    "C3-2B": {
+        "variants": [
+            ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "~TBD"),
+        ],
+        "nim": None,
+    },
+    "C3-8B": {
+        "variants": [
+            ("C3R-8B BF16", "Cosmos3-Reasoner-8B", "nvidia/Cosmos3-Reasoner-8B-Private", "~TBD"),
+        ],
+        "nim": None,
+    },
+    # ── Cosmos Reason2 ──
     "2B": {
         "variants": [
             ("CR2-2B BF16", "Cosmos-Reason2-2B",     "nvidia/Cosmos-Reason2-2B",     "~4 GB"),
@@ -94,16 +110,20 @@ ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', ''
                  "PYTHONUNBUFFERED": "1"}
 HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
-MODEL_SIZE    = os.environ.get("MODEL_SIZE", "2B").upper()
-REASON2_DIR   = f"{HOME}/cosmos-reason2"
+MODEL_SIZE    = os.environ.get("MODEL_SIZE", "C3-2B").upper()
+# Cosmos3-Reasoner uses cosmos-reason2 working dir until a dedicated repo is published.
+# Set COSMOS_DIR env var to override if the repo path changes.
+REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
+# MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
+VLLM_MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, or 32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, 2B, 8B, or 32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -396,6 +416,10 @@ launch_env = {
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
     "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+    # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
+    "VLLM_MAX_MODEL_LEN": str(VLLM_MAX_MODEL_LEN),
+    # PRELOAD-001: skip HF preload when using vLLM backend
+    "SKIP_HF_PRELOAD":    "1" if os.environ.get("INFERENCE_BACKEND", "hf") == "vllm" else "0",
 }
 
 run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
