@@ -161,11 +161,20 @@ MODEL_CONFIGS = {
         ],
         "nim": None,
     },
+    "C3-32B": {
+        "variants": [
+            ("C3R-32B BF16", "Cosmos3-Reasoner-32B", "nvidia/Cosmos3-Reasoner-32B-Private", "bf16"),
+        ],
+        "nim": None,
+        # disk_gb: 1024 (1TB minimum — Alex explicit requirement for 32B)
+        # vLLM: --tensor-parallel-size 1 --gpu-memory-utilization 0.93 on single H100 80GB
+        # Weight size unverified (25 files, est ~60-70GB BF16). Review if OOM occurs.
+    },
 }
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, or 32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, or C3-32B."); sys.exit(1)
 
 _cfg         = MODEL_CONFIGS[MODEL_SIZE]
 _MODELS_BASE = os.path.join(HOME, "cosmos-reason2", "models")
@@ -195,8 +204,9 @@ CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
-    ("C3R-2B BF16",  "Cosmos3-Reasoner-2B",      "nvidia/Cosmos3-Reasoner-2B-Private", "bf16"),
-    ("C3R-8B BF16",  "Cosmos3-Reasoner-8B",      "nvidia/Cosmos3-Reasoner-8B-Private", "bf16"),
+    ("C3R-2B BF16",  "Cosmos3-Reasoner-2B",      "nvidia/Cosmos3-Reasoner-2B-Private",  "bf16"),
+    ("C3R-8B BF16",  "Cosmos3-Reasoner-8B",      "nvidia/Cosmos3-Reasoner-8B-Private",  "bf16"),
+    ("C3R-32B BF16", "Cosmos3-Reasoner-32B",     "nvidia/Cosmos3-Reasoner-32B-Private", "bf16"),
     ("CR2-2B BF16",  "Cosmos-Reason2-2B",        "nvidia/Cosmos-Reason2-2B",        "bf16"),
     ("CR2-2B FP8",   "Cosmos-Reason2-2B-FP8",    "nvidia/Cosmos-Reason2-2B-FP8",    "fp8"),
     ("CR2-2B NVFP4", "Cosmos-Reason2-2B-NVFP4",  "nvidia/Cosmos-Reason2-2B-NVFP4",  "nvfp4"),

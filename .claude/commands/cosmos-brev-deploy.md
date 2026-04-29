@@ -202,12 +202,31 @@ deploy/
 # 1. Set HF token as Brev secret (not in command history)
 brev env set HF_TOKEN=hf_...
 
-# 2. Create massedcompute_H100 instance (1TB disk; 2B needs ~60GB, 8B needs ~100GB with cache)
+# 2. Create massedcompute_H100 instance
+#    2B: ~60GB disk. 8B: ~100GB with cache. 32B: 1TB minimum (--disk 1024 or brev.yaml disk: 1024)
 brev create cosmos3-reasoner-demo --type massedcompute_H100
 
-# 3. Bootstrap and launch
+# 3. Bootstrap and launch (choose MODEL_SIZE)
 brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-2B python3 /tmp/byo_video_setup.py"
+brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-8B python3 /tmp/byo_video_setup.py"
+brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-32B python3 /tmp/byo_video_setup.py"
 ```
+
+**C3-32B vLLM flags (single H100 80GB):**
+```bash
+VLLM_VIDEO_LOADER_BACKEND=opencv \
+SKIP_HF_PRELOAD=1 \
+nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos3-Reasoner-32B \
+  --served-model-name nvidia/Cosmos3-Reasoner-32B-Private \
+  --port 8000 \
+  --dtype auto \
+  --trust-remote-code \
+  --max-model-len 32768 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.93 \
+  > /tmp/vllm.log 2>&1 &
+```
+Weight size: ~60-70GB BF16 (25 safetensor files). If OOM occurs, reduce `--max-model-len` or use multi-GPU.
 
 **vLLM flags required for video (apply to any Cosmos/Nemotron VLM on Brev):**
 ```bash

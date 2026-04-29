@@ -79,6 +79,18 @@ _MODEL_CONFIGS = {
         ],
         "nim": None,
     },
+    "C3-32B": {
+        "variants": [
+            ("C3R-32B BF16", "Cosmos3-Reasoner-32B", "nvidia/Cosmos3-Reasoner-32B-Private", "~TBD"),
+        ],
+        "nim": None,
+        # disk_gb: 1024 (1TB minimum — Alex explicit requirement for 32B)
+        "disk_gb": 1024,
+        # vLLM flags: tensor-parallel-size 1 + high memory utilization for single H100 80GB.
+        # NOTE: weight size unverified (25 safetensor files, estimate ~60-70GB BF16).
+        # If weights exceed ~72GB, OOM will occur — flag for review before production deploy.
+        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
+    },
     # ── Cosmos Reason2 ──
     "2B": {
         "variants": [
@@ -123,7 +135,7 @@ LOG_FILE      = "/tmp/gradio_demo.log"
 VLLM_MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, 2B, 8B, or 32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, or 32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]

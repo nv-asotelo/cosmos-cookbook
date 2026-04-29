@@ -41,16 +41,18 @@ COSMOS BYO-VIDEO — SETUP (answer all, then I run autonomously)
 |---|---|---|---|---|---|
 | Cosmos3-Reasoner-2B-Private (C3R-2B) | Cosmos3 | 2B VLM | ~40 GB | HF Transformers | 🔒 Private (nvidia org) |
 | Cosmos3-Reasoner-8B-Private (C3R-8B) | Cosmos3 | 8B VLM | ~80 GB | vLLM | 🔒 Private (nvidia org) |
+| Cosmos3-Reasoner-32B-Private (C3R-32B) | Cosmos3 | 32B VLM | ~80 GB H100 | vLLM (--tensor-parallel-size 1 --gpu-memory-utilization 0.93) | 🔒 Private (nvidia org) |
 | Cosmos Reason2 (CR2-2B) | CR2 | 2B VLM | 40 GB | HF Transformers | Public |
 | Cosmos Reason2 (CR2-8B) | CR2 | 8B VLM | 80 GB | vLLM (hot-swap via dropdown) | Public |
 | Cosmos Reason2 (CR2-8B-NVFP4) | CR2 | 8B VLM | 80 GB | vLLM | Public |
 | Cosmos Reason2 (CR2-8B-FP8) | CR2 | 8B VLM | 80 GB | vLLM | Public |
 
 **Cosmos3-Reasoner notes:**
-- Requires HF_TOKEN from an account with approved access to `nvidia/Cosmos3-Reasoner-2B-Private` / `nvidia/Cosmos3-Reasoner-8B-Private` on HuggingFace.
-- Uses `MODEL_SIZE=C3-2B` or `MODEL_SIZE=C3-8B` in setup script.
+- Requires HF_TOKEN from an account with approved access to `nvidia/Cosmos3-Reasoner-2B-Private` / `nvidia/Cosmos3-Reasoner-8B-Private` / `nvidia/Cosmos3-Reasoner-32B-Private` on HuggingFace.
+- Uses `MODEL_SIZE=C3-2B`, `MODEL_SIZE=C3-8B`, or `MODEL_SIZE=C3-32B` in setup script.
 - Architecture: Qwen3-VL family (same HF Transformers API as CR2 — compatible with existing Gradio app).
-- L40S (46 GB): C3-2B fits; C3-8B requires ~80 GB → use C3-2B on L40S.
+- L40S (46 GB): C3-2B fits; C3-8B and C3-32B require ~80 GB → use C3-2B on L40S.
+- C3-32B: use massedcompute_H100 (1TB disk minimum). vLLM flags: `--tensor-parallel-size 1 --gpu-memory-utilization 0.93`. Weight size ~60-70GB BF16 (25 safetensor files); single H100 80GB should fit with tight KV cache headroom.
 
 CR2-2B runs on workstation hardware (≥40GB). CR2-8B requires an H100 or A100 80GB; use vLLM backend for sub-second TTFT (HF gives ~44s on H100 vs ~174ms on vLLM).
 
