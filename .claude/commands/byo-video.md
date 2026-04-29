@@ -201,8 +201,10 @@ brev ls
 
 Wait for STATUS: RUNNING. Then confirm the instance is reachable:
 ```bash
-brev exec byo-video-vllm "nvidia-smi"
+ssh byo-video-vllm "nvidia-smi"
 ```
+
+**Note — BUG-009:** `brev exec <instance> -- bash -c "cmd"` has a multi-instance parsing bug: each word after `--` is treated as both a command token AND an instance name attempt. Use `ssh <instance> "cmd"` directly instead. brev auto-maintains `~/.brev/ssh_config` (included in `~/.ssh/config`) so SSH works immediately after the instance is READY.
 
 ### Step 2 — Bootstrap
 
@@ -210,33 +212,36 @@ Run once per fresh instance.
 
 ```bash
 # Install uv
-brev exec byo-video-vllm -- bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
+ssh byo-video-vllm "curl -LsSf https://astral.sh/uv/install.sh | sh"
 
 # Clone cosmos-reason2
-brev exec byo-video-vllm -- git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
+ssh byo-video-vllm "git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2"
 
 # Install dependencies (CUDA 12.9+/13.0: cu128 extra; byo_video_setup.py gates to 0.11.0 if driver <575)
-brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
+ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
 
 # Install PyAV
-brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
+ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
 
 # Install vLLM (for vLLM backend — already included via cu128 extra; install explicitly to confirm)
-brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
+ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
 
-# Download first model (use brev env set HF_TOKEN=hf_... to avoid token in command history)
-brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
+# Download first model (transfer HF token via brev copy — no brev env set in current version)
+brev copy ~/.cache/huggingface/token byo-video-vllm:/tmp/hf_token
+ssh byo-video-vllm "mkdir -p ~/.cache/huggingface && cp /tmp/hf_token ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token"
+ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
 ```
 
 ### Step 3 — Start vLLM server
 
 ```bash
-brev exec byo-video-vllm -- bash -c "nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1 &"
+# Use screen -dmS for proper SSH-detachment (nohup alone keeps SSH open — BUG-009 workaround)
+ssh byo-video-vllm "screen -dmS vllm_server bash -c 'nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1'"
 ```
 
 Wait ~60–90s for vLLM to load, then confirm:
 ```bash
-brev exec byo-video-vllm -- curl -s http://localhost:8000/v1/models
+ssh byo-video-vllm "curl -s http://localhost:8000/v1/models"
 ```
 
 ### Step 4 — Deploy scripts and launch Gradio
@@ -246,11 +251,11 @@ brev exec byo-video-vllm -- curl -s http://localhost:8000/v1/models
 brev copy ~/.claude/scripts/gradio_cr2_byo.py byo-video-vllm:/tmp/gradio_cr2_byo.py
 brev copy ~/.claude/scripts/byo_video_setup.py byo-video-vllm:/tmp/byo_video_setup.py
 
-# Launch Gradio in vLLM mode
-brev exec byo-video-vllm -- bash -c "nohup bash -c 'cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && INFERENCE_BACKEND=vllm MODEL_SIZE=8B .venv/bin/python /tmp/gradio_cr2_byo.py' > /tmp/gradio.log 2>&1 &"
+# Launch Gradio in vLLM mode via screen (proper detachment)
+ssh byo-video-vllm "screen -dmS gradio_demo bash -c 'cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && INFERENCE_BACKEND=vllm MODEL_SIZE=8B .venv/bin/python /tmp/gradio_cr2_byo.py > /tmp/gradio.log 2>&1'"
 
 # Wait ~15s for Gradio to start, then get URL (use tail -F to follow by name, not inode — BUG-008)
-brev exec byo-video-vllm -- tail -F /tmp/gradio_url.txt
+ssh byo-video-vllm "tail -F /tmp/gradio_url.txt"
 ```
 
 ### Step 5 — Kill alert (required)
@@ -439,3 +444,5 @@ video_processing_utils.BaseVideoProcessor.fetch_videos = _patched_fetch_videos
 | Gradio theme error on startup | Gradio 6.0 moved `theme=` from `gr.Blocks()` to `demo.launch()`. Deploy the latest canonical `gradio_cr2_byo.py` from `~/.claude/scripts/`. |
 | `flashinfer-cubin` version mismatch after vLLM downgrade | `RuntimeError: flashinfer-cubin version (0.6.6) does not match flashinfer version (0.5.3)`. Set `FLASHINFER_DISABLE_VERSION_CHECK=1` in env. `byo_video_setup.py` sets this automatically in `launch_env`. |
 | vLLM startup fails: `ninja` not found | `FileNotFoundError: ninja` from flashinfer JIT. Run `sudo apt-get install -y ninja-build`. `byo_video_setup.py` Step 6c does this automatically. |
+| `brev exec <instance> -- bash -c "cmd"` exits 1, errors for `bash` / `-c` instances (BUG-009) | Brev parses all tokens after `--` as instance names. Use `ssh <instance> "cmd"` directly. `~/.brev/ssh_config` is auto-maintained and included in `~/.ssh/config`. |
+| `nohup ... &` via brev exec keeps SSH session alive indefinitely | nohup doesn't detach from brev's SSH channel. Use `screen -dmS session_name /path/to/script.sh` instead — screen detaches fully and SSH closes immediately. |

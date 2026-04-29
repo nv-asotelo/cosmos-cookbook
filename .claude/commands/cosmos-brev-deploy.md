@@ -165,6 +165,38 @@ Every `demo.sh` sources `deploy/shared/brev-env.sh` which patches these in order
 
 **You do NOT need to fix these manually.** Sourcing `brev-env.sh` resolves all 6.
 
+### BUG-009 — brev exec multi-word command parsing
+
+**Symptom:** `brev exec <instance> -- bash -c "cmd"` exits 1 with errors for fake instances named `bash`, `-c`, etc. The actual instance runs the command correctly.
+
+**Root cause:** This brev version treats every whitespace-separated token after `--` as both a potential instance name AND part of the command. The command runs on your named instance, but brev also tries SSH to each token as an instance name (all fail with "nodename nor servname provided").
+
+**Fix — use direct SSH instead of brev exec:**
+
+brev auto-maintains `~/.brev/ssh_config` and includes it in `~/.ssh/config`. Use `ssh` directly for any multi-word or long-running remote commands:
+
+```bash
+# Instead of brev exec:
+ssh c3r-2b "chmod +x /tmp/launch.sh && screen -dmS setup_2b /tmp/launch.sh"
+
+# For long-running processes, use screen -dmS (returns immediately, SSH can close):
+ssh c3r-2b "screen -dmS setup_session /tmp/launch_script.sh && echo launched"
+
+# Check screen sessions:
+ssh c3r-2b "screen -list"
+
+# Tail remote logs:
+ssh c3r-2b "tail -20 /tmp/setup.log"
+```
+
+**HF token transfer (no brev env set in this version):**
+```bash
+brev copy ~/.cache/huggingface/token <instance>:/tmp/hf_token
+ssh <instance> "mkdir -p ~/.cache/huggingface && cp /tmp/hf_token ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token"
+```
+
+**Note:** `brev exec` with `--` still works for single-word commands (e.g. `brev exec <instance> -- nvidia-smi`) but is unreliable for multi-word commands. Prefer direct SSH for reliability.
+
 ### 8. Monitor Progress
 
 **Option A — Tail the output:**
