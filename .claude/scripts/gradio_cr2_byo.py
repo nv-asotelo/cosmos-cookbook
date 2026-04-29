@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cosmos Reason2 BYO-Video Gradio Demo — Multi-Checkpoint Edition
-Version: 2026-04-21
+Version: 2026-04-28
 Canonical source: ~/.claude/scripts/gradio_cr2_byo.py
 
 New in this version:
@@ -32,6 +32,7 @@ except ImportError:
 try:
     from transformers import (
         Qwen3VLForConditionalGeneration,
+        AutoModelForCausalLM,
         AutoProcessor,
         TextIteratorStreamer,
     )
@@ -501,11 +502,26 @@ def _load(model_id):
         print(f"[model] Loading {model_id} ...", flush=True)
         t0 = time.time()
 
-        kwargs = dict(dtype="auto", device_map="auto", attn_implementation="sdpa")
+        # BUG-001 fix: detect model_type from config.json so NemotronVL (nemotron_siglip2)
+        # and other non-qwen3_vl architectures route to AutoModelForCausalLM instead of
+        # Qwen3VLForConditionalGeneration, which raises NotImplementedError for unknown archs.
+        _model_type = "qwen3_vl"
+        _config_path = os.path.join(model_id, "config.json") if os.path.isdir(model_id) else ""
+        if _config_path and os.path.exists(_config_path):
+            with open(_config_path) as _cf:
+                _model_type = json.load(_cf).get("model_type", "qwen3_vl")
+
+        kwargs = dict(dtype="auto", device_map="auto")
         if HF_TOKEN:
             kwargs["token"] = HF_TOKEN
 
-        model = Qwen3VLForConditionalGeneration.from_pretrained(model_id, **kwargs)
+        if _model_type == "qwen3_vl":
+            kwargs["attn_implementation"] = "sdpa"
+            model = Qwen3VLForConditionalGeneration.from_pretrained(model_id, **kwargs)
+        else:
+            kwargs["trust_remote_code"] = True
+            print(f"[model] model_type={_model_type!r} — using AutoModelForCausalLM", flush=True)
+            model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
 
         proc_kwargs = {"trust_remote_code": True}
         if HF_TOKEN:

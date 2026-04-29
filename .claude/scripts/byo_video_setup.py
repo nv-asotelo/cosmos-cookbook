@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cosmos BYO Video Demo setup + launch.
-Version: 2026-04-27
+Version: 2026-04-28
 Canonical source: ~/.claude/scripts/byo_video_setup.py
 
 Runs on the GPU instance. Prints live progress with ETAs.
@@ -129,6 +129,7 @@ REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf")
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
@@ -266,29 +267,32 @@ else:
         print("  ✗  uv sync failed:", out[-500:]); sys.exit(1)
     ok(f"Dependencies installed in {time.time()-t0:.0f}s")
 
-# ── Step 6b: CUDA 12.8 vLLM pin ──────────────────────────────────────────────
-# cu128 installs vLLM 0.12.0 (torch 2.9.0) which requires CUDA 12.9+ driver.
-# On CUDA 12.8 (Hyperstack H100, driver 570.x), downgrade to vLLM 0.11.0.
-_cuda_major_minor = None
+# ── Step 6b: CUDA version gate for vLLM ──────────────────────────────────────
+# vLLM 0.12.0 (cu128 extra) requires CUDA driver >= 12.9 (driver >= 575).
+# On CUDA 12.8 (Hyperstack H100, driver 570.x), PTX compilation fails with
+# cudaErrorUnsupportedPtxVersion — --enforce-eager does NOT fix this.
+# Fix: detect driver version and fall back to HF Transformers when incompatible.
+_driver_major = None
 try:
     import subprocess as _sp_cuda
-    _smi = _sp_cuda.check_output(
+    _smi_out = _sp_cuda.check_output(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
         timeout=10, text=True
-    ).strip().split(".")[0:2]
-    _driver_major = int(_smi[0])
-    if _driver_major < 575:  # 575.x is the first driver with CUDA 12.9 support
-        header("Step 6b — vLLM downgrade for CUDA 12.8", eta="~30s")
-        rc_vllm, _ = run_cmd(
-            ["uv", "pip", "install", "vllm==0.11.0"],
-            cwd=REASON2_DIR, env=ENV, timeout=120
-        )
-        if rc_vllm == 0:
-            ok("vLLM pinned to 0.11.0 (torch 2.8.0) — compatible with CUDA 12.8")
-        else:
-            warn("vLLM 0.11.0 pin failed — vLLM 0.12.0 may not start on CUDA 12.8")
+    ).strip()
+    _driver_major = int(_smi_out.split(".")[0])
 except Exception:
-    pass  # CUDA check is best-effort; if nvidia-smi fails, proceed as-is
+    pass
+
+_CUDA_VLLM_OK = (_driver_major is None) or (_driver_major >= 575)
+
+if INFERENCE_BACKEND == "vllm" and not _CUDA_VLLM_OK:
+    header("Step 6b — CUDA PTX gate (BUG-002 prevention)", eta="<5s")
+    warn(f"CUDA driver {_driver_major}.x detected — vLLM 0.12.0 requires driver >= 575 (CUDA 12.9).")
+    warn("Forcing INFERENCE_BACKEND=hf to avoid cudaErrorUnsupportedPtxVersion crash.")
+    warn("Use MassedCompute (CUDA 13.0) for vLLM inference on C3-8B / C3-32B.")
+    INFERENCE_BACKEND = "hf"
+elif INFERENCE_BACKEND == "vllm":
+    ok(f"CUDA driver {_driver_major}.x — vLLM 0.12.0 compatible")
 
 # ── Step 6c: ninja build system (required by flashinfer / torch compile) ─────
 try:
@@ -400,6 +404,83 @@ for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants
     elif not ok_:
         warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
 
+# ── Step 9z: NemotronVL architecture gate (BUG-001 prevention) ───────────────
+# NemotronVLForConditionCausalLM (model_type=nemotron_siglip2, e.g. C3-2B) is not
+# registered in vLLM 0.12.0 or 0.9.2. Force HF Transformers for these architectures.
+_primary_config = os.path.join(MODEL_DIR, "config.json")
+if os.path.exists(_primary_config):
+    with open(_primary_config) as _cf:
+        _detected_model_type = json.load(_cf).get("model_type", "qwen3_vl")
+    if INFERENCE_BACKEND == "vllm" and _detected_model_type != "qwen3_vl":
+        warn(f"model_type={_detected_model_type!r} not supported by vLLM — forcing INFERENCE_BACKEND=hf")
+        warn("BUG-001: NemotronVL arch not registered. Use HF Transformers via AutoModelForCausalLM.")
+        INFERENCE_BACKEND = "hf"
+    elif os.path.exists(_primary_config):
+        ok(f"model_type={_detected_model_type!r} — vLLM compatible")
+
+# ── Step 9b: Auto-launch vLLM before Gradio (when INFERENCE_BACKEND=vllm) ────
+# BUG-003 fix: byo_video_setup.py previously completed without launching the vLLM
+# server, causing Gradio to start in vllm mode with no backend available.
+_vllm_proc = None
+if INFERENCE_BACKEND == "vllm":
+    header("Step 9b — Launch vLLM server (BUG-003 fix)", eta="~5-10 min for model load")
+    import socket as _socket
+
+    _vllm_port = int(os.environ.get("VLLM_PORT", "8000"))
+    _vllm_model_id = os.environ.get("VLLM_SERVED_MODEL_NAME", MODEL_NAME)
+    _vllm_extra = _cfg.get("vllm_extra_flags", [])
+    _vllm_max_len = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
+
+    # C3-32B: use tighter max_model_len to fit H100 80GB; cap FPS in Gradio
+    if MODEL_SIZE == "C3-32B":
+        _vllm_max_len = int(os.environ.get("VLLM_MAX_MODEL_LEN", "16384"))
+
+    _vllm_cmd = [
+        f"{REASON2_DIR}/.venv/bin/vllm", "serve", MODEL_DIR,
+        "--served-model-name", _vllm_model_id,
+        "--port", str(_vllm_port),
+        "--dtype", "auto",
+        "--trust-remote-code",
+        "--enforce-eager",
+        "--max-model-len", str(_vllm_max_len),
+        "--max-num-seqs", "1",
+        "--gpu-memory-utilization", "0.95",
+    ]
+    _vllm_cmd.extend(_vllm_extra)
+
+    _vllm_log = f"/tmp/vllm_{MODEL_SIZE.lower()}.log"
+    run(f"Starting vLLM server (log: {_vllm_log})")
+    info(f"Command: {' '.join(_vllm_cmd)}")
+    with open(_vllm_log, "w") as _vf:
+        _vllm_proc = subprocess.Popen(
+            _vllm_cmd, cwd=REASON2_DIR, env={**ENV, "HF_TOKEN": HF_TOKEN,
+                                              "VLLM_VIDEO_LOADER_BACKEND": "opencv",
+                                              "SKIP_HF_PRELOAD": "1"},
+            stdout=_vf, stderr=subprocess.STDOUT
+        )
+
+    # Wait up to 10 min for vLLM to be ready on the port
+    _vllm_ready = False
+    _vllm_timeout = 600
+    _t0_vllm = time.time()
+    info(f"Waiting up to {_vllm_timeout}s for vLLM to bind port {_vllm_port} ...")
+    while time.time() - _t0_vllm < _vllm_timeout:
+        try:
+            with _socket.create_connection(("localhost", _vllm_port), timeout=2):
+                _vllm_ready = True
+                break
+        except OSError:
+            time.sleep(5)
+        if _vllm_proc.poll() is not None:
+            print(f"  ✗  vLLM process exited early. Check {_vllm_log}")
+            sys.exit(1)
+
+    if not _vllm_ready:
+        print(f"  ✗  vLLM did not bind port {_vllm_port} within {_vllm_timeout}s. Check {_vllm_log}")
+        sys.exit(1)
+
+    ok(f"vLLM server ready on port {_vllm_port} ({time.time()-_t0_vllm:.0f}s)")
+
 # ── Step 10: Launch Gradio ────────────────────────────────────────────────────
 header("Step 10 — Launch Gradio web demo", eta="~5-10s for model load")
 
@@ -423,7 +504,7 @@ launch_env = {
     "GRADIO_FPS":         str(gradio_fps),
     "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
-    "INFERENCE_BACKEND":  os.environ.get("INFERENCE_BACKEND", "hf"),
+    "INFERENCE_BACKEND":  INFERENCE_BACKEND,
     "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
@@ -431,7 +512,7 @@ launch_env = {
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
     "VLLM_MAX_MODEL_LEN": str(VLLM_MAX_MODEL_LEN),
     # PRELOAD-001: skip HF preload when using vLLM backend
-    "SKIP_HF_PRELOAD":    "1" if os.environ.get("INFERENCE_BACKEND", "hf") == "vllm" else "0",
+    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND == "vllm" else "0",
 }
 
 run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
