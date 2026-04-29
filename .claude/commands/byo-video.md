@@ -8,6 +8,35 @@ Upload a video, pick a prompt, get structured analysis from Cosmos Reason2 or Co
 
 ---
 
+## ZERO-TRUST AUTH — check before any remote command
+
+**All auth gates run at session open. Never mid-execution.**
+
+### Brev auth
+
+```bash
+brev ls
+```
+
+If output contains any auth prompt or login request: use `AskUserQuestion` with:
+> "Brev authentication required.
+> Run: **`brev login`** — a browser opens for NVIDIA SSO. Type **done** when complete."
+Re-run `brev ls` after the user replies. Three failures → halt.
+
+### HF auth
+
+```bash
+hf auth whoami
+```
+
+If not logged in: use `AskUserQuestion` with:
+> "HuggingFace authentication required.
+> Run: **`hf auth login`** — paste your HF token when prompted (no browser).
+> Type **done** when complete."
+After the user replies, re-run `hf auth whoami` and confirm `orgs: nvidia` is present (required for all Cosmos3-Reasoner private models).
+
+---
+
 ## AGENT PROTOCOL — PRE-PROCESS FIRST
 
 **Before running any remote command, ask ALL of the following in a single message block.**
@@ -41,7 +70,7 @@ COSMOS BYO-VIDEO — SETUP (answer all, then I run autonomously)
 |---|---|---|---|---|---|
 | Cosmos3-Reasoner-2B-Private (C3R-2B) | Cosmos3 | 2B VLM | ~40 GB | HF Transformers | 🔒 Private (nvidia org) |
 | Cosmos3-Reasoner-8B-Private (C3R-8B) | Cosmos3 | 8B VLM | ~80 GB | vLLM | 🔒 Private (nvidia org) |
-| Cosmos3-Reasoner-32B-Private (C3R-32B) | Cosmos3 | 32B VLM | ~80 GB H100 | vLLM (--tensor-parallel-size 1 --gpu-memory-utilization 0.93) | 🔒 Private (nvidia org) |
+| Cosmos3-Reasoner-32B-Private (C3R-32B) | Cosmos3 | 32B VLM | H200 141GB or 2×H100 80GB | vLLM (--tensor-parallel-size 1 on H200; --tensor-parallel-size 2 on 2×H100) | 🔒 Private (nvidia org) |
 | Cosmos Reason2 (CR2-2B) | CR2 | 2B VLM | 40 GB | HF Transformers | Public |
 | Cosmos Reason2 (CR2-8B) | CR2 | 8B VLM | 80 GB | vLLM (hot-swap via dropdown) | Public |
 | Cosmos Reason2 (CR2-8B-NVFP4) | CR2 | 8B VLM | 80 GB | vLLM | Public |
@@ -52,7 +81,7 @@ COSMOS BYO-VIDEO — SETUP (answer all, then I run autonomously)
 - Uses `MODEL_SIZE=C3-2B`, `MODEL_SIZE=C3-8B`, or `MODEL_SIZE=C3-32B` in setup script.
 - Architecture: Qwen3-VL family (same HF Transformers API as CR2 — compatible with existing Gradio app).
 - L40S (46 GB): C3-2B fits; C3-8B and C3-32B require ~80 GB → use C3-2B on L40S.
-- C3-32B: use massedcompute_H100 (1TB disk minimum). vLLM flags: `--tensor-parallel-size 1 --gpu-memory-utilization 0.93`. Weight size ~60-70GB BF16 (25 safetensor files); single H100 80GB should fit with tight KV cache headroom.
+- C3-32B: H200 141GB (preferred) or 2×H100 TP=2 (fallback). Use `massedcompute_H200` or provision two `massedcompute_H100` with TP=2. Disk minimum 1TB. Weight size ~60-70GB BF16 (25 safetensor files).
 
 CR2-2B runs on workstation hardware (≥40GB). CR2-8B requires an H100 or A100 80GB; use vLLM backend for sub-second TTFT (HF gives ~44s on H100 vs ~174ms on vLLM).
 
@@ -181,35 +210,33 @@ Run once per fresh instance.
 
 ```bash
 # Install uv
-brev exec byo-video-vllm "curl -LsSf https://astral.sh/uv/install.sh | sh"
+brev exec byo-video-vllm -- bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh"
 
 # Clone cosmos-reason2
-brev exec byo-video-vllm "git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2"
+brev exec byo-video-vllm -- git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
 
-# Install dependencies
-brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
-# Note: byo_video_setup.py auto-detects CUDA 12.8 (driver <575.x) and downgrades
-# vLLM to 0.11.0 automatically. On CUDA 12.9+ instances this step is not needed.
+# Install dependencies (CUDA 12.9+/13.0: cu128 extra; byo_video_setup.py gates to 0.11.0 if driver <575)
+brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
 
 # Install PyAV
-brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
+brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
 
-# Install vLLM (for vLLM backend)
-brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
+# Install vLLM (for vLLM backend — already included via cu128 extra; install explicitly to confirm)
+brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
 
-# Download NVFP4 (first model, smallest, ~7GB)
-brev exec byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && export HF_TOKEN=hf_... && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
+# Download first model (use brev env set HF_TOKEN=hf_... to avoid token in command history)
+brev exec byo-video-vllm -- bash -c "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
 ```
 
 ### Step 3 — Start vLLM server
 
 ```bash
-brev exec byo-video-vllm "nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1 &"
+brev exec byo-video-vllm -- bash -c "nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1 &"
 ```
 
 Wait ~60–90s for vLLM to load, then confirm:
 ```bash
-brev exec byo-video-vllm "curl -s http://localhost:8000/v1/models"
+brev exec byo-video-vllm -- curl -s http://localhost:8000/v1/models
 ```
 
 ### Step 4 — Deploy scripts and launch Gradio
@@ -220,10 +247,10 @@ brev copy ~/.claude/scripts/gradio_cr2_byo.py byo-video-vllm:/tmp/gradio_cr2_byo
 brev copy ~/.claude/scripts/byo_video_setup.py byo-video-vllm:/tmp/byo_video_setup.py
 
 # Launch Gradio in vLLM mode
-brev exec byo-video-vllm "nohup bash -c 'cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && INFERENCE_BACKEND=vllm MODEL_SIZE=8B .venv/bin/python /tmp/gradio_cr2_byo.py' > /tmp/gradio.log 2>&1 &"
+brev exec byo-video-vllm -- bash -c "nohup bash -c 'cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && INFERENCE_BACKEND=vllm MODEL_SIZE=8B .venv/bin/python /tmp/gradio_cr2_byo.py' > /tmp/gradio.log 2>&1 &"
 
-# Wait ~15s for Gradio to start, then get URL
-brev exec byo-video-vllm "cat /tmp/gradio_url.txt"
+# Wait ~15s for Gradio to start, then get URL (use tail -F to follow by name, not inode — BUG-008)
+brev exec byo-video-vllm -- tail -F /tmp/gradio_url.txt
 ```
 
 ### Step 5 — Kill alert (required)
@@ -403,6 +430,8 @@ video_processing_utils.BaseVideoProcessor.fetch_videos = _patched_fetch_videos
 | vLLM "Server not running" | vLLM process died. Restart with vLLM serve command from Step 3. |
 | Download fails ENOSPC | Disk full. Open Storage panel in Gradio UI. Clean HF cache or delete partial downloads. 32B models need ≥64GB free — use massedcompute_H100. |
 | Dropdown swap stalls >150s | vLLM failed to start. SSH to instance, check `cat /tmp/vllm.log`. |
+| C3-32B inference hangs on high-FPS video (BUG-004) | KV cache deadlock. Isolate: `curl -s -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"nvidia/Cosmos3-Reasoner-32B-Private","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}'` — if curl hangs but Gradio UI also hangs, this is a vLLM KV issue. Reduce fps in Gradio or add `--max-num-seqs 1`. |
+| Gradio crashes but tunnel (frpc) stays alive (BUG-005) | The frpc process outlives Gradio. Run `pkill -f frpc` on the instance to clean up. Then restart Gradio. gradio_cr2_byo.py includes an atexit handler for this since 2026-04-29. |
 | BF16 8B not on disk | Click "Download & Load" from dropdown banner. Needs ~16GB free + HF token. |
 | FP8 download fails with 401 | CR2-8B-FP8 is a gated HuggingFace model — requires HF_TOKEN with accepted license. Use "Apply Token" in Gradio Advanced Settings → HuggingFace Auth. |
 | HF 429 rate limit on download | Script retries with sleep. Usually succeeds by attempt 3–4. |

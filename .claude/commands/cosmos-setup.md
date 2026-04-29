@@ -5,8 +5,16 @@ Steps:
    - Also report CPU architecture: `uname -m`. If aarch64 (ARM64): warn that standard x86_64 PyPI wheels will not install. Verify `python3 -c "import torch; print(torch.cuda.is_available())"` before proceeding with any recipe.
 2. Check Python version: run `python3 --version` and verify it is 3.10 or higher.
 3. Check Docker: run `docker --version` to confirm Docker is available (required for several post-training recipes).
-4. Check HuggingFace token: check cached token first with `hf auth whoami` or `cat ~/.cache/huggingface/token`. If not logged in, instruct the user to run `hf auth login` (interactive) or set via stdin: `echo "hf_..." | tee ~/.cache/huggingface/token > /dev/null`. Do NOT ask for the token as a CLI argument — it ends up in shell history.
-   - For Cosmos3-Reasoner models: also verify nvidia org membership. Check `hf auth whoami` shows `orgs: nvidia`.
+4. Check HuggingFace token: run `hf auth whoami` first.
+   - If logged in: confirm `orgs: nvidia` is present for Cosmos3-Reasoner private models. If the nvidia org is missing, warn — model downloads will fail with 403.
+   - If not logged in: use the `AskUserQuestion` tool with this prompt:
+     > "HuggingFace authentication required.
+     > Run in your terminal: **`hf auth login`**
+     > Paste your HF token when prompted (no browser). Token is stored in `~/.cache/huggingface/token`.
+     > Type **done** when complete."
+     After the user replies, re-run `hf auth whoami`. If still not logged in, use `AskUserQuestion` once more. After three failures, halt.
+   - Do NOT ask for the token as a CLI argument — it ends up in shell history.
+   - For Cosmos3-Reasoner models: verify `hf auth whoami` shows `orgs: nvidia` before any model download.
 5. Check NGC API key: NGC is only required for NIM endpoint mode. For all other Cosmos recipes (including Cosmos3-Reasoner), NGC is optional. If `echo $NGC_API_KEY` is empty, note it's not needed for standard inference. Only warn if the user explicitly wants NIM mode.
 6. Check disk space: run `df -h /` and warn if less than 100GB free (post-training recipes need 100–600GB).
 7. Check uv: run `uv --version`. If missing, run: `curl -LsSf https://astral.sh/uv/install.sh | sh` then reload PATH with `export PATH="$HOME/.local/bin:$PATH"`. Note: `source $HOME/.local/bin/env` only works in interactive shells — use the export form in non-interactive/SSH sessions.

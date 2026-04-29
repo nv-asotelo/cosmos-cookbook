@@ -11,8 +11,21 @@ New in this version:
   - Right-side status panel: Step N/5 WIP + live token metrics (replaces grey loading box)
   - NIM mode: NVCF API via NGC_API_KEY (no local weights needed)
 """
-import os, sys, gc, json, time, threading, warnings, base64, io
+import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup
 warnings.filterwarnings("ignore")
+
+def _kill_frpc():
+    """BUG-005: kill orphaned frpc tunnel processes when Gradio exits."""
+    try:
+        _sp_cleanup.run(["pkill", "-f", "frpc"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+atexit.register(_kill_frpc)
+try:
+    signal.signal(signal.SIGTERM, lambda *_: (_kill_frpc(), sys.exit(0)))
+except Exception:
+    pass
 
 try:
     import torch
@@ -541,6 +554,11 @@ def _load(model_id):
         elif expected == "nvfp4" and "float4" not in dtype_str:
             upcast_warning = (f"NVFP4 weights upcast to {dtype_str} — "
                               f"NVFP4 requires TRT-LLM or NIM; HF runs at BF16 speed.")
+        elif expected == "bf16" and "float32" in dtype_str and _model_type != "qwen3_vl":
+            # BUG-006: NemotronVL and other non-qwen3_vl models may load as float32
+            # when transformers version doesn't honor dtype="auto" for the architecture.
+            upcast_warning = (f"BF16 model loaded as float32 (arch={_model_type!r}) — "
+                              f"2× memory usage. Set torch_dtype=torch.bfloat16 if OOM.")
         if upcast_warning:
             print(f"[upcast] {upcast_warning}", flush=True)
 

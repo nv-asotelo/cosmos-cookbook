@@ -15,24 +15,46 @@ all environment setup failures, not model failures).
 
 ## Steps
 
-### 0. BREV AUTH CHECK — run before anything else
+### 0. ZERO-TRUST AUTH CHECKS — run before any Brev or model work
+
+**All auth checks must run at sprint/session open — never mid-execution.**
+
+#### Brev auth
 
 ```bash
 brev ls
 ```
 
-If `brev ls` outputs "would you like to log in?" or any auth prompt: **stop immediately.**
+If the output contains "would you like to log in?", any auth prompt, or a non-zero exit:
 
-Tell the user:
-> "Brev authentication is required. Your session token has expired or was never set.
-> Run: `brev login`
-> A browser window will open for NVIDIA SSO login. Once complete, re-run this skill."
+Use the `AskUserQuestion` tool with this prompt:
+> "Brev authentication required.
+> Run in your terminal: **`brev login`**
+> A browser window will open for NVIDIA SSO. After login completes, type **done** here."
 
-Do NOT attempt to work around expired auth. Do NOT silently skip. This is a zero-trust requirement — every user must authenticate explicitly before any Brev instance is created.
+After the user replies, re-run `brev ls` to verify. If still failing, use `AskUserQuestion` once more. After three failures, halt and report the exact error.
 
-Once `brev ls` returns the instance list (even if empty), proceed.
+Do NOT skip. Do NOT work around. Every user must authenticate before any instance is created.
 
-### 0b. PRE-PROCESS — gather before first Brev command
+#### HF auth
+
+```bash
+hf auth whoami
+```
+
+If the command fails or shows "Not logged in":
+
+Use the `AskUserQuestion` tool with this prompt:
+> "HuggingFace authentication required.
+> Run in your terminal: **`hf auth login`**
+> Paste your HF token when prompted (no browser — token is stored in `~/.cache/huggingface/token`).
+> After login, type **done** here."
+
+After the user replies, re-run `hf auth whoami` and verify it shows `orgs: nvidia` for Cosmos3-Reasoner private models. If the nvidia org is missing, warn and halt — the model download will fail with 403.
+
+Once both `brev ls` and `hf auth whoami` return clean results, proceed.
+
+### 0b. PRE-PROCESS — gather before first Brev command (after auth confirmed)
 
 Ask these in a single message block. Do not start Brev work until all are answered.
 
@@ -229,8 +251,12 @@ brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-8B python3 /tmp/byo_video_setup.p
 brev exec cosmos3-reasoner-demo "MODEL_SIZE=C3-32B python3 /tmp/byo_video_setup.py"
 ```
 
-**C3-32B vLLM flags (single H100 80GB):**
+**C3-32B vLLM flags:**
+
+Preferred hardware: H200 141GB (single GPU). Fallback: 2×H100 with TP=2.
+
 ```bash
+# H200 single-GPU (preferred)
 VLLM_VIDEO_LOADER_BACKEND=opencv \
 SKIP_HF_PRELOAD=1 \
 nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos3-Reasoner-32B \
@@ -240,10 +266,23 @@ nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos3-Reas
   --trust-remote-code \
   --max-model-len 32768 \
   --tensor-parallel-size 1 \
-  --gpu-memory-utilization 0.93 \
+  --gpu-memory-utilization 0.90 \
+  > /tmp/vllm.log 2>&1 &
+
+# 2×H100 fallback (TP=2)
+VLLM_VIDEO_LOADER_BACKEND=opencv \
+SKIP_HF_PRELOAD=1 \
+nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos3-Reasoner-32B \
+  --served-model-name nvidia/Cosmos3-Reasoner-32B-Private \
+  --port 8000 \
+  --dtype auto \
+  --trust-remote-code \
+  --max-model-len 32768 \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.90 \
   > /tmp/vllm.log 2>&1 &
 ```
-Weight size: ~60-70GB BF16 (25 safetensor files). If OOM occurs, reduce `--max-model-len` or use multi-GPU.
+Weight size: ~60-70GB BF16 (25 safetensor files). Disk minimum: 1TB (`massedcompute_H100` or `massedcompute_H200`).
 
 **vLLM flags required for video (apply to any Cosmos/Nemotron VLM on Brev):**
 ```bash
