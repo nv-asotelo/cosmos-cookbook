@@ -25,7 +25,7 @@ Steps:
 | Cosmos Reason2 | nvidia/Cosmos-Reason2-* | Public | cosmos-reason2 repo |
 | Cosmos Transfer | nvidia/Cosmos-Transfer* | Public | cosmos-transfer repo |
 
-Cosmos3-Reasoner uses `MODEL_SIZE=C3-2B` or `MODEL_SIZE=C3-8B` with `byo_video_setup.py`. The model uses the same HF Transformers API as CR2 (Qwen3-VL family).
+Cosmos3-Reasoner uses `MODEL_SIZE=C3-2B`, `MODEL_SIZE=C3-8B`, or `MODEL_SIZE=C3-32B` with `byo_video_setup.py`. The model uses the same HF Transformers API as CR2 (Qwen3-VL family). C3-32B requires 1TB+ disk and a single H100 80GB with `--tensor-parallel-size 1 --gpu-memory-utilization 0.93`.
 
 ## Brev Cloud Deployment Check
 

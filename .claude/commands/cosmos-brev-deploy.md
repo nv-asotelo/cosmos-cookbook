@@ -15,7 +15,24 @@ all environment setup failures, not model failures).
 
 ## Steps
 
-### 0. PRE-PROCESS — gather before first Brev command
+### 0. BREV AUTH CHECK — run before anything else
+
+```bash
+brev ls
+```
+
+If `brev ls` outputs "would you like to log in?" or any auth prompt: **stop immediately.**
+
+Tell the user:
+> "Brev authentication is required. Your session token has expired or was never set.
+> Run: `brev login`
+> A browser window will open for NVIDIA SSO login. Once complete, re-run this skill."
+
+Do NOT attempt to work around expired auth. Do NOT silently skip. This is a zero-trust requirement — every user must authenticate explicitly before any Brev instance is created.
+
+Once `brev ls` returns the instance list (even if empty), proceed.
+
+### 0b. PRE-PROCESS — gather before first Brev command
 
 Ask these in a single message block. Do not start Brev work until all are answered.
 
