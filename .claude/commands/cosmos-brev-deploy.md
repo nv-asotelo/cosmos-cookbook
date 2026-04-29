@@ -197,6 +197,36 @@ ssh <instance> "mkdir -p ~/.cache/huggingface && cp /tmp/hf_token ~/.cache/huggi
 
 **Note:** `brev exec` with `--` still works for single-word commands (e.g. `brev exec <instance> -- nvidia-smi`) but is unreliable for multi-word commands. Prefer direct SSH for reliability.
 
+### BUG-010 — byo_video_setup.py Gradio child killed on script exit
+
+**Symptom:** Setup script completes, prints the public Gradio URL, then exits. Within seconds, the Gradio process dies (no Python process in `ps aux`, port 7860 goes dark). The Gradio CDN still serves the HTML shell but inference fails.
+
+**Root cause:** `byo_video_setup.py` launches Gradio via `subprocess.Popen`, reads the stdout pipe until the `gradio.live` URL appears, then breaks and exits the script. When the parent process exits from within a `screen` session, the Popen child receives SIGHUP and terminates.
+
+**Fix — added to `byo_video_setup.py` (line 494+):**
+```python
+proc.stdout.close()
+# Keep parent alive so Gradio subprocess doesn't get SIGHUP on script exit.
+try:
+    proc.wait()
+except KeyboardInterrupt:
+    proc.terminate()
+    proc.wait()
+```
+
+**Workaround if using an old copy of the script:** relaunch Gradio directly in its own screen session:
+```bash
+screen -dmS gradio_2b bash -c '
+  export MODEL_SIZE=C3-2B
+  export MODEL_DIR=~/cosmos-reason2/models/Cosmos3-Reasoner-2B
+  export GRADIO_PORT=7860
+  export GRADIO_SHARE=true
+  export INFERENCE_BACKEND=hf
+  export PATH=~/cosmos-reason2/.venv/bin:$PATH
+  cd ~/cosmos-reason2
+  exec uv run python -u /tmp/gradio_cr2_byo.py > /tmp/gradio_demo.log 2>&1'
+```
+
 ### 8. Monitor Progress
 
 **Option A — Tail the output:**
