@@ -573,3 +573,10 @@ print(f"{'─'*62}", flush=True)
 print(flush=True)
 
 proc.stdout.close()
+# BUG-010: keep parent alive so Gradio subprocess doesn't get SIGHUP when
+# the setup script exits from within a screen session.
+try:
+    proc.wait()
+except KeyboardInterrupt:
+    proc.terminate()
+    proc.wait()

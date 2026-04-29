@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Cosmos Reason2 BYO-Video Gradio Demo — Multi-Checkpoint Edition
-Version: 2026-04-28
+Cosmos Reason BYO-Video Gradio Demo — Multi-Checkpoint Edition
+Version: 2026-04-29
 Canonical source: ~/.claude/scripts/gradio_cr2_byo.py
 
 New in this version:
@@ -1625,7 +1625,7 @@ def _clean_hf_cache():
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 with gr.Blocks(
-    title="Cosmos Reason2 — BYO Video Demo",
+    title="Cosmos Reason — BYO Video Demo",
 ) as demo:
 
     _variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
@@ -1639,7 +1639,7 @@ with gr.Blocks(
         else "**Backend:** HF transformers *(quantized models upcast to BF16)*"
     )
     gr.Markdown(
-        f"# 🌌 Cosmos Reason2 — BYO Video Demo ({MODEL_SIZE})\n"
+        f"# 🌌 Cosmos Reason — BYO Video Demo ({MODEL_SIZE})\n"
         f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
         f"**VRAM free:** {free_vram:,} MiB &nbsp;·&nbsp; {_backend_note}\n\n"
         f"Upload any MP4 and ask the model a question. "
@@ -1809,10 +1809,10 @@ with gr.Blocks(
                 label="Max output tokens",
             )
 
-        with gr.Row():
+        with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
                 label="Disable resolution auto-cap",
-                value=False,
+                value=INFERENCE_BACKEND == "vllm",
                 info=(
                     "Advanced users only. Bypasses automatic max_pixels reduction. "
                     "Expect long and inconsistent load times, OOM crashes, silent failures, "
@@ -1894,6 +1894,9 @@ with gr.Blocks(
         n_frames = max(1, int(m.duration_s * fps_val))
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                     f"{n_frames} frames sampled")
+        # vLLM is 100-500x faster than HF — HF-based timing estimates are meaningless.
+        if INFERENCE_BACKEND == "vllm":
+            return info_str, gr.update()
         est_s_full = _est_tokens(n_frames, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(n_frames, DEFAULT_MAX_PIXELS)
         if not disable_autocap:
