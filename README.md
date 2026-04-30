@@ -13,6 +13,7 @@ A comprehensive guide for working with the **NVIDIA Cosmos ecosystem**—a suite
 
 | **Date** | **Recipe** | **Model** | **Description** |
 |----------|------------|-----------|-----------------|
+| Apr 21 | [Generate Photorealistic Agricultural Images for Robot Perception Training](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/post_training/transfer2_5/agtec_scenarios_single_view/post_training.html) | Cosmos Transfer 2.5 | Post-train Cosmos Transfer (depth-conditioned) on agricultural fleet video to generate photorealistic synthetic training images for robot perception |
 | Mar 16 | [Cosmos-Reason2 on Jetson Thor for Edge VLM Perception](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/inference/reason2/intbot_edge_vlm/inference.html) | Cosmos Reason 2 | Deploy Cosmos-Reason2 on Jetson AGX Thor for social robots (IntBot), with FP8 quantization and TensorRT-Edge-LLM optimization |
 | Mar 15 | [Content-Adaptive Video Compression for Cosmos Curator with Beamr CABR](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/data_curation/cosmos_cabr/cabr_recipe.html) | Cosmos Curator | Recipe for replacing Cosmos Curator's default CPU-based, fixed-bitrate video encoder with Beamr CABR (Content-Adaptive Bitrate) — a GPU-accelerated video optimization and encoding solution |
 | Mar 15 | [Post-Training Cosmos-H-Surgical-Simulator for Surgical Robotics](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/post_training/predict2_5/surgical_robotics/post_training.html) | Cosmos Predict 2.5 | Fine-tune Cosmos Predict 2.5 as an action-conditioned surgical simulator for policy evaluation and synthetic data generation using the SutureBot dataset |
@@ -22,22 +23,6 @@ A comprehensive guide for working with the **NVIDIA Cosmos ecosystem**—a suite
 | Feb 18 | [3D AV Grounding Post-Training with Cosmos Reason 1 & 2](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/post_training/reason2/av_3d_grounding/post_training.html) | Cosmos Reason 1 & 2 | 3D vehicle grounding in autonomous driving: detect and localize vehicles in 3D from camera images with SFT (Cosmos-RL and Qwen-Finetune) |
 | Feb 4 | [Worker Safety in a Classical Warehouse](https://nvidia-cosmos.github.io/cosmos-cookbook/recipes/inference/reason2/worker_safety/inference.html) | Cosmos Reason 2 | Zero-shot industrial safety compliance and hazard detection in classical warehouse environments using context-aware prompt engineering |
 | Jan 30 | [Prompt Guide](https://nvidia-cosmos.github.io/cosmos-cookbook/core_concepts/prompt_guide/reason_guide.html) | Cosmos Reason 2 | Inference Prompt Guide |
-
-## Upcoming Activities
-
-### NVIDIA GTC 2026
-
-Register for [NVIDIA GTC](https://www.nvidia.com/gtc/) happening **March 16–19, 2026**, and add the [Cosmos sessions](https://www.nvidia.com/gtc/session-catalog/?sessions=S81667,CWES81669,DLIT81644,DLIT81698,S81836,S81488,S81834,DLIT81774,CWES81733,CWES81568) to your calendar. Don't miss the must-see keynote from CEO Jensen Huang at SAP Center on Monday, March 16 at 11:00 a.m. PT.
-
-### NVIDIA Cosmos Cookoff
-
-Introducing the **[NVIDIA Cosmos Cookoff](https://luma.com/nvidia-cosmos-cookoff)** — a virtual, four-week physical AI challenge running **January 29 – February 26** for robotics, AV, and vision AI builders.
-
-Build with NVIDIA Cosmos Reason and Cosmos Cookbook recipes—from egocentric robot reasoning to physical plausibility checks and traffic-aware models for a chance to win **$5,000**, an **NVIDIA DGX Spark**, and more!
-
-**[Register Now →](https://luma.com/nvidia-cosmos-cookoff)**
-
-Sponsored by Nebius and Milestone.
 
 ## Prerequisites
 
