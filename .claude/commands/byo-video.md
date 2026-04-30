@@ -1,175 +1,310 @@
 # /byo-video — Cosmos BYO-Video Demo
 
-Upload a video, pick a prompt, get structured analysis from Cosmos Reason2 or Cosmos3-Reasoner.
+Two modes:
+
+**VLM Race (multi-model comparison) — use `/vlm-race` skill instead:**
+Side-by-side comparison of Cosmos Reason 2, Nemotron-Nano-12B-v2, and Qwen3-VL.
+The VLM Race is now its own skill with full documentation. See `/vlm-race`.
+The section below is kept for reference only.
+
+**Single-model (CR2 only) — original mode:**
+Launch Cosmos Reason2 only. Faster startup. See `## Primary flow — Brev web demo` below.
+
+Default output (both modes): **Gradio web UI at a `gradio.live` public URL** — user uploads video in browser.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
-- `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio demo app (vLLM + HF + NIM backends)
-- `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch (HF Transformers mode)
+- `~/.claude/scripts/gradio_compare_vlm.py` — VLM Race 3-model comparison app (new)
+- `~/.claude/scripts/compare_vlm_setup.py`  — VLM Race bootstrap + launch (new)
+- `~/.claude/scripts/gradio_cr2_byo.py`      — Single-model CR2 app (original)
+- `~/.claude/scripts/byo_video_setup.py`     — Single-model bootstrap + launch (original)
 
 ---
 
-## ZERO-TRUST AUTH — check before any remote command
+## VLM Race — Multi-Model Comparison
 
-**All auth gates run at session open. Never mid-execution.**
+### Models
+| Column | Model | HF ID | Notes |
+|---|---|---|---|
+| 🌌 | Cosmos Reason 2 | `nvidia/Cosmos-Reason2-2B` or `8B` | Auto-sized by VRAM; checkpoint selectable in Advanced |
+| 🤖 | Nemotron-Nano-12B-v2 | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` | Fixed; gated — requires HF_TOKEN |
+| 🔷 | Qwen3-VL | `Qwen/Qwen3-VL-2B-Instruct` or `8B` | Paired with CR2 size |
 
-### Brev auth
+All models use BF16 (torch.bfloat16) by default.
+
+### VRAM requirements
+| Config | VRAM needed | Fits on |
+|---|---|---|
+| 2B variants (CR2-2B + Nem-12B + Qwen-2B) | ~32 GB | A40 (48GB), A100 (40/80GB), H100 (80GB) |
+| 8B variants (CR2-8B + Nem-12B + Qwen-8B) | ~56 GB | A100 80GB, H100 80GB |
+| RTX5070 (12 GB) | CR2-2B only; Nem-12B OOM | Graceful OOM error shown in UI |
+
+### Deploy — Brev (agent provisions instance)
 
 ```bash
-brev ls
+# Step 1 — Create instance (agent runs this)
+brev create vlm-race --gpu-name H100 --type hyperstack_H100
+
+# Step 2 — Wait for SHELL READY
+brev ls   # repeat until SHELL column shows READY
+
+# Step 3 — Deploy both scripts
+for script in gradio_compare_vlm compare_vlm_setup; do
+  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
+  brev exec vlm-race "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
+done
+
+# Step 4 — Launch (agent runs; streams to terminal)
+brev exec vlm-race "export HF_TOKEN=hf_... && python3 /tmp/compare_vlm_setup.py"
+
+# Step 5 — Capture URL (if needed separately)
+brev exec vlm-race "cat /tmp/gradio_url.txt"
 ```
 
-If output contains any auth prompt or login request: use `AskUserQuestion` with:
-> "Brev authentication required.
-> Run: **`brev login`** — a browser opens for NVIDIA SSO. Type **done** when complete."
-Re-run `brev ls` after the user replies. Three failures → halt.
-
-### HF auth
+### Deploy — Horde (10.57.234.230, SSH key default)
 
 ```bash
-hf auth whoami
+# Deploy scripts
+for script in gradio_compare_vlm compare_vlm_setup; do
+  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
+  ssh horde@10.57.234.230 "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
+done
+
+# Launch
+ssh horde@10.57.234.230 "export HF_TOKEN=hf_... && python3 /tmp/compare_vlm_setup.py"
+
+# Capture URL
+ssh horde@10.57.234.230 "cat /tmp/gradio_url.txt"
 ```
 
-If not logged in: use `AskUserQuestion` with:
-> "HuggingFace authentication required.
-> Run: **`hf auth login`** — paste your HF token when prompted (no browser).
-> Type **done** when complete."
-After the user replies, re-run `hf auth whoami` and confirm `orgs: nvidia` is present (required for all Cosmos3-Reasoner private models).
+### Deploy — asotelo-dt (local workstation, RTX5070)
+
+Same SSH pattern as Horde. Note: Nemotron-12B will OOM on RTX5070 — app handles gracefully.
+
+```bash
+ssh asotelo@asotelo-dt "python3 /tmp/compare_vlm_setup.py"
+```
+
+### Race UI
+- **Basic mode:** upload video, pick demo prompt, click Start Comparison
+- **Advanced mode:** edit system/user prompts, toggle thinking/reasoning, tune fps/resolution/max_tokens, change CR2 checkpoint
+- **Metrics per column:** TTFT · Inference time · E2E time · Tokens in/out
+- **Clip info:** resolution · fps · duration shown on upload
+- **Winner badge:** 🏆 on whichever model has lowest inference_s among successful runs
+- **OOM handling:** column shows error + "try quantized variant" message; other columns continue
+- **Timeout:** per-model, default 240s; configurable in Advanced
+
+### Env vars (VLM Race)
+| Var | Default | Notes |
+|---|---|---|
+| `CR2_CHECKPOINT` | auto | Override CR2 model (any HF ID or local path) |
+| `RACE_TIMEOUT_S` | 300 | Per-model timeout in seconds |
+| `NEMOTRON_MODEL` | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` | Override Nemotron model |
+| `QWEN_MODEL_2B` / `QWEN_MODEL_8B` | Qwen3-VL defaults | Override Qwen3-VL model |
+| `GRADIO_PORT` | 7860 | Port |
+| `GRADIO_SHARE` | true | Set to false to disable public link |
+
+### Results
+JSON saved to `/tmp/vlm_race_results.json` after each run. Contains per-model: status, text, TTFT, inference_s, e2e_s, tokens_in, tokens_out, winner flag.
 
 ---
 
-## AGENT PROTOCOL — PRE-PROCESS FIRST
+**Primary launch command (all environments):**
+```bash
+python3 /tmp/byo_video_setup.py
+```
+This script shows live step-by-step progress with ETAs for every install stage, then prints a clickable hyperlink to the Gradio UI. The URL is also written to `/tmp/gradio_url.txt` for agent capture. Deploy it to the instance before running (see deploy section below).
 
-**Before running any remote command, ask ALL of the following in a single message block.**
-Do not start any remote work until all are answered. Do not ask again mid-run.
+---
+
+## AGENT PROTOCOL — Pre-process picker + autonomous execution
+
+### PRE-PROCESS PICKER (ask as a single block before any command fires)
+
+If not already provided, ask these 3 questions together:
+
+**Q1 — Backend?**
+- `vllm` (advanced): longer setup (~15–20 min), quantization supported, fast inference once loaded, lower free VRAM needed at inference time
+- `hf` (basic): shorter setup (~8–12 min), no quantization, slower inference, higher free VRAM needed
+- Default: `vllm` (current sprint default — advanced users). Future no-args default: `hf`.
+
+**Q2 — Model?**
+Any Cosmos HF model ID is accepted. Examples:
+- `nvidia/Cosmos-Reason2-2B` (default — fits ≥12GB VRAM in LOW_VRAM mode)
+- `nvidia/Cosmos-Reason2-8B` (needs ≥80GB free)
+- `nvidia/Cosmos3-Reasoner-8B-Private` (gated — needs a valid HF_TOKEN on the instance)
+- `nvidia/Cosmos-Reason2-2B-FP8` (quantized, vLLM only)
+
+**Q3 — Environment?**
+- `a` New Brev instance — agent provisions. Specify GPU type (default: H100).
+- `b` Existing Brev instance — provide name (from `brev ls`).
+- `c` SSH target — provide `user@host` or IP. Agent discovers GPU automatically.
+- `d` Local machine — agent runs `nvidia-smi` locally, deploys locally.
+
+Once all 3 are answered: agent runs autonomously to Gradio URL capture. No further questions.
+
+---
+
+### AUTONOMOUS EXECUTION
+
+**HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote instance. Do NOT ask the user for their token. Do NOT pass it as a command-line argument. The script handles it.
+
+**DEPLOY_TARGET** (agent-internal, not passed to script):
+- New Brev: provision instance → `brev:<name>`
+- Existing Brev: `brev:<name>`
+- SSH: `ssh:<user@host>`
+- Local: `local`
+
+**Env vars passed to the setup script:**
+| Var | Source | Notes |
+|---|---|---|
+| `INFERENCE_BACKEND` | Q1 answer | `vllm` or `hf` |
+| `MODEL_ID` | Q2 answer | Full HF ID (e.g., `nvidia/Cosmos-Reason2-2B`) |
+| `BREV_RATE_PER_HOUR` | Agent reads from `brev ls` | Brev only; enables credits tracking in dashboard |
+
+**Deploy scripts — one command per tool call (no compound commands):**
+```bash
+# Brev
+brev exec <name> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64>'))\""
+brev exec <name> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64>'))\""
+
+# SSH
+ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64>'))\""
+ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64>'))\""
+```
+
+Record `SETUP_DISPATCHED_AT` (agent-side timestamp) immediately before dispatching the setup script. This timestamp gates the idle billing handler.
+
+**Launch:**
+```bash
+# Brev
+brev exec <name> "export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> BREV_RATE_PER_HOUR=<rate> && python3 /tmp/byo_video_setup.py"
+
+# SSH
+ssh -i ~/.ssh/id_ed25519 <user@host> "export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> && python3 /tmp/byo_video_setup.py"
+```
+
+Note: CLAUDE.md prohibits compound commands in Bash tool calls. Use env vars in the launch string inside the quoted remote command — that is remote shell syntax, not local shell chaining.
+
+URL capture fallback (if stream drops before URL prints):
+```bash
+brev exec <name> "cat /tmp/gradio_url.txt"
+# or
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt"
+```
+
+---
+
+### UNHEALTHY MONITORING (Brev)
+
+After instance creation, poll `brev ls` every 60s until SHELL column shows READY.
+
+If STATUS shows `UNHEALTHY` at any point: **report it immediately.** Do NOT wait for the user to notice.
+
+1. Test GPU: `brev exec <name> "nvidia-smi"`
+2. If GPU responds → UNHEALTHY is a Brev daemon flag (not hardware). Document it, continue.
+3. If GPU doesn't respond → BLOCKED. Tell user, offer to provision a new instance.
+
+Never let UNHEALTHY pass silently.
+
+---
+
+### IDLE BILLING HANDLER
+
+Trigger: `SETUP_DISPATCHED_AT` is null AND instance has been at SHELL READY for >5 minutes.
+(This means the picker is still open, or user is reviewing — instance is burning credits with nothing running.)
+
+Alert:
+```
+⚠️  <instance-name> is idle — <elapsed> at $<rate>/hr.
+    $<credits_burned> spent so far. Setup not yet started.
+    
+    Options:
+      [s] Start setup now
+      [d] Delete instance  
+      [w] Wait 5 more min
+```
+
+- Do NOT auto-terminate.
+- If user picks [w]: reset timer, repeat alert at +5 min.
+- If user picks [s]: proceed to Q3 confirmation and launch.
+- If user picks [d]: `brev delete <name>` (confirm before running).
+
+---
+
+### PROVIDER FALLBACK
+
+If Brev provisioning fails, surface the failure clearly and offer alternatives:
 
 ```
-───────────────────────────────────────────────────────────────
-COSMOS BYO-VIDEO — SETUP (answer all, then I run autonomously)
-───────────────────────────────────────────────────────────────
-1. Environment:   local | horde | brev
-2. Host / IP:     [skip if local]
-3. Model family:  cosmos3-reasoner [recommended, private] | cosmos-reason2 [public]
-4. Model size:    2B [default, fits 40+ GB VRAM] | 8B [needs 80 GB]
-5. Backend:       hf-transformers [default] | vllm [sub-second TTFT, H100+]
-───────────────────────────────────────────────────────────────
+✗  <brev create command> failed: <exact error>
+
+Fallback options:
+  → H100 (hyperstack_H100): $3.70/hr — same GPU, different provider
+  → A100-80GB (hyperstack_A100): $2.20/hr  (-$1.50/hr, 80GB VRAM)
+  → A40 (scaleway_A40): $1.10/hr  (-$2.60/hr, 48GB VRAM, LOW_VRAM mode)
+
+Pick one, or cancel.
 ```
 
-**HF_TOKEN handling (secure — never echo to terminal output):**
-1. Check remote cache first: `ssh horde@<ip> "cat ~/.cache/huggingface/token 2>/dev/null || echo MISSING"`
-2. If found: use silently. If `MISSING`: ask once, then copy via: `ssh horde@<ip> "mkdir -p ~/.cache/huggingface && tee ~/.cache/huggingface/token > /dev/null"` with token piped via stdin — NOT as a command-line argument.
-3. Never pass HF_TOKEN as a command-line arg (`export HF_TOKEN=hf_...` in commands appears in `ps aux`, shell history, and agent logs).
-4. For Brev: use `brev env set HF_TOKEN=hf_...` (stored as Brev secret, not in command history).
+Wait for explicit user selection. Do NOT auto-provision a fallback.
 
-**NGC_API_KEY:** Not required for Cosmos3-Reasoner or any CR2 model. Only needed for NIM endpoint mode.
+---
+
+### KILL ALERT
+
+When Alex signals done, send via `teams-notify.sh` (NOT pa-cli):
+```bash
+~/.claude/scripts/teams-notify.sh "Cosmos demo done on <provider>/<instance>. Kill when ready."
+```
+
+Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
+
+**AGENT RUNS AUTONOMOUSLY (do not ask the user to run these):**
+- All environment detection (`nvidia-smi`, `brev ls`, etc.)
+- All deploy steps (base64 encode + copy)
+- Bootstrap and launch via `byo_video_setup.py`
+- URL capture from `/tmp/gradio_url.txt`
+- UNHEALTHY polling
+- Idle billing alerts
+
+**Crisp interaction target:** 3 picker answers → agent runs everything else without prompting.
+
+---
 
 ---
 
 ## Supported models
 
-| Model | Family | Size | Min VRAM | Preferred backend | Access |
-|---|---|---|---|---|---|
-| Cosmos3-Reasoner-2B-Private (C3R-2B) | Cosmos3 | 2B VLM | ~40 GB | HF Transformers | 🔒 Private (nvidia org) |
-| Cosmos3-Reasoner-8B-Private (C3R-8B) | Cosmos3 | 8B VLM | ~80 GB | vLLM | 🔒 Private (nvidia org) |
-| Cosmos3-Reasoner-32B-Private (C3R-32B) | Cosmos3 | 32B VLM | H200 141GB or 2×H100 80GB | vLLM (--tensor-parallel-size 1 on H200; --tensor-parallel-size 2 on 2×H100) | 🔒 Private (nvidia org) |
-| Cosmos Reason2 (CR2-2B) | CR2 | 2B VLM | 40 GB | HF Transformers | Public |
-| Cosmos Reason2 (CR2-8B) | CR2 | 8B VLM | 80 GB | vLLM (hot-swap via dropdown) | Public |
-| Cosmos Reason2 (CR2-8B-NVFP4) | CR2 | 8B VLM | 80 GB | vLLM | Public |
-| Cosmos Reason2 (CR2-8B-FP8) | CR2 | 8B VLM | 80 GB | vLLM | Public |
+| Model | Size | Min VRAM | Use case |
+|---|---|---|---|
+| Cosmos Reason2 (CR2-2B) | 2B VLM | 40 GB | Video understanding: robotics, AV, Metropolis |
+| Cosmos Reason2 (CR2-8B) | 8B VLM | 80 GB | Same, higher quality |
+| Cosmos Transfer2.5 | Gen | 80 GB+ | Video-to-video generation, sim2real |
+| Cosmos Predict2 | Gen | 80 GB+ | World model generation |
 
-**Cosmos3-Reasoner notes:**
-- Requires HF_TOKEN from an account with approved access to `nvidia/Cosmos3-Reasoner-2B-Private` / `nvidia/Cosmos3-Reasoner-8B-Private` / `nvidia/Cosmos3-Reasoner-32B-Private` on HuggingFace.
-- Uses `MODEL_SIZE=C3-2B`, `MODEL_SIZE=C3-8B`, or `MODEL_SIZE=C3-32B` in setup script.
-- Architecture: Qwen3-VL family (same HF Transformers API as CR2 — compatible with existing Gradio app).
-- L40S (46 GB): C3-2B fits; C3-8B and C3-32B require ~80 GB → use C3-2B on L40S.
-- C3-32B: H200 141GB (preferred) or 2×H100 TP=2 (fallback). Use `massedcompute_H200` or provision two `massedcompute_H100` with TP=2. Disk minimum 1TB. Weight size ~60-70GB BF16 (25 safetensor files).
-
-CR2-2B runs on workstation hardware (≥40GB). CR2-8B requires an H100 or A100 80GB; use vLLM backend for sub-second TTFT (HF gives ~44s on H100 vs ~174ms on vLLM).
-
----
-
-## Disk requirements
-
-**3× 8B variants on-disk needs ≥200GB free.**
-
-| Checkpoint | Disk |
-|---|---|
-| Cosmos-Reason2-8B (BF16) | ~16 GB |
-| Cosmos-Reason2-8B-FP8 | ~10 GB |
-| Cosmos-Reason2-8B-NVFP4 | ~7 GB |
-| Cosmos-Reason2-2B-FP8 | ~3 GB |
-| OS + Python env (cosmos-reason2) | ~35 GB |
-| HF download cache (temp) | = model size while downloading |
-| Video uploads | up to 1 GB each |
-| **Total recommended** | **≥200 GB** |
-
-**Important:** `snapshot_download` creates hardlinks between the HF cache and the local model dir. `du -sh` on each directory double-counts the blocks. The HF cache (`~/.cache/huggingface/hub/`) can be deleted safely once a model is installed — the files in `cosmos-reason2/models/` are the real copies. Use the Storage panel in the Gradio UI to monitor and clean.
+Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+). Reason2 at 2B runs on workstation hardware (≥40GB).
 
 ---
 
 ## VRAM auto-selection
 
-The setup script (`byo_video_setup.py`) handles tier selection automatically:
+The setup script (`byo_video_setup.py`) handles all of this automatically. Rules as of 2026-04-21:
 
-**Model selection** — CR2-2B for the live demo (8B fails the <60s inference target on non-H100 GPUs). Force 8B via `MODEL_NAME=nvidia/Cosmos-Reason2-8B` env var.
+**Model selection** — always CR2-2B for the live demo (8B fails the <60s inference target on non-H100 GPUs). Force 8B via `MODEL_NAME=nvidia/Cosmos-Reason2-8B` env var if quality > speed.
 - ≥ 40000 MiB free → `nvidia/Cosmos-Reason2-2B`
 - < 40000 MiB → CR2-2B with LOW_VRAM mode (fps=1, reduced resolution)
 
-**FPS/pixel tier** — detected by GPU name (not free VRAM), because workstation GPUs have large VRAM but slower prefill compute:
-
-| Tier | GPU names | fps | max_pixels | Expected TTFT (HF) |
+**FPS/pixel tier** — detected by GPU name (not free VRAM), because workstation GPUs like RTX PRO 6000 have large VRAM but slower prefill compute:
+| Tier | Condition | fps | max_pixels | Expected inference |
 |---|---|---|---|---|
-| H100/A100 | H100, A100, H200, GB200 | 8 | 1,048,576 | ~18s TTFT (vLLM: ~174ms) |
-| High-VRAM (non-H100) | RTX PRO, A40, A30, etc. | 8 | 524,288 | ~18s TTFT |
-| Low-VRAM | < 40GB free | 4 | 131,072 | ~80–120s |
+| H100/A100 | GPU name contains H100, A100, H200, GB200 | 2 | 1,048,576 | ~44s (validated H100) |
+| High-VRAM (non-H100) | ≥40GB free, non-H100 (RTX PRO, A40, A30, etc.) | 1 | 524,288 | ~54s (validated RTX PRO 6000 97GB) |
+| Low-VRAM | <40GB free | 1 | 131,072 | ~80-120s |
+| Ultra-Low-VRAM | <8GB free (RTX 5070, GTX 3090, etc.) | 1 | 65,536 | ~120-180s; may OOM on videos >5s at 720p — pre-resize to 360p |
 
----
+**Pre-kill**: setup script kills any process on port 7860 BEFORE measuring VRAM, so stale processes don't skew the tier selection.
 
-## Backend comparison: HF Transformers vs vLLM
-
-| Metric | HF Transformers | vLLM |
-|---|---|---|
-| TTFT (H100, CR2-8B, 2K tokens) | ~18–44s | ~174ms |
-| TTFT (H100, CR2-8B, 4K tokens) | — | ~341ms |
-| TTFT (H100, CR2-8B, 8K tokens) | — | ~724ms |
-| Prefill throughput | ~23 tok/s (RTX PRO 6000) | ~12,000 tok/s (H100) |
-| Model load time | 10–20s (cached) | 60–90s (server restart) |
-| Hot-swap to new checkpoint | ~30s (Python re-load) | ~60–90s (vLLM restart) |
-| Concurrent requests | blocked per request | full batching |
-| Quantization support | FP8 via HF auto | FP8, NVFP4 native |
-
-**When to use HF mode:** Demos where startup time matters more than TTFT. CR2-2B on workstations. Environments where vLLM is not installed.
-
-**When to use vLLM mode:** Benchmarking, customer demos requiring sub-second TTFT, any 8B variant. The Gradio dropdown triggers live server hot-swap between NVFP4/FP8/BF16 without restarting the UI.
-
----
-
-## vLLM best practices (from Nemotron-Nano-12B vLLM recipe)
-
-These flags apply to any video VLM served via vLLM. Always set explicitly — never rely on defaults.
-
-| Flag / env var | Required value | Why |
-|---|---|---|
-| `VLLM_VIDEO_LOADER_BACKEND=opencv` | opencv | Required for vLLM video frame extraction; default ffmpeg backend is unreliable on many cloud images |
-| `--max-model-len` | **32768 minimum** (MAXLEN-001) | Default 8192 causes 400 Bad Request on typical video queries (8 frames × 1920×1080 > 8192 tokens) |
-| `--trust-remote-code` | (always) | Required for all Cosmos/Nemotron models |
-| `--gpu-memory-utilization` | 0.85 | Leaves headroom for KV cache |
-| `SKIP_HF_PRELOAD=1` | (in vLLM mode) | PRELOAD-001: prevents double-loading model into Python + vLLM simultaneously (~9 GB wasted) |
-
-**vLLM version:** 0.11.0 is the last stable version on CUDA 12.8 (driver 570.x, Hyperstack H100). v0.12.0 breaks on this driver. `byo_video_setup.py` auto-detects driver and pins to 0.11.0 when needed.
-
-**Full vLLM launch command (reference):**
-```bash
-VLLM_VIDEO_LOADER_BACKEND=opencv \
-SKIP_HF_PRELOAD=1 \
-nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/<model-dir> \
-  --served-model-name nvidia/<hf-model-id> \
-  --port 8000 \
-  --dtype auto \
-  --trust-remote-code \
-  --max-model-len 32768 \
-  --gpu-memory-utilization 0.85 \
-  > /tmp/vllm.log 2>&1 &
-```
+Transfer2.5 / Predict2: abort if < 80000. Do not proceed.
 
 ---
 
@@ -190,126 +325,140 @@ Check in this order:
 ### Step 1 — Create or reuse instance
 
 ```bash
-# massedcompute_H100 gives 1TB disk (required for multi-model) at $3.58/hr
-brev create byo-video-vllm --type massedcompute_H100
+# Create new instance (name it something meaningful)
+brev create <name> --gpu-name H100 --type hyperstack_H100
 
 # Or list existing
 brev ls
 ```
 
-**Why massedcompute_H100?** 1TB disk. The hyperstack_H100 ($2.28/hr) provisions ~97GB OS disk — too small to hold 3× 8B variants + download cache + video uploads. massedcompute gives sufficient headroom.
-
-Wait for STATUS: RUNNING. Then confirm the instance is reachable:
+Wait for STATUS: RUNNING. Then get the public IP:
 ```bash
-ssh byo-video-vllm "nvidia-smi"
+brev exec <name> "curl -s ifconfig.me"
 ```
-
-**Note — BUG-009:** `brev exec <instance> -- bash -c "cmd"` has a multi-instance parsing bug: each word after `--` is treated as both a command token AND an instance name attempt. Use `ssh <instance> "cmd"` directly instead. brev auto-maintains `~/.brev/ssh_config` (included in `~/.ssh/config`) so SSH works immediately after the instance is READY.
 
 ### Step 2 — Bootstrap
 
-Run once per fresh instance.
+Run once per fresh instance. All commands via `brev exec <name> "<cmd>"`.
 
 ```bash
 # Install uv
-ssh byo-video-vllm "curl -LsSf https://astral.sh/uv/install.sh | sh"
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Clone cosmos-reason2
-ssh byo-video-vllm "git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2"
+# Clone cosmos-reason2 (provides model code + sample video)
+git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
 
-# Install dependencies (CUDA 12.9+/13.0: cu128 extra; byo_video_setup.py gates to 0.11.0 if driver <575)
-ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv sync --extra cu128"
+# Install dependencies
+cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:$PATH && uv sync --extra cu128
 
-# Install PyAV
-ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install av==16.1.0"
+# Install PyAV (required on Hyperstack — FFmpeg not in PATH)
+uv pip install "av==16.1.0"
 
-# Install vLLM (for vLLM backend — already included via cu128 extra; install explicitly to confirm)
-ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv pip install vllm"
-
-# Download first model (transfer HF token via brev copy — no brev env set in current version)
-brev copy ~/.cache/huggingface/token byo-video-vllm:/tmp/hf_token
-ssh byo-video-vllm "mkdir -p ~/.cache/huggingface && cp /tmp/hf_token ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token"
-ssh byo-video-vllm "cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && uv run hf download nvidia/Cosmos-Reason2-8B-NVFP4 --local-dir models/Cosmos-Reason2-8B-NVFP4"
+# Download model weights (CR2-2B ~8GB, first-run only, ~5-10 min on cloud bandwidth)
+export HF_TOKEN=hf_...
+uv run huggingface-cli download nvidia/Cosmos-Reason2-2B \
+  --local-dir ~/cosmos-reason2/models/Cosmos-Reason2-2B
 ```
 
-### Step 3 — Start vLLM server
+### Step 3 — Deploy scripts and launch
+
+Two scripts must be present on the instance:
+- `/tmp/byo_video_setup.py` — shows live progress + ETAs, launches Gradio, prints clickable URL
+- `/tmp/gradio_cr2_byo.py` — the Gradio app itself (called by setup script)
+
+Both live at `~/.claude/scripts/` on Alex's Mac (canonical, versioned). Deploy via base64:
 
 ```bash
-# Use screen -dmS for proper SSH-detachment (nohup alone keeps SSH open — BUG-009 workaround)
-ssh byo-video-vllm "screen -dmS vllm_server bash -c 'nohup ~/cosmos-reason2/.venv/bin/vllm serve ~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 32768 --gpu-memory-utilization 0.85 > /tmp/vllm.log 2>&1'"
+# Deploy both scripts to the instance
+for script in byo_video_setup gradio_cr2_byo; do
+  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
+  brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
+done
 ```
 
-Wait ~60–90s for vLLM to load, then confirm:
+Then run setup (streams live progress to this terminal).
+Note: pass env vars as separate exports in the remote quoted command — HF_TOKEN is auto-read by the script from `~/.cache/huggingface/token` on the instance (do not pass it manually):
 ```bash
-ssh byo-video-vllm "curl -s http://localhost:8000/v1/models"
+brev exec <name> "export INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B BREV_RATE_PER_HOUR=3.70 PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py"
 ```
 
-### Step 4 — Deploy scripts and launch Gradio
+The script will:
+1. Print a 9-step setup dashboard and begin executing
+2. Detect GPU + VRAM tier (H100 / High-VRAM / Low-VRAM / Ultra-Low-VRAM)
+3. Validate HF token (whoami check — fails fast if expired)
+4. Install any missing deps (uv, repos, PyAV, Gradio)
+5. Download model weights with retry logic
+6. Launch Gradio and print a **clickable hyperlink** to the public `gradio.live` URL
+7. Report elapsed time and credits spent throughout
 
-```bash
-# Deploy scripts
-brev copy ~/.claude/scripts/gradio_cr2_byo.py byo-video-vllm:/tmp/gradio_cr2_byo.py
-brev copy ~/.claude/scripts/byo_video_setup.py byo-video-vllm:/tmp/byo_video_setup.py
+### Step 4 — The URL appears at the end
 
-# Launch Gradio in vLLM mode via screen (proper detachment)
-ssh byo-video-vllm "screen -dmS gradio_demo bash -c 'cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:\$PATH && INFERENCE_BACKEND=vllm MODEL_SIZE=8B .venv/bin/python /tmp/gradio_cr2_byo.py > /tmp/gradio.log 2>&1'"
-
-# Wait ~15s for Gradio to start, then get URL (use tail -F to follow by name, not inode — BUG-008)
-ssh byo-video-vllm "tail -F /tmp/gradio_url.txt"
+Example output:
 ```
+──────────────────────────────────────────────────────────────
+  Cosmos Reason2 Demo — Ready
+──────────────────────────────────────────────────────────────
+  URL:  https://xxxxxxxxxxxx.gradio.live
+  Upload any MP4 → type a prompt → click Run Inference
+  Link valid for 72h. Kill instance when done.
+──────────────────────────────────────────────────────────────
+```
+
+The URL is an OSC 8 hyperlink — click it directly in iTerm2 or Terminal.app (macOS). Valid for 72 hours.
 
 ### Step 5 — Kill alert (required)
 
 When Alex is done:
 ```bash
-/Users/asotelo/.nvcowork/bin/pa --agent tpm --print \
-  "Send a Microsoft Teams message to chat ID 48:notes with this text: \
-  'byo-video demo done on brev/byo-video-vllm (H100). Instance can be terminated.'" \
-  --max-duration 90
+~/.claude/scripts/teams-notify.sh "Cosmos demo done on brev/<name>. Kill when ready."
 ```
 
 Do NOT auto-terminate. Notify Alex and wait for explicit kill confirmation.
 
 ---
 
-## vLLM checkpoint hot-swap
-
-The Gradio dropdown triggers live vLLM server restart when you select a different checkpoint:
-
-1. Select checkpoint → orange banner: "⚠ Restarting vLLM for {model}…"
-2. Polls `/v1/models` every 5s (~60–90s total)
-3. Banner turns green: "✅ vLLM now serving {model} ({Ns})"
-4. If model is not on disk → grey banner + **"Download & Load"** button
-5. "Download & Load" → HF Hub download → auto-swap vLLM
-
-Dropdown includes all 2B, 8B, and 32B variants. Models not on disk show "not on disk" banner until downloaded.
-
----
-
 ## Local web demo (no cloud billing)
 
-Same Gradio app, runs on your own GPU machine.
+Same Gradio app, runs on the user's own GPU machine.
 
+Prerequisites:
 ```bash
-# Bootstrap (once)
+export HF_TOKEN=hf_...
+# Check VRAM — must be ≥40GB for CR2-2B
+nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1
+```
+
+Bootstrap (once):
+```bash
 git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
 cd ~/cosmos-reason2
 uv sync --extra cu128
 uv pip install "av==16.1.0" gradio
-export HF_TOKEN=hf_...
-uv run hf download nvidia/Cosmos-Reason2-2B \
+uv run huggingface-cli download nvidia/Cosmos-Reason2-2B \
   --local-dir ~/cosmos-reason2/models/Cosmos-Reason2-2B
+```
 
-# Launch (HF mode, CR2-2B)
+Launch:
+```bash
 export MODEL_DIR=~/cosmos-reason2/models/Cosmos-Reason2-2B
 export MODEL_NAME=nvidia/Cosmos-Reason2-2B
 cd ~/cosmos-reason2
 uv run python /tmp/gradio_cr2_byo.py
 ```
 
+Open `http://localhost:7860` in any browser. No kill alert needed — local machine.
+
+**Claude auth on local:** If running via Claude Code on a headless SSH machine, check auth first:
+```bash
+claude auth status
+```
+If `loggedIn: false`: `claude auth login --console` (API/console.anthropic.com users) or `claude auth login` (Claude.ai). On SSH — a URL prints; open it in your local browser.
+
 ---
 
 ## Headless inference (programmatic / no browser)
+
+For CI or batch use where no browser is needed. Results go to JSON only.
 
 ```bash
 export HF_TOKEN=hf_...
@@ -317,77 +466,156 @@ export BYO_VIDEO=/path/to/video.mp4
 export MODEL_DIR=~/cosmos-reason2/models/Cosmos-Reason2-2B
 export MODEL_NAME=nvidia/Cosmos-Reason2-2B
 export OUT_FILE=/tmp/byo_video_reason2_results.json
+export PROVIDER=brev  # or horde, local
 cd ~/cosmos-reason2
 uv run python /tmp/smoke_cr2_byo.py
 ```
+
+Results at `/tmp/byo_video_reason2_results.json`.
 
 ---
 
 ## Horde (SSH-based — asotelo org)
 
-**SSH username is `horde`** — confirmed 2026-04-17. Not `ubuntu`, `nvidia`, or `root`.
+Horde instances are created via REST API, accessed via SSH.
 
-**Active Horde instances (2026-04-27):**
-| IP | GPU | VRAM | Arch | Status |
-|---|---|---|---|---|
-| 10.57.235.180 | L40S | 46 GB | aarch64 | Active — deploy C3-2B (8B doesn't fit) |
-| 10.57.235.179 | L40S | 46 GB | aarch64 | Active |
+**Critical:** SSH username is `horde` — confirmed empirically 2026-04-17. Not `ubuntu`, `nvidia`, `root`, or `asotelo`.
 
-**⚠️ aarch64 note:** Both 2026-04 machines run ARM64. Standard PyPI wheels (x86_64) will fail. Use the Horde-native Python environment — check `python3 -c "import torch; print(torch.cuda.is_available())"` before attempting install. If False, the environment needs to be set up for ARM64+CUDA first.
+Agent steps:
+1. Create instance via Horde API v4 (`POST /api/v4/instances`) — or use existing `asotelo-uzof99`
+2. Poll `GET /api/v4/instances/<id>` until `status: running`
+3. Deploy scripts to instance (canonical source is `~/.claude/scripts/`):
+   ```bash
+   for script in byo_video_setup gradio_cr2_byo; do
+     B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
+     ssh -i ~/.ssh/id_ed25519 horde@<ip> \
+       "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
+   done
+   ```
+4. Run setup (streams live output here):
+   ```bash
+   ssh -i ~/.ssh/id_ed25519 horde@<ip> \
+     "export HF_TOKEN=hf_... && python3 /tmp/byo_video_setup.py"
+   ```
+5. URL prints at the end AND is written to `/tmp/gradio_url.txt` — read it back with `cat /tmp/gradio_url.txt` via ssh
 
-**HF_TOKEN — check cached first (never echo to commands):**
-```bash
-ssh horde@<ip> "cat ~/.cache/huggingface/token 2>/dev/null || echo MISSING"
-```
-If MISSING, set it via stdin pipe (avoids command-line exposure):
-```bash
-echo "hf_..." | ssh horde@<ip> "mkdir -p ~/.cache/huggingface && cat > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token"
-```
+**HOME on Horde is `/home/horde/`** — setup script uses `os.path.expanduser("~")` so it adapts automatically.
 
-Deploy scripts (base64 transfer — no scp required):
-```bash
-for script in byo_video_setup gradio_cr2_byo; do
-  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
-  ssh horde@<ip> \
-    "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
-done
-```
-
-Run setup (reads HF_TOKEN from cached file automatically):
-```bash
-ssh horde@<ip> "MODEL_SIZE=C3-2B python3 /tmp/byo_video_setup.py"
-```
-
-**Horde capacity API is stale** — reports availability that doesn't match actual pool. Confirmed 2026-04-17.
+**Horde capacity API is stale.** Reports availability that doesn't match actual pool — confirmed across all SKUs as of 2026-04-17. Expect provisioning failures even when API shows GPUs available. Retry or use Brev. Existing instance `asotelo-uzof99` (A40) is the reliable fallback.
 
 ---
 
-## Gradio app: backend modes
+## Nebius (OpenAI-compatible API endpoint)
 
-| Mode | Env var | Notes |
+Nebius runs Reason2 as a vLLM serving endpoint — no SSH, no Gradio needed. Useful for API integration testing, not for interactive browser demos.
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://<instance>.nebius.ai/v1", api_key="<nebius-key>")
+response = client.chat.completions.create(
+    model="nvidia/Cosmos-Reason2-2B",
+    messages=[{"role": "user", "content": [
+        {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,<b64>"}},
+        {"type": "text", "text": "Describe what is happening in this video."}
+    ]}]
+)
+```
+
+Write result to `/tmp/byo_video_reason2_results.json`. Send Teams kill alert when done.
+
+---
+
+## Gradio app script
+
+Canonical source: **`~/.claude/scripts/gradio_cr2_byo.py`** (versioned 2026-04-21).
+
+Features (as of 2026-04-21):
+- **Checkpoint selector** — Advanced Settings accordion has a preset dropdown (CR2-2B base, CR2-2B FP8, CR2-8B NVFP4, NIM 2B) plus a custom model ID field. Any HF model ID or local path is accepted.
+- **On-demand load/unload** — switching checkpoints does `del model → gc.collect() → cuda.empty_cache()` before loading the next variant. VRAM is confirmed free before loading.
+- **Run All Variants button** — sequential benchmark: FP8 → NVFP4 → NIM, each unloaded before the next. Results saved to `/tmp/byo_video_benchmark.json`.
+- **Right-side status panel** — replaces the grey loading box. Shows Step N/5 WIP tracker (resolve / load / preprocess / prefill / generate) with ✅/⟳/— per step, plus live token metrics: prefill count, generated count (running), TTFT, inference time.
+- **NIM mode** — calls NVCF API (`https://integrate.api.nvidia.com/v1/chat/completions`) via NGC_API_KEY (nvapi- prefix). Extracts up to 8 JPEG frames from the video and sends them as image content. No local model load needed.
+- LOW_VRAM mode, PyAV backend, qwen_vl_utils pipeline, auto-cap, results JSON — all retained from 2026-04-20.
+
+Deploy to instances via base64 as shown in the deploy section.
+
+**Do not embed the source here.** The canonical file is the source of truth.
+
+### Checkpoint selector usage
+
+| Method | How |
+|---|---|
+| Preset (base, FP8, NVFP4, NIM) | Advanced Settings → Checkpoint dropdown |
+| Custom HF ID | Advanced Settings → Custom Checkpoint ID field (overrides dropdown) |
+| Custom local path | Same custom field — accepts `/path/to/model` |
+| Env var (headless) | `export CR2_CHECKPOINT=nvidia/Cosmos-Reason2-2B-FP8` before setup |
+
+For multi-variant benchmarking without the UI, click **Run All Variants** — runs FP8 → NVFP4 → NIM sequentially.
+
+### NIM mode requirements
+
+| Item | Value |
+|---|---|
+| NGC_API_KEY | `nvapi-...` prefix (set in env before setup, passed to Gradio) |
+| Model identifier | `nvidia/cosmos-reason2-2b` (NVCF catalog) |
+| Video input | Up to 8 JPEG frames extracted by PyAV at selected fps |
+| Auth header | `Authorization: Bearer $NGC_API_KEY` |
+| Output | Streamed via SSE, same JSON results format as HF path |
+
+Set `NGC_API_KEY` before running `byo_video_setup.py` — it passes it through to the Gradio process env.
+
+### Setup script — multi-variant mode
+
+Set `MULTI_VARIANT=true` to also pre-download FP8 and NVFP4 model weights during setup:
+
+```bash
+export HF_TOKEN=hf_...
+export NGC_API_KEY=nvapi-...
+export MULTI_VARIANT=true
+python3 /tmp/byo_video_setup.py
+```
+
+Without `MULTI_VARIANT=true`, only the base model downloads. FP8/NVFP4 will download from HF on first use in Gradio (with HF_TOKEN).
+
+### Env vars (single-model mode)
+
+| Var | Default | Notes |
 |---|---|---|
-| HF Transformers | `INFERENCE_BACKEND=hf` (default) | Loads model into Python; ~10-20s load, ~18-44s TTFT |
-| vLLM | `INFERENCE_BACKEND=vllm` | Requires vLLM server on port 8000; sub-second TTFT |
-| NIM (NVCF) | `INFERENCE_BACKEND=nim` | NGC API key required; no local GPU |
-| NIM local | `INFERENCE_BACKEND=nim_local` | Container on local GPU; 5-image limit |
-
-**Canonical source:** `~/.claude/scripts/gradio_cr2_byo.py` — deploy via `brev copy` or base64.
+| `MODEL_NAME` | `nvidia/Cosmos-Reason2-2B` | HF model ID to load at startup |
+| `MODEL_DIR` | `~/cosmos-reason2/models/Cosmos-Reason2-2B` | Local path |
+| `HF_TOKEN` | — | Required for gated model download |
+| `NGC_API_KEY` | — | Required for NIM mode (`nvapi-` prefix) |
+| `MULTI_VARIANT` | false | `true` = also download FP8 + NVFP4 during setup |
+| `GRADIO_PORT` | 7860 | Gradio server port |
+| `GRADIO_SHARE` | true | Set `false` to disable public link |
+| `GRADIO_FPS` | tier-based | Passed by setup script |
+| `GRADIO_MAX_PIXELS` | tier-based | Passed by setup script |
+| `GRADIO_PREFILL_TPS` | tier-based | Passed by setup script |
+| `LOW_VRAM` | auto | Set `true` to force low-VRAM mode |
+| `OUT_FILE` | `/tmp/byo_video_reason2_results.json` | Per-run results JSON path |
 
 ---
 
-## AGENT EXECUTION PROTOCOL
+## Cosmos cookbook structure (as of 2026-04-17)
 
-After pre-process answers are received, the agent runs autonomously:
-- Environment detection, deploy steps, bootstrap, URL capture, kill alert.
-- HF_TOKEN: read from remote cache (never asked mid-run).
-- BYO video: upload via Gradio UI after launch, or pre-place at a path on the instance.
-- Kill alert: sent via Teams (pa-cli) at end — never auto-terminate.
+The cookbook repo restructured. **`deploy/` directory no longer exists.** Old shell script paths are invalid.
+
+| What | New location |
+|---|---|
+| Brev Reason2 setup script | `docs/getting_started/brev/reason2/setup_script.sh` |
+| Worker safety recipe (Python) | `docs/recipes/inference/reason2/worker_safety/worker_safety.py` |
+| Transfer2.5 real augmentation | `docs/recipes/inference/transfer2_5/inference-real-augmentation/inference.md` |
+| Predict2 ITS | `docs/recipes/inference/predict2/inference-its/inference.md` |
+
+For BYO-video inference, **do not use cookbook scripts** — use `gradio_cr2_byo.py` (web demo) or `smoke_cr2_byo.py` (headless) directly against the `cosmos-reason2` repo environment.
 
 ---
 
 ## PyAV backend patch (always apply)
 
-Required on Hyperstack and Horde — FFmpeg not in system PATH. Already embedded in `gradio_cr2_byo.py` and `smoke_cr2_byo.py`.
+Required on Hyperstack and most Horde images — FFmpeg is not in system PATH so torchcodec fails. Already embedded in both `gradio_cr2_byo.py` and `smoke_cr2_byo.py`.
+
+If writing a new inference script, prepend this before loading the processor:
 
 ```python
 from transformers import video_processing_utils
@@ -408,16 +636,136 @@ video_processing_utils.BaseVideoProcessor.fetch_videos = _patched_fetch_videos
 
 ## Timing benchmarks
 
-| Environment | GPU | Model | Backend | TTFT | Pass <60s? |
-|---|---|---|---|---|---|
-| Brev Hyperstack | H100 PCIe | CR2-2B BF16 | HF | ~44s | ✅ |
-| Brev Hyperstack | H100 PCIe | CR2-2B BF16 | HF | ~43s (2nd run) | ✅ |
-| Horde | A40 | CR2-2B BF16 | HF | ~77s | ❌ |
-| Horde | RTX PRO 6000 Blackwell 97GB | CR2-2B BF16 | HF | ~55s | ✅ |
-| Horde | RTX PRO 6000 Blackwell 97GB | CR2-8B BF16 | HF | >62s | ❌ |
-| Brev H100 | H100 | CR2-8B NVFP4 | vLLM | ~174ms (2K tok) | ✅ |
-| Brev H100 | H100 | CR2-8B NVFP4 | vLLM | ~341ms (4K tok) | ✅ |
-| Brev H100 | H100 | CR2-8B NVFP4 | vLLM | ~724ms (8K tok) | ✅ |
+| Environment | GPU | Model | Tier | Load | Inference | Pass <60s? |
+|---|---|---|---|---|---|---|
+| Brev Hyperstack | H100 PCIe | CR2-2B | fps=2, 1M px | 1.7s | 44.1s | ✅ |
+| Brev Hyperstack | H100 PCIe | CR2-2B | fps=2, 1M px | 10.6s | 42.9s | ✅ |
+| Horde | A40 | CR2-2B | fps=1, 512K px | 2.9s | 76.9s | ❌ (old — no tier) |
+| Horde | RTX PRO 6000 Blackwell (97GB) | CR2-2B | fps=1, 512K px | 3.4s | 54.8s | ✅ |
+| Horde | RTX PRO 6000 Blackwell (97GB) | CR2-8B | fps=1, 1M px | 10.4s | >62s TTFT | ❌ |
+| Brev H100 | H100 | CR2-2B-FP8 | fps=8, 1M px | TBD | TBD | ⏳ pending smoke gate |
+| Brev H100 | H100 | CR2-8B-NVFP4 | fps=8, 1M px | TBD | TBD | ⏳ pending smoke gate |
+| Brev H100 | H100 | NIM 2B (NVCF) | 8 frames | N/A | TBD | ⏳ pending smoke gate |
+
+Notes:
+- "Inference" = preprocess + prefill + decode (TTFT-dominated for video inference)
+- Old A40 result was without VRAM tier tuning; with fps=1 it would likely be ~55-65s
+- CR2-8B fails the <60s target on all non-H100 GPUs tested; use CR2-2B for demos
+- FP8/NVFP4/NIM timing benchmarks TBD — update after Bronson smoke gate (byo-video Checkpoint & NIM Sprint, 2026-04-21)
+
+---
+
+## Dynamic Reconfiguration — Switching Model Class at Runtime
+
+**When invoked with `<instance> <model-class>` arguments**, the skill changes the active model without touching the static launch scripts.
+
+Usage:
+```
+/byo-video byo-video-vllm 8B
+/byo-video byo-video-vllm 2B
+/byo-video 10.0.1.103 8B
+```
+
+### Known instances (Hyperstack, private subnet 10.0.1.0/24)
+
+| Brev name | IP | Backend | Default size | NGC env |
+|---|---|---|---|---|
+| `byo-video-vllm` | 10.0.1.103 | vLLM 0.11.0 | 8B NVFP4 | `/home/shadeform/.ngc_env` |
+| `byo-video-nim` | 10.0.1.248 | HF Transformers | 2B BF16 | — |
+
+### Models on disk (byo-video-vllm)
+
+| Size | Local path | HF ID |
+|---|---|---|
+| 2B FP8 | `~/cosmos-reason2/models/Cosmos-Reason2-2B-FP8` | `nvidia/Cosmos-Reason2-2B-FP8` |
+| 2B BF16 | `~/cosmos-reason2/models/Cosmos-Reason2-2B` | `nvidia/Cosmos-Reason2-2B` |
+| 8B NVFP4 | `~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4` | `nvidia/Cosmos-Reason2-8B-NVFP4` |
+| 8B FP8 | `~/cosmos-reason2/models/Cosmos-Reason2-8B-FP8` | `nvidia/Cosmos-Reason2-8B-FP8` |
+| 8B BF16 | `~/cosmos-reason2/models/Cosmos-Reason2-8B` | `nvidia/Cosmos-Reason2-8B` |
+| 32B BF16 | not yet downloaded | `nvidia/Cosmos-Reason2-32B` |
+| 32B AV | not yet downloaded | `nvidia/Cosmos-Reason2-32B-AV` |
+
+### Reconfiguration procedure (agent runs all steps)
+
+**Step 1 — Kill Gradio:**
+```bash
+brev exec <instance> "pkill -f gradio_cr2_byo"
+```
+Then wait 3s, verify port is free:
+```bash
+brev exec <instance> "ss -tlnp | grep 7860"
+```
+
+**Step 2 — Kill vLLM server:**
+```bash
+brev exec <instance> "pkill -f 'vllm serve'"
+```
+Wait 5s for GPU memory to release:
+```bash
+brev exec <instance> "nvidia-smi --query-gpu=memory.used --format=csv,noheader"
+```
+
+**Step 3 — Deploy updated gradio script (if changed):**
+```bash
+B64=$(base64 -i ~/.claude/scripts/gradio_cr2_byo.py | tr -d '\n')
+brev exec <instance> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('${B64}'))\""
+```
+
+**Step 4 — Start vLLM with target model:**
+
+For 2B FP8 (vLLM, real FP8 kernels):
+```bash
+brev exec <instance> "nohup bash -c 'source /home/shadeform/.ngc_env && cd /home/shadeform/cosmos-reason2 && .venv/bin/vllm serve models/Cosmos-Reason2-2B-FP8 --served-model-name nvidia/Cosmos-Reason2-2B-FP8 --port 8000 --dtype auto --trust-remote-code --max-model-len 8192 --gpu-memory-utilization 0.90 > /tmp/vllm_server.log 2>&1 &'"
+```
+
+For 8B NVFP4 (current default):
+```bash
+brev exec <instance> "nohup bash -c 'source /home/shadeform/.ngc_env && cd /home/shadeform/cosmos-reason2 && .venv/bin/vllm serve models/Cosmos-Reason2-8B-NVFP4 --served-model-name nvidia/Cosmos-Reason2-8B-NVFP4 --port 8000 --dtype auto --trust-remote-code --max-model-len 8192 --gpu-memory-utilization 0.85 > /tmp/vllm_server.log 2>&1 &'"
+```
+
+For 8B FP8:
+```bash
+brev exec <instance> "nohup bash -c 'source /home/shadeform/.ngc_env && cd /home/shadeform/cosmos-reason2 && .venv/bin/vllm serve models/Cosmos-Reason2-8B-FP8 --served-model-name nvidia/Cosmos-Reason2-8B-FP8 --port 8000 --dtype auto --trust-remote-code --max-model-len 8192 --gpu-memory-utilization 0.85 > /tmp/vllm_server.log 2>&1 &'"
+```
+
+For 32B BF16 (needs smaller max-model-len to fit 80GB — download first):
+```bash
+brev exec <instance> "nohup bash -c 'source /home/shadeform/.ngc_env && cd /home/shadeform/cosmos-reason2 && .venv/bin/vllm serve models/Cosmos-Reason2-32B --served-model-name nvidia/Cosmos-Reason2-32B --port 8000 --dtype bfloat16 --trust-remote-code --max-model-len 4096 --gpu-memory-utilization 0.95 > /tmp/vllm_server.log 2>&1 &'"
+```
+
+**Step 5 — Wait for vLLM ready (poll /v1/models, up to 120s):**
+```bash
+brev exec <instance> "for i in \$(seq 1 24); do curl -sf http://localhost:8000/v1/models && break || sleep 5; done"
+```
+
+**Step 6 — Start Gradio with correct MODEL_SIZE:**
+
+Do NOT edit `launch_gradio_vllm.sh`. Run inline:
+```bash
+brev exec <instance> "nohup bash -c 'source /home/shadeform/.ngc_env && cd /home/shadeform/cosmos-reason2 && INFERENCE_BACKEND=vllm VLLM_BASE_URL=http://localhost:8000/v1 MODEL_SIZE=<SIZE> .venv/bin/python /tmp/gradio_cr2_byo.py > /tmp/gradio_demo.log 2>&1 &'"
+```
+
+Replace `<SIZE>` with `2B`, `8B`, or `32B`.
+
+**Step 7 — Get URL:**
+```bash
+brev exec <instance> "sleep 20 && cat /tmp/gradio_url.txt"
+```
+
+### Downloading missing models
+
+If the target model isn't on disk yet, download before starting vLLM:
+```bash
+brev exec <instance> "cd /home/shadeform/cosmos-reason2 && .venv/bin/huggingface-cli download nvidia/Cosmos-Reason2-8B-FP8 --local-dir models/Cosmos-Reason2-8B-FP8"
+```
+HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
+
+### 32B feasibility on single H100 80GB (vLLM)
+
+- 32B BF16: ~64GB weights. Fits with `--max-model-len 4096 --gpu-memory-utilization 0.95`. Tight.
+- 32B would need to be downloaded first (~64GB). Not yet on disk as of 2026-04-21.
+- In vLLM mode with 8B loaded, `run_all_variants` will send 32B requests to the 8B server — the table `Notes` column will show `vLLM serves Cosmos-Reason2-8B-NVFP4` to flag the mismatch.
+- For true 32B benchmarking: restart vLLM with 32B model using this skill, then run `Run All Variants` with `MODEL_SIZE=32B`.
 
 ---
 
@@ -425,24 +773,14 @@ video_processing_utils.BaseVideoProcessor.fetch_videos = _patched_fetch_videos
 
 | Symptom | Fix |
 |---|---|
-| Port 7860 unreachable | Check `ss -tlnp` on instance. Gradio failed — check `/tmp/gradio.log`. |
-| Horde: no public share URL | NVIDIA network blocks outgoing to gradio.live. Normal — access via SSH tunnel: `ssh -L 7860:localhost:7860 horde@<ip>` then open localhost:7860. |
-| Horde: `ffprobe` not found | Horde's snap ffmpeg doesn't include ffprobe in PATH. Fix: `wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -O /tmp/ff.tar.xz && cd /tmp && tar -xf ff.tar.xz && sudo cp /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe`. |
-| Black frames / torchcodec error | PyAV patch not applied. Confirm `gradio_cr2_byo.py` was deployed. |
-| OOM during inference | Kill other GPU processes. CR2-8B needs ~80GB VRAM. |
-| vLLM 0.12.0 fails to start | CUDA 12.8 (driver 570.x) is incompatible. `byo_video_setup.py` auto-detects and pins vLLM to 0.11.0. Manual fix: `cd ~/cosmos-reason2 && uv pip install vllm==0.11.0`. |
-| Horde SSH rejected | Username must be `horde`. Key: `~/.ssh/id_ed25519`. |
-| vLLM "Server not running" | vLLM process died. Restart with vLLM serve command from Step 3. |
-| Download fails ENOSPC | Disk full. Open Storage panel in Gradio UI. Clean HF cache or delete partial downloads. 32B models need ≥64GB free — use massedcompute_H100. |
-| Dropdown swap stalls >150s | vLLM failed to start. SSH to instance, check `cat /tmp/vllm.log`. |
-| C3-32B inference hangs on high-FPS video (BUG-004) | KV cache deadlock. Isolate: `curl -s -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"nvidia/Cosmos3-Reasoner-32B-Private","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}'` — if curl hangs but Gradio UI also hangs, this is a vLLM KV issue. Reduce fps in Gradio or add `--max-num-seqs 1`. |
-| Gradio crashes but tunnel (frpc) stays alive (BUG-005) | The frpc process outlives Gradio. Run `pkill -f frpc` on the instance to clean up. Then restart Gradio. gradio_cr2_byo.py includes an atexit handler for this since 2026-04-29. |
-| BF16 8B not on disk | Click "Download & Load" from dropdown banner. Needs ~16GB free + HF token. |
-| FP8 download fails with 401 | CR2-8B-FP8 is a gated HuggingFace model — requires HF_TOKEN with accepted license. Use "Apply Token" in Gradio Advanced Settings → HuggingFace Auth. |
-| HF 429 rate limit on download | Script retries with sleep. Usually succeeds by attempt 3–4. |
-| hyperstack_H100 disk full at 97GB | Wrong instance type. Use massedcompute_H100 (1TB). hyperstack OS disk is too small for multi-model. |
-| Gradio theme error on startup | Gradio 6.0 moved `theme=` from `gr.Blocks()` to `demo.launch()`. Deploy the latest canonical `gradio_cr2_byo.py` from `~/.claude/scripts/`. |
-| `flashinfer-cubin` version mismatch after vLLM downgrade | `RuntimeError: flashinfer-cubin version (0.6.6) does not match flashinfer version (0.5.3)`. Set `FLASHINFER_DISABLE_VERSION_CHECK=1` in env. `byo_video_setup.py` sets this automatically in `launch_env`. |
-| vLLM startup fails: `ninja` not found | `FileNotFoundError: ninja` from flashinfer JIT. Run `sudo apt-get install -y ninja-build`. `byo_video_setup.py` Step 6c does this automatically. |
-| `brev exec <instance> -- bash -c "cmd"` exits 1, errors for `bash` / `-c` instances (BUG-009) | Brev parses all tokens after `--` as instance names. Use `ssh <instance> "cmd"` directly. `~/.brev/ssh_config` is auto-maintained and included in `~/.ssh/config`. |
-| `nohup ... &` via brev exec keeps SSH session alive indefinitely | nohup doesn't detach from brev's SSH channel. Use `screen -dmS session_name /path/to/script.sh` instead — screen detaches fully and SSH closes immediately. |
+| Port 7860 unreachable | Check `ss -tlnp | grep 7860` on instance. If not listening, Gradio failed to start — check `/tmp/gradio_demo.log`. |
+| Video upload fails in browser | Gradio temp dir issue. Try with sample.mp4 via Examples button first. |
+| Black frames / torchcodec error | PyAV patch not applied. Confirm `gradio_cr2_byo.py` was deployed (not a custom script). |
+| OOM during inference | VRAM too low. Kill other GPU processes first. CR2-2B needs ~10GB GPU RAM peak. |
+| `uv sync --extra cu128` fails | Wrong CUDA driver. Check `nvidia-smi` shows CUDA 12.x driver. |
+| Horde SSH rejected | Username must be `horde`. Not `ubuntu`, `nvidia`, `root`, or `asotelo`. SSH key: `~/.ssh/id_ed25519` (not a .pem file). |
+| Horde "No GPUs available" | Capacity API is stale. Try different time window or use Brev instead. |
+| `claude auth status` → loggedIn: false | `claude auth login --console` (API users). On SSH: copy URL, open in local browser. |
+| Wrong VRAM tier selected (old Gradio using memory) | Setup script now kills port 7860 BEFORE measuring VRAM. Re-run setup to get clean tier. |
+| Inference >60s on high-VRAM workstation GPU | GPU name doesn't match H100/A100/H200/GB200 → fps=1 tier applies. If inference still slow, check that `GRADIO_FPS=1` is in the Gradio process env. |
+| HF 429 rate limit on download | Script retries 5× with 30s sleep. Common on shared Horde IP. Usually succeeds by attempt 3-4. |

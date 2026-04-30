@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cosmos BYO Video Demo setup + launch.
-Version: 2026-04-28
+Version: 2026-04-30
 Canonical source: ~/.claude/scripts/byo_video_setup.py
 
 Runs on the GPU instance. Prints live progress with ETAs.
@@ -18,7 +18,7 @@ Env vars:
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
-import os, sys, time, subprocess, re, shutil, json
+import os, sys, time, subprocess, re, shutil, json, urllib.request
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 GREEN  = "\033[32m"
@@ -129,11 +129,23 @@ REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
-INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf")
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
 VLLM_MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
+# VRAM flags — set during GPU detection; declare defaults here
+ULTRA_LOW_VRAM = False
+LOW_VRAM       = False
+# Cost tracking
+BREV_RATE_PER_HOUR = float(os.environ.get("BREV_RATE_PER_HOUR", "0"))
+SETUP_START        = time.time()
+
+def credits_spent():
+    if BREV_RATE_PER_HOUR <= 0:
+        return ""
+    elapsed = time.time() - SETUP_START
+    cost = BREV_RATE_PER_HOUR * elapsed / 3600
+    return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
     print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, or 32B.")
@@ -146,51 +158,131 @@ _primary_label, _primary_dirname, _primary_hf_id, _ = _cfg["variants"][0]
 MODEL_DIR  = os.environ.get("MODEL_DIR",  f"{MODELS_BASE}/{_primary_dirname}")
 MODEL_NAME = _primary_hf_id
 
+# ── MODEL_ID override (arbitrary HF model, bypasses MODEL_SIZE lookup) ───────
+MODEL_ID = os.environ.get("MODEL_ID", "")
+if MODEL_ID:
+    # Derive repo dir name from MODEL_ID (last path component, sanitized)
+    _model_dir_name = MODEL_ID.split("/")[-1].replace("-", "_")
+    MODEL_NAME = MODEL_ID
+    MODEL_DIR  = os.path.join(MODELS_BASE, _model_dir_name)
+    MODEL_SIZE = "custom"
+    # Estimate size hint from model ID
+    _size_hint = "~8GB" if "8B" in MODEL_ID else "~16GB" if ("32B" in MODEL_ID or "14B" in MODEL_ID) else "~4GB"
+    # Override _cfg to a minimal single-variant config
+    _cfg = {
+        "repo": MODEL_ID.split("/")[-1],
+        "variants": [("base", _model_dir_name, MODEL_ID, _size_hint)],
+        "nim": False,
+    }
+    _variant_labels = MODEL_ID
+
+# ── Dashboard: 9-step progress checklist ─────────────────────────────────────
+STEP_LABELS = [
+    "GPU detect + VRAM tier",
+    "HF auth + token validate",
+    "NGC API key",
+    "uv install",
+    "cosmos-reason2 repo",
+    "uv sync + CUDA libs",
+    "PyAV + Gradio + requests",
+    "Model weights download",
+    "Gradio launch",
+]
+STEPS_DONE = []
+
+def print_dashboard():
+    print("\n── Setup Progress ──────────────────────────────", flush=True)
+    elapsed = int(time.time() - SETUP_START)
+    print(f"  Elapsed: {elapsed//60}m {elapsed%60}s{credits_spent()}", flush=True)
+    for i, label in enumerate(STEP_LABELS, 1):
+        if i in STEPS_DONE:
+            marker = "✅"
+        elif i == (max(STEPS_DONE) + 1 if STEPS_DONE else 1):
+            marker = "⟳ "
+        else:
+            marker = "—"
+        print(f"  [{marker}] Step {i}: {label}", flush=True)
+    print("────────────────────────────────────────────────\n", flush=True)
+
+print_dashboard()
+
 # ── Pre-step: kill old Gradio so VRAM measurement is accurate ────────────────
 subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
 time.sleep(2)
 
 # ── Step 1: GPU check ─────────────────────────────────────────────────────────
 header("Step 1 — GPU detect", eta="<5s")
-rc, out = run_cmd(["nvidia-smi", "--query-gpu=name,memory.free,memory.total",
-                   "--format=csv,noheader"])
-if rc != 0:
-    print("  ✗  nvidia-smi failed — no GPU detected", flush=True)
-    sys.exit(1)
-gpu_line   = out.strip().splitlines()[0]
-parts_     = [p.strip() for p in gpu_line.split(",")]
-gpu_name   = parts_[0]
-vram_free  = int(parts_[1].split()[0])
-vram_total = int(parts_[2].split()[0])
-
-LOW_VRAM = vram_free < 24000
-
-_gpu_upper = gpu_name.upper()
-_h100_class = any(tag in _gpu_upper for tag in ("H100", "A100", "H200", "GB200"))
-if _h100_class and vram_free >= 60000:
-    tier_name   = "H100/A100"
-    gradio_fps  = 8
-    max_pixels  = 1048576
-    prefill_tps = 90
-elif vram_free >= 40000:
-    tier_name   = "high-VRAM"
-    gradio_fps  = 8
-    max_pixels  = 524288
-    prefill_tps = 23
+NVIDIA_SMI_RETRIES = 3
+_smi_rc = 1
+_smi_out = ""
+for _attempt in range(NVIDIA_SMI_RETRIES):
+    _smi_rc, _smi_out = run_cmd(
+        ["nvidia-smi", "--query-gpu=name,memory.free,memory.total",
+         "--format=csv,noheader,nounits"]
+    )
+    if _smi_rc == 0 and _smi_out.strip():
+        break
+    if _attempt < NVIDIA_SMI_RETRIES - 1:
+        warn(f"nvidia-smi attempt {_attempt + 1} failed — retrying in 5s")
+        time.sleep(5)
 else:
-    tier_name   = "low-VRAM (<40GB)"
-    gradio_fps  = 4
-    max_pixels  = 131072
-    prefill_tps = 15
-    LOW_VRAM    = True
+    if _smi_rc != 0 or not _smi_out.strip():
+        warn("nvidia-smi failed after 3 attempts — defaulting to LOW_VRAM tier")
+        gpu_name   = "unknown"
+        vram_free  = 0
+        vram_total = 0
+        LOW_VRAM   = True
+        tier_name  = "low-VRAM (fallback)"
+        gradio_fps = 4
+        max_pixels = 131072
+        prefill_tps = 15
 
-_variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
-if _cfg["nim"]:
-    _variant_labels += f" → NIM-{MODEL_SIZE}"
+if _smi_rc == 0 and _smi_out.strip():
+    gpu_line   = _smi_out.strip().splitlines()[0]
+    parts_     = [p.strip() for p in gpu_line.split(",")]
+    gpu_name   = parts_[0]
+    vram_free  = int(parts_[1].split()[0])
+    vram_total = int(parts_[2].split()[0])
+
+    _gpu_upper  = gpu_name.upper()
+    _h100_class = any(tag in _gpu_upper for tag in ("H100", "A100", "H200", "GB200"))
+    if _h100_class and vram_free >= 60000:
+        tier_name   = "H100/A100"
+        gradio_fps  = 8
+        max_pixels  = 1048576
+        prefill_tps = 90
+    elif vram_free >= 40000:
+        tier_name   = "high-VRAM"
+        gradio_fps  = 8
+        max_pixels  = 524288
+        prefill_tps = 23
+    elif vram_free >= 8000:
+        tier_name   = "low-VRAM (<40GB)"
+        gradio_fps  = 4
+        max_pixels  = 131072
+        prefill_tps = 15
+        LOW_VRAM    = True
+    else:
+        LOW_VRAM       = True
+        ULTRA_LOW_VRAM = True
+        gradio_fps     = 1
+        max_pixels     = 65536
+        prefill_tps    = 10
+        tier_name      = "ULTRA-LOW-VRAM"
+
+if ULTRA_LOW_VRAM:
+    warn("RTX consumer GPU detected (<8GB VRAM free). Demo will run but may OOM on videos >5s at 720p. Pre-resize to 360p before upload.")
+
+if not MODEL_ID:
+    _variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
+    if _cfg.get("nim"):
+        _variant_labels += f" → NIM-{MODEL_SIZE}"
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
 ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
+STEPS_DONE.append(1)
+print_dashboard()
 
 # ── Step 2: HF token ──────────────────────────────────────────────────────────
 header("Step 2 — HuggingFace auth", eta="<5s")
@@ -207,6 +299,25 @@ else:
     print("     Run: export HF_TOKEN=hf_... and re-run this script.")
     sys.exit(1)
 
+# ── Step 2b: Validate HF token ────────────────────────────────────────────────
+header("Step 2b — Validate HF token", eta="<2s")
+_hf_req = urllib.request.Request(
+    "https://huggingface.co/api/whoami",
+    headers={"Authorization": f"Bearer {HF_TOKEN}"}
+)
+try:
+    with urllib.request.urlopen(_hf_req, timeout=10) as _resp:
+        if _resp.status == 200:
+            ok("HF token valid")
+        else:
+            print(f"  ✗  HF token returned HTTP {_resp.status} — run 'huggingface-cli login' on this instance")
+            sys.exit(1)
+except Exception as _hf_err:
+    warn(f"HF token check failed ({_hf_err}) — continuing, will fail at download if token is bad")
+
+STEPS_DONE.append(2)
+print_dashboard()
+
 # ── Step 3: NGC API key check (for NIM mode) ──────────────────────────────────
 header("Step 3 — NGC API key (NIM mode)", eta="<5s")
 if _cfg["nim"]:
@@ -220,6 +331,7 @@ if _cfg["nim"]:
         info("To enable NIM: export NGC_API_KEY=nvapi-...")
 else:
     info(f"MODEL_SIZE={MODEL_SIZE} has no NIM endpoint in catalog — NIM step skipped")
+STEPS_DONE.append(3)
 
 # ── Step 4: uv ────────────────────────────────────────────────────────────────
 header("Step 4 — uv package manager", eta="<5s if cached, ~10s first time")
@@ -234,6 +346,7 @@ else:
     if rc != 0:
         print("  ✗  uv install failed"); sys.exit(1)
     ok(f"uv installed in {time.time()-t0:.0f}s")
+STEPS_DONE.append(4)
 
 # ── Step 5: cosmos-reason2 repo ───────────────────────────────────────────────
 header("Step 5 — cosmos-reason2 repo", eta="<5s if cached, ~15s first time")
@@ -249,6 +362,7 @@ else:
     if rc != 0:
         print("  ✗  git clone failed"); sys.exit(1)
     ok(f"Cloned in {time.time()-t0:.0f}s")
+STEPS_DONE.append(5)
 
 # ── Step 6: Python dependencies ───────────────────────────────────────────────
 header("Step 6 — Python dependencies (uv sync)", eta="<5s if cached, ~2-3 min first time")
@@ -267,32 +381,29 @@ else:
         print("  ✗  uv sync failed:", out[-500:]); sys.exit(1)
     ok(f"Dependencies installed in {time.time()-t0:.0f}s")
 
-# ── Step 6b: CUDA version gate for vLLM ──────────────────────────────────────
-# vLLM 0.12.0 (cu128 extra) requires CUDA driver >= 12.9 (driver >= 575).
-# On CUDA 12.8 (Hyperstack H100, driver 570.x), PTX compilation fails with
-# cudaErrorUnsupportedPtxVersion — --enforce-eager does NOT fix this.
-# Fix: detect driver version and fall back to HF Transformers when incompatible.
-_driver_major = None
+# ── Step 6b: CUDA 12.8 vLLM pin ──────────────────────────────────────────────
+# cu128 installs vLLM 0.12.0 (torch 2.9.0) which requires CUDA 12.9+ driver.
+# On CUDA 12.8 (Hyperstack H100, driver 570.x), downgrade to vLLM 0.11.0.
+_cuda_major_minor = None
 try:
     import subprocess as _sp_cuda
-    _smi_out = _sp_cuda.check_output(
+    _smi = _sp_cuda.check_output(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
         timeout=10, text=True
-    ).strip()
-    _driver_major = int(_smi_out.split(".")[0])
+    ).strip().split(".")[0:2]
+    _driver_major = int(_smi[0])
+    if _driver_major < 575:  # 575.x is the first driver with CUDA 12.9 support
+        header("Step 6b — vLLM downgrade for CUDA 12.8", eta="~30s")
+        rc_vllm, _ = run_cmd(
+            ["uv", "pip", "install", "vllm==0.11.0"],
+            cwd=REASON2_DIR, env=ENV, timeout=120
+        )
+        if rc_vllm == 0:
+            ok("vLLM pinned to 0.11.0 (torch 2.8.0) — compatible with CUDA 12.8")
+        else:
+            warn("vLLM 0.11.0 pin failed — vLLM 0.12.0 may not start on CUDA 12.8")
 except Exception:
-    pass
-
-_CUDA_VLLM_OK = (_driver_major is None) or (_driver_major >= 575)
-
-if INFERENCE_BACKEND == "vllm" and not _CUDA_VLLM_OK:
-    header("Step 6b — CUDA PTX gate (BUG-002 prevention)", eta="<5s")
-    warn(f"CUDA driver {_driver_major}.x detected — vLLM 0.12.0 requires driver >= 575 (CUDA 12.9).")
-    warn("Forcing INFERENCE_BACKEND=hf to avoid cudaErrorUnsupportedPtxVersion crash.")
-    warn("Use MassedCompute (CUDA 13.0) for vLLM inference on C3-8B / C3-32B.")
-    INFERENCE_BACKEND = "hf"
-elif INFERENCE_BACKEND == "vllm":
-    ok(f"CUDA driver {_driver_major}.x — vLLM 0.12.0 compatible")
+    pass  # CUDA check is best-effort; if nvidia-smi fails, proceed as-is
 
 # ── Step 6c: ninja build system (required by flashinfer / torch compile) ─────
 try:
@@ -307,6 +418,9 @@ except Exception:
         ok("ninja-build installed")
     except Exception as _e_ninja:
         warn(f"ninja install failed ({_e_ninja}) — vLLM may fail with flashinfer JIT")
+
+STEPS_DONE.append(6)
+print_dashboard()
 
 # ── Step 7: PyAV ──────────────────────────────────────────────────────────────
 header("Step 7 — PyAV video backend", eta="<5s if cached, ~10s first time")
@@ -354,6 +468,8 @@ else:
     else:
         ok("requests installed")
 
+STEPS_DONE.append(7)
+
 # ── Step 9: Model weights ──────────────────────────────────────────────────────
 
 def download_model(model_name, model_dir, size_hint, dl_env):
@@ -383,7 +499,11 @@ def download_model(model_name, model_dir, size_hint, dl_env):
             break
         if attempt < MAX_RETRIES:
             print(f"  ✗  Attempt {attempt} failed. Retry {attempt}/{MAX_RETRIES} after 30s", flush=True)
-            time.sleep(30)
+            for _t in range(30):
+                time.sleep(1)
+                if _t % 10 == 9:
+                    _elapsed = int(time.time() - SETUP_START)
+                    print(f"  ⟳  Retry in {30-_t-1}s | Elapsed: {_elapsed//60}m {_elapsed%60}s{credits_spent()}", flush=True)
         else:
             print(f"  ✗  All {MAX_RETRIES} attempts failed for {model_name}.")
             return False
@@ -404,82 +524,8 @@ for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants
     elif not ok_:
         warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
 
-# ── Step 9z: NemotronVL architecture gate (BUG-001 prevention) ───────────────
-# NemotronVLForConditionCausalLM (model_type=nemotron_siglip2, e.g. C3-2B) is not
-# registered in vLLM 0.12.0 or 0.9.2. Force HF Transformers for these architectures.
-_primary_config = os.path.join(MODEL_DIR, "config.json")
-if os.path.exists(_primary_config):
-    with open(_primary_config) as _cf:
-        _detected_model_type = json.load(_cf).get("model_type", "qwen3_vl")
-    if INFERENCE_BACKEND == "vllm" and _detected_model_type != "qwen3_vl":
-        warn(f"model_type={_detected_model_type!r} not supported by vLLM — forcing INFERENCE_BACKEND=hf")
-        warn("BUG-001: NemotronVL arch not registered. Use HF Transformers via AutoModelForCausalLM.")
-        INFERENCE_BACKEND = "hf"
-    elif os.path.exists(_primary_config):
-        ok(f"model_type={_detected_model_type!r} — vLLM compatible")
-
-# ── Step 9b: Auto-launch vLLM before Gradio (when INFERENCE_BACKEND=vllm) ────
-# BUG-003 fix: byo_video_setup.py previously completed without launching the vLLM
-# server, causing Gradio to start in vllm mode with no backend available.
-_vllm_proc = None
-if INFERENCE_BACKEND == "vllm":
-    header("Step 9b — Launch vLLM server (BUG-003 fix)", eta="~5-10 min for model load")
-    import socket as _socket
-
-    _vllm_port = int(os.environ.get("VLLM_PORT", "8000"))
-    _vllm_model_id = os.environ.get("VLLM_SERVED_MODEL_NAME", MODEL_NAME)
-    _vllm_extra = _cfg.get("vllm_extra_flags", [])
-    _vllm_max_len = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
-
-    # C3-32B: use tighter max_model_len to fit H100 80GB; cap FPS in Gradio
-    if MODEL_SIZE == "C3-32B":
-        _vllm_max_len = int(os.environ.get("VLLM_MAX_MODEL_LEN", "16384"))
-
-    _vllm_cmd = [
-        f"{REASON2_DIR}/.venv/bin/vllm", "serve", MODEL_DIR,
-        "--served-model-name", _vllm_model_id,
-        "--port", str(_vllm_port),
-        "--dtype", "auto",
-        "--trust-remote-code",
-        "--enforce-eager",
-        "--max-model-len", str(_vllm_max_len),
-        "--max-num-seqs", "1",
-        "--gpu-memory-utilization", "0.95",
-    ]
-    _vllm_cmd.extend(_vllm_extra)
-
-    _vllm_log = f"/tmp/vllm_{MODEL_SIZE.lower()}.log"
-    run(f"Starting vLLM server (log: {_vllm_log})")
-    info(f"Command: {' '.join(_vllm_cmd)}")
-    with open(_vllm_log, "w") as _vf:
-        _vllm_proc = subprocess.Popen(
-            _vllm_cmd, cwd=REASON2_DIR, env={**ENV, "HF_TOKEN": HF_TOKEN,
-                                              "VLLM_VIDEO_LOADER_BACKEND": "opencv",
-                                              "SKIP_HF_PRELOAD": "1"},
-            stdout=_vf, stderr=subprocess.STDOUT
-        )
-
-    # Wait up to 10 min for vLLM to be ready on the port
-    _vllm_ready = False
-    _vllm_timeout = 600
-    _t0_vllm = time.time()
-    info(f"Waiting up to {_vllm_timeout}s for vLLM to bind port {_vllm_port} ...")
-    while time.time() - _t0_vllm < _vllm_timeout:
-        try:
-            with _socket.create_connection(("localhost", _vllm_port), timeout=2):
-                _vllm_ready = True
-                break
-        except OSError:
-            time.sleep(5)
-        if _vllm_proc.poll() is not None:
-            print(f"  ✗  vLLM process exited early. Check {_vllm_log}")
-            sys.exit(1)
-
-    if not _vllm_ready:
-        print(f"  ✗  vLLM did not bind port {_vllm_port} within {_vllm_timeout}s. Check {_vllm_log}")
-        sys.exit(1)
-
-    ok(f"vLLM server ready on port {_vllm_port} ({time.time()-_t0_vllm:.0f}s)")
+STEPS_DONE.append(9)
+print_dashboard()
 
 # ── Step 10: Launch Gradio ────────────────────────────────────────────────────
 header("Step 10 — Launch Gradio web demo", eta="~5-10s for model load")
@@ -504,7 +550,7 @@ launch_env = {
     "GRADIO_FPS":         str(gradio_fps),
     "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
-    "INFERENCE_BACKEND":  INFERENCE_BACKEND,
+    "INFERENCE_BACKEND":  os.environ.get("INFERENCE_BACKEND", "hf"),
     "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
@@ -512,7 +558,7 @@ launch_env = {
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
     "VLLM_MAX_MODEL_LEN": str(VLLM_MAX_MODEL_LEN),
     # PRELOAD-001: skip HF preload when using vLLM backend
-    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND == "vllm" else "0",
+    "SKIP_HF_PRELOAD":    "1" if os.environ.get("INFERENCE_BACKEND", "hf") == "vllm" else "0",
 }
 
 run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
@@ -555,6 +601,8 @@ with open(URL_FILE, "w") as f:
     f.write(url + "\n")
 
 ok("Demo server up, public tunnel established")
+STEPS_DONE.append(9)
+print_dashboard()
 
 # ── Final: print clickable hyperlink ────────────────────────────────────────
 print(flush=True)
@@ -573,8 +621,8 @@ print(f"{'─'*62}", flush=True)
 print(flush=True)
 
 proc.stdout.close()
-# BUG-010: keep parent alive so Gradio subprocess doesn't get SIGHUP when
-# the setup script exits from within a screen session.
+# Stay alive while Gradio runs — without this, the subprocess gets SIGHUP when
+# the screen session's controlling process exits.
 try:
     proc.wait()
 except KeyboardInterrupt:
