@@ -195,6 +195,8 @@ MODEL_CONFIGS = {
             ("Qwen3-VL-2B Thinking", "Qwen3-VL-2B-Thinking",     "Qwen/Qwen3-VL-2B-Thinking",     "bf16"),
         ],
         "nim": None,
+        "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
+        "vllm_swap_env":   {},
     },
     "QW3-8B": {
         "variants": [
@@ -203,6 +205,8 @@ MODEL_CONFIGS = {
             ("Qwen3-VL-8B Thinking", "Qwen3-VL-8B-Thinking",     "Qwen/Qwen3-VL-8B-Thinking",     "bf16"),
         ],
         "nim": None,
+        "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
+        "vllm_swap_env":   {},
     },
     "QW3-32B": {
         "variants": [
@@ -211,6 +215,8 @@ MODEL_CONFIGS = {
             ("Qwen3-VL-32B Thinking", "Qwen3-VL-32B-Thinking",     "Qwen/Qwen3-VL-32B-Thinking",     "bf16"),
         ],
         "nim": None,
+        "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
+        "vllm_swap_env":   {},
     },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
@@ -221,7 +227,34 @@ MODEL_CONFIGS = {
             ("Nem-12B FP8",  "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "fp8"),
         ],
         "nim": None,
+        # Required for hot-swap: opencv video decoder + file:// media path + flashinfer bypass.
+        "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
+        "vllm_swap_env":   {"VLLM_VIDEO_LOADER_BACKEND": "opencv", "FLASHINFER_DISABLE_VERSION_CHECK": "1"},
     },
+}
+
+# Per-model-size slider defaults shown in Advanced Settings when a checkpoint is selected.
+# fps/max_pixels that are None inherit the GPU-tier value from DEFAULT_FPS/DEFAULT_MAX_PIXELS.
+# Thinking variants get a max_tokens boost automatically in _ckpt_slider_defaults().
+_MODEL_SIZE_DEFAULTS = {
+    # file:// models (NEM-12B, QW3-*) — fps slider unused by vLLM; inherit GPU-tier fps
+    "NEM-12B":  {"max_tokens": 512},
+    "QW3-2B":   {"max_tokens": 512},
+    "QW3-8B":   {"max_tokens": 512},
+    "QW3-32B":  {"max_tokens": 1024},
+    # base64-frame models — fps controls extraction; set sensible per-size values
+    "2B":    {"fps": 2, "max_tokens": 512},
+    "8B":    {"fps": 2, "max_tokens": 512},
+    "32B":   {"fps": 1, "max_tokens": 512},
+    "C3-2B": {"fps": 2, "max_tokens": 512},
+    "C3-8B": {"fps": 2, "max_tokens": 512},
+    "C3-32B":{"fps": 1, "max_tokens": 1024},
+}
+# Flat map: checkpoint UI label → MODEL_CONFIGS size key (built after MODEL_CONFIGS is complete)
+_LABEL_TO_MODEL_SIZE = {
+    label: size_key
+    for size_key, cfg in MODEL_CONFIGS.items()
+    for label, _, _, _ in cfg.get("variants", [])
 }
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
@@ -242,6 +275,18 @@ NIM_MODEL_API = _cfg["nim"] or ""
 def _resolve(dirname, hf_id):
     local = os.path.join(_MODELS_BASE, dirname)
     return local if os.path.exists(local) else hf_id
+
+def _ckpt_slider_defaults(label):
+    """Return (fps, max_pixels, max_tokens) for a checkpoint label.
+    Falls back to GPU-tier globals; Thinking variants get a max_tokens boost."""
+    size = _LABEL_TO_MODEL_SIZE.get(label, MODEL_SIZE)
+    ov   = _MODEL_SIZE_DEFAULTS.get(size, {})
+    fps  = ov.get("fps",        DEFAULT_FPS)
+    mpx  = ov.get("max_pixels", DEFAULT_MAX_PIXELS)
+    mtok = ov.get("max_tokens", DEFAULT_MAX_TOKENS)
+    if "Think" in label:
+        mtok = max(mtok, 1024)
+    return fps, mpx, mtok
 
 CHECKPOINT_PRESETS = [
     (label, _resolve(dirname, hf_id))
@@ -290,7 +335,20 @@ if INFERENCE_BACKEND == "vllm":
         for label, dirname, hf_id, _ in _ALL_VARIANTS_DD_RAW
     ]
     CHECKPOINT_PRESETS.append(("NIM 8B", "nim://nvidia/cosmos-reason2-8b"))
-    _VLLM_DD_DEFAULT = "CR2-8B BF16"
+    # Auto-select the checkpoint that matches the loaded model so no swap fires on first use.
+    _VLLM_DD_MAP = {
+        "NEM-12B": "Nem-12B BF16",
+        "QW3-2B":  "Qwen3-VL-2B",
+        "QW3-8B":  "Qwen3-VL-8B",
+        "QW3-32B": "Qwen3-VL-32B",
+        "2B":      "CR2-2B BF16",
+        "8B":      "CR2-8B BF16",
+        "C3-2B":   "C3R-2B BF16",
+        "C3-8B":   "C3R-8B BF16",
+        "C3-32B":  "C3R-32B BF16",
+        "32B":     "CR2-32B BF16",
+    }
+    _VLLM_DD_DEFAULT = _VLLM_DD_MAP.get(MODEL_SIZE, "CR2-8B BF16")
 else:
     _VLLM_DD_DEFAULT = CHECKPOINT_PRESETS[0][0]
 
@@ -1394,7 +1452,12 @@ def _launch_vllm_swap(local_path, served_name, gpu_util="0.85", max_model_len="3
         _VLLM_PROC = None
     time.sleep(4)  # allow GPU memory to release
 
-    print(f"[vllm-swap] Launching {served_name} (path={local_path})", flush=True)
+    # Per-model extra flags (e.g. --allowed-local-media-path for Nemotron/Qwen).
+    _model_cfg   = MODEL_CONFIGS.get(MODEL_SIZE, {})
+    extra_flags  = _model_cfg.get("vllm_swap_flags", [])
+    extra_env    = {**os.environ, **_model_cfg.get("vllm_swap_env", {})}
+
+    print(f"[vllm-swap] Launching {served_name} (path={local_path}) flags={extra_flags}", flush=True)
     _VLLM_PROC = _sp.Popen(
         [
             vllm_bin, "serve", local_path,
@@ -1404,7 +1467,8 @@ def _launch_vllm_swap(local_path, served_name, gpu_util="0.85", max_model_len="3
             "--trust-remote-code",
             "--max-model-len", max_model_len,
             "--gpu-memory-utilization", gpu_util,
-        ],
+        ] + extra_flags,
+        env=extra_env,
         stdout=_sp.DEVNULL,
         stderr=_sp.DEVNULL,
     )
@@ -1444,11 +1508,14 @@ def _swap_banner_html(model_short, state, elapsed=0, remain_lo=60, remain_hi=90)
 
 
 def _vllm_swap_yields(label, local_path, hf_id):
-    """Shared generator for the vLLM swap+poll loop. Yields (banner_html, btn_update)."""
-    yield _swap_banner_html(label, "loading", 0, 60, 90), gr.update(visible=False)
+    """Shared generator for the vLLM swap+poll loop.
+    Yields (banner_html, btn_update, fps_update, maxpx_update)."""
+    _fps, _mpx, _mtok = _ckpt_slider_defaults(label)
+    _no_change = gr.update()
+    yield _swap_banner_html(label, "loading", 0, 60, 90), gr.update(visible=False), _no_change, _no_change
     launched = _launch_vllm_swap(local_path, hf_id)
     if not launched:
-        yield _swap_banner_html(label, "error", 0), gr.update(visible=True)
+        yield _swap_banner_html(label, "error", 0), gr.update(visible=True), _no_change, _no_change
         return
     _swap_start = time.time()
     actual_id = None
@@ -1458,7 +1525,7 @@ def _vllm_swap_yields(label, local_path, hf_id):
             break
         _remain_lo = max(0, 60 - _elapsed)
         _remain_hi = max(0, 90 - _elapsed)
-        yield _swap_banner_html(label, "loading", _elapsed, _remain_lo, _remain_hi), gr.update(visible=False)
+        yield _swap_banner_html(label, "loading", _elapsed, _remain_lo, _remain_hi), gr.update(visible=False), _no_change, _no_change
         time.sleep(5)
         try:
             import urllib.request as _urlreq3
@@ -1472,36 +1539,41 @@ def _vllm_swap_yields(label, local_path, hf_id):
             pass
     _elapsed_final = time.time() - _swap_start
     if actual_id is None:
-        yield _swap_banner_html(label, "error", _elapsed_final), gr.update(visible=True)
+        yield _swap_banner_html(label, "error", _elapsed_final), gr.update(visible=True), _no_change, _no_change
         return
     global _SERVER_MODEL_ID
     _SERVER_MODEL_ID = actual_id
-    yield _swap_banner_html(label, "ready", _elapsed_final), gr.update(visible=False)
+    yield _swap_banner_html(label, "ready", _elapsed_final), gr.update(visible=False), \
+          gr.update(value=_fps), gr.update(value=_mpx)
 
 
 def _on_checkpoint_change(label):
     """Reload vLLM when the user selects a new checkpoint (vLLM mode only).
-    Yields (banner_html, download_btn_update)."""
+    Yields (banner_html, download_btn_update, fps_update, maxpx_update)."""
+    _no_change = gr.update()
     if INFERENCE_BACKEND != "vllm":
-        yield "", gr.update(visible=False)
+        yield "", gr.update(visible=False), _no_change, _no_change
         return
     meta = _VLLM_DD_META.get(label)
     if meta is None:
-        yield "", gr.update(visible=False)
+        yield "", gr.update(visible=False), _no_change, _no_change
         return
     local_path, hf_id = meta
+    _fps, _mpx, _mtok = _ckpt_slider_defaults(label)
     if not os.path.exists(local_path):
-        yield _swap_banner_html(label, "nodisk"), gr.update(visible=True)
+        yield _swap_banner_html(label, "nodisk"), gr.update(visible=True), \
+              gr.update(value=_fps), gr.update(value=_mpx)
         return
     yield from _vllm_swap_yields(label, local_path, hf_id)
 
 
 def _on_download_and_load(label):
     """Download model from HF Hub then load it into vLLM.
-    Yields (banner_html, download_btn_update)."""
+    Yields (banner_html, download_btn_update, fps_update, maxpx_update)."""
+    _no_change = gr.update()
     meta = _VLLM_DD_META.get(label)
     if meta is None:
-        yield _swap_banner_html(label, "nodisk"), gr.update(visible=True)
+        yield _swap_banner_html(label, "nodisk"), gr.update(visible=True), _no_change, _no_change
         return
     local_path, hf_id = meta
     if os.path.exists(local_path):
@@ -1554,7 +1626,7 @@ def _on_download_and_load(label):
             f'padding:10px 14px;font-size:13px;color:#dbeafe;margin:4px 0">'
             f'⬇ Downloading <b>{label}</b> from HF Hub{_sz_note} · '
             f'{_elapsed:.0f}s elapsed · large models take 10–30 min</div>'
-        ), gr.update(visible=False)
+        ), gr.update(visible=False), gr.update(), gr.update()
         time.sleep(10)
 
     if _dl_state["error"]:
@@ -1562,7 +1634,7 @@ def _on_download_and_load(label):
             f'<div style="background:#450a0a;border:1px solid #f87171;border-radius:6px;'
             f'padding:10px 14px;font-size:13px;color:#fee2e2;margin:4px 0">'
             f'❌ Download failed for <b>{label}</b>: {_dl_state["error"][:160]}</div>'
-        ), gr.update(visible=True)
+        ), gr.update(visible=True), gr.update(), gr.update()
         return
 
     yield from _vllm_swap_yields(label, local_path, hf_id)
@@ -1881,7 +1953,7 @@ with gr.Blocks(
                 info="Higher = more frames = more tokens = slower",
             )
             maxpx_slider = gr.Slider(
-                minimum=128*(32**2), maximum=4096*(32**2), step=128*(32**2),
+                minimum=64*(32**2), maximum=4096*(32**2), step=64*(32**2),
                 value=DEFAULT_MAX_PIXELS,
                 label="Max pixels per frame",
             )
@@ -2013,12 +2085,12 @@ with gr.Blocks(
         checkpoint_dd.change(
             fn=_on_checkpoint_change,
             inputs=[checkpoint_dd],
-            outputs=[vllm_swap_banner, download_load_btn],
+            outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
         )
         download_load_btn.click(
             fn=_on_download_and_load,
             inputs=[checkpoint_dd],
-            outputs=[vllm_swap_banner, download_load_btn],
+            outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
         )
 
     def resolve_model_id(ckpt_name, custom_val):

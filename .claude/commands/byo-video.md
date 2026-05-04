@@ -199,11 +199,35 @@ After deploying scripts and launching setup: invoke /loop
   I'll notify you when the Gradio URL is live.
 ```
 
-**Loop behavior:**
-- Poll `brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null || echo NOT_LIVE"` every ~60s
-- When `/tmp/gradio_live.flag` contains a URL → declare live, read URL, post Teams kill alert, stop looping
-- If `/tmp/vllm_server.log` shows an error → surface immediately, stop looping
-- If instance goes UNHEALTHY → surface immediately, offer new instance
+**Loop behavior — live checklist display (required):**
+
+Each loop iteration must:
+1. Tail the setup log: `brev exec <name> "tail -50 /tmp/byo_video_setup.log 2>/dev/null"`
+2. Parse the log for completed steps (look for `✓` or `Step N` completion markers)
+3. Render the checklist inline — show ALL 9 steps with current status:
+
+```
+Setup Progress — <instance-name> (<elapsed>s)
+──────────────────────────────────────────────
+  [✓] Step 1: GPU detect + VRAM tier
+  [✓] Step 2: HF auth + token validate
+  [✓] Step 3: NGC API key
+  [✓] Step 4: uv install
+  [✓] Step 5: cosmos-reason2 repo
+  [✓] Step 6: uv sync + CUDA libs
+  [✓] Step 7: PyAV + Gradio + requests
+  [ ] Step 8: Model weights download  ← (in progress)
+  [ ] Step 9: Gradio launch
+──────────────────────────────────────────────
+Next check in ~60s. Type any message to stop.
+```
+
+4. Check `/tmp/gradio_live.flag` for the live URL
+5. When flag contains a URL → declare live, read URL, post Teams kill alert, stop looping
+6. If log shows `✗` or `exit status 1` → surface error immediately, stop looping
+7. If instance goes UNHEALTHY → surface immediately, offer new instance
+
+**The checklist must be visible every iteration.** Silent polling (just checking the flag) is not acceptable — the user needs to see where setup is stalled.
 
 The `/tmp/gradio_live.flag` file is written by `byo_video_setup.py` only AFTER the Gradio liveness probe passes (BUG-LIVENESS fix). It is the authoritative live signal — not `/tmp/gradio_url.txt`.
 

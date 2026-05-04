@@ -237,16 +237,19 @@ if MODEL_ID:
     _model_dir_name = MODEL_ID.split("/")[-1].replace("-", "_")
     MODEL_NAME = MODEL_ID
     MODEL_DIR  = os.path.join(MODELS_BASE, _model_dir_name)
-    MODEL_SIZE = "custom"
-    # Estimate size hint from model ID
-    _size_hint = "~8GB" if "8B" in MODEL_ID else "~16GB" if ("32B" in MODEL_ID or "14B" in MODEL_ID) else "~4GB"
-    # Override _cfg to a minimal single-variant config
-    _cfg = {
-        "repo": MODEL_ID.split("/")[-1],
-        "variants": [("base", _model_dir_name, MODEL_ID, _size_hint)],
-        "nim": False,
-    }
-    _variant_labels = MODEL_ID
+    # Only fall back to "custom" if MODEL_SIZE wasn't explicitly set to a known config key.
+    # Prevents MODEL_ID from silently discarding a valid MODEL_SIZE (e.g. NEM-12B).
+    if MODEL_SIZE not in _MODEL_CONFIGS:
+        MODEL_SIZE = "custom"
+        # Estimate size hint from model ID
+        _size_hint = "~8GB" if "8B" in MODEL_ID else "~16GB" if ("32B" in MODEL_ID or "14B" in MODEL_ID) else "~4GB"
+        # Override _cfg to a minimal single-variant config
+        _cfg = {
+            "repo": MODEL_ID.split("/")[-1],
+            "variants": [("base", _model_dir_name, MODEL_ID, _size_hint)],
+            "nim": False,
+        }
+        _variant_labels = MODEL_ID
 
 # ── Dashboard: 9-step progress checklist ─────────────────────────────────────
 STEP_LABELS = [
@@ -745,14 +748,14 @@ _live_flag = "/tmp/gradio_live.flag"
 _probe_ok = False
 for _probe_attempt in range(10):
     try:
-        urllib.request.urlopen(f"http://localhost:{GRADIO_PORT}/info", timeout=3)
+        urllib.request.urlopen(f"http://localhost:{GRADIO_PORT}/", timeout=3)
         _probe_ok = True
         break
     except Exception:
         time.sleep(2)
 
 if not _probe_ok:
-    print("  ✗  Gradio process launched but /info probe failed after 20s — process may have crashed.")
+    print("  ✗  Gradio process launched but / probe failed after 20s — process may have crashed.")
     print(f"     Check {LOG_FILE} for errors.")
     sys.exit(1)
 
@@ -782,7 +785,23 @@ if _cfg["nim"] and not NGC_API_KEY:
 print(f"{'─'*62}", flush=True)
 print(flush=True)
 
-proc.stdout.close()
+# BUG-STDOUT-PIPE: Keep stdout pipe alive so Gradio's print(flush=True) calls
+# don't get BrokenPipeError. Closing the read end here caused every inference
+# request to fail at Step 1 — the first yield fired, then the next print()
+# raised BrokenPipeError and the generator died. Drain thread keeps it open.
+import threading as _thr
+
+def _drain_gradio_stdout(fh, path):
+    try:
+        with open(path, "a") as f:
+            for line in fh:
+                f.write(line)
+                f.flush()
+    except Exception:
+        pass
+
+_thr.Thread(target=_drain_gradio_stdout, args=(proc.stdout, LOG_FILE), daemon=True).start()
+
 # Stay alive while Gradio runs — without this, the subprocess gets SIGHUP when
 # the screen session's controlling process exits.
 try:
