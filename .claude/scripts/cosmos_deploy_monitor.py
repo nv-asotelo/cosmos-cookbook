@@ -107,7 +107,7 @@ def brev_create(instance, provider):
 
 
 def brev_delete(instance):
-    _run_local(["brev", "delete", instance, "--force"], timeout=30)
+    _run_local(["brev", "delete", instance], timeout=30)
 
 
 def write_state(state):
@@ -129,28 +129,43 @@ def eta_fmt(start, model_size, backend):
     return f"~{remain // 60}m"
 
 
-def parse_setup_log(log_text):
-    """Return (done_steps: set[int], current_step: int|None, has_error: bool, last_line: str)."""
+def parse_setup_log(log_text, prev_done: set, prev_current, step_start_ts: dict):
+    """Parse setup log. Updates step_start_ts in-place for timing.
+    Returns (done_steps, current_step, has_error, last_line)."""
     done    = set()
     current = None
     has_err = False
     lines   = [l for l in log_text.splitlines() if l.strip()]
+    now     = time.time()
 
     for line in lines:
         if "[✓] Step" in line:
             try:
                 raw = line.split("Step")[1].split(":")[0].strip()
-                done.add(int(raw.rstrip("abcdefghij")))
+                num = int(raw.rstrip("abcdefghij"))
+                done.add(num)
+                # Record completion time if not already done
+                if num not in prev_done:
+                    if str(num) not in step_start_ts:
+                        step_start_ts[str(num)] = now
+                    step_start_ts[f"{num}_done"] = now
             except (ValueError, IndexError):
                 pass
         elif "[→] Step" in line:
             try:
                 raw = line.split("Step")[1].split(":")[0].strip()
                 current = int(raw.rstrip("abcdefghij"))
+                # Record start time for this step on first sight
+                if str(current) not in step_start_ts:
+                    step_start_ts[str(current)] = now
             except (ValueError, IndexError):
                 pass
         if "  ✗  " in line or "exit status 1" in line:
             has_err = True
+
+    # Step became current this cycle but wasn't tracked
+    if current and str(current) not in step_start_ts:
+        step_start_ts[str(current)] = now
 
     last = lines[-1][:90] if lines else ""
     return done, current, has_err, last
@@ -178,22 +193,38 @@ def print_checklist(state, done_steps, current_step, last_log_line):
         if ci == ti: return "→"
         return " "
 
+    # Phase-level elapsed for BUILDING
+    phase_elapsed = ""
+    if phase == "BUILDING" and state.get("phase_start_ts"):
+        ps = int(time.time() - state["phase_start_ts"])
+        phase_elapsed = f"  ({ps // 60}m {ps % 60:02d}s — typical ~3-5m)"
+
     buf = [
         f"Cosmos Deploy Monitor — {instance}  (elapsed: {elapsed} | ETA: {eta})",
         f"  {label} · ${rate:.2f}/hr · {model} ({msize}, {backend})",
         "──────────────────────────────────────────────────────────────",
-        f"  [{mark('BUILDING')}] Wait for SHELL READY",
+        f"  [{mark('BUILDING')}] Wait for SHELL READY{phase_elapsed}",
         f"  [{mark('DEPLOY_SCRIPTS')}] Deploy scripts",
     ]
 
     if phase in ("SETUP", "GRADIO_LIVE", "DONE"):
         buf.append(f"  [✓] Setup launched")
         all_done = phase in ("GRADIO_LIVE", "DONE")
+        step_starts = state.get("step_start_ts", {})
         for num, label_s in STEP_LABELS.items():
             if num in done_steps or all_done:
-                buf.append(f"       ✓ Step {num}: {label_s}")
+                # Show how long the step took if recorded
+                s_start = step_starts.get(str(num))
+                s_done  = step_starts.get(f"{num}_done")
+                if s_start and s_done:
+                    took = int(s_done - s_start)
+                    buf.append(f"       ✓ Step {num}: {label_s}  ({took}s)")
+                else:
+                    buf.append(f"       ✓ Step {num}: {label_s}")
             elif num == current_step:
-                buf.append(f"       → Step {num}: {label_s}  (running)")
+                s_start = step_starts.get(str(num))
+                running = f"  ({int(time.time() - s_start)}s)" if s_start else ""
+                buf.append(f"       → Step {num}: {label_s}{running}")
             else:
                 buf.append(f"       [ ] Step {num}: {label_s}")
     else:
@@ -233,6 +264,7 @@ def main():
 
     state = {
         "phase":          "BUILDING",
+        "phase_start_ts": time.time(),
         "start_ts":       time.time(),
         "instance":       args.instance,
         "model_id":       args.model_id,
@@ -253,6 +285,8 @@ def main():
     unhealthy_start  = None
     done_steps: set  = set()
     current_step     = None
+    step_start_ts: dict = {}
+    state["step_start_ts"] = step_start_ts
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
     while True:
@@ -262,8 +296,52 @@ def main():
             time.sleep(15)
             continue
 
-        # ── UNHEALTHY detection ───────────────────────────────────────────────
-        if brev_build in ("UNHEALTHY", "FAILED"):
+        # ── UNHEALTHY / CREATE_FAILED detection ──────────────────────────────
+        build_failed = brev_build in ("UNHEALTHY", "FAILED", "CREATE_FAILED")
+
+        # CREATE_FAILED = never provisioned → rotate immediately, no recovery window
+        if brev_build == "CREATE_FAILED":
+            print(f"✗ {args.provider_label} CREATE_FAILED — rotating provider immediately", flush=True)
+            brev_delete(args.instance)
+            time.sleep(10)
+
+            next_providers = PROVIDER_PRIORITY[prov_idx + 1:]
+            if not next_providers:
+                state["phase"]     = "ERROR"
+                state["exit_code"] = 2
+                state["message"]   = (
+                    f"All {len(PROVIDER_PRIORITY)} providers failed (CREATE_FAILED) starting with "
+                    f"{args.provider_label}. Please choose an action."
+                )
+                state["options"] = ["Try again with same provider", "Cancel deployment"]
+                write_state(state)
+                print_checklist(state, done_steps, current_step, "")
+                sys.exit(2)
+
+            next_p              = next_providers[0]
+            prov_idx           += 1
+            args.provider       = next_p["type"]
+            args.provider_label = next_p["label"]
+            args.rate           = next_p["rate"]
+            state["provider"]       = next_p["type"]
+            state["provider_label"] = next_p["label"]
+            state["rate"]           = next_p["rate"]
+            state["last_action"]    = f"✗ CREATE_FAILED — trying {next_p['label']}"
+            print(f"  → trying {next_p['label']} ({next_p['type']})", flush=True)
+            _, rc = brev_create(args.instance, next_p)
+            if rc != 0:
+                state["last_action"] = f"⚠️ brev create {next_p['label']} also failed — will retry next cycle"
+            unhealthy_start  = None
+            scripts_deployed = False
+            setup_launched   = False
+            done_steps       = set()
+            current_step     = None
+            state["phase"]   = "BUILDING"
+            write_state(state)
+            time.sleep(30)
+            continue
+
+        if build_failed:
             if unhealthy_start is None:
                 unhealthy_start = time.time()
                 state["last_action"] = f"⚠️ UNHEALTHY — 3-min recovery window starting"
@@ -323,8 +401,27 @@ def main():
         else:
             unhealthy_start = None  # reset on clean status
 
+        # ── Instance not found: provision it ─────────────────────────────────
+        if brev_status is None:
+            state["phase"]          = "BUILDING"
+            state["phase_start_ts"] = time.time()
+            state["last_action"]    = f"Instance not found — provisioning {args.provider_label}..."
+            print_checklist(state, done_steps, current_step, "")
+            current_p = next(
+                (p for p in PROVIDER_PRIORITY if p["type"] == args.provider),
+                PROVIDER_PRIORITY[prov_idx],
+            )
+            _, rc = brev_create(args.instance, current_p)
+            if rc != 0:
+                state["last_action"] = f"⚠️ brev create failed — will retry next cycle"
+            write_state(state)
+            time.sleep(30)
+            continue
+
         # ── BUILDING: wait for SHELL READY ────────────────────────────────────
         if brev_shell != "READY":
+            if state["phase"] != "BUILDING":
+                state["phase_start_ts"] = time.time()
             state["phase"]       = "BUILDING"
             state["last_action"] = f"Building... (BUILD={brev_build})"
             print_checklist(state, done_steps, current_step, "")
@@ -400,7 +497,10 @@ def main():
             log_raw, _ = brev_exec(
                 args.instance, f"tail -60 {SETUP_LOG} 2>/dev/null", timeout=30
             )
-            done_steps, current_step, has_err, last_line = parse_setup_log(log_raw)
+            done_steps, current_step, has_err, last_line = parse_setup_log(
+                log_raw, done_steps, current_step, step_start_ts
+            )
+            state["step_start_ts"] = step_start_ts
 
             # Check live flag
             flag_out, flag_rc = brev_exec(
