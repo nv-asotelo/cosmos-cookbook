@@ -70,6 +70,14 @@ STEP_LABELS = {
 }
 
 
+# Models that don't require an HF token (fully public)
+HF_PUBLIC_MODELS = {"QW3-2B", "QW3-8B", "QW3-32B"}
+
+
+def is_public_model(model_size):
+    return model_size in HF_PUBLIC_MODELS
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _run_local(args_list, timeout=30):
@@ -108,6 +116,106 @@ def brev_create(instance, provider):
 
 def brev_delete(instance):
     _run_local(["brev", "delete", instance], timeout=30)
+
+
+def deploy_hf_token(instance, state, done_steps, current_step):
+    """Read local HF token, deploy to instance, validate via whoami API.
+    Exits 2 if token is missing or invalid; exits 1 on hard deploy failure."""
+    local_path = os.path.expanduser("~/.cache/huggingface/token")
+
+    if not os.path.exists(local_path):
+        state["exit_code"] = 2
+        state["message"] = (
+            "HF token not found at ~/.cache/huggingface/token.\n"
+            "Copy your token from huggingface.co/settings/tokens, then run:\n"
+            "  pbpaste > ~/.cache/huggingface/token\n"
+            "Re-run the monitor to continue."
+        )
+        state["options"] = [
+            "Get token at huggingface.co/settings/tokens → copy → pbpaste > ~/.cache/huggingface/token  then retry",
+            "Cancel deployment",
+        ]
+        write_state(state)
+        print_checklist(state, done_steps, current_step, "")
+        sys.exit(2)
+
+    with open(local_path, "r") as f:
+        token = f.read().strip()
+
+    if not token:
+        state["exit_code"] = 2
+        state["message"] = "~/.cache/huggingface/token is empty — paste a valid token first."
+        state["options"] = ["pbpaste > ~/.cache/huggingface/token  then retry", "Cancel deployment"]
+        write_state(state)
+        print_checklist(state, done_steps, current_step, "")
+        sys.exit(2)
+
+    state["last_action"] = "Deploying HF token to instance..."
+    print_checklist(state, done_steps, current_step, "")
+    write_state(state)
+
+    # Ensure remote cache dir exists
+    brev_exec(instance, "mkdir -p ~/.cache/huggingface", timeout=15)
+
+    # Deploy token via base64 (avoids shell quoting issues with token characters)
+    b64_token = base64.b64encode(token.encode()).decode()
+    write_cmd = (
+        "python3 -c \""
+        "import base64,os; "
+        "p=os.path.expanduser('~/.cache/huggingface/token'); "
+        f"open(p,'w').write(base64.b64decode('{b64_token}').decode()); "
+        "os.chmod(p,0o600)"
+        "\""
+    )
+    _, rc = brev_exec(instance, write_cmd, timeout=30)
+    if rc != 0:
+        state["last_action"] = "⚠️ Token deploy failed — retrying..."
+        print_checklist(state, done_steps, current_step, "")
+        _, rc = brev_exec(instance, write_cmd, timeout=30)
+        if rc != 0:
+            state["phase"]     = "ERROR"
+            state["exit_code"] = 1
+            state["message"]   = "Failed to deploy HF token to instance after 2 attempts"
+            write_state(state)
+            sys.exit(1)
+
+    # Validate token via HF whoami API
+    state["last_action"] = "Validating HF token with HuggingFace..."
+    print_checklist(state, done_steps, current_step, "")
+    write_state(state)
+
+    validate_cmd = (
+        'TOKEN=$(cat ~/.cache/huggingface/token) && '
+        'curl -sf -H "Authorization: Bearer $TOKEN" https://huggingface.co/api/whoami-v2'
+    )
+    whoami_out, rc = brev_exec(instance, validate_cmd, timeout=30)
+
+    if rc == 0 and whoami_out.strip().startswith("{"):
+        try:
+            info   = json.loads(whoami_out)
+            user   = info.get("name", "unknown")
+            orgs   = [o["name"] for o in info.get("orgs", [])]
+            org_s  = ", ".join(orgs[:3]) or "none"
+            state["last_action"] = f"✓ HF token valid (user: {user}, orgs: [{org_s}])"
+        except (json.JSONDecodeError, KeyError):
+            state["last_action"] = "✓ HF token validated"
+    else:
+        state["exit_code"] = 2
+        state["message"] = (
+            "HF token validation failed — token may be expired or lack nvidia org access.\n"
+            "Get a fresh token at huggingface.co/settings/tokens, then:\n"
+            "  pbpaste > ~/.cache/huggingface/token"
+        )
+        state["options"] = [
+            "Refresh token: huggingface.co/settings/tokens → copy → pbpaste > ~/.cache/huggingface/token  then retry",
+            "Cancel deployment",
+        ]
+        write_state(state)
+        print_checklist(state, done_steps, current_step, "")
+        sys.exit(2)
+
+    print_checklist(state, done_steps, current_step, "")
+    write_state(state)
 
 
 def write_state(state):
@@ -286,6 +394,7 @@ def main():
     write_state(state)
 
     scripts_deployed = False
+    token_handled    = is_public_model(args.model_size)  # skip for public models
     setup_launched   = False
     unhealthy_start  = None
     done_steps: set  = set()
@@ -338,6 +447,7 @@ def main():
                 state["last_action"] = f"⚠️ brev create {next_p['label']} also failed — will retry next cycle"
             unhealthy_start  = None
             scripts_deployed = False
+            token_handled    = is_public_model(args.model_size)
             setup_launched   = False
             done_steps       = set()
             current_step     = None
@@ -395,6 +505,7 @@ def main():
                 prov_idx -= 1  # will be re-incremented next UNHEALTHY cycle
             unhealthy_start  = None
             scripts_deployed = False
+            token_handled    = is_public_model(args.model_size)
             setup_launched   = False
             done_steps       = set()
             current_step     = None
@@ -411,6 +522,9 @@ def main():
             state["phase"]          = "BUILDING"
             state["phase_start_ts"] = time.time()
             state["last_action"]    = f"Instance not found — provisioning {args.provider_label}..."
+            scripts_deployed = False
+            token_handled    = is_public_model(args.model_size)
+            setup_launched   = False
             print_checklist(state, done_steps, current_step, "")
             current_p = next(
                 (p for p in PROVIDER_PRIORITY if p["type"] == args.provider),
@@ -486,11 +600,18 @@ def main():
                 write_state(state)
 
             scripts_deployed     = True
-            state["last_action"] = "Scripts deployed ✓ — launching setup..."
+            state["last_action"] = "Scripts deployed ✓"
+            write_state(state)
+
+        # ── HF token: deploy and validate for gated models ───────────────────
+        if scripts_deployed and not token_handled:
+            deploy_hf_token(args.instance, state, done_steps, current_step)
+            token_handled        = True
+            state["last_action"] = "Credentials ready — launching setup..."
             write_state(state)
 
         # ── Launch setup in background ────────────────────────────────────────
-        if not setup_launched:
+        if not setup_launched and token_handled:
             state["phase"]       = "SETUP"
             state["last_action"] = "Launching setup in background..."
             print_checklist(state, done_steps, current_step, "")
