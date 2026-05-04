@@ -682,8 +682,8 @@ Usage:
 | 8B NVFP4 | `~/cosmos-reason2/models/Cosmos-Reason2-8B-NVFP4` | `nvidia/Cosmos-Reason2-8B-NVFP4` |
 | 8B FP8 | `~/cosmos-reason2/models/Cosmos-Reason2-8B-FP8` | `nvidia/Cosmos-Reason2-8B-FP8` |
 | 8B BF16 | `~/cosmos-reason2/models/Cosmos-Reason2-8B` | `nvidia/Cosmos-Reason2-8B` |
-| 32B BF16 | not yet downloaded | `nvidia/Cosmos-Reason2-32B` |
-| 32B AV | not yet downloaded | `nvidia/Cosmos-Reason2-32B-AV` |
+| 32B BF16 | public (May 2026) — no HF_TOKEN, ~66 GB | `nvidia/Cosmos-Reason2-32B` |
+| 32B AV | public (May 2026) — no HF_TOKEN, ~66 GB | `nvidia/Cosmos-Reason2-32B-AV` |
 
 ### Reconfiguration procedure (agent runs all steps)
 
@@ -762,8 +762,8 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 
 ### 32B feasibility on single H100 80GB (vLLM)
 
-- 32B BF16: ~64GB weights. Fits with `--max-model-len 4096 --gpu-memory-utilization 0.95`. Tight.
-- 32B would need to be downloaded first (~64GB). Not yet on disk as of 2026-04-21.
+- 32B BF16: ~66GB weights (33B params BF16). Fits with `--max-model-len 4096 --gpu-memory-utilization 0.95`. Tight — H100 80GB only.
+- CR2-32B is **public** as of May 2026 — no HF_TOKEN required. Download: `huggingface-cli download nvidia/Cosmos-Reason2-32B --local-dir models/Cosmos-Reason2-32B`.
 - In vLLM mode with 8B loaded, `run_all_variants` will send 32B requests to the 8B server — the table `Notes` column will show `vLLM serves Cosmos-Reason2-8B-NVFP4` to flag the mismatch.
 - For true 32B benchmarking: restart vLLM with 32B model using this skill, then run `Run All Variants` with `MODEL_SIZE=32B`.
 
@@ -784,3 +784,5 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 | Wrong VRAM tier selected (old Gradio using memory) | Setup script now kills port 7860 BEFORE measuring VRAM. Re-run setup to get clean tier. |
 | Inference >60s on high-VRAM workstation GPU | GPU name doesn't match H100/A100/H200/GB200 → fps=1 tier applies. If inference still slow, check that `GRADIO_FPS=1` is in the Gradio process env. |
 | HF 429 rate limit on download | Script retries 5× with 30s sleep. Common on shared Horde IP. Usually succeeds by attempt 3-4. |
+| `brev login` fails with EOF | `brev login` requires a browser handoff — it cannot run via `! brev login` in Claude Code (non-TTY). Open a separate terminal tab, run `brev login` there, complete the browser prompt, then return. |
+| vLLM Connection refused on first inference | `byo_video_setup.py` now auto-starts vLLM before Gradio (Step 9b). If running the Gradio script manually, start vLLM first: `nohup .venv/bin/vllm serve <model_dir> --port 8000 ... &` then poll `curl localhost:8000/v1/models`. |

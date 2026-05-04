@@ -108,10 +108,14 @@ _MODEL_CONFIGS = {
     },
     "32B": {
         "variants": [
-            ("CR2-32B BF16", "Cosmos-Reason2-32B",    "nvidia/Cosmos-Reason2-32B",    "~64 GB"),
-            ("CR2-32B AV",   "Cosmos-Reason2-32B-AV", "nvidia/Cosmos-Reason2-32B-AV", "~64 GB"),
+            ("CR2-32B BF16", "Cosmos-Reason2-32B",    "nvidia/Cosmos-Reason2-32B",    "~66 GB"),
+            ("CR2-32B AV",   "Cosmos-Reason2-32B-AV", "nvidia/Cosmos-Reason2-32B-AV", "~66 GB"),
         ],
         "nim": None,
+        # 33B params × 2 bytes BF16 = ~66GB weights. On H100 80GB: use 0.95 utilization.
+        # KV cache budget is ~4GB at this utilization — reduce max-model-len accordingly.
+        "vllm_extra_flags": ["--gpu-memory-utilization", "0.95"],
+        "vllm_max_model_len": 4096,
     },
 }
 
@@ -132,7 +136,8 @@ GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
-VLLM_MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
+VLLM_MAX_MODEL_LEN   = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
+INFERENCE_BACKEND    = os.environ.get("INFERENCE_BACKEND", "hf")
 # VRAM flags — set during GPU detection; declare defaults here
 ULTRA_LOW_VRAM = False
 LOW_VRAM       = False
@@ -527,6 +532,52 @@ for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants
 STEPS_DONE.append(9)
 print_dashboard()
 
+# ── Step 9b: vLLM server auto-start (BUG-VLLM-AUTOSTART) ─────────────────────
+# In vLLM mode Gradio connects to localhost:8000. If vLLM isn't running, the first
+# inference request fails with "Connection refused". Start it here, before Gradio.
+VLLM_LOG_FILE = "/tmp/vllm_server.log"
+if INFERENCE_BACKEND == "vllm":
+    _vllm_ready = False
+    try:
+        urllib.request.urlopen("http://localhost:8000/v1/models", timeout=3)
+        _vllm_ready = True
+        ok("vLLM already running on :8000 — reusing")
+    except Exception:
+        pass
+
+    if not _vllm_ready:
+        header("Step 9b — Start vLLM server", eta="~60-120s for model load")
+        _vllm_flags  = _cfg.get("vllm_extra_flags", ["--gpu-memory-utilization", "0.85"])
+        _vllm_maxlen = _cfg.get("vllm_max_model_len", VLLM_MAX_MODEL_LEN)
+        _vllm_cmd = [
+            f"{REASON2_DIR}/.venv/bin/vllm", "serve", MODEL_DIR,
+            "--served-model-name", MODEL_NAME,
+            "--port", "8000",
+            "--dtype", "auto",
+            "--trust-remote-code",
+            "--max-model-len", str(_vllm_maxlen),
+        ] + _vllm_flags
+
+        run(f"Launching vLLM server for {MODEL_SIZE} (log: {VLLM_LOG_FILE})")
+        with open(VLLM_LOG_FILE, "w") as _vf:
+            subprocess.Popen(_vllm_cmd, cwd=REASON2_DIR, env=ENV,
+                             stdout=_vf, stderr=subprocess.STDOUT)
+
+        VLLM_TIMEOUT = 180
+        t_vllm = time.time()
+        while time.time() - t_vllm < VLLM_TIMEOUT:
+            try:
+                urllib.request.urlopen("http://localhost:8000/v1/models", timeout=3)
+                _vllm_ready = True
+                break
+            except Exception:
+                time.sleep(5)
+
+        if not _vllm_ready:
+            print(f"  ✗  vLLM server did not start within {VLLM_TIMEOUT}s. Check {VLLM_LOG_FILE}")
+            sys.exit(1)
+        ok(f"vLLM ready in {int(time.time() - t_vllm)}s")
+
 # ── Step 10: Launch Gradio ────────────────────────────────────────────────────
 header("Step 10 — Launch Gradio web demo", eta="~5-10s for model load")
 
@@ -550,15 +601,15 @@ launch_env = {
     "GRADIO_FPS":         str(gradio_fps),
     "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
-    "INFERENCE_BACKEND":  os.environ.get("INFERENCE_BACKEND", "hf"),
+    "INFERENCE_BACKEND":  INFERENCE_BACKEND,
     "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
     "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
-    "VLLM_MAX_MODEL_LEN": str(VLLM_MAX_MODEL_LEN),
+    "VLLM_MAX_MODEL_LEN": str(_cfg.get("vllm_max_model_len", VLLM_MAX_MODEL_LEN)),
     # PRELOAD-001: skip HF preload when using vLLM backend
-    "SKIP_HF_PRELOAD":    "1" if os.environ.get("INFERENCE_BACKEND", "hf") == "vllm" else "0",
+    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND == "vllm" else "0",
 }
 
 run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
