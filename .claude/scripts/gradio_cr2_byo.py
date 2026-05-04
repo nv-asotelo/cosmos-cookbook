@@ -162,7 +162,7 @@ MODEL_CONFIGS = {
         ],
         "nim": None,  # TBD
     },
-    # ── Cosmos3-Reasoner (private gated — requires HF_TOKEN with nvidia org access) ──
+    # ── Cosmos3-Reasoner (C3-2B/C3-32B gated; C3-8B = Cosmos3-Nano-Reasoner, now public) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "bf16"),
@@ -171,7 +171,7 @@ MODEL_CONFIGS = {
     },
     "C3-8B": {
         "variants": [
-            ("C3R-8B BF16", "Cosmos3-Reasoner-8B", "nvidia/Cosmos3-Reasoner-8B-Private", "bf16"),
+            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "bf16"),
         ],
         "nim": None,
     },
@@ -302,7 +302,7 @@ CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
     ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
-    ("C3R-8B BF16",   "Cosmos3-Reasoner-8B",                  "nvidia/Cosmos3-Reasoner-8B-Private",             "bf16"),
+    ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner",                 "nvidia/Cosmos3-Nano-Reasoner",                   "bf16"),
     ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
     ("CR2-2B BF16",   "Cosmos-Reason2-2B",                    "nvidia/Cosmos-Reason2-2B",                       "bf16"),
     ("CR2-2B FP8",    "Cosmos-Reason2-2B-FP8",                "nvidia/Cosmos-Reason2-2B-FP8",                   "fp8"),

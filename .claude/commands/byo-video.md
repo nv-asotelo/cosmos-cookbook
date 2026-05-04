@@ -7,8 +7,9 @@ For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separa
 Default output: **Gradio web UI at a `gradio.live` public URL** — user uploads video in browser.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
-- `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
-- `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
+- `~/.claude/scripts/gradio_cr2_byo.py`       — Gradio app (all supported models)
+- `~/.claude/scripts/byo_video_setup.py`      — Bootstrap + launch script
+- `~/.claude/scripts/cosmos_deploy_monitor.py` — Local deployment monitor (state machine, checklist, provider rotation)
 
 ---
 
@@ -40,9 +41,9 @@ AskUserQuestion({
       question: "Model?",
       options: [
         "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (default, ≥40GB VRAM)",
-        "Nemotron-Nano-12B — nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16 (gated, vLLM only)",
+        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (public, 8B, ≥40GB VRAM)",
         "Qwen3-VL 8B — Qwen/Qwen3-VL-8B-Instruct (public, no HF_TOKEN)",
-        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (≥80GB VRAM)"
+        "Nemotron-Nano-12B — nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16 (gated, vLLM only)"
       ]
     },
     {
@@ -65,9 +66,10 @@ AskUserQuestion({
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
-| Q2 Model | Nemotron-Nano-12B | `MODEL_ID=nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
+| Q2 Model | Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
 | Q2 Model | Qwen3-VL 8B | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
-| Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
+| Q2 Model | Nemotron-Nano-12B | `MODEL_ID=nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
+| Q2 Model | Cosmos Reason2 8B | (Other) `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Other (free text) | Use the typed HF model ID; derive `MODEL_SIZE` from supported models table |
 | Q3 Env | New Brev H100 | `DEPLOY_TARGET=brev:new` — agent calls `brev create` |
 | Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
@@ -111,22 +113,23 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/gra
 
 Record `SETUP_DISPATCHED_AT` (agent-side timestamp) immediately before dispatching the setup script. This timestamp gates the idle billing handler.
 
-**Launch:**
-```bash
-# Brev
-brev exec <name> "export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> BREV_RATE_PER_HOUR=<rate> && python3 /tmp/byo_video_setup.py"
+**For Brev deployments — use the Deployment Monitor (preferred):**
 
+Deploy `cosmos_deploy_monitor.py` via the Monitor tool immediately after confirming the instance
+name. The monitor handles script deployment, background launch, log tailing, checklist display,
+UNHEALTHY recovery, and URL capture autonomously. See **DEPLOYMENT MONITOR** section below.
+
+**For SSH deployments — manual launch (no monitor available):**
+```bash
 # SSH
 ssh -i ~/.ssh/id_ed25519 <user@host> "export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> && python3 /tmp/byo_video_setup.py"
 ```
 
-Note: CLAUDE.md prohibits compound commands in Bash tool calls. Use env vars in the launch string inside the quoted remote command — that is remote shell syntax, not local shell chaining.
-
-URL capture fallback (if stream drops before URL prints):
+URL capture fallback (SSH / if monitor missed it):
 ```bash
-brev exec <name> "cat /tmp/gradio_url.txt"
+brev exec <name> "cat /tmp/gradio_live.flag"
 # or
-ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt"
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag"
 ```
 
 ---
@@ -135,13 +138,28 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt"
 
 After instance creation, poll `brev ls` every 60s until SHELL column shows READY.
 
-If STATUS shows `UNHEALTHY` at any point: **report it immediately.** Do NOT wait for the user to notice.
+If STATUS shows `UNHEALTHY` at any point:
 
-1. Test GPU: `brev exec <name> "nvidia-smi"`
-2. If GPU responds → UNHEALTHY is a Brev daemon flag (not hardware). Document it, continue.
-3. If GPU doesn't respond → BLOCKED. Tell user, offer to provision a new instance.
+**Step 1 — Warn immediately in chat.** Do not wait silently. Tell the user the instance is UNHEALTHY and that you're giving it 3 minutes to self-recover before halting.
 
-Never let UNHEALTHY pass silently.
+**Step 2 — Recovery window (3 minutes).** Poll every 30s. Display a countdown each poll:
+```
+⚠️  <name> UNHEALTHY — watching for self-recovery (2m 30s remaining)
+```
+Instances sometimes recover on their own during the BUILD phase (Brev daemon transient). 3 minutes is the empirical timeout — instances stuck longer than this do not recover.
+
+**Step 3 — If recovered (SHELL READY within 3 min):** test GPU with `brev exec <name> "nvidia-smi"`. If GPU responds → UNHEALTHY was a Brev daemon flag, continue normally. If GPU fails → treat as BLOCKED (step 4).
+
+**Step 4 — If still UNHEALTHY after 3 minutes: auto-recover silently.**
+
+No AskUserQuestion. Execute the recovery sequence autonomously:
+
+1. Try `brev reset <name>` — if it succeeds, re-enter the READY poll loop.
+2. If reset fails or is unsupported: delete the instance (`brev delete <name>`) and rotate to the next provider in the **PROVIDER FALLBACK priority list** (see section below). Emit one line: `✗ <type> UNHEALTHY — deleted, trying <next-type>`.
+3. Keep rotating until SHELL READY or all providers exhausted.
+4. **Only AskUserQuestion when all providers have been tried and all failed** — present the failure summary and ask whether to use an existing stopped instance or abort.
+
+**Never expose brev internals (reset, delete, provider names) to the user unless all options are exhausted. Handle it autonomously.**
 
 ---
 
@@ -168,22 +186,28 @@ Alert:
 
 ---
 
-### PROVIDER FALLBACK
+### PROVIDER FALLBACK — Auto-rotation (no user interruption)
 
-If Brev provisioning fails, surface the failure clearly and offer alternatives:
+When a provisioning attempt fails (UNHEALTHY after 3 min, `brev create` error, or `brev reset` unsupported), **automatically rotate** to the next provider in the priority list below. Do NOT stop to ask the user — they should only be interrupted when all providers are exhausted or when there is a meaningful cost difference requiring a decision.
 
-```
-✗  <brev create command> failed: <exact error>
+**Priority list (most reliable first, based on validated sessions):**
 
-Fallback options:
-  → H100 (hyperstack_H100): $3.70/hr — same GPU, different provider
-  → A100-80GB (hyperstack_A100): $2.20/hr  (-$1.50/hr, 80GB VRAM)
-  → A40 (scaleway_A40): $1.10/hr  (-$2.60/hr, 48GB VRAM, LOW_VRAM mode)
+| Priority | Type | GPU | VRAM | Rate | Notes |
+|---|---|---|---|---|---|
+| 1 | `gpu-h100-sxm.1gpu-16vcpu-200gb` | H100 SXM | 80 GB | ~$3.70/hr | Proven stable — same type as c3r-2b, c3r-8b-v2 |
+| 2 | `hyperstack_A100` | A100 80GB | 80 GB | ~$2.20/hr | 80GB, fits all models except 32B tight |
+| 3 | `hyperstack_H100` | H100 PCIe | 80 GB | ~$3.70/hr | Validated in earlier sessions; recently unreliable |
+| 4 | `scaleway_A40` | A40 | 48 GB | ~$1.10/hr | LOW_VRAM mode; slowest inference tier |
 
-Pick one, or cancel.
-```
+**Rotation behavior:**
+1. Attempt provisioning with priority 1.
+2. On UNHEALTHY (after 3-min window) or create error: delete the failed instance, emit one line of context (`✗ <type> failed — trying <next-type>`), and immediately try priority 2. No AskUserQuestion.
+3. Repeat through priority 4.
+4. **Only AskUserQuestion when all 4 have failed** — present the full failure log and ask whether to retry, use an existing stopped instance, or abort.
 
-Wait for explicit user selection. Do NOT auto-provision a fallback.
+**Exception — cost jump:** If rotating from a cheaper tier to one >$1.50/hr more expensive, surface a one-line warning and wait 30s before proceeding (allows user to interrupt). Do not block on it.
+
+**Existing stopped instances** count as priority 0 — if the user's org has a stopped instance with a compatible GPU, offer to start it before any new provisioning attempt.
 
 ---
 
@@ -208,53 +232,90 @@ Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
 
 ---
 
-### /loop AUTO-TRIGGER (Brev instance creation and long-running setup)
+### DEPLOYMENT MONITOR (replaces /loop — Brev only)
 
-After a new Brev instance is created OR after the setup script is dispatched, immediately invoke the `/loop` skill to keep the session alive while setup runs. This prevents the session from going dormant during the 5–15 minute model download + vLLM load phase.
+After SHELL READY is confirmed (or immediately if reusing an existing instance), dispatch
+`cosmos_deploy_monitor.py` — a local Python state machine that manages the full pipeline,
+shows a persistent formatted checklist on each poll cycle, and handles UNHEALTHY + provider
+rotation autonomously.
 
-**Invoke at dispatch time:**
-```
-After deploying scripts and launching setup: invoke /loop
-```
+**Canonical script:** `~/.claude/scripts/cosmos_deploy_monitor.py`
 
-**Notify the user immediately:**
-```
-⟳ /loop triggered — monitoring <instance-name> while setup runs.
-  To stop looping: type any message or close the session.
-  I'll notify you when the Gradio URL is live.
-```
+**Dispatch via Monitor tool** (streams checklist output as batched notifications):
 
-**Loop behavior — live checklist display (required):**
-
-Each loop iteration must:
-1. Tail the setup log: `brev exec <name> "tail -50 /tmp/byo_video_setup.log 2>/dev/null"`
-2. Parse the log for completed steps (look for `✓` or `Step N` completion markers)
-3. Render the checklist inline — show ALL 9 steps with current status:
-
-```
-Setup Progress — <instance-name> (<elapsed>s)
-──────────────────────────────────────────────
-  [✓] Step 1: GPU detect + VRAM tier
-  [✓] Step 2: HF auth + token validate
-  [✓] Step 3: NGC API key
-  [✓] Step 4: uv install
-  [✓] Step 5: cosmos-reason2 repo
-  [✓] Step 6: uv sync + CUDA libs
-  [✓] Step 7: PyAV + Gradio + requests
-  [ ] Step 8: Model weights download  ← (in progress)
-  [ ] Step 9: Gradio launch
-──────────────────────────────────────────────
-Next check in ~60s. Type any message to stop.
+```python
+Monitor({
+  description: "byo-video deploy — <instance-name>",
+  command: (
+    "python3 ~/.claude/scripts/cosmos_deploy_monitor.py"
+    " --instance <name>"
+    " --model-id <MODEL_ID>"
+    " --model-size <MODEL_SIZE>"
+    " --backend <INFERENCE_BACKEND>"
+    " --rate <BREV_RATE_PER_HOUR>"
+    " --provider <provider_type>"
+    " --provider-label '<provider_label>'"
+  ),
+  timeout_ms: 7200000,  # 2h max
+  persistent: false
+})
 ```
 
-4. Check `/tmp/gradio_live.flag` for the live URL
-5. When flag contains a URL → declare live, read URL, post Teams kill alert, stop looping
-6. If log shows `✗` or `exit status 1` → surface error immediately, stop looping
-7. If instance goes UNHEALTHY → surface immediately, offer new instance
+**What the monitor outputs (each poll cycle ~30s, lines batch into one notification):**
 
-**The checklist must be visible every iteration.** Silent polling (just checking the flag) is not acceptable — the user needs to see where setup is stalled.
+```
+Cosmos Deploy Monitor — c3r-nano  (elapsed: 4m 32s | ETA: ~12m)
+  H100 SXM · $3.70/hr · nvidia/Cosmos3-Nano-Reasoner (C3-8B, vllm)
+──────────────────────────────────────────────────────────────
+  [✓] Wait for SHELL READY
+  [✓] Deploy scripts
+  [✓] Setup launched
+       ✓ Step 1: GPU detect + VRAM tier
+       ✓ Step 2: HF auth + token validate
+       ✓ Step 3: NGC API key
+       ✓ Step 4: uv package manager
+       ✓ Step 5: cosmos-reason2 repo
+       → Step 6: uv sync + CUDA libs  (running)
+       [ ] Step 7: PyAV + Gradio + requests
+       [ ] Step 9: Model weights download
+       [ ] Step 10: Gradio launch
+  [ ] Gradio live
+──────────────────────────────────────────────────────────────
+  ↳ uv sync started — no delays so far.
+  log: ⟳  installing cu128 extras...
+```
 
-The `/tmp/gradio_live.flag` file is written by `byo_video_setup.py` only AFTER the Gradio liveness probe passes (BUG-LIVENESS fix). It is the authoritative live signal — not `/tmp/gradio_url.txt`.
+**Monitor exit code handling:**
+
+| Exit code | Meaning | Agent action |
+|---|---|---|
+| `0` | Gradio live — URL in `/tmp/cosmos_deploy_state.json` | Read URL, post Teams kill alert |
+| `1` | Unrecoverable error — message in state file | Read error, surface to user, offer retry |
+| `2` | All providers exhausted / needs user input — options in state file | Read state file, call `AskUserQuestion` with options from `state["options"]` |
+| timeout | Monitor timed out | Re-read state file to determine phase; re-arm if appropriate |
+
+**On exit 0:**
+```python
+state = json.load(open("/tmp/cosmos_deploy_state.json"))
+url = state["gradio_url"]
+# post kill alert
+run("~/.claude/scripts/teams-notify.sh 'Cosmos demo live at <url>. Kill when ready.'")
+```
+
+**On exit 2:**
+```python
+state = json.load(open("/tmp/cosmos_deploy_state.json"))
+AskUserQuestion({ questions: [{ question: state["message"], options: state["options"] }] })
+```
+
+**Notify the user at dispatch:**
+```
+⟳ Deployment monitor running — watching <instance-name>.
+  Checklist updates every 30s. I'll notify when Gradio is live or if I need input.
+```
+
+The `/tmp/gradio_live.flag` file is the authoritative live signal — written by `byo_video_setup.py`
+only after the Gradio liveness probe passes.
 
 ---
 
@@ -267,7 +328,8 @@ The `/tmp/gradio_live.flag` file is written by `byo_video_setup.py` only AFTER t
 | Cosmos Reason2 BF16 | 2B VLM | 40 GB | `2B` | Video understanding: robotics, AV, Metropolis |
 | Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
 | Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
-| Cosmos3-Reasoner | 2B/8B/32B | 40/80/80+ GB | `C3-2B`, `C3-8B`, `C3-32B` | Next-gen reasoning; gated HF_TOKEN |
+| Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | Public; was Cosmos3-Reasoner-8B-Private |
+| Cosmos3-Reasoner 2B/32B | 2B/32B | 40/80+ GB | `C3-2B`, `C3-32B` | Gated HF_TOKEN; nvidia org required |
 | Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
 | Nemotron-Nano-12B-v2-VL FP8 | 12B VLM | 24 GB | `NEM-12B` | FP8 quantized |
 | Qwen3-VL-2B Instruct/FP8/Thinking | 2B VLM | 8 GB | `QW3-2B` | Public (no HF_TOKEN); vLLM-only |

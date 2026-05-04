@@ -66,7 +66,7 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
 
 # ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
 _MODEL_CONFIGS = {
-    # ── Cosmos3-Reasoner (private gated — HF_TOKEN with nvidia org required) ──
+    # ── Cosmos3-Reasoner (C3-2B/C3-32B gated; C3-8B = Cosmos3-Nano-Reasoner, now public) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "~TBD"),
@@ -75,7 +75,7 @@ _MODEL_CONFIGS = {
     },
     "C3-8B": {
         "variants": [
-            ("C3R-8B BF16", "Cosmos3-Reasoner-8B", "nvidia/Cosmos3-Reasoner-8B-Private", "~TBD"),
+            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~TBD"),
         ],
         "nim": None,
     },
