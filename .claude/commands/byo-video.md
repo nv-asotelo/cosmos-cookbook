@@ -1,110 +1,14 @@
 # /byo-video — Cosmos BYO-Video Demo
 
-Two modes:
+**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to a Gradio web UI at a `gradio.live` public URL — user uploads video in browser.
 
-**VLM Race (multi-model comparison) — use `/vlm-race` skill instead:**
-Side-by-side comparison of Cosmos Reason 2, Nemotron-Nano-12B-v2, and Qwen3-VL.
-The VLM Race is now its own skill with full documentation. See `/vlm-race`.
-The section below is kept for reference only.
+For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
 
-**Single-model (CR2 only) — original mode:**
-Launch Cosmos Reason2 only. Faster startup. See `## Primary flow — Brev web demo` below.
-
-Default output (both modes): **Gradio web UI at a `gradio.live` public URL** — user uploads video in browser.
+Default output: **Gradio web UI at a `gradio.live` public URL** — user uploads video in browser.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
-- `~/.claude/scripts/gradio_compare_vlm.py` — VLM Race 3-model comparison app (new)
-- `~/.claude/scripts/compare_vlm_setup.py`  — VLM Race bootstrap + launch (new)
-- `~/.claude/scripts/gradio_cr2_byo.py`      — Single-model CR2 app (original)
-- `~/.claude/scripts/byo_video_setup.py`     — Single-model bootstrap + launch (original)
-
----
-
-## VLM Race — Multi-Model Comparison
-
-### Models
-| Column | Model | HF ID | Notes |
-|---|---|---|---|
-| 🌌 | Cosmos Reason 2 | `nvidia/Cosmos-Reason2-2B` or `8B` | Auto-sized by VRAM; checkpoint selectable in Advanced |
-| 🤖 | Nemotron-Nano-12B-v2 | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` | Fixed; gated — requires HF_TOKEN |
-| 🔷 | Qwen3-VL | `Qwen/Qwen3-VL-2B-Instruct` or `8B` | Paired with CR2 size |
-
-All models use BF16 (torch.bfloat16) by default.
-
-### VRAM requirements
-| Config | VRAM needed | Fits on |
-|---|---|---|
-| 2B variants (CR2-2B + Nem-12B + Qwen-2B) | ~32 GB | A40 (48GB), A100 (40/80GB), H100 (80GB) |
-| 8B variants (CR2-8B + Nem-12B + Qwen-8B) | ~56 GB | A100 80GB, H100 80GB |
-| RTX5070 (12 GB) | CR2-2B only; Nem-12B OOM | Graceful OOM error shown in UI |
-
-### Deploy — Brev (agent provisions instance)
-
-```bash
-# Step 1 — Create instance (agent runs this)
-brev create vlm-race --gpu-name H100 --type hyperstack_H100
-
-# Step 2 — Wait for SHELL READY
-brev ls   # repeat until SHELL column shows READY
-
-# Step 3 — Deploy both scripts
-for script in gradio_compare_vlm compare_vlm_setup; do
-  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
-  brev exec vlm-race "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
-done
-
-# Step 4 — Launch (agent runs; streams to terminal)
-brev exec vlm-race "export HF_TOKEN=hf_... && python3 /tmp/compare_vlm_setup.py"
-
-# Step 5 — Capture URL (if needed separately)
-brev exec vlm-race "cat /tmp/gradio_url.txt"
-```
-
-### Deploy — Horde (10.57.234.230, SSH key default)
-
-```bash
-# Deploy scripts
-for script in gradio_compare_vlm compare_vlm_setup; do
-  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
-  ssh horde@10.57.234.230 "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
-done
-
-# Launch
-ssh horde@10.57.234.230 "export HF_TOKEN=hf_... && python3 /tmp/compare_vlm_setup.py"
-
-# Capture URL
-ssh horde@10.57.234.230 "cat /tmp/gradio_url.txt"
-```
-
-### Deploy — asotelo-dt (local workstation, RTX5070)
-
-Same SSH pattern as Horde. Note: Nemotron-12B will OOM on RTX5070 — app handles gracefully.
-
-```bash
-ssh asotelo@asotelo-dt "python3 /tmp/compare_vlm_setup.py"
-```
-
-### Race UI
-- **Basic mode:** upload video, pick demo prompt, click Start Comparison
-- **Advanced mode:** edit system/user prompts, toggle thinking/reasoning, tune fps/resolution/max_tokens, change CR2 checkpoint
-- **Metrics per column:** TTFT · Inference time · E2E time · Tokens in/out
-- **Clip info:** resolution · fps · duration shown on upload
-- **Winner badge:** 🏆 on whichever model has lowest inference_s among successful runs
-- **OOM handling:** column shows error + "try quantized variant" message; other columns continue
-- **Timeout:** per-model, default 240s; configurable in Advanced
-
-### Env vars (VLM Race)
-| Var | Default | Notes |
-|---|---|---|
-| `CR2_CHECKPOINT` | auto | Override CR2 model (any HF ID or local path) |
-| `RACE_TIMEOUT_S` | 300 | Per-model timeout in seconds |
-| `NEMOTRON_MODEL` | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` | Override Nemotron model |
-| `QWEN_MODEL_2B` / `QWEN_MODEL_8B` | Qwen3-VL defaults | Override Qwen3-VL model |
-| `GRADIO_PORT` | 7860 | Port |
-| `GRADIO_SHARE` | true | Set to false to disable public link |
-
-### Results
-JSON saved to `/tmp/vlm_race_results.json` after each run. Contains per-model: status, text, TTFT, inference_s, e2e_s, tokens_in, tokens_out, winner flag.
+- `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
+- `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 
 ---
 
@@ -128,11 +32,19 @@ If not already provided, ask these 3 questions together:
 - Default: `vllm` (current sprint default — advanced users). Future no-args default: `hf`.
 
 **Q2 — Model?**
-Any Cosmos HF model ID is accepted. Examples:
-- `nvidia/Cosmos-Reason2-2B` (default — fits ≥12GB VRAM in LOW_VRAM mode)
-- `nvidia/Cosmos-Reason2-8B` (needs ≥80GB free)
-- `nvidia/Cosmos3-Reasoner-8B-Private` (gated — needs a valid HF_TOKEN on the instance)
-- `nvidia/Cosmos-Reason2-2B-FP8` (quantized, vLLM only)
+Any supported HF model ID is accepted. Set `MODEL_SIZE` to the matching size key. Examples:
+- `nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` (default — fits ≥40GB VRAM)
+- `nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` (needs ≥80GB free)
+- `nvidia/Cosmos3-Reasoner-8B-Private` · `MODEL_SIZE=C3-8B` (gated — HF_TOKEN with nvidia org)
+- `nvidia/Cosmos-Reason2-2B-FP8` · `MODEL_SIZE=2B` (quantized, vLLM only)
+- `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` (gated — HF_TOKEN with nvidia org; vLLM only)
+- `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8` · `MODEL_SIZE=NEM-12B` (FP8 quantized)
+- `Qwen/Qwen3-VL-2B-Instruct` · `MODEL_SIZE=QW3-2B` (public, no HF_TOKEN; vLLM only)
+- `Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` (public, ~16GB)
+- `Qwen/Qwen3-VL-8B-Instruct-FP8` · `MODEL_SIZE=QW3-8B` (FP8 quantized)
+- `Qwen/Qwen3-VL-8B-Thinking` · `MODEL_SIZE=QW3-8B` (reasoning variant)
+
+Qwen3-VL is public (no HF_TOKEN required) and uses the same `file://` video URL protocol as Nemotron. Variant selection (Instruct/FP8/Thinking) is shown in the Gradio checkpoint dropdown.
 
 **Q3 — Environment?**
 - `a` New Brev instance — agent provisions. Specify GPU type (default: H100).
@@ -271,29 +183,71 @@ Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
 
 ---
 
+### /loop AUTO-TRIGGER (Brev instance creation and long-running setup)
+
+After a new Brev instance is created OR after the setup script is dispatched, immediately invoke the `/loop` skill to keep the session alive while setup runs. This prevents the session from going dormant during the 5–15 minute model download + vLLM load phase.
+
+**Invoke at dispatch time:**
+```
+After deploying scripts and launching setup: invoke /loop
+```
+
+**Notify the user immediately:**
+```
+⟳ /loop triggered — monitoring <instance-name> while setup runs.
+  To stop looping: type any message or close the session.
+  I'll notify you when the Gradio URL is live.
+```
+
+**Loop behavior:**
+- Poll `brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null || echo NOT_LIVE"` every ~60s
+- When `/tmp/gradio_live.flag` contains a URL → declare live, read URL, post Teams kill alert, stop looping
+- If `/tmp/vllm_server.log` shows an error → surface immediately, stop looping
+- If instance goes UNHEALTHY → surface immediately, offer new instance
+
+The `/tmp/gradio_live.flag` file is written by `byo_video_setup.py` only AFTER the Gradio liveness probe passes (BUG-LIVENESS fix). It is the authoritative live signal — not `/tmp/gradio_url.txt`.
+
+---
+
 ---
 
 ## Supported models
 
-| Model | Size | Min VRAM | Use case |
-|---|---|---|---|
-| Cosmos Reason2 (CR2-2B) | 2B VLM | 40 GB | Video understanding: robotics, AV, Metropolis |
-| Cosmos Reason2 (CR2-8B) | 8B VLM | 80 GB | Same, higher quality |
-| Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB (A40) | Video understanding via vLLM nightly; `MODEL_SIZE=NEM-12B` |
-| Nemotron-Nano-12B-v2-VL FP8  | 12B VLM | 24 GB | Same, FP8 quantized |
-| Cosmos Transfer2.5 | Gen | 80 GB+ | Video-to-video generation, sim2real |
-| Cosmos Predict2 | Gen | 80 GB+ | World model generation |
+| Model | Size | Min VRAM | MODEL_SIZE | Use case |
+|---|---|---|---|---|
+| Cosmos Reason2 BF16 | 2B VLM | 40 GB | `2B` | Video understanding: robotics, AV, Metropolis |
+| Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
+| Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
+| Cosmos3-Reasoner | 2B/8B/32B | 40/80/80+ GB | `C3-2B`, `C3-8B`, `C3-32B` | Next-gen reasoning; gated HF_TOKEN |
+| Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
+| Nemotron-Nano-12B-v2-VL FP8 | 12B VLM | 24 GB | `NEM-12B` | FP8 quantized |
+| Qwen3-VL-2B Instruct/FP8/Thinking | 2B VLM | 8 GB | `QW3-2B` | Public (no HF_TOKEN); vLLM-only |
+| Qwen3-VL-8B Instruct/FP8/Thinking | 8B VLM | 20 GB | `QW3-8B` | Public; higher quality |
+| Qwen3-VL-32B Instruct/FP8/Thinking | 32B VLM | 64+ GB | `QW3-32B` | Public; best quality |
+| Cosmos Transfer2.5 | Gen | 80 GB+ | — | Video-to-video generation, sim2real |
+| Cosmos Predict2 | Gen | 80 GB+ | — | World model generation |
 
-Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+). Reason2 at 2B runs on workstation hardware (≥40GB).
+Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+).
 
 ### Nemotron-Nano-12B-v2-VL notes
 
-- **Gated model** — HF_TOKEN required with nvidia org access (`huggingface-cli login` on the instance)
-- **vLLM nightly** — PyPI vLLM ≤0.11.0 does not support Nemotron. Instance must have a vLLM nightly build or use Docker image `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067`
-- **opencv backend** — Nemotron's vLLM integration uses `VLLM_VIDEO_LOADER_BACKEND=opencv` (injected automatically by `byo_video_setup.py`). PyAV is not used for Nemotron.
-- **file:// video protocol** — Gradio uploads the video to `/tmp/gradio_upload.mp4` and sends a `file://` URL to the vLLM server. The server reads the video file directly. `--allowed-local-media-path /tmp` is required (set automatically).
-- **NVFP4-QAD variant** — requires a special vLLM build; not in the variants list. Use BF16 or FP8 for demos.
+- **Gated model** — HF_TOKEN required with nvidia org access
+- **vLLM 0.14.0+** — vLLM 0.11.0 is ABI-incompatible with torch 2.9.0+cu128. `byo_video_setup.py` auto-pins to 0.14.0 on CUDA 12.8 (driver < 575). Do not pin lower.
+- **opencv backend** — `VLLM_VIDEO_LOADER_BACKEND=opencv` is injected automatically. PyAV is not supported.
+- **file:// video protocol** — Gradio copies video to `/tmp/gradio_upload.mp4` and sends `file:///tmp/gradio_upload.mp4` to vLLM. `--allowed-local-media-path /tmp` is required (set automatically by setup script NEM-12B config).
+- **FLASHINFER bypass** — `FLASHINFER_DISABLE_VERSION_CHECK=1` is injected automatically (flashinfer package/cubin version mismatch in cosmos-reason2 venv).
+- **NVFP4-QAD variant** — requires a special vLLM build; not available in standard setup. Use BF16 or FP8.
 - **Launch**: `MODEL_SIZE=NEM-12B INFERENCE_BACKEND=vllm python3 /tmp/byo_video_setup.py`
+
+### Qwen3-VL notes
+
+- **Public model** — no HF_TOKEN required
+- **vLLM only** — uses same `file://` video URL protocol as Nemotron; HF inference backend not supported
+- **`--allowed-local-media-path /tmp`** required — set automatically in QW3-* configs
+- **Variant picker** — Gradio checkpoint dropdown shows Instruct, FP8, and Thinking for each size
+- **Thinking variant** — extended reasoning mode; max_tokens should be ≥2048 for best results
+- **VRAM**: 2B~8GB, 8B~20GB, 32B~64GB (FP8 halves these)
+- **Launch**: `MODEL_SIZE=QW3-8B INFERENCE_BACKEND=vllm python3 /tmp/byo_video_setup.py`
 
 ---
 

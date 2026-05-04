@@ -117,6 +117,40 @@ _MODEL_CONFIGS = {
         "vllm_extra_flags": ["--gpu-memory-utilization", "0.95"],
         "vllm_max_model_len": 4096,
     },
+    # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
+    # vLLM-only: uses video_url content type with file:// path (same as Nemotron).
+    # Frame control via extra_body mm_processor_kwargs at inference time.
+    # Variants: 2B fits 1x H100; 8B fits 1x H100 80GB; 32B needs TP=2 or FP8 on 1x H100.
+    "QW3-2B": {
+        "variants": [
+            ("Qwen3-VL-2B Instruct",    "Qwen3-VL-2B-Instruct",     "Qwen/Qwen3-VL-2B-Instruct",     "~5 GB"),
+            ("Qwen3-VL-2B FP8",         "Qwen3-VL-2B-Instruct-FP8", "Qwen/Qwen3-VL-2B-Instruct-FP8", "~3 GB"),
+            ("Qwen3-VL-2B Thinking",    "Qwen3-VL-2B-Thinking",     "Qwen/Qwen3-VL-2B-Thinking",     "~5 GB"),
+        ],
+        "nim": None,
+        "vllm_extra_flags": ["--gpu-memory-utilization", "0.85", "--allowed-local-media-path", "/tmp"],
+        "vllm_max_model_len": 32768,
+    },
+    "QW3-8B": {
+        "variants": [
+            ("Qwen3-VL-8B Instruct",    "Qwen3-VL-8B-Instruct",     "Qwen/Qwen3-VL-8B-Instruct",     "~16 GB"),
+            ("Qwen3-VL-8B FP8",         "Qwen3-VL-8B-Instruct-FP8", "Qwen/Qwen3-VL-8B-Instruct-FP8", "~9 GB"),
+            ("Qwen3-VL-8B Thinking",    "Qwen3-VL-8B-Thinking",     "Qwen/Qwen3-VL-8B-Thinking",     "~16 GB"),
+        ],
+        "nim": None,
+        "vllm_extra_flags": ["--gpu-memory-utilization", "0.85", "--allowed-local-media-path", "/tmp"],
+        "vllm_max_model_len": 32768,
+    },
+    "QW3-32B": {
+        "variants": [
+            ("Qwen3-VL-32B Instruct",   "Qwen3-VL-32B-Instruct",     "Qwen/Qwen3-VL-32B-Instruct",     "~64 GB"),
+            ("Qwen3-VL-32B FP8",        "Qwen3-VL-32B-Instruct-FP8", "Qwen/Qwen3-VL-32B-Instruct-FP8", "~33 GB"),
+            ("Qwen3-VL-32B Thinking",   "Qwen3-VL-32B-Thinking",     "Qwen/Qwen3-VL-32B-Thinking",     "~64 GB"),
+        ],
+        "nim": None,
+        "vllm_extra_flags": ["--gpu-memory-utilization", "0.93", "--allowed-local-media-path", "/tmp"],
+        "vllm_max_model_len": 16384,
+    },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # Requires vLLM nightly or compatible build; PyPI vLLM ≤0.11.0 unsupported.
     # Uses opencv video backend (not PyAV). Gradio sends video as file:// URL.
@@ -134,17 +168,29 @@ _MODEL_CONFIGS = {
         ],
         "vllm_max_model_len": 32768,
         # VLLM_VIDEO_LOADER_BACKEND=opencv: required for Nemotron video decoding.
-        # Nemotron's vLLM integration does not support PyAV; opencv is the only
-        # supported backend. This env var is injected into the vLLM subprocess only.
-        "vllm_env": {"VLLM_VIDEO_LOADER_BACKEND": "opencv"},
+        # Nemotron's vLLM integration does not support PyAV; opencv is the only supported backend.
+        # FLASHINFER_DISABLE_VERSION_CHECK=1: bypasses mismatch between flashinfer Python package
+        # (0.5.3) and flashinfer-cubin (0.6.8.post1) installed by cosmos-reason2 uv sync.
+        "vllm_env": {
+            "VLLM_VIDEO_LOADER_BACKEND": "opencv",
+            "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+        },
     },
 }
 
 # ── Config ──────────────────────────────────────────────────────────────────
 HOME          = os.path.expanduser("~")
 PATH_EXTRA    = f"{HOME}/.local/bin:{HOME}/.cargo/bin"
+# HF_HOME=/tmp/hf-home: avoids root-owned ~/.cache/huggingface/ on Brev/shadeform instances.
+# byo_video_setup.py may run as a non-root user where ~/.cache is owned by root (prior root
+# invocation). Redirecting to /tmp/hf-home ensures write access for model cache, frpc binary,
+# and HF modules. Set early so all downstream ENV copies inherit it.
+HF_HOME_DIR   = os.environ.get("HF_HOME", "/tmp/hf-home")
+os.makedirs(HF_HOME_DIR, exist_ok=True)
 ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', '')}",
-                 "PYTHONUNBUFFERED": "1"}
+                 "PYTHONUNBUFFERED": "1",
+                 "HF_HOME": HF_HOME_DIR,
+                 "HF_MODULES_CACHE": f"{HF_HOME_DIR}/modules"}
 HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
 MODEL_SIZE    = os.environ.get("MODEL_SIZE", "C3-2B").upper()
@@ -174,7 +220,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, or NEM-12B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -407,10 +453,12 @@ else:
         print("  ✗  uv sync failed:", out[-500:]); sys.exit(1)
     ok(f"Dependencies installed in {time.time()-t0:.0f}s")
 
-# ── Step 6b: CUDA 12.8 vLLM pin ──────────────────────────────────────────────
-# cu128 installs vLLM 0.12.0 (torch 2.9.0) which requires CUDA 12.9+ driver.
-# On CUDA 12.8 (Hyperstack H100, driver 570.x), downgrade to vLLM 0.11.0.
-_cuda_major_minor = None
+# ── Step 6b: vLLM version pin for CUDA 12.8 ──────────────────────────────────
+# vLLM version matrix for cu128 environments (Hyperstack H100, driver 570.x = CUDA 12.8):
+#   vLLM 0.11.0 → requires torch 2.8.0  (ABI mismatch: cu128 uv sync installs torch 2.9.0)
+#   vLLM 0.14.0 → requires torch 2.9.1+cu128 ✅ compatible with CUDA 12.8 driver
+#   vLLM 0.20.1 → requires torch 2.11.0+cu130 (needs CUDA 13.0 driver = driver 575.x+)
+# Rule: driver_major < 575 → pin vLLM 0.14.0. Driver ≥ 575 → allow latest vLLM.
 try:
     import subprocess as _sp_cuda
     _smi = _sp_cuda.check_output(
@@ -418,16 +466,17 @@ try:
         timeout=10, text=True
     ).strip().split(".")[0:2]
     _driver_major = int(_smi[0])
-    if _driver_major < 575:  # 575.x is the first driver with CUDA 12.9 support
-        header("Step 6b — vLLM downgrade for CUDA 12.8", eta="~30s")
-        rc_vllm, _ = run_cmd(
-            ["uv", "pip", "install", "vllm==0.11.0"],
-            cwd=REASON2_DIR, env=ENV, timeout=120
+    if _driver_major < 575:  # < CUDA 13.0 threshold → cu128 pin required
+        header("Step 6b — vLLM pin for CUDA 12.8", eta="~30-60s")
+        rc_vllm, out_vllm = run_cmd(
+            ["uv", "pip", "install", "vllm==0.14.0"],
+            cwd=REASON2_DIR, env=ENV, timeout=180
         )
         if rc_vllm == 0:
-            ok("vLLM pinned to 0.11.0 (torch 2.8.0) — compatible with CUDA 12.8")
+            ok("vLLM pinned to 0.14.0 (torch 2.9.1+cu128) — compatible with CUDA 12.8 driver")
         else:
-            warn("vLLM 0.11.0 pin failed — vLLM 0.12.0 may not start on CUDA 12.8")
+            warn(f"vLLM 0.14.0 pin failed — check pip output: {out_vllm[-300:]}")
+            warn("vLLM ABI mismatch may cause ImportError at startup")
 except Exception:
     pass  # CUDA check is best-effort; if nvidia-smi fails, proceed as-is
 
@@ -495,6 +544,25 @@ else:
         ok("requests installed")
 
 STEPS_DONE.append(7)
+
+# ── Step 7b: Gradio frpc binary (required for public share link) ─────────────
+# frpc_linux_amd64_v0.3 is required for Gradio's SHARE=true tunnel.
+# On fresh instances, ~/.cache/huggingface/gradio/ may be missing or root-owned.
+# We pre-download to $HF_HOME/gradio/frpc/ so Gradio finds it without auth.
+_frpc_dir  = os.path.join(HF_HOME_DIR, "gradio", "frpc")
+_frpc_path = os.path.join(_frpc_dir, "frpc_linux_amd64_v0.3")
+if not os.path.exists(_frpc_path):
+    header("Step 7b — Gradio frpc binary (share link tunnel)", eta="~5s")
+    os.makedirs(_frpc_dir, exist_ok=True)
+    _frpc_url = "https://cdn-media.huggingface.co/frpc-gradio-0.3/frpc_linux_amd64"
+    try:
+        urllib.request.urlretrieve(_frpc_url, _frpc_path)
+        os.chmod(_frpc_path, 0o755)
+        ok(f"frpc binary downloaded to {_frpc_path}")
+    except Exception as _frpc_err:
+        warn(f"frpc download failed ({_frpc_err}) — public Gradio share link may not work")
+else:
+    ok(f"frpc binary already present ({_frpc_path})")
 
 # ── Step 9: Model weights ──────────────────────────────────────────────────────
 
@@ -670,7 +738,28 @@ if not url:
     print("  ✗  Gradio did not print a public URL. Check /tmp/gradio_demo.log")
     sys.exit(1)
 
+# BUG-LIVENESS: probe Gradio /info before declaring live.
+# Writing URL_FILE before confirming the process survived causes stale live declarations.
+# We poll the local port (not the public URL) because frpc tunnel may lag by a few seconds.
+_live_flag = "/tmp/gradio_live.flag"
+_probe_ok = False
+for _probe_attempt in range(10):
+    try:
+        urllib.request.urlopen(f"http://localhost:{GRADIO_PORT}/info", timeout=3)
+        _probe_ok = True
+        break
+    except Exception:
+        time.sleep(2)
+
+if not _probe_ok:
+    print("  ✗  Gradio process launched but /info probe failed after 20s — process may have crashed.")
+    print(f"     Check {LOG_FILE} for errors.")
+    sys.exit(1)
+
 with open(URL_FILE, "w") as f:
+    f.write(url + "\n")
+
+with open(_live_flag, "w") as f:
     f.write(url + "\n")
 
 ok("Demo server up, public tunnel established")

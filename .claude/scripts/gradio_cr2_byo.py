@@ -184,6 +184,34 @@ MODEL_CONFIGS = {
         # vLLM: --tensor-parallel-size 1 --gpu-memory-utilization 0.93 on single H100 80GB
         # Weight size unverified (25 files, est ~60-70GB BF16). Review if OOM occurs.
     },
+    # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
+    # vLLM-only: uses video_url content type with file:// path (same pattern as Nemotron).
+    # Frame control via extra_body mm_processor_kwargs at inference time (not server flags).
+    # Three variants per size: Instruct (general), FP8 (quantized), Thinking (reasoning).
+    "QW3-2B": {
+        "variants": [
+            ("Qwen3-VL-2B Instruct", "Qwen3-VL-2B-Instruct",     "Qwen/Qwen3-VL-2B-Instruct",     "bf16"),
+            ("Qwen3-VL-2B FP8",      "Qwen3-VL-2B-Instruct-FP8", "Qwen/Qwen3-VL-2B-Instruct-FP8", "fp8"),
+            ("Qwen3-VL-2B Thinking", "Qwen3-VL-2B-Thinking",     "Qwen/Qwen3-VL-2B-Thinking",     "bf16"),
+        ],
+        "nim": None,
+    },
+    "QW3-8B": {
+        "variants": [
+            ("Qwen3-VL-8B Instruct", "Qwen3-VL-8B-Instruct",     "Qwen/Qwen3-VL-8B-Instruct",     "bf16"),
+            ("Qwen3-VL-8B FP8",      "Qwen3-VL-8B-Instruct-FP8", "Qwen/Qwen3-VL-8B-Instruct-FP8", "fp8"),
+            ("Qwen3-VL-8B Thinking", "Qwen3-VL-8B-Thinking",     "Qwen/Qwen3-VL-8B-Thinking",     "bf16"),
+        ],
+        "nim": None,
+    },
+    "QW3-32B": {
+        "variants": [
+            ("Qwen3-VL-32B Instruct", "Qwen3-VL-32B-Instruct",     "Qwen/Qwen3-VL-32B-Instruct",     "bf16"),
+            ("Qwen3-VL-32B FP8",      "Qwen3-VL-32B-Instruct-FP8", "Qwen/Qwen3-VL-32B-Instruct-FP8", "fp8"),
+            ("Qwen3-VL-32B Thinking", "Qwen3-VL-32B-Thinking",     "Qwen/Qwen3-VL-32B-Thinking",     "bf16"),
+        ],
+        "nim": None,
+    },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
     # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
@@ -198,7 +226,7 @@ MODEL_CONFIGS = {
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, or NEM-12B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 _cfg         = MODEL_CONFIGS[MODEL_SIZE]
 _MODELS_BASE = os.path.join(HOME, "cosmos-reason2", "models")
@@ -239,8 +267,18 @@ _ALL_VARIANTS_DD_RAW = [
     ("CR2-8B NVFP4",  "Cosmos-Reason2-8B-NVFP4",              "nvidia/Cosmos-Reason2-8B-NVFP4",                 "nvfp4"),
     ("CR2-32B BF16",  "Cosmos-Reason2-32B",                   "nvidia/Cosmos-Reason2-32B",                      "bf16"),
     ("CR2-32B AV",    "Cosmos-Reason2-32B-AV",                "nvidia/Cosmos-Reason2-32B-AV",                   "bf16"),
-    ("Nem-12B BF16",  "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",    "bf16"),
-    ("Nem-12B FP8",   "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",   "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",     "fp8"),
+    ("Nem-12B BF16",      "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",    "bf16"),
+    ("Nem-12B FP8",       "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",   "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",     "fp8"),
+    # Qwen3-VL — public, no HF_TOKEN required; uses file:// video_url like Nemotron
+    ("Qwen3-VL-2B",       "Qwen3-VL-2B-Instruct",      "Qwen/Qwen3-VL-2B-Instruct",      "bf16"),
+    ("Qwen3-VL-2B FP8",   "Qwen3-VL-2B-Instruct-FP8",  "Qwen/Qwen3-VL-2B-Instruct-FP8",  "fp8"),
+    ("Qwen3-VL-2B Think", "Qwen3-VL-2B-Thinking",      "Qwen/Qwen3-VL-2B-Thinking",      "bf16"),
+    ("Qwen3-VL-8B",       "Qwen3-VL-8B-Instruct",      "Qwen/Qwen3-VL-8B-Instruct",      "bf16"),
+    ("Qwen3-VL-8B FP8",   "Qwen3-VL-8B-Instruct-FP8",  "Qwen/Qwen3-VL-8B-Instruct-FP8",  "fp8"),
+    ("Qwen3-VL-8B Think", "Qwen3-VL-8B-Thinking",      "Qwen/Qwen3-VL-8B-Thinking",      "bf16"),
+    ("Qwen3-VL-32B",      "Qwen3-VL-32B-Instruct",     "Qwen/Qwen3-VL-32B-Instruct",     "bf16"),
+    ("Qwen3-VL-32B FP8",  "Qwen3-VL-32B-Instruct-FP8", "Qwen/Qwen3-VL-32B-Instruct-FP8", "fp8"),
+    ("Qwen3-VL-32B Think","Qwen3-VL-32B-Thinking",     "Qwen/Qwen3-VL-32B-Thinking",     "bf16"),
 ]
 _VLLM_DD_META = {
     label: (os.path.join(_MODELS_BASE, dirname), hf_id)
@@ -360,6 +398,15 @@ def _is_vllm(model_id):
 def _is_nemotron(model_id):
     """True for Nemotron models — they use file:// video URL instead of base64 frames."""
     return "nemotron" in (model_id or "").lower()
+
+def _is_qwen3vl(model_id):
+    """True for Qwen3-VL models — they use file:// video URL (same as Nemotron)."""
+    mid = (model_id or "").lower()
+    return "qwen3-vl" in mid or "qwen3vl" in mid
+
+def _uses_file_url(model_id):
+    """True for any model that uses file:// video URL to vLLM (vs base64 JPEG frames)."""
+    return _is_nemotron(model_id) or _is_qwen3vl(model_id)
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
@@ -648,9 +695,9 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                            steps=steps), gr.update()
 
     # Step 3: prepare video content
-    # Nemotron uses file:// URL (vLLM opencv backend reads the file directly).
+    # Nemotron and Qwen3-VL use file:// video_url (vLLM reads file directly).
     # CR2/C3 use base64-encoded JPEG frames injected as image_url items.
-    _nem = _is_nemotron(model_id) or _is_nemotron(_SERVER_MODEL_ID or "")
+    _nem = _uses_file_url(model_id) or _uses_file_url(_SERVER_MODEL_ID or "")
     if _nem:
         import shutil as _shutil
         _nem_path = "/tmp/gradio_upload.mp4"
