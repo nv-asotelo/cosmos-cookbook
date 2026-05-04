@@ -193,18 +193,23 @@ def print_checklist(state, done_steps, current_step, last_log_line):
         if ci == ti: return "→"
         return " "
 
-    # Phase-level elapsed for BUILDING
-    phase_elapsed = ""
-    if phase == "BUILDING" and state.get("phase_start_ts"):
+    # Phase-level elapsed (BUILDING + DEPLOY_SCRIPTS)
+    build_elapsed  = ""
+    deploy_elapsed = ""
+    if state.get("phase_start_ts"):
         ps = int(time.time() - state["phase_start_ts"])
-        phase_elapsed = f"  ({ps // 60}m {ps % 60:02d}s — typical ~3-5m)"
+        ph_str = f"{ps // 60}m {ps % 60:02d}s"
+        if phase == "BUILDING":
+            build_elapsed  = f"  ({ph_str} — typical ~3-5m)"
+        elif phase == "DEPLOY_SCRIPTS":
+            deploy_elapsed = f"  ({ph_str} — ~30-120s)"
 
     buf = [
         f"Cosmos Deploy Monitor — {instance}  (elapsed: {elapsed} | ETA: {eta})",
         f"  {label} · ${rate:.2f}/hr · {model} ({msize}, {backend})",
         "──────────────────────────────────────────────────────────────",
-        f"  [{mark('BUILDING')}] Wait for SHELL READY{phase_elapsed}",
-        f"  [{mark('DEPLOY_SCRIPTS')}] Deploy scripts",
+        f"  [{mark('BUILDING')}] Wait for SHELL READY{build_elapsed}",
+        f"  [{mark('DEPLOY_SCRIPTS')}] Deploy scripts{deploy_elapsed}",
     ]
 
     if phase in ("SETUP", "GRADIO_LIVE", "DONE"):
@@ -431,19 +436,27 @@ def main():
 
         # ── SHELL READY: deploy scripts ───────────────────────────────────────
         if not scripts_deployed:
+            if state["phase"] != "DEPLOY_SCRIPTS":
+                state["phase_start_ts"] = time.time()
             state["phase"]       = "DEPLOY_SCRIPTS"
             state["last_action"] = "SHELL READY — deploying scripts..."
             print_checklist(state, done_steps, current_step, "")
 
-            for name in ("byo_video_setup", "gradio_cr2_byo"):
+            script_names = ("byo_video_setup", "gradio_cr2_byo")
+            for idx, name in enumerate(script_names, 1):
                 path = os.path.join(SCRIPTS_DIR, f"{name}.py")
                 if not os.path.exists(path):
-                    state["phase"]    = "ERROR"
+                    state["phase"]     = "ERROR"
                     state["exit_code"] = 1
-                    state["message"]  = f"Script not found locally: {path}"
+                    state["message"]   = f"Script not found locally: {path}"
                     write_state(state)
                     print(f"ERROR: {state['message']}", flush=True)
                     sys.exit(1)
+
+                # Progress line fires an immediate Monitor notification
+                state["last_action"] = f"Uploading {name}.py ({idx}/{len(script_names)})..."
+                print_checklist(state, done_steps, current_step, "")
+                write_state(state)
 
                 with open(path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode()
@@ -454,21 +467,26 @@ def main():
                     f"open('/tmp/{name}.py','wb').write("
                     f"base64.b64decode('{b64}'))\""
                 )
+                t0 = time.time()
                 _, rc = brev_exec(args.instance, remote_deploy, timeout=90)
                 if rc != 0:
-                    # one retry
                     time.sleep(5)
                     _, rc = brev_exec(args.instance, remote_deploy, timeout=90)
                     if rc != 0:
-                        state["phase"]    = "ERROR"
+                        state["phase"]     = "ERROR"
                         state["exit_code"] = 1
-                        state["message"]  = f"Failed to deploy {name}.py after 2 attempts"
+                        state["message"]   = f"Failed to deploy {name}.py after 2 attempts"
                         write_state(state)
                         print(f"ERROR: {state['message']}", flush=True)
                         sys.exit(1)
 
+                took = int(time.time() - t0)
+                state["last_action"] = f"✓ {name}.py uploaded ({took}s) — {idx}/{len(script_names)}"
+                print_checklist(state, done_steps, current_step, "")
+                write_state(state)
+
             scripts_deployed     = True
-            state["last_action"] = "Scripts deployed ✓"
+            state["last_action"] = "Scripts deployed ✓ — launching setup..."
             write_state(state)
 
         # ── Launch setup in background ────────────────────────────────────────
