@@ -279,10 +279,21 @@ Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
 |---|---|---|---|
 | Cosmos Reason2 (CR2-2B) | 2B VLM | 40 GB | Video understanding: robotics, AV, Metropolis |
 | Cosmos Reason2 (CR2-8B) | 8B VLM | 80 GB | Same, higher quality |
+| Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB (A40) | Video understanding via vLLM nightly; `MODEL_SIZE=NEM-12B` |
+| Nemotron-Nano-12B-v2-VL FP8  | 12B VLM | 24 GB | Same, FP8 quantized |
 | Cosmos Transfer2.5 | Gen | 80 GB+ | Video-to-video generation, sim2real |
 | Cosmos Predict2 | Gen | 80 GB+ | World model generation |
 
 Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+). Reason2 at 2B runs on workstation hardware (≥40GB).
+
+### Nemotron-Nano-12B-v2-VL notes
+
+- **Gated model** — HF_TOKEN required with nvidia org access (`huggingface-cli login` on the instance)
+- **vLLM nightly** — PyPI vLLM ≤0.11.0 does not support Nemotron. Instance must have a vLLM nightly build or use Docker image `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067`
+- **opencv backend** — Nemotron's vLLM integration uses `VLLM_VIDEO_LOADER_BACKEND=opencv` (injected automatically by `byo_video_setup.py`). PyAV is not used for Nemotron.
+- **file:// video protocol** — Gradio uploads the video to `/tmp/gradio_upload.mp4` and sends a `file://` URL to the vLLM server. The server reads the video file directly. `--allowed-local-media-path /tmp` is required (set automatically).
+- **NVFP4-QAD variant** — requires a special vLLM build; not in the variants list. Use BF16 or FP8 for demos.
+- **Launch**: `MODEL_SIZE=NEM-12B INFERENCE_BACKEND=vllm python3 /tmp/byo_video_setup.py`
 
 ---
 
@@ -786,3 +797,6 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 | HF 429 rate limit on download | Script retries 5× with 30s sleep. Common on shared Horde IP. Usually succeeds by attempt 3-4. |
 | `brev login` fails with EOF | `brev login` requires a browser handoff — it cannot run via `! brev login` in Claude Code (non-TTY). Open a separate terminal tab, run `brev login` there, complete the browser prompt, then return. |
 | vLLM Connection refused on first inference | `byo_video_setup.py` now auto-starts vLLM before Gradio (Step 9b). If running the Gradio script manually, start vLLM first: `nohup .venv/bin/vllm serve <model_dir> --port 8000 ... &` then poll `curl localhost:8000/v1/models`. |
+| Nemotron: `no module named 'mamba_ssm'` or `selective_scan_cuda` | vLLM PyPI build doesn't include mamba-ssm. Use vLLM nightly Docker: `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067` or `nvcr.io/nvidia/vllm:25.12.post1-py3`. |
+| Nemotron: `video_url not supported` or `unsupported content type` | vLLM version doesn't support `video_url` message type. Requires vLLM nightly; PyPI ≤0.11.0 unsupported. |
+| Nemotron: 400 error from vLLM on inference | Check that `--allowed-local-media-path /tmp` is in the vLLM serve command (set automatically by `byo_video_setup.py`). |

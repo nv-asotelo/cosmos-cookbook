@@ -184,11 +184,21 @@ MODEL_CONFIGS = {
         # vLLM: --tensor-parallel-size 1 --gpu-memory-utilization 0.93 on single H100 80GB
         # Weight size unverified (25 files, est ~60-70GB BF16). Review if OOM occurs.
     },
+    # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
+    # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
+    # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
+    "NEM-12B": {
+        "variants": [
+            ("Nem-12B BF16", "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", "bf16"),
+            ("Nem-12B FP8",  "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "fp8"),
+        ],
+        "nim": None,
+    },
 }
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, or C3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, or NEM-12B."); sys.exit(1)
 
 _cfg         = MODEL_CONFIGS[MODEL_SIZE]
 _MODELS_BASE = os.path.join(HOME, "cosmos-reason2", "models")
@@ -218,17 +228,19 @@ CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
-    ("C3R-2B BF16",  "Cosmos3-Reasoner-2B",      "nvidia/Cosmos3-Reasoner-2B-Private",  "bf16"),
-    ("C3R-8B BF16",  "Cosmos3-Reasoner-8B",      "nvidia/Cosmos3-Reasoner-8B-Private",  "bf16"),
-    ("C3R-32B BF16", "Cosmos3-Reasoner-32B",     "nvidia/Cosmos3-Reasoner-32B-Private", "bf16"),
-    ("CR2-2B BF16",  "Cosmos-Reason2-2B",        "nvidia/Cosmos-Reason2-2B",        "bf16"),
-    ("CR2-2B FP8",   "Cosmos-Reason2-2B-FP8",    "nvidia/Cosmos-Reason2-2B-FP8",    "fp8"),
-    ("CR2-2B NVFP4", "Cosmos-Reason2-2B-NVFP4",  "nvidia/Cosmos-Reason2-2B-NVFP4",  "nvfp4"),
-    ("CR2-8B BF16",  "Cosmos-Reason2-8B",         "nvidia/Cosmos-Reason2-8B",         "bf16"),
-    ("CR2-8B FP8",   "Cosmos-Reason2-8B-FP8",    "nvidia/Cosmos-Reason2-8B-FP8",    "fp8"),
-    ("CR2-8B NVFP4", "Cosmos-Reason2-8B-NVFP4",  "nvidia/Cosmos-Reason2-8B-NVFP4",  "nvfp4"),
-    ("CR2-32B BF16", "Cosmos-Reason2-32B",        "nvidia/Cosmos-Reason2-32B",        "bf16"),
-    ("CR2-32B AV",   "Cosmos-Reason2-32B-AV",    "nvidia/Cosmos-Reason2-32B-AV",    "bf16"),
+    ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
+    ("C3R-8B BF16",   "Cosmos3-Reasoner-8B",                  "nvidia/Cosmos3-Reasoner-8B-Private",             "bf16"),
+    ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
+    ("CR2-2B BF16",   "Cosmos-Reason2-2B",                    "nvidia/Cosmos-Reason2-2B",                       "bf16"),
+    ("CR2-2B FP8",    "Cosmos-Reason2-2B-FP8",                "nvidia/Cosmos-Reason2-2B-FP8",                   "fp8"),
+    ("CR2-2B NVFP4",  "Cosmos-Reason2-2B-NVFP4",              "nvidia/Cosmos-Reason2-2B-NVFP4",                 "nvfp4"),
+    ("CR2-8B BF16",   "Cosmos-Reason2-8B",                    "nvidia/Cosmos-Reason2-8B",                       "bf16"),
+    ("CR2-8B FP8",    "Cosmos-Reason2-8B-FP8",                "nvidia/Cosmos-Reason2-8B-FP8",                   "fp8"),
+    ("CR2-8B NVFP4",  "Cosmos-Reason2-8B-NVFP4",              "nvidia/Cosmos-Reason2-8B-NVFP4",                 "nvfp4"),
+    ("CR2-32B BF16",  "Cosmos-Reason2-32B",                   "nvidia/Cosmos-Reason2-32B",                      "bf16"),
+    ("CR2-32B AV",    "Cosmos-Reason2-32B-AV",                "nvidia/Cosmos-Reason2-32B-AV",                   "bf16"),
+    ("Nem-12B BF16",  "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",    "bf16"),
+    ("Nem-12B FP8",   "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",   "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",     "fp8"),
 ]
 _VLLM_DD_META = {
     label: (os.path.join(_MODELS_BASE, dirname), hf_id)
@@ -344,6 +356,10 @@ def _is_nim(model_id):
 
 def _is_vllm(model_id):
     return INFERENCE_BACKEND in ("vllm", "nim_local") and not _is_nim(model_id)
+
+def _is_nemotron(model_id):
+    """True for Nemotron models — they use file:// video URL instead of base64 frames."""
+    return "nemotron" in (model_id or "").lower()
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
@@ -631,24 +647,42 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                            {"model_id": model_id, "elapsed_s": _elapsed(), "backend": _be_label},
                            steps=steps), gr.update()
 
-    # Step 3: extract frames
-    print(f"[vllm] Extracting frames fps={fps} max=8", flush=True)
-    frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
-    if not frames_b64:
-        msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
-        _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
-        yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
-                                {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
-        return
-    print(f"[vllm] {len(frames_b64)} frames extracted", flush=True)
+    # Step 3: prepare video content
+    # Nemotron uses file:// URL (vLLM opencv backend reads the file directly).
+    # CR2/C3 use base64-encoded JPEG frames injected as image_url items.
+    _nem = _is_nemotron(model_id) or _is_nemotron(_SERVER_MODEL_ID or "")
+    if _nem:
+        import shutil as _shutil
+        _nem_path = "/tmp/gradio_upload.mp4"
+        try:
+            if os.path.abspath(video_path) != os.path.abspath(_nem_path):
+                _shutil.copy2(video_path, _nem_path)
+        except Exception as _cp_err:
+            _nem_path = video_path  # fall back to original path if copy fails
+            print(f"[vllm/nemotron] copy to /tmp failed ({_cp_err}), using original path", flush=True)
+        content = [
+            {"type": "video_url", "video_url": {"url": f"file://{_nem_path}"}},
+            {"type": "text", "text": prompt},
+        ]
+        print(f"[vllm/nemotron] video_url: file://{_nem_path}", flush=True)
+    else:
+        print(f"[vllm] Extracting frames fps={fps} max=8", flush=True)
+        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
+        if not frames_b64:
+            msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
+            _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
+            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                    {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+            return
+        print(f"[vllm] {len(frames_b64)} frames extracted", flush=True)
+        content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
+        for fb64 in frames_b64:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
+            })
 
     # Step 4: send to vLLM
-    content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
-    for fb64 in frames_b64:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
-        })
 
     yield "", _status_html(["ok", "ok", "ok", "run", "wait"],
                             {"model_id": model_id, "elapsed_s": _elapsed(), "backend": _be_label},

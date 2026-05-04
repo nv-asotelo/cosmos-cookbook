@@ -117,6 +117,27 @@ _MODEL_CONFIGS = {
         "vllm_extra_flags": ["--gpu-memory-utilization", "0.95"],
         "vllm_max_model_len": 4096,
     },
+    # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
+    # Requires vLLM nightly or compatible build; PyPI vLLM ≤0.11.0 unsupported.
+    # Uses opencv video backend (not PyAV). Gradio sends video as file:// URL.
+    # NVFP4-QAD variant requires special vLLM build — use BF16 or FP8 for demos.
+    "NEM-12B": {
+        "variants": [
+            ("Nem-12B BF16", "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", "~26 GB"),
+            ("Nem-12B FP8",  "NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8",  "~13 GB"),
+        ],
+        "nim": None,
+        "vllm_extra_flags": [
+            "--media-io-kwargs", '{"video": {"fps": 2, "num_frames": 128}}',
+            "--video-pruning-rate", "0.75",
+            "--allowed-local-media-path", "/tmp",
+        ],
+        "vllm_max_model_len": 32768,
+        # VLLM_VIDEO_LOADER_BACKEND=opencv: required for Nemotron video decoding.
+        # Nemotron's vLLM integration does not support PyAV; opencv is the only
+        # supported backend. This env var is injected into the vLLM subprocess only.
+        "vllm_env": {"VLLM_VIDEO_LOADER_BACKEND": "opencv"},
+    },
 }
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -153,7 +174,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, or 32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, or NEM-12B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -558,9 +579,10 @@ if INFERENCE_BACKEND == "vllm":
             "--max-model-len", str(_vllm_maxlen),
         ] + _vllm_flags
 
+        _vllm_proc_env = {**ENV, **_cfg.get("vllm_env", {})}
         run(f"Launching vLLM server for {MODEL_SIZE} (log: {VLLM_LOG_FILE})")
         with open(VLLM_LOG_FILE, "w") as _vf:
-            subprocess.Popen(_vllm_cmd, cwd=REASON2_DIR, env=ENV,
+            subprocess.Popen(_vllm_cmd, cwd=REASON2_DIR, env=_vllm_proc_env,
                              stdout=_vf, stderr=subprocess.STDOUT)
 
         VLLM_TIMEOUT = 180
