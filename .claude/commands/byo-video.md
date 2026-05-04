@@ -22,37 +22,62 @@ This script shows live step-by-step progress with ETAs for every install stage, 
 
 ## AGENT PROTOCOL — Pre-process picker + autonomous execution
 
-### PRE-PROCESS PICKER (ask as a single block before any command fires)
+### PRE-PROCESS PICKER (AskUserQuestion — fires before any command)
 
-If not already provided, ask these 3 questions together:
+If not already provided, call `AskUserQuestion` with all 3 questions in a single call:
 
-**Q1 — Backend?**
-- `vllm` (advanced): longer setup (~15–20 min), quantization supported, fast inference once loaded, lower free VRAM needed at inference time
-- `hf` (basic): shorter setup (~8–12 min), no quantization, slower inference, higher free VRAM needed
-- Default: `vllm` (current sprint default — advanced users). Future no-args default: `hf`.
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Backend?",
+      options: [
+        "vLLM (Recommended) — ~15–20 min setup, quantization support, fast inference",
+        "HF Transformers — ~8–12 min setup, no quantization, simpler"
+      ]
+    },
+    {
+      question: "Model?",
+      options: [
+        "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (default, ≥40GB VRAM)",
+        "Nemotron-Nano-12B — nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16 (gated, vLLM only)",
+        "Qwen3-VL 8B — Qwen/Qwen3-VL-8B-Instruct (public, no HF_TOKEN)",
+        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (≥80GB VRAM)"
+      ]
+    },
+    {
+      question: "Environment?",
+      options: [
+        "New Brev H100 — agent provisions a fresh instance",
+        "Existing Brev — provide instance name when prompted",
+        "SSH target — provide user@host or IP when prompted",
+        "Local machine — agent runs nvidia-smi locally"
+      ]
+    }
+  ]
+})
+```
 
-**Q2 — Model?**
-Any supported HF model ID is accepted. Set `MODEL_SIZE` to the matching size key. Examples:
-- `nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` (default — fits ≥40GB VRAM)
-- `nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` (needs ≥80GB free)
-- `nvidia/Cosmos3-Reasoner-8B-Private` · `MODEL_SIZE=C3-8B` (gated — HF_TOKEN with nvidia org)
-- `nvidia/Cosmos-Reason2-2B-FP8` · `MODEL_SIZE=2B` (quantized, vLLM only)
-- `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` (gated — HF_TOKEN with nvidia org; vLLM only)
-- `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8` · `MODEL_SIZE=NEM-12B` (FP8 quantized)
-- `Qwen/Qwen3-VL-2B-Instruct` · `MODEL_SIZE=QW3-2B` (public, no HF_TOKEN; vLLM only)
-- `Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` (public, ~16GB)
-- `Qwen/Qwen3-VL-8B-Instruct-FP8` · `MODEL_SIZE=QW3-8B` (FP8 quantized)
-- `Qwen/Qwen3-VL-8B-Thinking` · `MODEL_SIZE=QW3-8B` (reasoning variant)
+**Answer → env var mapping:**
 
-Qwen3-VL is public (no HF_TOKEN required) and uses the same `file://` video URL protocol as Nemotron. Variant selection (Instruct/FP8/Thinking) is shown in the Gradio checkpoint dropdown.
+| Question | Answer | Sets |
+|---|---|---|
+| Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
+| Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
+| Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
+| Q2 Model | Nemotron-Nano-12B | `MODEL_ID=nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
+| Q2 Model | Qwen3-VL 8B | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
+| Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
+| Q2 Model | Other (free text) | Use the typed HF model ID; derive `MODEL_SIZE` from supported models table |
+| Q3 Env | New Brev H100 | `DEPLOY_TARGET=brev:new` — agent calls `brev create` |
+| Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
+| Q3 Env | SSH target | Follow up: "user@host or IP?" (free text) → `DEPLOY_TARGET=ssh:<user@host>` |
+| Q3 Env | Local machine | `DEPLOY_TARGET=local` |
+| Q3 Env | Other (free text) | Parse as instance name or host as appropriate |
 
-**Q3 — Environment?**
-- `a` New Brev instance — agent provisions. Specify GPU type (default: H100).
-- `b` Existing Brev instance — provide name (from `brev ls`).
-- `c` SSH target — provide `user@host` or IP. Agent discovers GPU automatically.
-- `d` Local machine — agent runs `nvidia-smi` locally, deploys locally.
+**Other (custom model):** If the user selects "Other" on Q2, ask: "Enter the full HuggingFace model ID:" then look up `MODEL_SIZE` from the supported models table below. If not found, use `MODEL_SIZE=2B` as default and warn.
 
-Once all 3 are answered: agent runs autonomously to Gradio URL capture. No further questions.
+Once all 3 answers are resolved: agent runs autonomously to Gradio URL capture. No further questions.
 
 ---
 
