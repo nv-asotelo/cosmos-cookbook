@@ -268,7 +268,13 @@ def parse_setup_log(log_text, prev_done: set, prev_current, step_start_ts: dict)
                     step_start_ts[str(current)] = now
             except (ValueError, IndexError):
                 pass
-        if "  ✗  " in line or "exit status 1" in line:
+        if ("  ✗  " in line or "exit status 1" in line
+                or "Traceback (most recent call last)" in line
+                or any(exc in line for exc in (
+                    "NameError:", "TypeError:", "AttributeError:", "ImportError:",
+                    "RuntimeError:", "ModuleNotFoundError:", "FileNotFoundError:",
+                    "KeyError:", "ValueError:", "OSError:",
+                ))):
             has_err = True
 
     # Step became current this cycle but wasn't tracked
@@ -573,24 +579,30 @@ def main():
                 write_state(state)
 
                 t0 = time.time()
-                cp_result = subprocess.run(
-                    ["brev", "copy", path, f"{args.instance}:/tmp/{name}.py"],
-                    capture_output=True, text=True, timeout=120,
-                )
-                rc = cp_result.returncode
-                if rc != 0:
-                    time.sleep(5)
+                try:
                     cp_result = subprocess.run(
                         ["brev", "copy", path, f"{args.instance}:/tmp/{name}.py"],
                         capture_output=True, text=True, timeout=120,
                     )
-                    rc = cp_result.returncode
+                    rc, cp_stderr = cp_result.returncode, cp_result.stderr
+                except subprocess.TimeoutExpired:
+                    rc, cp_stderr = 1, "brev copy timed out after 120s"
+                if rc != 0:
+                    time.sleep(5)
+                    try:
+                        cp_result = subprocess.run(
+                            ["brev", "copy", path, f"{args.instance}:/tmp/{name}.py"],
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        rc, cp_stderr = cp_result.returncode, cp_result.stderr
+                    except subprocess.TimeoutExpired:
+                        rc, cp_stderr = 1, "brev copy timed out after 120s"
                     if rc != 0:
                         state["phase"]     = "ERROR"
                         state["exit_code"] = 1
                         state["message"]   = (
                             f"Failed to deploy {name}.py after 2 attempts "
-                            f"(brev copy error: {cp_result.stderr[:200]})"
+                            f"(brev copy error: {cp_stderr[:200]})"
                         )
                         write_state(state)
                         print(f"ERROR: {state['message']}", flush=True)
@@ -626,7 +638,10 @@ def main():
                 f"python3 /tmp/byo_video_setup.py"
             )
             launch_cmd = f"nohup bash -c \"{inner}\" > {SETUP_LOG} 2>&1 &"
-            brev_exec(args.instance, launch_cmd, timeout=30)
+            try:
+                brev_exec(args.instance, launch_cmd, timeout=30)
+            except subprocess.TimeoutExpired:
+                pass  # fire-and-forget; nohup process continues on the instance
             setup_launched       = True
             state["last_action"] = "Setup launched — watching log"
             write_state(state)
@@ -635,18 +650,24 @@ def main():
 
         # ── SETUP running: tail log, check live flag ──────────────────────────
         if state["phase"] == "SETUP":
-            log_raw, _ = brev_exec(
-                args.instance, f"tail -60 {SETUP_LOG} 2>/dev/null", timeout=30
-            )
+            try:
+                log_raw, _ = brev_exec(
+                    args.instance, f"tail -60 {SETUP_LOG} 2>/dev/null", timeout=30
+                )
+            except subprocess.TimeoutExpired:
+                log_raw = ""
             done_steps, current_step, has_err, last_line = parse_setup_log(
                 log_raw, done_steps, current_step, step_start_ts
             )
             state["step_start_ts"] = step_start_ts
 
             # Check live flag
-            flag_out, flag_rc = brev_exec(
-                args.instance, f"cat {LIVE_FLAG} 2>/dev/null", timeout=15
-            )
+            try:
+                flag_out, flag_rc = brev_exec(
+                    args.instance, f"cat {LIVE_FLAG} 2>/dev/null", timeout=15
+                )
+            except subprocess.TimeoutExpired:
+                flag_out, flag_rc = "", 1
             url = flag_out.strip()
             if flag_rc == 0 and url.startswith("http"):
                 state["gradio_url"]  = url
@@ -659,6 +680,27 @@ def main():
                 print(f"DONE: {url}", flush=True)
                 sys.exit(0)
 
+            # Check if setup process is still running (after 60s startup grace period)
+            setup_elapsed = int(time.time() - state["start_ts"])
+            if setup_elapsed > 60:
+                try:
+                    proc_out, _ = brev_exec(
+                        args.instance, "pgrep -f byo_video_setup.py", timeout=15
+                    )
+                except subprocess.TimeoutExpired:
+                    proc_out = "timeout"  # assume alive on timeout
+                if not proc_out.strip():
+                    state["phase"]     = "ERROR"
+                    state["exit_code"] = 1
+                    state["message"]   = (
+                        f"Setup process exited without Gradio going live. "
+                        f"Last log: {last_line or '(no log output)'}"
+                    )
+                    write_state(state)
+                    print_checklist(state, done_steps, current_step, last_line)
+                    print(f"ERROR: {state['message']}", flush=True)
+                    sys.exit(1)
+
             # Check for setup failure
             if has_err:
                 state["last_action"] = f"⚠️ Error in setup log: {last_line}"
@@ -666,7 +708,13 @@ def main():
                 # Check if vLLM or critical step failed
                 critical_failure = any(
                     kw in log_raw
-                    for kw in ("sys.exit(1)", "CUDA out of memory", "No space left", "SIGKILL")
+                    for kw in (
+                        "sys.exit(1)", "CUDA out of memory", "No space left", "SIGKILL",
+                        "Traceback (most recent call last)",
+                        "NameError:", "TypeError:", "AttributeError:", "ImportError:",
+                        "RuntimeError:", "ModuleNotFoundError:", "FileNotFoundError:",
+                        "KeyError:", "ValueError:", "OSError:",
+                    )
                 )
                 if critical_failure:
                     state["phase"]    = "ERROR"
