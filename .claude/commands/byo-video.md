@@ -20,11 +20,24 @@ This script shows live step-by-step progress with ETAs for every install stage, 
 
 ---
 
-## SKILL PROTOCOL — Main session handles all phases
+## SKILL PROTOCOL — Hybrid: main session + observer
 
-The main session is the only agent for this skill. **Never spawn a subagent.** All phases run
-directly in the main session turn, from pre-checks through Gradio live. `AskUserQuestion` is
-available at any point — at the picker, at exception boundaries, or whenever user input is needed.
+The main session owns **PHASE 0–1** (pre-checks + picker). These phases are interactive;
+`AskUserQuestion` resolves all user decisions before anything runs on a GPU.
+
+Immediately after the picker answers are resolved, the main session spawns a **background
+observer** for **PHASE 2–6** (provision → shell ready → deploy scripts → setup → Gradio live).
+The observer handles all long-running work autonomously, keeping the main session free for
+conversation. On completion the observer writes `/tmp/byo_video_observer_result.json`; the
+main session reads it via the task completion notification and either displays the final URL
+panel or fires `AskUserQuestion` for recovery.
+
+**All user decisions happen in PHASE 1 before the observer spawns.** This includes the
+"restart stopped instance vs provision fresh" choice — PHASE 0 data is used to build the Q3
+options dynamically (see PICKER section).
+
+**Never use Teams, Slack, or any external notification in this skill.** All user communication
+happens in the Claude Code UI — panels, `AskUserQuestion`, and completion text.
 
 ### PHASE 0 — Pre-checks
 
@@ -49,13 +62,19 @@ Display initial panel:
 Load `AskUserQuestion` via ToolSearch: `query: "select:AskUserQuestion"`, then fire all 3
 questions in a single call (see PICKER section below for the full call).
 
+**Q3 options are built dynamically from PHASE 0 results.** If PHASE 0 found a stopped
+instance with a compatible GPU for the selected model, prepend it as an option:
+`{ label: "Restart <name> (<GPU> · existing rate)", description: "Resume stopped instance — faster to SHELL READY" }`
+This option maps to `DEPLOY_TARGET=brev:<name>` (restart path, not fresh provision).
+
 Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`,
 `DEPLOY_TARGET` per the answer→env var mapping table.
 
 If Q3 answer is "Existing Brev" or "SSH target", fire one follow-up `AskUserQuestion` to collect
 the instance name or host.
 
-Record `PROVISION_START_TS` immediately after all answers are in. Then proceed directly to PHASE 2.
+Record `PROVISION_START_TS` immediately after all answers are in. Then spawn the observer
+(see HANDOFF section) and stay available for conversation.
 
 ---
 
@@ -176,110 +195,143 @@ AskUserQuestion({
 | Qwen3-VL-32B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-32B-Instruct` · `MODEL_SIZE=QW3-32B` |
 
 Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: record
-`PROVISION_START_TS` and proceed directly to PHASE 2.
+`PROVISION_START_TS` and spawn the observer (see HANDOFF section below).
 
 ---
 
-## EXECUTION PROTOCOL — Phases 2–6
+## EXECUTION PROTOCOL — Phase 1 (main session) + Phases 2–6 (observer)
 
-The main session executes PHASE 2–6 directly. Each phase ends with a panel update. The panel
-is the user's single source of truth — it shows instance, GPU, rate, elapsed time, ETA, cost,
-and checklist state. Never replace panel updates with prose summaries.
+The main session executes only PHASE 0–1. After the picker resolves all answers it spawns the
+observer and stays free for conversation.
 
-**Compaction-safety rule:** Every panel reprint must include all critical state: instance name,
-GPU type, rate, MODEL_ID, MODEL_SIZE, backend, elapsed, and the full checklist. If context
-compaction fires during a polling loop, the next panel reprint is a complete recovery anchor —
-the agent picks up from the last printed panel without losing state.
+**PROVISION_START_TS** is recorded in PHASE 1 immediately after all picker answers are in and
+passed to the observer as part of the spawn prompt.
 
-**Elapsed timer rule:** `PROVISION_START_TS` is recorded once in PHASE 1 (immediately after
-picker answers). On every 30s poll cycle (PHASE 3, PHASE 5, PHASE 6), compute
-`elapsed = int(time.time() - PROVISION_START_TS)` and embed it in the panel header line as
-`elapsed: Xm Ys`. Reprint the full panel on every poll cycle — not only on phase transitions.
+The observer handles PHASE 2–6. It outputs clean checklist panels — commands run silently
+underneath. See **OBSERVER PROTOCOL** section for the observer's checklist format and
+per-phase instructions.
 
 ---
 
-### PHASE 2 — PROVISION
+### HANDOFF — Spawn observer after PHASE 1
 
-**HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote instance.
-Do NOT ask the user for it. Do NOT pass it as a CLI arg. The script handles it.
+After all picker answers are resolved, display a brief handoff message and spawn the observer:
 
-**Look up MODEL_SIZE in MODEL_GPU_REQUIREMENTS** (see reference section below) to select GPU type.
+```
+Setting up your demo — observer is running in the background (~15–20 min).
+I'll show you the Gradio URL when it's live. Feel free to keep chatting.
+```
+
+Spawn:
+
+```
+Agent({
+  subagent_type: "general-purpose",
+  run_in_background: True,
+  name: "byo-video-observer",
+  prompt: """
+OBSERVER TASK — Cosmos BYO-Video PHASE 2–6
+
+You are a background observer. Read the full OBSERVER PROTOCOL section of the /byo-video
+skill. Execute PHASE 2 through PHASE 6 exactly as described there.
+
+Inherited state (fill in actual values):
+  DEPLOY_TARGET:       <brev:new | brev:<name> | ssh:<user@host> | local>
+  MODEL_ID:            <model_id>
+  MODEL_SIZE:          <model_size>
+  INFERENCE_BACKEND:   <backend>
+  RATE:                <rate_per_hour>
+  PROVISION_START_TS:  <epoch_seconds>
+
+On success write to /tmp/byo_video_observer_result.json on the LOCAL machine:
+  {"status":"live","url":"<gradio_url>","elapsed_s":<N>,"cost":<N>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>"}
+
+On unrecoverable failure write:
+  {"status":"failed","phase":<N>,"error":"<one-line error>","instance":"<name>"}
+
+Then exit.
+"""
+})
+```
+
+After spawning: do not poll or sleep. Stay available for conversation.
+When the task completion notification fires, read `/tmp/byo_video_observer_result.json`:
+- `status == "live"` → display the LIVE final panel (see PHASE 6 completion template).
+- `status == "failed"` → fire `AskUserQuestion` with recovery options (see HALT-AND-ASK).
+
+---
+
+### OBSERVER PROTOCOL — PHASE 2: PROVISION
+
+**This phase and all subsequent phases run inside the observer. Do not prompt the user.**
+
+**HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote
+instance. Do NOT ask. Do NOT pass as a CLI arg.
 
 **For `DEPLOY_TARGET=brev:new`:**
+1. Look up MODEL_SIZE in MODEL_GPU_REQUIREMENTS to select provider type.
+2. Run `brev create <name> --type <provider_type>` — one Bash call.
+   Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`)
+3. `brev create` blocks until shell ready. Proceed to PHASE 4.
 
-1. Check PHASE 0 pre-check results for stopped instances with a compatible GPU:
-   - If found: fire `AskUserQuestion` (load via ToolSearch first: `query: "select:AskUserQuestion"`):
-     "Found stopped <name> (<GPU type>) — restart it or provision fresh?"
-     Options: "Restart <name> (existing rate)" · "Provision new <type> (~$<rate>/hr)"
-   - If not found: proceed directly to `brev create`.
+**For `DEPLOY_TARGET=brev:<name>` (restart stopped instance):**
+1. Run `brev start <name>` — one Bash call.
+2. Poll `brev ls` every 30s until STATUS = RUNNING and SHELL = READY. Then proceed to PHASE 4.
 
-2. Run `brev create`:
-   - `brev create <name> --type <provider_type>` — one Bash call
-   - Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`)
-   - Provider type from MODEL_GPU_REQUIREMENTS table
+**For `DEPLOY_TARGET=ssh:<user@host>`:**
+1. Verify: `ssh -i ~/.ssh/id_ed25519 <user@host> "echo ok"`
+2. Proceed directly to PHASE 4 on success.
 
-3. Display cost context immediately:
+**Observer checklist** — emit at the start of PHASE 2 and reprint (with updates) on each
+phase transition and every 30s poll:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║  Cosmos BYO-Video · <instance>  (elapsed: Ns)                ║
+║  Cosmos BYO-Video · setting up...  (elapsed: Xm Ys)          ║
 ║  <GPU label> · $<rate>/hr · <MODEL_ID> (<MODEL_SIZE>, <be>)  ║
 ╠══════════════════════════════════════════════════════════════╣
-║  [✓] Pre-checks                                              ║
-║  [✓] Model & environment selected                            ║
-║  [→] Provisioning: <instance> (<GPU type>)                   ║
-║  [ ] SHELL READY                                             ║
+║  [→] Provisioning instance                                   ║
+║  [ ] Shell ready                                             ║
 ║  [ ] Scripts deployed                                        ║
-║  [ ] Setup running                                           ║
-║  [ ] Gradio live                                             ║
+║  [ ] Installing dependencies          ETA ~8 min             ║
+║  [ ] Downloading model weights        ETA ~5 min             ║
+║  [ ] Starting Gradio                  ETA ~1 min             ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Cost so far: $0.00  |  Est. setup cost: ~$<low>–$<high>     ║
+║  Cost so far: $0.00  |  Est. total setup: ~$<low>–$<high>    ║
 ║  Brev dashboard: https://brev.dev                            ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
+
+Mark each row `[✓]` when complete, `[→]` when active. Update elapsed and cost each reprint.
+Raw bash output is never surfaced in the checklist.
 
 Cost estimates by GPU tier:
 - H100 SXM ($3.54/hr): 10 min setup ~$0.59 · 20 min ~$1.18
 - H200 SXM ($4.20/hr): 20 min setup ~$1.40 · 30 min ~$2.10
 
-**IDLE BILLING HANDLER** — triggers if instance reaches SHELL READY but setup hasn't launched for >5 min:
-
-```
-⚠️  <name> is idle — <elapsed> at $<rate>/hr. $<burned> spent so far.
-    Setup not yet started.
-    Options: [s] Start setup now  [d] Delete instance  [w] Wait 5 more min
-```
-
-Do NOT auto-terminate. If [w]: reset timer, repeat at +5 min.
-
 ---
 
-### PHASE 3 — WAIT FOR SHELL READY
+### OBSERVER PROTOCOL — PHASE 3: WAIT FOR SHELL READY
 
-Poll `brev ls` every 30s via Bash (one call per poll). Reprint the full panel each poll with
-updated elapsed time computed from `PROVISION_START_TS`:
-
-```
-║  Cosmos BYO-Video · <instance>  (elapsed: Xm Ys)                ║
-...
-║  [→] Waiting for SHELL READY (polling every 30s)                 ║
-```
+Applies when `brev create` did not already block until shell ready (e.g., restart path).
+Poll `brev ls` every 30s. Update the checklist `[→] Shell ready` row each poll.
 
 **On UNHEALTHY:**
-1. Warn immediately — display panel with `[!] UNHEALTHY — recovery window: 3m 00s`.
-2. Poll every 30s for 3 minutes. Update countdown each poll.
-3. If recovered: run `brev exec <name> "nvidia-smi"` — if GPU responds, continue. If not, treat as BLOCKED.
-4. If still UNHEALTHY after 3 minutes: auto-recover silently.
+1. Update checklist: `[!] UNHEALTHY — recovering (3 min window)`.
+2. Poll every 30s for 3 minutes.
+3. If recovered: run `brev exec <name> "nvidia-smi"` — if GPU responds, continue.
+4. If still UNHEALTHY after 3 minutes:
    - Try `brev reset <name>`. If succeeds → re-enter poll loop.
-   - If reset fails: `brev delete <name>`, rotate to next provider in PROVIDER FALLBACK table. Emit one line: `✗ <type> UNHEALTHY — deleted, trying <next-type>`.
-   - Keep rotating until SHELL READY or all providers exhausted.
-   - Only AskUserQuestion when all providers have been tried and all failed.
+   - If reset fails: `brev delete <name>`, rotate to next provider (PROVIDER FALLBACK table).
+     Emit one line: `✗ <type> UNHEALTHY — deleted, trying <next-type>`. Re-enter PHASE 2.
+   - If all providers exhausted: write failure result and exit.
+     `{"status":"failed","phase":3,"error":"All providers exhausted — UNHEALTHY","instance":"<last-name>"}`
 
-On SHELL READY: update panel `[✓] SHELL READY`, proceed to PHASE 4.
+On SHELL READY: update checklist `[✓] Shell ready`, proceed to PHASE 4.
 
 ---
 
-### PHASE 4 — DEPLOY SCRIPTS
+### OBSERVER PROTOCOL — PHASE 4: DEPLOY SCRIPTS
 
 Read and base64-encode each script. One Bash call per file. One Bash call per deploy.
 
@@ -304,11 +356,13 @@ If `gradio_cr2_byo.py` is >98KB, use `brev copy` instead of base64 (avoids brev 
 brev copy <name> ~/.claude/scripts/gradio_cr2_byo.py /tmp/gradio_cr2_byo.py
 ```
 
-Update panel: `[✓] Scripts deployed`
+Update checklist: `[✓] Scripts deployed`
 
 ---
 
-### PHASE 5 — SETUP LAUNCH + LOG TAIL
+### OBSERVER PROTOCOL — PHASE 5: SETUP LAUNCH + LOG TAIL
+
+**This phase runs inside the observer subagent, not the main session.**
 
 Record `SETUP_DISPATCHED_AT` = now.
 
@@ -317,44 +371,37 @@ Launch setup (one Bash call — nohup so brev exec returns immediately):
 brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
-Update panel: `[→] Setup running`
-
-**Log tail loop (every 30s):** Tail the log, then reprint the full panel with updated elapsed
-from `PROVISION_START_TS`. Do not emit intermediate prose between panels.
+**Log tail loop (every 30s):** Tail the log, print a compact status line (not a full panel —
+the observer is headless). Look for step markers and errors.
 
 ```bash
 brev exec <name> "tail -60 /tmp/byo_video_setup.log 2>/dev/null || echo '(log not yet written)'"
 ```
 
-Parse log output for step completion markers. Update the step-level checklist in the panel,
-including updated `elapsed: Xm Ys` in the header:
+Step markers to detect (scan log for these strings):
 
 ```
-║  [→] Setup running                                           ║
-║       [✓] Step 1: GPU detect + VRAM tier                    ║
-║       [✓] Step 2: HF auth + token validate                  ║
-║       [✓] Step 3: NGC API key                               ║
-║       [✓] Step 4: uv package manager                        ║
-║       [✓] Step 5: cosmos-reason2 repo                       ║
-║       [→] Step 6: uv sync + CUDA libs  (running ~8 min)     ║
-║       [ ] Step 7: PyAV + Gradio + requests                  ║
-║       [ ] Step 9: Model weights download                    ║
-║       [ ] Step 10: Gradio launch                            ║
+Step 1: GPU detect       Step 2: HF auth         Step 3: NGC API key
+Step 4: uv               Step 5: cosmos-reason2  Step 6: uv sync
+Step 7: PyAV/Gradio      Step 9: weights          Step 10: Gradio launch
 ```
 
-Detect errors in log: scan for `Traceback`, `Error:`, `exit status 1`, `FAILED`. If found:
-→ Update panel with `[✗] Setup failed` + error snippet.
-→ AskUserQuestion: "Setup failed at Step N: <error>. What next?" with options:
-  - "Retry setup on this instance"
-  - "Provision a new instance"
-  - "Abort and delete instance"
-→ Do not attempt recovery without user direction.
+**Error detection:** Scan for `Traceback`, `Error:`, `exit status 1`, `FAILED`.
+
+On error:
+1. Retry once: re-run the setup launch command, re-enter log tail loop.
+2. If error recurs: write failure result and exit:
+   ```json
+   {"status":"failed","phase":5,"error":"<one-line error>","instance":"<name>"}
+   ```
+   Write to `/tmp/byo_video_observer_result.json` on the local machine, then exit.
+   The main session handles user recovery via `AskUserQuestion`.
 
 ---
 
-### PHASE 6 — GRADIO LIVE + URL CAPTURE
+### OBSERVER PROTOCOL — PHASE 6: GRADIO LIVE + URL CAPTURE
 
-Poll every 30s for the live flag:
+Update checklist: `[→] Starting Gradio`. Poll every 30s for the live flag:
 ```bash
 brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null"
 ```
@@ -366,7 +413,13 @@ brev exec <name> "cat /tmp/gradio_url.txt 2>/dev/null"
 
 **Compute total cost:** `(time.time() - PROVISION_START_TS) / 3600 * rate_per_hour`
 
-Display final panel:
+Write success result to `/tmp/byo_video_observer_result.json` on the **local machine**:
+```json
+{"status":"live","url":"<gradio_url>","elapsed_s":<N>,"cost":<computed>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>"}
+```
+Then exit. The main session reads this file on task completion and displays the final panel.
+
+**LIVE final panel** (displayed by main session on success):
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
@@ -383,22 +436,19 @@ Display final panel:
 ╠══════════════════════════════════════════════════════════════╣
 ║  URL:  <gradio_url>                                          ║
 ║  Total setup cost: ~$<computed>  |  Link valid 72h           ║
-║  Brev dashboard: https://brev.dev                            ║
+║  Kill the Brev instance when you're done to stop billing.    ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
-Send kill alert:
-```bash
-~/.claude/scripts/teams-notify.sh "Cosmos demo live at <url>. Kill when ready."
-```
-
-Do NOT auto-terminate the instance. Wait for explicit kill instruction from the user.
+Do NOT auto-terminate the instance.
 
 ---
 
 ### SSH DEPLOYMENTS (non-Brev)
 
-The main session handles SSH targets with the same panel and polling loop, minus the `brev ls` instance-status polling (replaced by SSH connectivity checks).
+PHASE 0–4 run in the main session with SSH commands replacing `brev exec`. After scripts are
+deployed, the same HANDOFF applies — spawn the observer with `DEPLOY_TARGET=ssh:<user@host>`.
+The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 
 Deploy scripts:
 ```bash
@@ -428,53 +478,28 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt 2>/dev/null"
 
 ## HALT-AND-ASK PROTOCOL
 
-When an exception requires user input, the main session halts the current phase, updates the
-panel to show the error state, and fires `AskUserQuestion`. After the user responds, the main
-session acts immediately and resumes the appropriate phase. No relay. No subagent required.
+During PHASE 0–1 (main session): all user decisions are captured in the picker. If an edge case
+requires a follow-up question, fire `AskUserQuestion` before spawning the observer.
+
+During PHASE 2–6 (observer): the observer never calls `AskUserQuestion`. On unrecoverable
+failure it writes `/tmp/byo_video_observer_result.json` and exits. The main session reads the
+result on task completion notification and fires `AskUserQuestion` for recovery.
 
 **Load AskUserQuestion** before firing: `ToolSearch({ query: "select:AskUserQuestion" })`.
 
 ### Exception triggers and question templates
 
-**Setup failure (PHASE 5):**
-Panel: `[✗] Setup failed at Step N — <one-line error>`
+**Observer failure (any phase) — triggered by main session on task completion:**
 ```
-AskUserQuestion: "Setup failed at Step N: <error>. What next?"
+AskUserQuestion: "Observer failed at Phase <N>: <error>. What next?"
 Options:
-  "Retry setup on this instance"
+  "Retry — spawn a new observer on the same instance"
   "Provision a new instance (current will be deleted)"
   "Abort — delete instance and exit"
 ```
-On "Retry": re-run the PHASE 5 launch command, re-enter log-tail loop.
-On "New instance": run provider rotation (PHASE 2), restart from PHASE 3.
+On "Retry": spawn a new observer with the same state, `DEPLOY_TARGET=brev:<existing-name>`.
+On "New instance": delete the failed instance, spawn a new observer with `DEPLOY_TARGET=brev:new`.
 On "Abort": `brev delete <name>`, exit skill.
-
-**All providers exhausted (PHASE 2 or PHASE 3):**
-Panel: `[✗] All providers tried — no SHELL READY achieved`
-```
-AskUserQuestion: "All GPU providers exhausted. What next?"
-Options:
-  "Try again from the top (same provider list)"
-  "Abort — no instance provisioned"
-```
-
-**UNHEALTHY — manual decision needed (PHASE 3, after auto-recovery fails):**
-Panel: `[!] UNHEALTHY — auto-recovery failed after 3 min`
-```
-AskUserQuestion: "<name> is UNHEALTHY and could not be reset. What next?"
-Options:
-  "Delete and provision a new instance"
-  "Try brev reset again"
-  "Abort"
-```
-
-**Stopped instance found (PHASE 2):**
-```
-AskUserQuestion: "Found stopped <name> (<GPU type>) — restart or provision fresh?"
-Options:
-  "Restart <name> (existing rate ~$<rate>/hr)"
-  "Provision new <type> (~$<rate>/hr)"
-```
 
 **Rule:** For any exception not listed here, apply the closest matching template. The goal is
 one clear question with 2–3 concrete options. Never ask open-ended questions mid-deployment.
@@ -689,14 +714,9 @@ Example output:
 
 The URL is an OSC 8 hyperlink — click it directly in iTerm2 or Terminal.app (macOS). Valid for 72 hours.
 
-### Step 5 — Kill alert (required)
+### Step 5 — Kill instance when done
 
-When Alex is done:
-```bash
-~/.claude/scripts/teams-notify.sh "Cosmos demo done on brev/<name>. Kill when ready."
-```
-
-Do NOT auto-terminate. Notify Alex and wait for explicit kill confirmation.
+Delete the instance from the Brev dashboard or run `brev delete <name>`. Do NOT auto-terminate.
 
 ---
 
@@ -804,7 +824,7 @@ response = client.chat.completions.create(
 )
 ```
 
-Write result to `/tmp/byo_video_reason2_results.json`. Send Teams kill alert when done.
+Write result to `/tmp/byo_video_reason2_results.json`. Delete the endpoint when done.
 
 ---
 
