@@ -41,16 +41,15 @@ AskUserQuestion({
       question: "Model?",
       options: [
         "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (public, ≥40GB VRAM)",
-        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (public, 8B, ≥40GB VRAM)",
         "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (public, ≥80GB VRAM)",
-        "Cosmos Reason2 32B — nvidia/Cosmos-Reason2-32B (public, multi-GPU, ≥160GB VRAM)",
-        "Something else — gated Cosmos3, Nemotron, Qwen3-VL, or any HF model ID"
+        "Cosmos Reason2 32B — nvidia/Cosmos-Reason2-32B (public, ≥141GB VRAM — H200 required)",
+        "Something else — Cosmos 3 (private), Cosmos Transfer, Nemotron, non-NVIDIA models"
       ]
     },
     {
       question: "Environment?",
       options: [
-        "New Brev H100 — agent provisions a fresh instance",
+        "New Brev instance — agent provisions appropriate GPU tier for your model",
         "Existing Brev — provide instance name when prompted",
         "SSH target — provide user@host or IP when prompted",
         "Local machine — agent runs nvidia-smi locally"
@@ -67,19 +66,75 @@ AskUserQuestion({
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
-| Q2 Model | Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
-| Q2 Model | Something else | Ask: "Enter the HuggingFace model ID (e.g. nvidia/Cosmos3-Reasoner-32B, Qwen/Qwen3-VL-8B-Instruct, or any public/gated model):" → derive `MODEL_SIZE` from supported models table; default `MODEL_SIZE=2B` if not found |
-| Q3 Env | New Brev H100 | `DEPLOY_TARGET=brev:new` — agent calls `brev create` |
+| Q2 Model | Something else | Fire SOMETHING ELSE sub-picker (see section below) → resolves MODEL_ID + MODEL_SIZE |
+| Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` — agent calls `brev create` using model-aware GPU tier (see MODEL_GPU_REQUIREMENTS) |
 | Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
 | Q3 Env | SSH target | Follow up: "user@host or IP?" (free text) → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
 | Q3 Env | Other (free text) | Parse as instance name or host as appropriate |
 
-**Something else:** Ask: "Enter the HuggingFace model ID:" then look up `MODEL_SIZE` from the supported models table. If not found, use `MODEL_SIZE=2B` and warn.
+---
 
-Once all 3 answers are resolved: agent runs autonomously to Gradio URL capture. No further questions.
+### SOMETHING ELSE SUB-PICKER
+
+When user selects "Something else" for Q2, immediately call a second `AskUserQuestion`:
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Which model?",
+      options: [
+        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (8B, private, ≥40GB VRAM, HF_TOKEN required)",
+        "Cosmos3-Reasoner-32B — nvidia/Cosmos3-Reasoner-32B (32B, gated, nvidia org + HF_TOKEN required)",
+        "Cosmos Transfer 2.5 — nvidia/Cosmos-Transfer2.5 (generation model, ≥80GB VRAM)",
+        "Nemotron-Nano-12B-v2-VL — nvidia/Nemotron-Nano-12B-v2-VL-BF16 (12B, gated, vLLM only, ≥40GB VRAM)",
+        "Non-NVIDIA models — best-effort only, not officially supported"
+      ]
+    }
+  ]
+})
+```
+
+**Sub-picker → env var mapping:**
+
+| Selection | Sets |
+|---|---|
+| Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
+| Cosmos3-Reasoner-32B | `MODEL_ID=nvidia/Cosmos3-Reasoner-32B` · `MODEL_SIZE=C3-32B` |
+| Cosmos Transfer 2.5 | `MODEL_ID=nvidia/Cosmos-Transfer2.5` · `MODEL_SIZE=32B` |
+| Nemotron-Nano-12B-v2-VL | `MODEL_ID=nvidia/Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
+| Non-NVIDIA models | Show disclaimer (below), then fire Qwen sub-picker |
+
+**Non-NVIDIA models:** Show inline note first:
+> ⚠️ Non-NVIDIA models: NVIDIA does not officially support or guarantee setup for third-party models. This is best-effort only.
+
+Then immediately call a third `AskUserQuestion`:
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Which non-NVIDIA model?",
+      options: [
+        "Qwen3-VL-2B-Instruct — Qwen/Qwen3-VL-2B-Instruct (public, ~8GB VRAM)",
+        "Qwen3-VL-8B-Instruct — Qwen/Qwen3-VL-8B-Instruct (public, ~20GB VRAM)",
+        "Qwen3-VL-32B-Instruct — Qwen/Qwen3-VL-32B-Instruct (public, ~64GB VRAM)"
+      ]
+    }
+  ]
+})
+```
+
+| Selection | Sets |
+|---|---|
+| Qwen3-VL-2B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-2B-Instruct` · `MODEL_SIZE=QW3-2B` |
+| Qwen3-VL-8B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
+| Qwen3-VL-32B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-32B-Instruct` · `MODEL_SIZE=QW3-32B` |
+
+Once MODEL_ID and MODEL_SIZE are resolved from any path: agent runs autonomously to Gradio URL capture. No further questions.
 
 ---
 
@@ -113,11 +168,12 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/gra
 
 Record `SETUP_DISPATCHED_AT` (agent-side timestamp) immediately before dispatching the setup script. This timestamp gates the idle billing handler.
 
-**For Brev deployments — use the Deployment Monitor (preferred):**
+**For Brev deployments — REQUIRED: lead with the Deployment Monitor.**
 
-Deploy `cosmos_deploy_monitor.py` via the Monitor tool immediately after confirming the instance
-name. The monitor handles script deployment, background launch, log tailing, checklist display,
-UNHEALTHY recovery, and URL capture autonomously. See **DEPLOYMENT MONITOR** section below.
+As soon as the instance name is known (from Q3), dispatch `cosmos_deploy_monitor.py` via the
+Monitor tool. Do this BEFORE any manual `brev ls` polling. The monitor handles SHELL READY wait,
+script deployment, setup launch, log tailing, checklist display, UNHEALTHY recovery, and URL
+capture as a single visible foreground flow. See **DEPLOYMENT MONITOR** section below.
 
 **For SSH deployments — manual launch (no monitor available):**
 ```bash
@@ -134,9 +190,9 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag"
 
 ---
 
-### UNHEALTHY MONITORING (Brev)
+### UNHEALTHY MONITORING (Brev — handled automatically by cosmos_deploy_monitor.py)
 
-After instance creation, poll `brev ls` every 60s until SHELL column shows READY.
+**For Brev deployments: the monitor handles UNHEALTHY detection and recovery automatically.** The agent does not need to poll `brev ls` manually. The notes below apply only to SSH deployments or if the monitor is not running.
 
 If STATUS shows `UNHEALTHY` at any point:
 
@@ -186,18 +242,44 @@ Alert:
 
 ---
 
+### MODEL_GPU_REQUIREMENTS — Read before provisioning any instance
+
+Before calling `brev create`, look up the MODEL_SIZE in this table to determine which GPU tier to use. Do NOT offer providers marked ✗ for the selected model.
+
+| MODEL_SIZE | Min VRAM | Recommended GPU | Avoid |
+|---|---|---|---|
+| `2B` | 40 GB | H100 SXM, A100 80GB, H200 | — |
+| `8B` | 80 GB | H100 SXM, A100 80GB, H200 | A40 (48GB too tight) |
+| `32B` | 141 GB | **H200 SXM** (minimum viable) | H100 single-GPU (80GB insufficient) |
+| `C3-8B` | 40 GB | H100 SXM, A100 80GB | — |
+| `C3-32B` | 141 GB | **H200 SXM** (minimum viable) | H100 single-GPU (80GB insufficient) |
+| `NEM-12B` | 40 GB | H100 SXM, A100 80GB | — |
+| `QW3-2B` | 8 GB | Any GPU ≥8GB | — |
+| `QW3-8B` | 20 GB | H100 SXM, A100 80GB | — |
+| `QW3-32B` | 64 GB | H100 SXM, A100 80GB, H200 | — |
+
+**For 32B and C3-32B — H200 provider list (use this instead of the standard list):**
+
+| Priority | Type | GPU | VRAM | Rate | Notes |
+|---|---|---|---|---|---|
+| 0 | Existing stopped H200 instance | H200 SXM | 141 GB | (existing rate) | Check `brev ls` first — restart beats provisioning |
+| 1 | `gpu-h200-sxm.1gpu-16vcpu-200gb` | H200 SXM (Nebius) | 141 GB | ~$4.20/hr | Proven stable — Alex's c3r-32b instance type |
+| 2 | `digitalocean_H200_sxm5` | H200 SXM5 (DO) | 141 GB | ~$4.13/hr | Slightly cheaper; same VRAM |
+
+**Do not offer single-GPU H100 for 32B or C3-32B.** 80GB is insufficient. If the user is on an existing H100 instance and selects 32B, warn: "H100 has 80GB VRAM — insufficient for 32B (needs ≥141GB). Recommend provisioning an H200 instance."
+
 ### PROVIDER FALLBACK — Auto-rotation (no user interruption)
 
 When a provisioning attempt fails (UNHEALTHY after 3 min, `brev create` error, or `brev reset` unsupported), **automatically rotate** to the next provider in the priority list below. Do NOT stop to ask the user — they should only be interrupted when all providers are exhausted or when there is a meaningful cost difference requiring a decision.
 
-**Priority list (most reliable first, based on validated sessions):**
+**Standard priority list (for all models except 32B and C3-32B):**
 
 | Priority | Type | GPU | VRAM | Rate | Notes |
 |---|---|---|---|---|---|
-| 1 | `gpu-h100-sxm.1gpu-16vcpu-200gb` | H100 SXM | 80 GB | ~$3.70/hr | Proven stable — same type as c3r-2b, c3r-8b-v2 |
-| 2 | `hyperstack_A100` | A100 80GB | 80 GB | ~$2.20/hr | 80GB, fits all models except 32B tight |
-| 3 | `hyperstack_H100` | H100 PCIe | 80 GB | ~$3.70/hr | Validated in earlier sessions; recently unreliable |
-| 4 | `scaleway_A40` | A40 | 48 GB | ~$1.10/hr | LOW_VRAM mode; slowest inference tier |
+| 1 | `gpu-h100-sxm.1gpu-16vcpu-200gb` | H100 SXM | 80 GB | ~$3.54/hr | Proven stable — same type as c3r-2b, c3r-8b-v2 |
+| 2 | `hyperstack_A100_80G` | A100 80GB | 80 GB | ~$1.62/hr | Good fallback for 8B and smaller |
+| 3 | `hyperstack_H100` | H100 | 80 GB | ~$2.28/hr | Validated in earlier sessions |
+| 4 | `scaleway_A40` | A40 | 48 GB | ~$1.10/hr | LOW_VRAM mode; 2B only; slowest tier |
 
 **Rotation behavior:**
 1. Attempt provisioning with priority 1.
@@ -234,14 +316,25 @@ Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
 
 ### DEPLOYMENT MONITOR (replaces /loop — Brev only)
 
-After SHELL READY is confirmed (or immediately if reusing an existing instance), dispatch
-`cosmos_deploy_monitor.py` — a local Python state machine that manages the full pipeline,
-shows a persistent formatted checklist on each poll cycle, and handles UNHEALTHY + provider
-rotation autonomously.
+**TIMING: Dispatch IMMEDIATELY after the instance name is known from Q3.** Do NOT poll
+`brev ls` manually before dispatching. The monitor starts in BUILDING phase and handles
+the SHELL READY wait internally — polling `brev ls` and displaying the checklist until
+the instance is ready, then deploying scripts, launching setup, and watching for the
+Gradio URL. The agent's only job is to fire the monitor and then let it run.
+
+**TOOL: Monitor tool only. Do NOT use `Bash(run_in_background=true)`.** Background Bash
+runs below the line — the checklist is invisible. The Monitor tool streams output into
+the main chat thread as notifications, keeping Alex informed on every poll cycle.
+
+**Step 0 — Fetch Monitor schema first (required — it's a deferred tool):**
+```
+ToolSearch({ query: "select:Monitor" })
+```
+Then call Monitor with the cosmos_deploy_monitor.py command.
 
 **Canonical script:** `~/.claude/scripts/cosmos_deploy_monitor.py`
 
-**Dispatch via Monitor tool** (streams checklist output as batched notifications):
+**Dispatch via Monitor tool** (streams checklist output into the main chat thread):
 
 ```python
 Monitor({
@@ -308,10 +401,18 @@ state = json.load(open("/tmp/cosmos_deploy_state.json"))
 AskUserQuestion({ questions: [{ question: state["message"], options: state["options"] }] })
 ```
 
+**Provider/rate values for Monitor dispatch** (derive from MODEL_SIZE and GPU tier):
+
+| MODEL_SIZE | --provider | --provider-label | --rate |
+|---|---|---|---|
+| `32B`, `C3-32B` | `gpu-h200-sxm.1gpu-16vcpu-200gb` | `"H200 SXM"` | `4.20` |
+| All others (new Nebius H100) | `gpu-h100-sxm.1gpu-16vcpu-200gb` | `"H100 SXM"` | `3.54` |
+| Existing instance | Use `--provider` type from `brev ls` GPU column if known; else use H100 SXM defaults |
+
 **Notify the user at dispatch:**
 ```
-⟳ Deployment monitor running — watching <instance-name>.
-  Checklist updates every 30s. I'll notify when Gradio is live or if I need input.
+⟳ Deployment monitor starting — will track <instance-name> from SHELL READY through Gradio live.
+  Checklist appears every 30s in this thread. I'll notify when Gradio is live or if I need input.
 ```
 
 The `/tmp/gradio_live.flag` file is the authoritative live signal — written by `byo_video_setup.py`
@@ -328,7 +429,7 @@ only after the Gradio liveness probe passes.
 | Cosmos Reason2 BF16 | 2B VLM | 40 GB | `2B` | Video understanding: robotics, AV, Metropolis |
 | Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
 | Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
-| Cosmos Reason2 BF16 | 32B VLM | 160 GB | `32B` | Public; multi-GPU (2×H100 recommended) |
+| Cosmos Reason2 BF16 | 32B VLM | 141 GB | `32B` | Public; H200 SXM minimum (H100 80GB insufficient) |
 | Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | Public; was Cosmos3-Reasoner-8B-Private |
 | Cosmos3-Reasoner 2B/32B | 2B/32B | 40/80+ GB | `C3-2B`, `C3-32B` | Gated HF_TOKEN; nvidia org required |
 | Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
@@ -402,8 +503,9 @@ Check in this order:
 ### Step 1 — Create or reuse instance
 
 ```bash
-# Create new instance (name it something meaningful)
-brev create <name> --gpu-name H100 --type hyperstack_H100
+# Create new instance — use model-aware GPU type (see MODEL_GPU_REQUIREMENTS)
+# For 32B: brev create <name> --gpu-name H200 --type gpu-h200-sxm.1gpu-16vcpu-200gb
+# For ≤8B: brev create <name> --gpu-name H100 --type gpu-h100-sxm.1gpu-16vcpu-200gb
 
 # Or list existing
 brev ls
@@ -837,9 +939,10 @@ brev exec <instance> "cd /home/shadeform/cosmos-reason2 && .venv/bin/huggingface
 ```
 HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 
-### 32B feasibility on single H100 80GB (vLLM)
+### 32B feasibility notes
 
-- 32B BF16: ~66GB weights (33B params BF16). Fits with `--max-model-len 4096 --gpu-memory-utilization 0.95`. Tight — H100 80GB only.
+- **For /byo-video: H200 is the minimum viable GPU.** H100 single-GPU (80GB) is insufficient for comfortable inference under the skill's time constraints. Use `gpu-h200-sxm.1gpu-16vcpu-200gb` (141GB VRAM) — empirically confirmed by Alex with c3r-32b.
+- 32B BF16 weights are ~66GB, but vLLM requires additional VRAM for KV cache, activations, and overhead. On H100 80GB you can technically load with `--max-model-len 4096 --gpu-memory-utilization 0.95`, but this leaves almost no room for KV cache and will OOM on longer video sequences.
 - CR2-32B is **public** as of May 2026 — no HF_TOKEN required. Download: `huggingface-cli download nvidia/Cosmos-Reason2-32B --local-dir models/Cosmos-Reason2-32B`.
 - In vLLM mode with 8B loaded, `run_all_variants` will send 32B requests to the 8B server — the table `Notes` column will show `vLLM serves Cosmos-Reason2-8B-NVFP4` to flag the mismatch.
 - For true 32B benchmarking: restart vLLM with 32B model using this skill, then run `Run All Variants` with `MODEL_SIZE=32B`.
