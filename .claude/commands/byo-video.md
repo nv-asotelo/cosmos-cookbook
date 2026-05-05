@@ -254,10 +254,35 @@ Then exit.
 })
 ```
 
-After spawning: do not poll or sleep. Stay available for conversation.
-When the task completion notification fires, read `/tmp/byo_video_observer_result.json`:
-- `status == "live"` → display the LIVE final panel (see PHASE 6 completion template).
-- `status == "failed"` → fire `AskUserQuestion` with recovery options (see HALT-AND-ASK).
+**After spawning the observer, immediately start the progress loop:**
+
+Load `CronCreate` via ToolSearch: `query: "select:CronCreate"`, then create:
+
+```
+CronCreate({
+  cron: "*/1 * * * *",
+  prompt: "Check /byo-video observer progress: read /tmp/byo_video_progress.json and /tmp/byo_video_observer_result.json on the local machine; display a one-line status update with the current checklist phase and elapsed time. If result JSON exists with status='live', display the LIVE final panel and cancel this cron job (load CronDelete via ToolSearch first). If result JSON exists with status='failed', fire AskUserQuestion with recovery options (see HALT-AND-ASK) and cancel this cron job.",
+  recurring: true
+})
+```
+
+Store the returned job ID as `PROGRESS_LOOP_ID`. Cancel it with `CronDelete(PROGRESS_LOOP_ID)` when the observer completes (success or failure).
+
+After spawning: stay available for conversation.
+When the task completion notification fires, OR when the progress loop detects a result JSON, read `/tmp/byo_video_observer_result.json`:
+- `status == "live"` → display the LIVE final panel (see PHASE 6 completion template). Cancel the progress loop.
+- `status == "failed"` → fire `AskUserQuestion` with recovery options (see HALT-AND-ASK). Cancel the progress loop.
+
+---
+
+### OBSERVER PROTOCOL — Standing Rule
+
+> **OBSERVER RULE: No silent exits.**
+> On ANY unrecoverable error — SSH failure, brev create failure, vLLM error, setup script error, all providers exhausted — the observer MUST:
+> 1. Write `/tmp/byo_video_observer_result.json` on the local machine with `{"status":"failed","phase":<N>,"error":"<one-line>","instance":"<name>"}`.
+> 2. Then `exit`.
+>
+> Never exit without writing this file. The main session's progress loop reads it every minute — an absent file means "still running," so a silent exit leaves the user waiting forever.
 
 ---
 
@@ -305,6 +330,11 @@ phase transition and every 30s poll:
 Mark each row `[✓]` when complete, `[→]` when active. Update elapsed and cost each reprint.
 Raw bash output is never surfaced in the checklist.
 
+Write progress to local machine `/tmp/byo_video_progress.json`:
+```json
+{"phase": 2, "status": "provisioning", "elapsed_s": 0, "instance": "<name>", "checklist": {"provision": "active", "shell": "pending", "scripts": "pending", "deps": "pending", "weights": "pending", "gradio": "pending"}}
+```
+
 Cost estimates by GPU tier:
 - H100 SXM ($3.54/hr): 10 min setup ~$0.59 · 20 min ~$1.18
 - H200 SXM ($4.20/hr): 20 min setup ~$1.40 · 30 min ~$2.10
@@ -327,6 +357,11 @@ Poll `brev ls` every 30s. Update the checklist `[→] Shell ready` row each poll
    - If all providers exhausted: write failure result and exit.
      `{"status":"failed","phase":3,"error":"All providers exhausted — UNHEALTHY","instance":"<last-name>"}`
 
+On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+```json
+{"phase": 3, "status": "waiting_shell", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "active", "scripts": "pending", "deps": "pending", "weights": "pending", "gradio": "pending"}}
+```
+
 On SHELL READY: update checklist `[✓] Shell ready`, proceed to PHASE 4.
 
 ---
@@ -342,21 +377,33 @@ python3 -c "import base64, sys; sys.stdout.write(base64.b64encode(open('/Users/a
 
 # Step 2: deploy byo_video_setup.py to instance (Bash call 2)
 brev exec <name> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64_SETUP>'))\""
+```
 
-# Step 3: read + encode gradio_cr2_byo.py (Bash call 3)
+**Step 3** — Check file size before choosing deploy method for gradio_cr2_byo.py:
+```bash
+wc -c ~/.claude/scripts/gradio_cr2_byo.py
+```
+
+**Step 4a** — If size ≤ 100352 bytes (98KB): base64 encode and deploy:
+```bash
 python3 -c "import base64, sys; sys.stdout.write(base64.b64encode(open('/Users/asotelo/.claude/scripts/gradio_cr2_byo.py','rb').read()).decode())"
-# → capture B64_GRADIO
-
-# Step 4: deploy gradio_cr2_byo.py to instance (Bash call 4)
+```
+→ capture B64_GRADIO, then:
+```bash
 brev exec <name> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64_GRADIO>'))\""
 ```
 
-If `gradio_cr2_byo.py` is >98KB, use `brev copy` instead of base64 (avoids brev exec argument buffer overflow):
+**Step 4b** — If size > 100352 bytes (>98KB): use brev copy (avoids brev exec argument buffer overflow):
 ```bash
-brev copy <name> ~/.claude/scripts/gradio_cr2_byo.py /tmp/gradio_cr2_byo.py
+brev copy ~/.claude/scripts/gradio_cr2_byo.py <name>:/tmp/gradio_cr2_byo.py
 ```
 
 Update checklist: `[✓] Scripts deployed`
+
+Write progress to local machine `/tmp/byo_video_progress.json`:
+```json
+{"phase": 4, "status": "scripts_deployed", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "pending", "weights": "pending", "gradio": "pending"}}
+```
 
 ---
 
@@ -372,7 +419,11 @@ brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<mo
 ```
 
 **Log tail loop (every 30s):** Tail the log, print a compact status line (not a full panel —
-the observer is headless). Look for step markers and errors.
+the observer is headless). Look for step markers and errors. On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+```json
+{"phase": 5, "status": "<active_step>", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "active|done", "weights": "active|done|pending", "gradio": "pending"}}
+```
+(Update `deps` to `"done"` after Step 6 completes, `weights` to `"done"` after Step 9 completes.)
 
 ```bash
 brev exec <name> "tail -60 /tmp/byo_video_setup.log 2>/dev/null || echo '(log not yet written)'"
@@ -401,7 +452,11 @@ On error:
 
 ### OBSERVER PROTOCOL — PHASE 6: GRADIO LIVE + URL CAPTURE
 
-Update checklist: `[→] Starting Gradio`. Poll every 30s for the live flag:
+Update checklist: `[→] Starting Gradio`. Poll every 30s for the live flag. On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+```json
+{"phase": 6, "status": "waiting_gradio", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "done", "weights": "done", "gradio": "active"}}
+```
+
 ```bash
 brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null"
 ```
@@ -489,14 +544,22 @@ result on task completion notification and fires `AskUserQuestion` for recovery.
 
 ### Exception triggers and question templates
 
-**Observer failure (any phase) — triggered by main session on task completion:**
+**Observer failure (any phase) — triggered by main session progress loop detecting failure JSON:**
+
+Read `/tmp/byo_video_progress.json` for last-known state before firing AskUserQuestion.
+
 ```
-AskUserQuestion: "Observer failed at Phase <N>: <error>. What next?"
+AskUserQuestion: "Observer failed at Phase <N>: <error>.
+Last checklist state: [✓] provision [✓] shell [→] scripts [ ] deps [ ] weights [ ] gradio
+What next?"
 Options:
   "Retry — spawn a new observer on the same instance"
   "Provision a new instance (current will be deleted)"
   "Abort — delete instance and exit"
 ```
+
+(Replace the checklist state line with actual values read from `/tmp/byo_video_progress.json` — use `[✓]` for `"done"`, `[→]` for `"active"`, `[ ]` for `"pending"`.)
+
 On "Retry": spawn a new observer with the same state, `DEPLOY_TARGET=brev:<existing-name>`.
 On "New instance": delete the failed instance, spawn a new observer with `DEPLOY_TARGET=brev:new`.
 On "Abort": `brev delete <name>`, exit skill.
@@ -519,6 +582,9 @@ one clear question with 2–3 concrete options. Never ask open-ended questions m
 | `QW3-2B` | 8 GB | Any GPU ≥8GB | varies | — |
 | `QW3-8B` | 20 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
 | `QW3-32B` | 64 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
+| `C3-super` | TBD (32B) | `gpu-h200-sxm.1gpu-16vcpu-200gb` | $4.20/hr | — |
+
+> **TODO (next sprint):** `nvidia/Cosmos3-Super-Reasoner` is a 32B model (not the 2B edge model). The setup script currently maps unknown C3-super MODEL_SIZE to `Cosmos3-Reasoner-2B`. Add `C3-super` as an explicit alias for `C3-32B` in `byo_video_setup.py` MODEL_SIZE routing and update `MODEL_ID` mapping to `nvidia/Cosmos3-Super-Reasoner`. VRAM requirement ~141GB (H200 required).
 
 **32B and C3-32B — H200 only.** H100 80GB is insufficient. If the user has an existing H100 and selects 32B: warn them and offer to provision an H200.
 
