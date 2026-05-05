@@ -233,23 +233,25 @@ MODEL_NAME = _primary_hf_id
 # ── MODEL_ID override (arbitrary HF model, bypasses MODEL_SIZE lookup) ───────
 MODEL_ID = os.environ.get("MODEL_ID", "")
 if MODEL_ID:
-    # Derive repo dir name from MODEL_ID (last path component, sanitized)
-    _model_dir_name = MODEL_ID.split("/")[-1].replace("-", "_")
     MODEL_NAME = MODEL_ID
-    MODEL_DIR  = os.path.join(MODELS_BASE, _model_dir_name)
     # Only fall back to "custom" if MODEL_SIZE wasn't explicitly set to a known config key.
-    # Prevents MODEL_ID from silently discarding a valid MODEL_SIZE (e.g. NEM-12B).
+    # Prevents MODEL_ID from silently discarding a valid MODEL_SIZE (e.g. NEM-12B, C3-8B).
     if MODEL_SIZE not in _MODEL_CONFIGS:
+        # Unknown size: derive directory name from MODEL_ID. Keep hyphens — Linux supports them.
+        _model_dir_name = MODEL_ID.split("/")[-1]
+        MODEL_DIR  = os.path.join(MODELS_BASE, _model_dir_name)
         MODEL_SIZE = "custom"
         # Estimate size hint from model ID
         _size_hint = "~8GB" if "8B" in MODEL_ID else "~16GB" if ("32B" in MODEL_ID or "14B" in MODEL_ID) else "~4GB"
         # Override _cfg to a minimal single-variant config
         _cfg = {
             "repo": MODEL_ID.split("/")[-1],
-            "variants": [("base", _model_dir_name, MODEL_ID, _size_hint)],
+            "variants": [(_model_dir_name, _model_dir_name, MODEL_ID, _size_hint)],
             "nim": False,
         }
         _variant_labels = MODEL_ID
+    # When MODEL_SIZE is a known config key: MODEL_DIR already set correctly from config.
+    # Only MODEL_NAME is updated to the explicit MODEL_ID override.
 
 # ── Dashboard: 9-step progress checklist ─────────────────────────────────────
 STEP_LABELS = [

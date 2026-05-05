@@ -227,6 +227,12 @@ with a panel update. The panel is the user's single source of truth — it shows
 rate, elapsed time, ETA, cost, and checklist state. Never replace panel updates with prose
 summaries.
 
+**Elapsed timer rule:** `PROVISION_START_TS` is recorded once at the top of PHASE 2. On every
+30s poll cycle (PHASE 3, PHASE 5, PHASE 6), compute `elapsed = int(time.time() - PROVISION_START_TS)`
+and embed it in the panel header line as `elapsed: Xm Ys`. Reprint the full panel on every poll
+cycle — not only on phase transitions. This keeps elapsed time accurate to within 30s without
+flooding the session with rapid refreshes.
+
 ---
 
 ### PHASE 2 — PROVISION
@@ -288,10 +294,13 @@ Do NOT auto-terminate. If [w]: reset timer, repeat at +5 min.
 
 ### PHASE 3 — WAIT FOR SHELL READY
 
-Poll `brev ls` every 30s via Bash (one call per poll). Update panel each poll:
+Poll `brev ls` every 30s via Bash (one call per poll). Reprint the full panel each poll with
+updated elapsed time computed from `PROVISION_START_TS`:
 
 ```
-║  [→] Waiting for SHELL READY (<elapsed>s / polling every 30s)  ║
+║  Cosmos BYO-Video · <instance>  (elapsed: Xm Ys)                ║
+...
+║  [→] Waiting for SHELL READY (polling every 30s)                 ║
 ```
 
 **On UNHEALTHY:**
@@ -348,13 +357,15 @@ brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<mo
 
 Update panel: `[→] Setup running`
 
-**Log tail loop (every 30s):**
+**Log tail loop (every 30s):** Tail the log, then reprint the full panel with updated elapsed
+from `PROVISION_START_TS`. Do not emit intermediate prose between panels.
 
 ```bash
 brev exec <name> "tail -60 /tmp/byo_video_setup.log 2>/dev/null || echo '(log not yet written)'"
 ```
 
-Parse log output for step completion markers. Update the step-level checklist in the panel:
+Parse log output for step completion markers. Update the step-level checklist in the panel,
+including updated `elapsed: Xm Ys` in the header:
 
 ```
 ║  [→] Setup running                                           ║

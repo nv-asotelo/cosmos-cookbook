@@ -257,16 +257,16 @@ _LABEL_TO_MODEL_SIZE = {
     for label, _, _, _ in cfg.get("variants", [])
 }
 
+MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
+if MODEL_SIZE not in MODEL_CONFIGS:
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
 
 # Hard cap on frames sampled in HF mode — prevents multi-minute prefills on long videos.
 # qwen_vl_utils respects "nframes" in the conversation dict to uniformly subsample the clip.
 _MAX_HF_FRAMES = 32
-
-MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
-if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 _cfg         = MODEL_CONFIGS[MODEL_SIZE]
 _MODELS_BASE = os.path.join(HOME, "cosmos-reason2", "models")
@@ -351,7 +351,7 @@ if INFERENCE_BACKEND == "vllm":
         "2B":      "CR2-2B BF16",
         "8B":      "CR2-8B BF16",
         "C3-2B":   "C3R-2B BF16",
-        "C3-8B":   "C3R-8B BF16",
+        "C3-8B":   "C3R-Nano BF16",
         "C3-32B":  "C3R-32B BF16",
         "32B":     "CR2-32B BF16",
     }
@@ -731,7 +731,7 @@ def _extract_frames_b64(video_path, fps=1, max_frames=8):
 
 
 # ── vLLM inference (OpenAI-compatible local server) ───────────────────────────
-def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None, is_image=False):
+def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None, is_image=False, temperature=0.0, top_p=1.0, rep_penalty=1.0):
     """Generator: (response_text, status_html, table_html) via local vLLM/NIM server."""
     steps = VLLM_STEPS
     if t_run_start is None:
@@ -837,6 +837,9 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                     {"role": "user",   "content": content},
                 ],
                 "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "repetition_penalty": rep_penalty,
                 "stream": True,
             },
             stream=True,
@@ -1096,7 +1099,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
 
 
 # ── HF inference ───────────────────────────────────────────────────────────────
-def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, model_id, disable_autocap=False, display_label=None, is_image=False):
+def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, model_id, disable_autocap=False, display_label=None, is_image=False, temperature=0.0, top_p=1.0, rep_penalty=1.0):
     """Generator: (response_text, status_html, table_html). Routes to NIM or HF path."""
     if video_path is None:
         yield "Upload a video or image first.", _status_html(["wait"] * 5), gr.update()
@@ -1156,6 +1159,9 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
             display_label=display_label,
             extra_note=_extra_note,
             is_image=is_image,
+            temperature=temperature,
+            top_p=top_p,
+            rep_penalty=rep_penalty,
         )
         return
 
@@ -2033,6 +2039,23 @@ with gr.Blocks(
                 label="Max output tokens",
             )
 
+        with gr.Row():
+            temp_slider = gr.Slider(
+                minimum=0.0, maximum=1.0, step=0.05, value=0.0,
+                label="Temperature",
+                info="0 = deterministic. Higher = more creative/varied output.",
+            )
+            top_p_slider = gr.Slider(
+                minimum=0.01, maximum=1.0, step=0.01, value=1.0,
+                label="Top P",
+                info="Nucleus sampling threshold. 1.0 = disabled.",
+            )
+            rep_penalty_slider = gr.Slider(
+                minimum=1.0, maximum=2.0, step=0.05, value=1.05,
+                label="Repetition Penalty",
+                info="1.0 = no penalty. Higher discourages repeated phrases.",
+            )
+
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
                 label="Disable resolution auto-cap",
@@ -2186,7 +2209,7 @@ with gr.Blocks(
         return CHECKPOINT_PRESETS[0][1]
 
     def _run(video_path, image_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
-             ckpt_name, custom_val, disable_autocap):
+             ckpt_name, custom_val, disable_autocap, temperature, top_p, rep_penalty):
         model_id  = resolve_model_id(ckpt_name, custom_val)
         media     = video_path
         is_image  = False
@@ -2198,6 +2221,9 @@ with gr.Blocks(
             fps, max_pixels, max_new_tokens, model_id,
             disable_autocap=disable_autocap,
             is_image=is_image,
+            temperature=temperature,
+            top_p=top_p,
+            rep_penalty=rep_penalty,
         ):
             yield text, status, tbl
 
@@ -2214,7 +2240,8 @@ with gr.Blocks(
     run_btn.click(
         fn=_run,
         inputs=[video_input, image_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
-                checkpoint_dd, custom_ckpt, disable_autocap_chk],
+                checkpoint_dd, custom_ckpt, disable_autocap_chk,
+                temp_slider, top_p_slider, rep_penalty_slider],
         outputs=[response_out, status_panel, results_table],
     )
 
