@@ -352,6 +352,8 @@ if not MODEL_ID:
     _variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
     if _cfg.get("nim"):
         _variant_labels += f" → NIM-{MODEL_SIZE}"
+else:
+    _variant_labels = MODEL_ID
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
