@@ -21,57 +21,20 @@ This script shows live step-by-step progress with ETAs for every install stage, 
 
 ---
 
-## AGENT PROTOCOL — Observer-first execution
+## AGENT PROTOCOL — Main session handles interactive phases
 
-**Single entry point.** On `/byo-video` invocation, spawn the OBSERVER AGENT immediately — before
-running any Bash commands, before calling AskUserQuestion, before any other tool. The observer
-owns the full lifecycle: pre-checks → picker → provisioning → deployment → URL capture.
+**Phase split.** `AskUserQuestion` is only available in the main session context — subagent
+environments do not have it as a deferred tool. Therefore:
 
-The main session's only job is to spawn the observer (one Agent call) and wait for it to return.
-Do not run Bash, AskUserQuestion, or any other tool in the main session.
+- **Main session** runs PHASE 0 (pre-checks) and PHASE 1 (picker) using `AskUserQuestion`.
+- **Observer agent** is spawned after all parameters are resolved and handles PHASE 2–6
+  (provisioning → deployment → URL capture) with the resolved values baked into its prompt.
 
-**Spawn immediately:**
+### Main session — PHASE 0: Pre-checks
 
-```python
-Agent({
-  description: "byo-video observer",
-  prompt: """
-You are the byo-video observer. You own the entire deployment lifecycle from first interaction
-to Gradio live URL. Read the OBSERVER PROTOCOL section in this skill doc carefully — it defines
-every phase you must execute. Follow it verbatim.
-
-Your rules:
-- Never run anything silently. Every action produces visible output.
-- Never use Bash(run_in_background=true). Never spawn background processes.
-- Display the LIVE STATUS PANEL after every phase change.
-- If blocked: show the panel with the block reason, then AskUserQuestion with recovery options.
-- Never ask the user to run commands themselves.
-
-Begin with PHASE 0 immediately.
-"""
-})
-```
-
-The observer reads the OBSERVER PROTOCOL below and executes it. Nothing else runs in the main
-session until the observer returns with a Gradio URL (or an unrecoverable error).
-
----
-
-## OBSERVER PROTOCOL
-
-The observer executes these phases in order. Each phase ends with a panel update. The panel is
-the user's single source of truth — it shows instance, GPU, rate, elapsed time, ETA, cost, and
-checklist state. Never replace panel updates with prose summaries.
-
----
-
-### PHASE 0 — PRE-CHECKS
-
-Run before asking any questions. Results inform the picker options.
-
-1. Run `brev ls` via Bash.
-2. Note any existing stopped instances with H100/H200 GPUs. These become priority-0 options in Q3.
-3. Note any running instances (may be reusable).
+1. Run `brev ls` via Bash. Capture the full output.
+2. Note stopped H100/H200 instances (priority-0 candidates for Q3).
+3. Note any RUNNING instances (may be reusable).
 
 Display initial panel:
 
@@ -85,11 +48,59 @@ Display initial panel:
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+### Main session — PHASE 1: Picker
+
+Load `AskUserQuestion` via ToolSearch: `query: "select:AskUserQuestion"`, then fire all 3
+questions in a single call (see PICKER section below for the full call).
+
+Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`,
+`DEPLOY_TARGET` per the answer→env var mapping table.
+
+If Q3 answer is "Existing Brev" or "SSH target", fire one follow-up `AskUserQuestion` to collect
+the instance name or host before spawning the observer.
+
+### Main session — Spawn observer (after PHASE 1 complete)
+
+With all parameters resolved, spawn the observer:
+
+```python
+Agent({
+  description: "byo-video observer",
+  prompt: f"""
+You are the byo-video observer. You own PHASE 2 through PHASE 6 of the Cosmos BYO-Video
+deployment (provisioning → scripts → setup → URL capture). PHASE 0 and PHASE 1 are already
+complete — do NOT re-run them.
+
+Resolved parameters:
+  MODEL_ID           = <MODEL_ID>
+  MODEL_SIZE         = <MODEL_SIZE>
+  INFERENCE_BACKEND  = <INFERENCE_BACKEND>
+  DEPLOY_TARGET      = <DEPLOY_TARGET>
+
+Brev pre-check output (from PHASE 0):
+<brev_ls_output>
+
+Your rules:
+- Never run anything silently. Every action produces visible output.
+- Never use Bash(run_in_background=true).
+- Display the LIVE STATUS PANEL after every phase change.
+- If blocked: show the panel with the block reason, then call AskUserQuestion (load via
+  ToolSearch first: query "select:AskUserQuestion") with recovery options.
+- Never ask the user to run commands themselves.
+
+Begin with PHASE 2 immediately using the resolved parameters above.
+"""
+})
+```
+
+The observer executes PHASE 2–6 as defined in the OBSERVER PROTOCOL below and returns when
+a Gradio URL is live (or an unrecoverable error occurs).
+
 ---
 
-### PHASE 1 — PICKER
+## PICKER — Main session PHASE 1
 
-Load `AskUserQuestion` via ToolSearch first: `query: "select:AskUserQuestion"`
+Run after PHASE 0. Load `AskUserQuestion` via ToolSearch first: `query: "select:AskUserQuestion"`
 
 Then fire with all 3 questions in a single call:
 
@@ -203,8 +214,18 @@ AskUserQuestion({
 | Qwen3-VL-8B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
 | Qwen3-VL-32B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-32B-Instruct` · `MODEL_SIZE=QW3-32B` |
 
-Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: proceed to
-PHASE 2 immediately. No further questions.
+Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: spawn the
+OBSERVER AGENT as described in the AGENT PROTOCOL section above. No further questions from the
+main session.
+
+---
+
+## OBSERVER PROTOCOL
+
+The observer receives resolved parameters in its prompt and executes PHASE 2–6. Each phase ends
+with a panel update. The panel is the user's single source of truth — it shows instance, GPU,
+rate, elapsed time, ETA, cost, and checklist state. Never replace panel updates with prose
+summaries.
 
 ---
 
