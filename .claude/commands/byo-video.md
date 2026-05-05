@@ -322,24 +322,21 @@ the SHELL READY wait internally — polling `brev ls` and displaying the checkli
 the instance is ready, then deploying scripts, launching setup, and watching for the
 Gradio URL. The agent's only job is to fire the monitor and then let it run.
 
-**TOOL: Monitor tool only. Do NOT use `Bash(run_in_background=true)`.** Background Bash
-runs below the line — the checklist is invisible. The Monitor tool streams output into
-the main chat thread as notifications, keeping Alex informed on every poll cycle.
-
-**Step 0 — Fetch Monitor schema first (required — it's a deferred tool):**
-```
-ToolSearch({ query: "select:Monitor" })
-```
-Then call Monitor with the cosmos_deploy_monitor.py command.
+**TOOL: Background Agent subagent. Do NOT use Monitor or Bash(run_in_background=true).**
+Monitor is a deferred tool that requires ToolSearch first and frequently fails on schema
+load. Background Bash runs silently below the fold. A background Agent is always
+available and surfaces its output as notifications in the main thread.
 
 **Canonical script:** `~/.claude/scripts/cosmos_deploy_monitor.py`
 
-**Dispatch via Monitor tool** (streams checklist output into the main chat thread):
+**Dispatch via Agent tool** (background, streams checklist output as notifications):
 
 ```python
-Monitor({
+Agent({
   description: "byo-video deploy — <instance-name>",
-  command: (
+  prompt: (
+    "Run the Cosmos deployment monitor and report each checklist update back as a message.\n\n"
+    "Command:\n"
     "python3 ~/.claude/scripts/cosmos_deploy_monitor.py"
     " --instance <name>"
     " --model-id <MODEL_ID>"
@@ -347,10 +344,12 @@ Monitor({
     " --backend <INFERENCE_BACKEND>"
     " --rate <BREV_RATE_PER_HOUR>"
     " --provider <provider_type>"
-    " --provider-label '<provider_label>'"
+    " --provider-label '<provider_label>'\n\n"
+    "Run the command with Bash. Copy each block of stdout output verbatim into your "
+    "response as it arrives. When the script exits, report the exit code and the final "
+    "contents of /tmp/cosmos_deploy_state.json."
   ),
-  timeout_ms: 7200000,  # 2h max
-  persistent: false
+  run_in_background: true
 })
 ```
 
