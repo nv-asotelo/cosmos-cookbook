@@ -257,6 +257,13 @@ _LABEL_TO_MODEL_SIZE = {
     for label, _, _, _ in cfg.get("variants", [])
 }
 
+# Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
+_UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
+
+# Hard cap on frames sampled in HF mode — prevents multi-minute prefills on long videos.
+# qwen_vl_utils respects "nframes" in the conversation dict to uniformly subsample the clip.
+_MAX_HF_FRAMES = 32
+
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 if MODEL_SIZE not in MODEL_CONFIGS:
     print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
@@ -724,7 +731,7 @@ def _extract_frames_b64(video_path, fps=1, max_frames=8):
 
 
 # ── vLLM inference (OpenAI-compatible local server) ───────────────────────────
-def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None):
+def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None, is_image=False):
     """Generator: (response_text, status_html, table_html) via local vLLM/NIM server."""
     steps = VLLM_STEPS
     if t_run_start is None:
@@ -752,11 +759,36 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                            {"model_id": model_id, "elapsed_s": _elapsed(), "backend": _be_label},
                            steps=steps), gr.update()
 
-    # Step 3: prepare video content
-    # Nemotron and Qwen3-VL use file:// video_url (vLLM reads file directly).
-    # CR2/C3 use base64-encoded JPEG frames injected as image_url items.
+    # Step 3: prepare media content
+    # Images: single image_url (file:// for Nemotron/Qwen, base64 for CR2/C3).
+    # Videos: Nemotron/Qwen3-VL use file:// video_url; CR2/C3 use base64 JPEG frames.
     _nem = _uses_file_url(model_id) or _uses_file_url(_SERVER_MODEL_ID or "")
-    if _nem:
+    if is_image:
+        if _nem:
+            content = [
+                {"type": "image_url", "image_url": {"url": f"file://{video_path}"}},
+                {"type": "text", "text": prompt},
+            ]
+            print(f"[vllm/image] file:// image: {video_path}", flush=True)
+        else:
+            try:
+                from PIL import Image as _pil_img
+                _img = _pil_img.open(video_path).convert("RGB")
+                _buf = io.BytesIO()
+                _img.save(_buf, format="JPEG", quality=85)
+                _img_b64 = base64.b64encode(_buf.getvalue()).decode()
+            except Exception as _img_err:
+                msg = f"[vLLM ERROR] Could not read image: {_img_err}"
+                _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
+                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+                return
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_img_b64}"}},
+            ]
+            print(f"[vllm/image] base64 image prepared", flush=True)
+    elif _nem:
         import shutil as _shutil
         _nem_path = "/tmp/gradio_upload.mp4"
         try:
@@ -888,7 +920,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
 
 
 # ── NIM inference ──────────────────────────────────────────────────────────────
-def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None):
+def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, is_image=False):
     """Generator: (response_text, status_html, table_html) via NVCF streaming API."""
     steps = NIM_STEPS
     if t_run_start is None:
@@ -934,24 +966,43 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
     yield "", _status_html(["ok", "ok", "run", "wait", "wait"],
                            {"elapsed_s": _elapsed()}, steps=steps), gr.update()
 
-    # Step 3: extract frames
-    print(f"[nim] Extracting frames fps={fps} max={8}", flush=True)
-    frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
-    if not frames_b64:
-        msg = "[NIM ERROR] Could not extract frames from video (PyAV missing or video unreadable)"
-        _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
-        yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
-                           {"elapsed_s": _elapsed()}, steps=steps), _table_html()
-        return
-    print(f"[nim] {len(frames_b64)} frames extracted", flush=True)
+    # Step 3: prepare media content
+    if is_image:
+        try:
+            from PIL import Image as _pil_img
+            _img = _pil_img.open(video_path).convert("RGB")
+            _buf = io.BytesIO()
+            _img.save(_buf, format="JPEG", quality=85)
+            _img_b64 = base64.b64encode(_buf.getvalue()).decode()
+        except Exception as _img_err:
+            msg = f"[NIM ERROR] Could not read image: {_img_err}"
+            _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
+            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                               {"elapsed_s": _elapsed()}, steps=steps), _table_html()
+            return
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_img_b64}"}},
+        ]
+        print(f"[nim/image] base64 image prepared", flush=True)
+    else:
+        print(f"[nim] Extracting frames fps={fps} max={8}", flush=True)
+        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
+        if not frames_b64:
+            msg = "[NIM ERROR] Could not extract frames from video (PyAV missing or video unreadable)"
+            _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
+            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                               {"elapsed_s": _elapsed()}, steps=steps), _table_html()
+            return
+        print(f"[nim] {len(frames_b64)} frames extracted", flush=True)
+        content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
+        for fb64 in frames_b64:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
+            })
 
     # Step 4: send to NVCF
-    content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
-    for fb64 in frames_b64:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
-        })
 
     yield "", _status_html(["ok", "ok", "ok", "run", "wait"],
                             {"model_id": model_id, "elapsed_s": _elapsed()}, steps=steps), gr.update()
@@ -1045,10 +1096,10 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
 
 
 # ── HF inference ───────────────────────────────────────────────────────────────
-def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, model_id, disable_autocap=False, display_label=None):
+def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, model_id, disable_autocap=False, display_label=None, is_image=False):
     """Generator: (response_text, status_html, table_html). Routes to NIM or HF path."""
     if video_path is None:
-        yield "Upload a video first.", _status_html(["wait"] * 5), gr.update()
+        yield "Upload a video or image first.", _status_html(["wait"] * 5), gr.update()
         return
     if not user_prompt.strip():
         user_prompt = DEFAULT_PROMPT
@@ -1087,6 +1138,7 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
             video_path, user_prompt, system_prompt, fps, max_new_tokens, model_id,
             t_run_start=t_run_start,
             display_label=display_label,
+            is_image=is_image,
         )
         return
 
@@ -1103,6 +1155,7 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
             t_run_start=t_run_start,
             display_label=display_label,
             extra_note=_extra_note,
+            is_image=is_image,
         )
         return
 
@@ -1133,21 +1186,30 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
          "upcast_warning": _upcast, "backend": "HF"},
     ), gr.update()
 
-    m = get_video_meta(video_path)
-    if m.duration_s > 0 and not disable_autocap:
-        n_frames = max(1, int(m.duration_s * fps))
-        capped_px, est_s = _auto_cap(n_frames, max_pixels)
-        if capped_px < max_pixels:
-            print(f"[auto-cap] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est)", flush=True)
-            max_pixels = capped_px
-
-    conversation = [
-        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {"role": "user", "content": [
-            {"type": "video", "video": video_path, "fps": fps, "max_pixels": max_pixels},
-            {"type": "text",  "text": user_prompt},
-        ]},
-    ]
+    if is_image:
+        conversation = [
+            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+            {"role": "user", "content": [
+                {"type": "image", "image": video_path},
+                {"type": "text", "text": user_prompt},
+            ]},
+        ]
+    else:
+        m = get_video_meta(video_path)
+        if m.duration_s > 0 and not disable_autocap:
+            n_frames = max(1, int(m.duration_s * fps))
+            capped_px, est_s = _auto_cap(n_frames, max_pixels)
+            if capped_px < max_pixels:
+                print(f"[auto-cap] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est)", flush=True)
+                max_pixels = capped_px
+        conversation = [
+            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+            {"role": "user", "content": [
+                {"type": "video", "video": video_path, "fps": fps, "max_pixels": max_pixels,
+                 "nframes": _MAX_HF_FRAMES},
+                {"type": "text", "text": user_prompt},
+            ]},
+        ]
 
     t1 = time.time()
     text_prompt = processor.apply_chat_template(
@@ -1795,15 +1857,24 @@ with gr.Blocks(
         f"# 🌌 Cosmos Reason — BYO Video Demo ({MODEL_SIZE})\n"
         f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
         f"**VRAM free:** {free_vram:,} MiB &nbsp;·&nbsp; {_backend_note}\n\n"
-        f"Upload any MP4 and ask the model a question. "
+        f"Upload any MP4 or image (JPG/PNG/WebP) and ask the model a question. "
         f"Select a checkpoint from the dropdown to load it into vLLM."
     )
 
     # ── Input row ───────────────────────────────────────────────────────────
     with gr.Row():
         with gr.Column(scale=2):
-            video_input = gr.Video(label="Upload Video (MP4)", sources=["upload"], height=280)
-            clip_info   = gr.Markdown("*Upload a video to see clip info*")
+            with gr.Tabs():
+                with gr.TabItem("Video"):
+                    video_input = gr.Video(label="Upload Video (MP4)", sources=["upload"], height=250)
+                with gr.TabItem("Image"):
+                    image_input = gr.Image(
+                        label="Upload Image (JPG / PNG / WebP)",
+                        type="filepath",
+                        sources=["upload"],
+                        height=250,
+                    )
+            clip_info = gr.Markdown("*Upload a video or image to see info*")
 
         with gr.Column(scale=1):
             demo_picker = gr.Dropdown(
@@ -1948,9 +2019,9 @@ with gr.Blocks(
 
         with gr.Row():
             fps_slider = gr.Slider(
-                minimum=1, maximum=8, step=1, value=DEFAULT_FPS,
-                label="Video sampling rate (fps)",
-                info="Higher = more frames = more tokens = slower",
+                minimum=1, maximum=8, step=1, value=_UI_DEFAULT_FPS,
+                label="Video sampling rate (fps) — ignored for images",
+                info="Higher = more frames = more tokens = slower. HF mode caps at 32 frames total.",
             )
             maxpx_slider = gr.Slider(
                 minimum=64*(32**2), maximum=4096*(32**2), step=64*(32**2),
@@ -2073,6 +2144,19 @@ with gr.Blocks(
     fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     disable_autocap_chk.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
 
+    def on_image_upload(path):
+        if not path:
+            return "*Upload an image to see info*", gr.update()
+        try:
+            from PIL import Image as _pil
+            img = _pil.open(path)
+            w, h = img.size
+            return f"**{w}×{h}** · {img.mode} image", gr.update()
+        except Exception:
+            return "*Image info unavailable*", gr.update()
+
+    image_input.change(on_image_upload, inputs=[image_input], outputs=[clip_info, maxpx_slider])
+
     def on_demo(name):
         for n, p in DEMO_PROMPTS:
             if n == name:
@@ -2101,13 +2185,19 @@ with gr.Blocks(
                 return mid
         return CHECKPOINT_PRESETS[0][1]
 
-    def _run(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
+    def _run(video_path, image_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
              ckpt_name, custom_val, disable_autocap):
-        model_id = resolve_model_id(ckpt_name, custom_val)
+        model_id  = resolve_model_id(ckpt_name, custom_val)
+        media     = video_path
+        is_image  = False
+        if media is None and image_path is not None:
+            media    = image_path
+            is_image = True
         for text, status, tbl in run_inference(
-            video_path, user_prompt, system_prompt,
+            media, user_prompt, system_prompt,
             fps, max_pixels, max_new_tokens, model_id,
             disable_autocap=disable_autocap,
+            is_image=is_image,
         ):
             yield text, status, tbl
 
@@ -2123,7 +2213,7 @@ with gr.Blocks(
 
     run_btn.click(
         fn=_run,
-        inputs=[video_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
+        inputs=[video_input, image_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
                 checkpoint_dd, custom_ckpt, disable_autocap_chk],
         outputs=[response_out, status_panel, results_table],
     )
