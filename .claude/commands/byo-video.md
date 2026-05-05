@@ -41,6 +41,14 @@ happens in the Claude Code UI — panels, `AskUserQuestion`, and completion text
 
 ### PHASE 0 — Pre-checks
 
+0. **Clear stale session artifacts first** (one Bash call before anything else):
+   ```bash
+   rm -f /tmp/byo_video_observer_result.json /tmp/byo_video_progress.json
+   ```
+   These files persist across Claude Code sessions. If not cleared, the progress cron will
+   read a prior session's result and report a false success or failure. This step is mandatory
+   and must run before `brev ls`.
+
 1. Run `brev ls` via Bash. Capture the full output.
 2. Note stopped H100/H200 instances — these become options in the PHASE 1 picker (Q3).
 3. Note any RUNNING instances (may be reusable).
@@ -298,6 +306,9 @@ instance. Do NOT ask. Do NOT pass as a CLI arg.
 2. Run `brev create <name> --type <provider_type>` — one Bash call.
    Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`)
 3. `brev create` blocks until shell ready. Proceed to PHASE 4.
+
+**CRITICAL — `cloudCredId` error halt:** If `brev create` output contains `cloudCredId or workspaceGroupId must be specified on request`, do NOT rotate to a fallback provider — this error is an org-level credential gap that applies to all provider types. Write failure JSON immediately and exit:
+`{"status":"failed","phase":2,"error":"Brev org missing cloud credential — brev create blocked for all providers. Fix in Brev dashboard org settings.","instance":"<name>"}`
 
 **For `DEPLOY_TARGET=brev:<name>` (restart stopped instance):**
 1. Run `brev start <name>` — one Bash call.
