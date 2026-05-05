@@ -572,24 +572,26 @@ def main():
                 print_checklist(state, done_steps, current_step, "")
                 write_state(state)
 
-                with open(path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode()
-
-                remote_deploy = (
-                    f"python3 -c \""
-                    f"import base64; "
-                    f"open('/tmp/{name}.py','wb').write("
-                    f"base64.b64decode('{b64}'))\""
-                )
                 t0 = time.time()
-                _, rc = brev_exec(args.instance, remote_deploy, timeout=90)
+                cp_result = subprocess.run(
+                    ["brev", "copy", path, f"{args.instance}:/tmp/{name}.py"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                rc = cp_result.returncode
                 if rc != 0:
                     time.sleep(5)
-                    _, rc = brev_exec(args.instance, remote_deploy, timeout=90)
+                    cp_result = subprocess.run(
+                        ["brev", "copy", path, f"{args.instance}:/tmp/{name}.py"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    rc = cp_result.returncode
                     if rc != 0:
                         state["phase"]     = "ERROR"
                         state["exit_code"] = 1
-                        state["message"]   = f"Failed to deploy {name}.py after 2 attempts"
+                        state["message"]   = (
+                            f"Failed to deploy {name}.py after 2 attempts "
+                            f"(brev copy error: {cp_result.stderr[:200]})"
+                        )
                         write_state(state)
                         print(f"ERROR: {state['message']}", flush=True)
                         sys.exit(1)

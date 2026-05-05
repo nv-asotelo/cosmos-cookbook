@@ -378,14 +378,30 @@ Cosmos Deploy Monitor — c3r-nano  (elapsed: 4m 32s | ETA: ~12m)
   log: ⟳  installing cu128 extras...
 ```
 
+**Monitor event display — verbatim, always:**
+When a Monitor event fires, print its content as-is in a code block. Do NOT paraphrase, summarize, or write sentences like "Still building at 48s — on track." The raw checklist output from cosmos_deploy_monitor.py is the user's view of the pipeline; replacing it with a summary destroys that visibility.
+
 **Monitor exit code handling:**
 
 | Exit code | Meaning | Agent action |
 |---|---|---|
 | `0` | Gradio live — URL in `/tmp/cosmos_deploy_state.json` | Read URL, post Teams kill alert |
-| `1` | Unrecoverable error — message in state file | Read error, surface to user, offer retry |
+| `1` | Unrecoverable error — message in state file | Read error, surface to user. **STOP. Do not attempt to fix, redeploy, or relaunch anything.** |
 | `2` | All providers exhausted / needs user input — options in state file | Read state file, call `AskUserQuestion` with options from `state["options"]` |
 | timeout | Monitor timed out | Re-read state file to determine phase; re-arm if appropriate |
+
+**On exit 1 — mandatory stop:**
+Read `/tmp/cosmos_deploy_state.json`, report `state["message"]` to the user, and stop. Do NOT:
+- Run `scp` or `brev copy` to redeploy scripts
+- Run `brev exec` with `pkill`, `nohup`, or any relaunch command
+- Use SSH directly to recover
+- Attempt any recovery without explicit user instruction
+
+Example correct response on exit 1:
+```
+Monitor exited with error: <state["message"]>
+Waiting for your instruction — retry, try a different instance, or abort?
+```
 
 **On exit 0:**
 ```python
