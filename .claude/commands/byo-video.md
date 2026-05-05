@@ -40,10 +40,11 @@ AskUserQuestion({
     {
       question: "Model?",
       options: [
-        "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (default, ≥40GB VRAM)",
-        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (8B, ≥40GB VRAM)",
-        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (≥80GB VRAM)",
-        "Something else — Nemotron-Nano-12B, Qwen3-VL, or any HF model ID"
+        "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (public, ≥40GB VRAM)",
+        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (public, 8B, ≥40GB VRAM)",
+        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (public, ≥80GB VRAM)",
+        "Cosmos Reason2 32B — nvidia/Cosmos-Reason2-32B (public, multi-GPU, ≥160GB VRAM)",
+        "Something else — gated Cosmos3, Nemotron, Qwen3-VL, or any HF model ID"
       ]
     },
     {
@@ -68,7 +69,8 @@ AskUserQuestion({
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
-| Q2 Model | Something else | Ask: "Enter the HuggingFace model ID (e.g. nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16, Qwen/Qwen3-VL-8B-Instruct, or any public/gated model):" → derive `MODEL_SIZE` from supported models table; default `MODEL_SIZE=2B` if not found |
+| Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
+| Q2 Model | Something else | Ask: "Enter the HuggingFace model ID (e.g. nvidia/Cosmos3-Reasoner-32B, Qwen/Qwen3-VL-8B-Instruct, or any public/gated model):" → derive `MODEL_SIZE` from supported models table; default `MODEL_SIZE=2B` if not found |
 | Q3 Env | New Brev H100 | `DEPLOY_TARGET=brev:new` — agent calls `brev create` |
 | Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
 | Q3 Env | SSH target | Follow up: "user@host or IP?" (free text) → `DEPLOY_TARGET=ssh:<user@host>` |
@@ -326,6 +328,7 @@ only after the Gradio liveness probe passes.
 | Cosmos Reason2 BF16 | 2B VLM | 40 GB | `2B` | Video understanding: robotics, AV, Metropolis |
 | Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
 | Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
+| Cosmos Reason2 BF16 | 32B VLM | 160 GB | `32B` | Public; multi-GPU (2×H100 recommended) |
 | Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | Public; was Cosmos3-Reasoner-8B-Private |
 | Cosmos3-Reasoner 2B/32B | 2B/32B | 40/80+ GB | `C3-2B`, `C3-32B` | Gated HF_TOKEN; nvidia org required |
 | Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
