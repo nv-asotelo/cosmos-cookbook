@@ -21,38 +21,110 @@ This script shows live step-by-step progress with ETAs for every install stage, 
 
 ---
 
-## AGENT PROTOCOL — Pre-process picker + autonomous execution
+## AGENT PROTOCOL — Observer-first execution
 
-### PRE-PROCESS PICKER (AskUserQuestion — fires before any command)
+**Single entry point.** On `/byo-video` invocation, spawn the OBSERVER AGENT immediately — before
+running any Bash commands, before calling AskUserQuestion, before any other tool. The observer
+owns the full lifecycle: pre-checks → picker → provisioning → deployment → URL capture.
 
-If not already provided, call `AskUserQuestion` with all 3 questions in a single call:
+The main session's only job is to spawn the observer (one Agent call) and wait for it to return.
+Do not run Bash, AskUserQuestion, or any other tool in the main session.
+
+**Spawn immediately:**
+
+```python
+Agent({
+  description: "byo-video observer",
+  prompt: """
+You are the byo-video observer. You own the entire deployment lifecycle from first interaction
+to Gradio live URL. Read the OBSERVER PROTOCOL section in this skill doc carefully — it defines
+every phase you must execute. Follow it verbatim.
+
+Your rules:
+- Never run anything silently. Every action produces visible output.
+- Never use Bash(run_in_background=true). Never spawn background processes.
+- Display the LIVE STATUS PANEL after every phase change.
+- If blocked: show the panel with the block reason, then AskUserQuestion with recovery options.
+- Never ask the user to run commands themselves.
+
+Begin with PHASE 0 immediately.
+"""
+})
+```
+
+The observer reads the OBSERVER PROTOCOL below and executes it. Nothing else runs in the main
+session until the observer returns with a Gradio URL (or an unrecoverable error).
+
+---
+
+## OBSERVER PROTOCOL
+
+The observer executes these phases in order. Each phase ends with a panel update. The panel is
+the user's single source of truth — it shows instance, GPU, rate, elapsed time, ETA, cost, and
+checklist state. Never replace panel updates with prose summaries.
+
+---
+
+### PHASE 0 — PRE-CHECKS
+
+Run before asking any questions. Results inform the picker options.
+
+1. Run `brev ls` via Bash.
+2. Note any existing stopped instances with H100/H200 GPUs. These become priority-0 options in Q3.
+3. Note any running instances (may be reusable).
+
+Display initial panel:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  Cosmos BYO-Video  ·  Pre-checks                             ║
+╠══════════════════════════════════════════════════════════════╣
+║  Existing instances:                                         ║
+║    [list each: name | status | GPU | type]                   ║
+║    (or "None found")                                         ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+---
+
+### PHASE 1 — PICKER
+
+Load `AskUserQuestion` via ToolSearch first: `query: "select:AskUserQuestion"`
+
+Then fire with all 3 questions in a single call:
 
 ```
 AskUserQuestion({
   questions: [
     {
       question: "Backend?",
+      header: "Backend",
+      multiSelect: false,
       options: [
-        "vLLM (Recommended) — ~15–20 min setup, quantization support, fast inference",
-        "HF Transformers — ~8–12 min setup, no quantization, simpler"
+        { label: "vLLM (Recommended)", description: "~15–20 min setup, quantization support, fast inference" },
+        { label: "HF Transformers", description: "~8–12 min setup, no quantization, simpler" }
       ]
     },
     {
       question: "Model?",
+      header: "Model",
+      multiSelect: false,
       options: [
-        "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (public, ≥40GB VRAM)",
-        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (public, ≥80GB VRAM)",
-        "Cosmos Reason2 32B — nvidia/Cosmos-Reason2-32B (public, ≥141GB VRAM — H200 required)",
-        "Something else — Cosmos 3 (private), Cosmos Transfer, Nemotron, non-NVIDIA models"
+        { label: "Cosmos Reason2 2B", description: "nvidia/Cosmos-Reason2-2B (public, ≥40GB VRAM)" },
+        { label: "Cosmos Reason2 8B", description: "nvidia/Cosmos-Reason2-8B (public, ≥80GB VRAM)" },
+        { label: "Cosmos Reason2 32B", description: "nvidia/Cosmos-Reason2-32B (public, ≥141GB VRAM — H200 required)" },
+        { label: "Something else", description: "Cosmos 3 (private), Cosmos Transfer, Nemotron, non-NVIDIA models" }
       ]
     },
     {
       question: "Environment?",
+      header: "Environment",
+      multiSelect: false,
       options: [
-        "New Brev instance — agent provisions appropriate GPU tier for your model",
-        "Existing Brev — provide instance name when prompted",
-        "SSH target — provide user@host or IP when prompted",
-        "Local machine — agent runs nvidia-smi locally"
+        { label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" },
+        { label: "Existing Brev", description: "Provide instance name when prompted" },
+        { label: "SSH target", description: "Provide user@host or IP when prompted" },
+        { label: "Local machine", description: "Agent runs nvidia-smi locally" }
       ]
     }
   ]
@@ -68,37 +140,32 @@ AskUserQuestion({
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
-| Q2 Model | Something else | Fire SOMETHING ELSE sub-picker (see section below) → resolves MODEL_ID + MODEL_SIZE |
-| Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` — agent calls `brev create` using model-aware GPU tier (see MODEL_GPU_REQUIREMENTS) |
-| Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
-| Q3 Env | SSH target | Follow up: "user@host or IP?" (free text) → `DEPLOY_TARGET=ssh:<user@host>` |
+| Q2 Model | Something else | Fire SOMETHING ELSE sub-picker (see below) |
+| Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` |
+| Q3 Env | Existing Brev | Follow-up AskUserQuestion: "Instance name?" → `DEPLOY_TARGET=brev:<name>` |
+| Q3 Env | SSH target | Follow-up AskUserQuestion: "user@host or IP?" → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
-| Q3 Env | Other (free text) | Parse as instance name or host as appropriate |
 
----
-
-### SOMETHING ELSE SUB-PICKER
-
-When user selects "Something else" for Q2, immediately call a second `AskUserQuestion`:
+**SOMETHING ELSE sub-picker** — fire immediately when user selects "Something else" for Q2:
 
 ```
 AskUserQuestion({
   questions: [
     {
       question: "Which model?",
+      header: "Model",
+      multiSelect: false,
       options: [
-        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (8B, private, ≥40GB VRAM, HF_TOKEN required)",
-        "Cosmos3-Reasoner-32B — nvidia/Cosmos3-Reasoner-32B (32B, gated, nvidia org + HF_TOKEN required)",
-        "Cosmos Transfer 2.5 — nvidia/Cosmos-Transfer2.5 (generation model, ≥80GB VRAM)",
-        "Nemotron-Nano-12B-v2-VL — nvidia/Nemotron-Nano-12B-v2-VL-BF16 (12B, gated, vLLM only, ≥40GB VRAM)",
-        "Non-NVIDIA models — best-effort only, not officially supported"
+        { label: "Cosmos3-Nano-Reasoner", description: "nvidia/Cosmos3-Nano-Reasoner (8B, private, ≥40GB VRAM, HF_TOKEN required)" },
+        { label: "Cosmos3-Reasoner-32B", description: "nvidia/Cosmos3-Reasoner-32B (32B, gated, nvidia org + HF_TOKEN required)" },
+        { label: "Cosmos Transfer 2.5", description: "nvidia/Cosmos-Transfer2.5 (generation model, ≥80GB VRAM)" },
+        { label: "Nemotron-Nano-12B-v2-VL", description: "nvidia/Nemotron-Nano-12B-v2-VL-BF16 (12B, gated, vLLM only, ≥40GB VRAM)" },
+        { label: "Non-NVIDIA models", description: "Best-effort only, not officially supported" }
       ]
     }
   ]
 })
 ```
-
-**Sub-picker → env var mapping:**
 
 | Selection | Sets |
 |---|---|
@@ -106,22 +173,24 @@ AskUserQuestion({
 | Cosmos3-Reasoner-32B | `MODEL_ID=nvidia/Cosmos3-Reasoner-32B` · `MODEL_SIZE=C3-32B` |
 | Cosmos Transfer 2.5 | `MODEL_ID=nvidia/Cosmos-Transfer2.5` · `MODEL_SIZE=32B` |
 | Nemotron-Nano-12B-v2-VL | `MODEL_ID=nvidia/Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
-| Non-NVIDIA models | Show disclaimer (below), then fire Qwen sub-picker |
+| Non-NVIDIA models | Show disclaimer inline, then fire Qwen sub-picker |
 
-**Non-NVIDIA models:** Show inline note first:
+**Non-NVIDIA disclaimer (display inline before sub-picker):**
 > ⚠️ Non-NVIDIA models: NVIDIA does not officially support or guarantee setup for third-party models. This is best-effort only.
 
-Then immediately call a third `AskUserQuestion`:
+**Qwen sub-picker:**
 
 ```
 AskUserQuestion({
   questions: [
     {
       question: "Which non-NVIDIA model?",
+      header: "Model",
+      multiSelect: false,
       options: [
-        "Qwen3-VL-2B-Instruct — Qwen/Qwen3-VL-2B-Instruct (public, ~8GB VRAM)",
-        "Qwen3-VL-8B-Instruct — Qwen/Qwen3-VL-8B-Instruct (public, ~20GB VRAM)",
-        "Qwen3-VL-32B-Instruct — Qwen/Qwen3-VL-32B-Instruct (public, ~64GB VRAM)"
+        { label: "Qwen3-VL-2B-Instruct", description: "Qwen/Qwen3-VL-2B-Instruct (public, ~8GB VRAM)" },
+        { label: "Qwen3-VL-8B-Instruct", description: "Qwen/Qwen3-VL-8B-Instruct (public, ~20GB VRAM)" },
+        { label: "Qwen3-VL-32B-Instruct", description: "Qwen/Qwen3-VL-32B-Instruct (public, ~64GB VRAM)" }
       ]
     }
   ]
@@ -134,304 +203,273 @@ AskUserQuestion({
 | Qwen3-VL-8B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
 | Qwen3-VL-32B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-32B-Instruct` · `MODEL_SIZE=QW3-32B` |
 
-Once MODEL_ID and MODEL_SIZE are resolved from any path: agent runs autonomously to Gradio URL capture. No further questions.
+Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: proceed to
+PHASE 2 immediately. No further questions.
 
 ---
 
-### AUTONOMOUS EXECUTION
+### PHASE 2 — PROVISION
 
-**HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote instance. Do NOT ask the user for their token. Do NOT pass it as a command-line argument. The script handles it.
+Record `PROVISION_START_TS` = now (Python: `import time; PROVISION_START_TS = time.time()`).
 
-**DEPLOY_TARGET** (agent-internal, not passed to script):
-- New Brev: provision instance → `brev:<name>`
-- Existing Brev: `brev:<name>`
-- SSH: `ssh:<user@host>`
-- Local: `local`
+**HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote instance.
+Do NOT ask the user for it. Do NOT pass it as a CLI arg. The script handles it.
 
-**Env vars passed to the setup script:**
-| Var | Source | Notes |
-|---|---|---|
-| `INFERENCE_BACKEND` | Q1 answer | `vllm` or `hf` |
-| `MODEL_ID` | Q2 answer | Full HF ID (e.g., `nvidia/Cosmos-Reason2-2B`) |
-| `BREV_RATE_PER_HOUR` | Agent reads from `brev ls` | Brev only; enables credits tracking in dashboard |
+**Look up MODEL_SIZE in MODEL_GPU_REQUIREMENTS** (see reference section below) to select GPU type.
 
-**Deploy scripts — one command per tool call (no compound commands):**
+**For `DEPLOY_TARGET=brev:new`:**
+
+1. Check PHASE 0 pre-check results for stopped instances with a compatible GPU:
+   - If found: fire `AskUserQuestion`: "Found stopped <name> (<GPU type>) — restart it or provision fresh?"
+     Options: "Restart <name> (existing rate)" · "Provision new <type> (~$<rate>/hr)"
+   - If not found: proceed directly to `brev create`.
+
+2. Run `brev create`:
+   - `brev create <name> --type <provider_type>` — one Bash call
+   - Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`)
+   - Provider type from MODEL_GPU_REQUIREMENTS table
+
+3. Display cost context immediately:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  Cosmos BYO-Video · <instance>  (elapsed: Ns)                ║
+║  <GPU label> · $<rate>/hr · <MODEL_ID> (<MODEL_SIZE>, <be>)  ║
+╠══════════════════════════════════════════════════════════════╣
+║  [✓] Pre-checks                                              ║
+║  [✓] Model & environment selected                            ║
+║  [→] Provisioning: <instance> (<GPU type>)                   ║
+║  [ ] SHELL READY                                             ║
+║  [ ] Scripts deployed                                        ║
+║  [ ] Setup running                                           ║
+║  [ ] Gradio live                                             ║
+╠══════════════════════════════════════════════════════════════╣
+║  Cost so far: $0.00  |  Est. setup cost: ~$<low>–$<high>     ║
+║  Brev dashboard: https://brev.dev                            ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+Cost estimates by GPU tier:
+- H100 SXM ($3.54/hr): 10 min setup ~$0.59 · 20 min ~$1.18
+- H200 SXM ($4.20/hr): 20 min setup ~$1.40 · 30 min ~$2.10
+
+**IDLE BILLING HANDLER** — triggers if instance reaches SHELL READY but setup hasn't launched for >5 min:
+
+```
+⚠️  <name> is idle — <elapsed> at $<rate>/hr. $<burned> spent so far.
+    Setup not yet started.
+    Options: [s] Start setup now  [d] Delete instance  [w] Wait 5 more min
+```
+
+Do NOT auto-terminate. If [w]: reset timer, repeat at +5 min.
+
+---
+
+### PHASE 3 — WAIT FOR SHELL READY
+
+Poll `brev ls` every 30s via Bash (one call per poll). Update panel each poll:
+
+```
+║  [→] Waiting for SHELL READY (<elapsed>s / polling every 30s)  ║
+```
+
+**On UNHEALTHY:**
+1. Warn immediately — display panel with `[!] UNHEALTHY — recovery window: 3m 00s`.
+2. Poll every 30s for 3 minutes. Update countdown each poll.
+3. If recovered: run `brev exec <name> "nvidia-smi"` — if GPU responds, continue. If not, treat as BLOCKED.
+4. If still UNHEALTHY after 3 minutes: auto-recover silently.
+   - Try `brev reset <name>`. If succeeds → re-enter poll loop.
+   - If reset fails: `brev delete <name>`, rotate to next provider in PROVIDER FALLBACK table. Emit one line: `✗ <type> UNHEALTHY — deleted, trying <next-type>`.
+   - Keep rotating until SHELL READY or all providers exhausted.
+   - Only AskUserQuestion when all providers have been tried and all failed.
+
+On SHELL READY: update panel `[✓] SHELL READY`, proceed to PHASE 4.
+
+---
+
+### PHASE 4 — DEPLOY SCRIPTS
+
+Read and base64-encode each script. One Bash call per file. One Bash call per deploy.
+
 ```bash
-# Brev
-brev exec <name> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64>'))\""
-brev exec <name> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64>'))\""
+# Step 1: read + encode byo_video_setup.py (Bash call 1)
+python3 -c "import base64, sys; sys.stdout.write(base64.b64encode(open('/Users/asotelo/.claude/scripts/byo_video_setup.py','rb').read()).decode())"
+# → capture B64_SETUP
 
-# SSH
+# Step 2: deploy byo_video_setup.py to instance (Bash call 2)
+brev exec <name> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64_SETUP>'))\""
+
+# Step 3: read + encode gradio_cr2_byo.py (Bash call 3)
+python3 -c "import base64, sys; sys.stdout.write(base64.b64encode(open('/Users/asotelo/.claude/scripts/gradio_cr2_byo.py','rb').read()).decode())"
+# → capture B64_GRADIO
+
+# Step 4: deploy gradio_cr2_byo.py to instance (Bash call 4)
+brev exec <name> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64_GRADIO>'))\""
+```
+
+If `gradio_cr2_byo.py` is >98KB, use `brev copy` instead of base64 (avoids brev exec argument buffer overflow):
+```bash
+brev copy <name> ~/.claude/scripts/gradio_cr2_byo.py /tmp/gradio_cr2_byo.py
+```
+
+Update panel: `[✓] Scripts deployed`
+
+---
+
+### PHASE 5 — SETUP LAUNCH + LOG TAIL
+
+Record `SETUP_DISPATCHED_AT` = now.
+
+Launch setup (one Bash call — nohup so brev exec returns immediately):
+```bash
+brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+```
+
+Update panel: `[→] Setup running`
+
+**Log tail loop (every 30s):**
+
+```bash
+brev exec <name> "tail -60 /tmp/byo_video_setup.log 2>/dev/null || echo '(log not yet written)'"
+```
+
+Parse log output for step completion markers. Update the step-level checklist in the panel:
+
+```
+║  [→] Setup running                                           ║
+║       [✓] Step 1: GPU detect + VRAM tier                    ║
+║       [✓] Step 2: HF auth + token validate                  ║
+║       [✓] Step 3: NGC API key                               ║
+║       [✓] Step 4: uv package manager                        ║
+║       [✓] Step 5: cosmos-reason2 repo                       ║
+║       [→] Step 6: uv sync + CUDA libs  (running ~8 min)     ║
+║       [ ] Step 7: PyAV + Gradio + requests                  ║
+║       [ ] Step 9: Model weights download                    ║
+║       [ ] Step 10: Gradio launch                            ║
+```
+
+Detect errors in log: scan for `Traceback`, `Error:`, `exit status 1`, `FAILED`. If found:
+→ Update panel with `[✗] Setup failed` + error snippet.
+→ AskUserQuestion: "Setup failed at Step N: <error>. What next?" with options:
+  - "Retry setup on this instance"
+  - "Provision a new instance"
+  - "Abort and delete instance"
+→ Do not attempt recovery without user direction.
+
+---
+
+### PHASE 6 — GRADIO LIVE + URL CAPTURE
+
+Poll every 30s for the live flag:
+```bash
+brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null"
+```
+
+When flag is present, read the URL:
+```bash
+brev exec <name> "cat /tmp/gradio_url.txt 2>/dev/null"
+```
+
+**Compute total cost:** `(time.time() - PROVISION_START_TS) / 3600 * rate_per_hour`
+
+Display final panel:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  Cosmos BYO-Video  ·  LIVE  ✓                                ║
+║  <GPU label> · $<rate>/hr · elapsed: <N>m <S>s               ║
+╠══════════════════════════════════════════════════════════════╣
+║  [✓] Pre-checks                                              ║
+║  [✓] Model & environment selected                            ║
+║  [✓] Instance: <name> (<GPU type>)                           ║
+║  [✓] SHELL READY                                             ║
+║  [✓] Scripts deployed                                        ║
+║  [✓] Setup complete                                          ║
+║  [✓] Gradio live                                             ║
+╠══════════════════════════════════════════════════════════════╣
+║  URL:  <gradio_url>                                          ║
+║  Total setup cost: ~$<computed>  |  Link valid 72h           ║
+║  Brev dashboard: https://brev.dev                            ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+Send kill alert:
+```bash
+~/.claude/scripts/teams-notify.sh "Cosmos demo live at <url>. Kill when ready."
+```
+
+Do NOT auto-terminate the instance. Wait for explicit kill instruction from the user.
+
+---
+
+### SSH DEPLOYMENTS (non-Brev)
+
+The observer handles SSH targets with the same panel, minus the `brev ls` polling.
+
+Deploy scripts:
+```bash
 ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/byo_video_setup.py','wb').write(base64.b64decode('<B64>'))\""
 ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('<B64>'))\""
 ```
 
-Record `SETUP_DISPATCHED_AT` (agent-side timestamp) immediately before dispatching the setup script. This timestamp gates the idle billing handler.
-
-**For Brev deployments — REQUIRED: lead with the Deployment Monitor.**
-
-As soon as the instance name is known (from Q3), dispatch `cosmos_deploy_monitor.py` via the
-Monitor tool. Do this BEFORE any manual `brev ls` polling. The monitor handles SHELL READY wait,
-script deployment, setup launch, log tailing, checklist display, UNHEALTHY recovery, and URL
-capture as a single visible foreground flow. See **DEPLOYMENT MONITOR** section below.
-
-**For SSH deployments — manual launch (no monitor available):**
+Launch setup:
 ```bash
-# SSH
-ssh -i ~/.ssh/id_ed25519 <user@host> "export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> && python3 /tmp/byo_video_setup.py"
+ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
-URL capture fallback (SSH / if monitor missed it):
+Tail logs:
 ```bash
-brev exec <name> "cat /tmp/gradio_live.flag"
-# or
-ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag"
+ssh -i ~/.ssh/id_ed25519 <user@host> "tail -60 /tmp/byo_video_setup.log 2>/dev/null"
 ```
 
----
-
-### UNHEALTHY MONITORING (Brev — handled automatically by cosmos_deploy_monitor.py)
-
-**For Brev deployments: the monitor handles UNHEALTHY detection and recovery automatically.** The agent does not need to poll `brev ls` manually. The notes below apply only to SSH deployments or if the monitor is not running.
-
-If STATUS shows `UNHEALTHY` at any point:
-
-**Step 1 — Warn immediately in chat.** Do not wait silently. Tell the user the instance is UNHEALTHY and that you're giving it 3 minutes to self-recover before halting.
-
-**Step 2 — Recovery window (3 minutes).** Poll every 30s. Display a countdown each poll:
+URL capture:
+```bash
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null"
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt 2>/dev/null"
 ```
-⚠️  <name> UNHEALTHY — watching for self-recovery (2m 30s remaining)
-```
-Instances sometimes recover on their own during the BUILD phase (Brev daemon transient). 3 minutes is the empirical timeout — instances stuck longer than this do not recover.
-
-**Step 3 — If recovered (SHELL READY within 3 min):** test GPU with `brev exec <name> "nvidia-smi"`. If GPU responds → UNHEALTHY was a Brev daemon flag, continue normally. If GPU fails → treat as BLOCKED (step 4).
-
-**Step 4 — If still UNHEALTHY after 3 minutes: auto-recover silently.**
-
-No AskUserQuestion. Execute the recovery sequence autonomously:
-
-1. Try `brev reset <name>` — if it succeeds, re-enter the READY poll loop.
-2. If reset fails or is unsupported: delete the instance (`brev delete <name>`) and rotate to the next provider in the **PROVIDER FALLBACK priority list** (see section below). Emit one line: `✗ <type> UNHEALTHY — deleted, trying <next-type>`.
-3. Keep rotating until SHELL READY or all providers exhausted.
-4. **Only AskUserQuestion when all providers have been tried and all failed** — present the failure summary and ask whether to use an existing stopped instance or abort.
-
-**Never expose brev internals (reset, delete, provider names) to the user unless all options are exhausted. Handle it autonomously.**
-
----
-
-### IDLE BILLING HANDLER
-
-Trigger: `SETUP_DISPATCHED_AT` is null AND instance has been at SHELL READY for >5 minutes.
-(This means the picker is still open, or user is reviewing — instance is burning credits with nothing running.)
-
-Alert:
-```
-⚠️  <instance-name> is idle — <elapsed> at $<rate>/hr.
-    $<credits_burned> spent so far. Setup not yet started.
-    
-    Options:
-      [s] Start setup now
-      [d] Delete instance  
-      [w] Wait 5 more min
-```
-
-- Do NOT auto-terminate.
-- If user picks [w]: reset timer, repeat alert at +5 min.
-- If user picks [s]: proceed to Q3 confirmation and launch.
-- If user picks [d]: `brev delete <name>` (confirm before running).
 
 ---
 
 ### MODEL_GPU_REQUIREMENTS — Read before provisioning any instance
 
-Before calling `brev create`, look up the MODEL_SIZE in this table to determine which GPU tier to use. Do NOT offer providers marked ✗ for the selected model.
+| MODEL_SIZE | Min VRAM | Brev type | Rate | Avoid |
+|---|---|---|---|---|
+| `2B` | 40 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
+| `8B` | 80 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | A40 (48GB too tight) |
+| `32B` | 141 GB | `gpu-h200-sxm.1gpu-16vcpu-200gb` | $4.20/hr | H100 single-GPU |
+| `C3-8B` | 40 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
+| `C3-32B` | 141 GB | `gpu-h200-sxm.1gpu-16vcpu-200gb` | $4.20/hr | H100 single-GPU |
+| `NEM-12B` | 40 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
+| `QW3-2B` | 8 GB | Any GPU ≥8GB | varies | — |
+| `QW3-8B` | 20 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
+| `QW3-32B` | 64 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
 
-| MODEL_SIZE | Min VRAM | Recommended GPU | Avoid |
-|---|---|---|---|
-| `2B` | 40 GB | H100 SXM, A100 80GB, H200 | — |
-| `8B` | 80 GB | H100 SXM, A100 80GB, H200 | A40 (48GB too tight) |
-| `32B` | 141 GB | **H200 SXM** (minimum viable) | H100 single-GPU (80GB insufficient) |
-| `C3-8B` | 40 GB | H100 SXM, A100 80GB | — |
-| `C3-32B` | 141 GB | **H200 SXM** (minimum viable) | H100 single-GPU (80GB insufficient) |
-| `NEM-12B` | 40 GB | H100 SXM, A100 80GB | — |
-| `QW3-2B` | 8 GB | Any GPU ≥8GB | — |
-| `QW3-8B` | 20 GB | H100 SXM, A100 80GB | — |
-| `QW3-32B` | 64 GB | H100 SXM, A100 80GB, H200 | — |
+**32B and C3-32B — H200 only.** H100 80GB is insufficient. If the user has an existing H100 and selects 32B: warn them and offer to provision an H200.
 
-**For 32B and C3-32B — H200 provider list (use this instead of the standard list):**
+**H200 fallback order for 32B/C3-32B:**
 
-| Priority | Type | GPU | VRAM | Rate | Notes |
-|---|---|---|---|---|---|
-| 0 | Existing stopped H200 instance | H200 SXM | 141 GB | (existing rate) | Check `brev ls` first — restart beats provisioning |
-| 1 | `gpu-h200-sxm.1gpu-16vcpu-200gb` | H200 SXM (Nebius) | 141 GB | ~$4.20/hr | Proven stable — Alex's c3r-32b instance type |
-| 2 | `digitalocean_H200_sxm5` | H200 SXM5 (DO) | 141 GB | ~$4.13/hr | Slightly cheaper; same VRAM |
-
-**Do not offer single-GPU H100 for 32B or C3-32B.** 80GB is insufficient. If the user is on an existing H100 instance and selects 32B, warn: "H100 has 80GB VRAM — insufficient for 32B (needs ≥141GB). Recommend provisioning an H200 instance."
-
-### PROVIDER FALLBACK — Auto-rotation (no user interruption)
-
-When a provisioning attempt fails (UNHEALTHY after 3 min, `brev create` error, or `brev reset` unsupported), **automatically rotate** to the next provider in the priority list below. Do NOT stop to ask the user — they should only be interrupted when all providers are exhausted or when there is a meaningful cost difference requiring a decision.
-
-**Standard priority list (for all models except 32B and C3-32B):**
-
-| Priority | Type | GPU | VRAM | Rate | Notes |
-|---|---|---|---|---|---|
-| 1 | `gpu-h100-sxm.1gpu-16vcpu-200gb` | H100 SXM | 80 GB | ~$3.54/hr | Proven stable — same type as c3r-2b, c3r-8b-v2 |
-| 2 | `hyperstack_A100_80G` | A100 80GB | 80 GB | ~$1.62/hr | Good fallback for 8B and smaller |
-| 3 | `hyperstack_H100` | H100 | 80 GB | ~$2.28/hr | Validated in earlier sessions |
-| 4 | `scaleway_A40` | A40 | 48 GB | ~$1.10/hr | LOW_VRAM mode; 2B only; slowest tier |
-
-**Rotation behavior:**
-1. Attempt provisioning with priority 1.
-2. On UNHEALTHY (after 3-min window) or create error: delete the failed instance, emit one line of context (`✗ <type> failed — trying <next-type>`), and immediately try priority 2. No AskUserQuestion.
-3. Repeat through priority 4.
-4. **Only AskUserQuestion when all 4 have failed** — present the full failure log and ask whether to retry, use an existing stopped instance, or abort.
-
-**Exception — cost jump:** If rotating from a cheaper tier to one >$1.50/hr more expensive, surface a one-line warning and wait 30s before proceeding (allows user to interrupt). Do not block on it.
-
-**Existing stopped instances** count as priority 0 — if the user's org has a stopped instance with a compatible GPU, offer to start it before any new provisioning attempt.
-
----
-
-### KILL ALERT
-
-When Alex signals done, send via `teams-notify.sh` (NOT pa-cli):
-```bash
-~/.claude/scripts/teams-notify.sh "Cosmos demo done on <provider>/<instance>. Kill when ready."
-```
-
-Do NOT auto-terminate. Alert, then wait for explicit kill instruction.
-
-**AGENT RUNS AUTONOMOUSLY (do not ask the user to run these):**
-- All environment detection (`nvidia-smi`, `brev ls`, etc.)
-- All deploy steps (base64 encode + copy)
-- Bootstrap and launch via `byo_video_setup.py`
-- URL capture from `/tmp/gradio_url.txt`
-- UNHEALTHY polling
-- Idle billing alerts
-
-**Crisp interaction target:** 3 picker answers → agent runs everything else without prompting.
-
----
-
-### DEPLOYMENT MONITOR (replaces /loop — Brev only)
-
-**TIMING: Dispatch IMMEDIATELY after the instance name is known from Q3.** Do NOT poll
-`brev ls` manually before dispatching. The monitor starts in BUILDING phase and handles
-the SHELL READY wait internally — polling `brev ls` and displaying the checklist until
-the instance is ready, then deploying scripts, launching setup, and watching for the
-Gradio URL. The agent's only job is to fire the monitor and then let it run.
-
-**TOOL: Foreground Agent subagent. Do NOT use Bash(run_in_background=true) or set run_in_background: true on the Agent.**
-A foreground Agent blocks the main thread and streams its output inline in the conversation —
-the checklist updates appear directly in the thread as the monitor polls. Background Agent
-hides output behind a collapsed UI element and shows nothing until completion, which destroys
-deployment visibility. Do NOT run_in_background.
-
-**Canonical script:** `~/.claude/scripts/cosmos_deploy_monitor.py`
-
-**Dispatch via Agent tool** (foreground, output streams inline in conversation):
-
-```python
-Agent({
-  description: "byo-video deploy — <instance-name>",
-  prompt: (
-    "Run the Cosmos deployment monitor and print each checklist update as it arrives.\n\n"
-    "Command:\n"
-    "python3 ~/.claude/scripts/cosmos_deploy_monitor.py"
-    " --instance <name>"
-    " --model-id <MODEL_ID>"
-    " --model-size <MODEL_SIZE>"
-    " --backend <INFERENCE_BACKEND>"
-    " --rate <BREV_RATE_PER_HOUR>"
-    " --provider <provider_type>"
-    " --provider-label '<provider_label>'\n\n"
-    "Run the command with Bash. Copy each block of stdout output verbatim into your "
-    "response as it arrives. When the script exits, report the exit code and the final "
-    "contents of /tmp/cosmos_deploy_state.json."
-  )
-})
-```
-
-**What the monitor outputs (each poll cycle ~30s, lines batch into one notification):**
-
-```
-Cosmos Deploy Monitor — c3r-nano  (elapsed: 4m 32s | ETA: ~12m)
-  H100 SXM · $3.70/hr · nvidia/Cosmos3-Nano-Reasoner (C3-8B, vllm)
-──────────────────────────────────────────────────────────────
-  [✓] Wait for SHELL READY
-  [✓] Deploy scripts
-  [✓] Setup launched
-       ✓ Step 1: GPU detect + VRAM tier
-       ✓ Step 2: HF auth + token validate
-       ✓ Step 3: NGC API key
-       ✓ Step 4: uv package manager
-       ✓ Step 5: cosmos-reason2 repo
-       → Step 6: uv sync + CUDA libs  (running)
-       [ ] Step 7: PyAV + Gradio + requests
-       [ ] Step 9: Model weights download
-       [ ] Step 10: Gradio launch
-  [ ] Gradio live
-──────────────────────────────────────────────────────────────
-  ↳ uv sync started — no delays so far.
-  log: ⟳  installing cu128 extras...
-```
-
-**Monitor event display — verbatim, always:**
-When a Monitor event fires, print its content as-is in a code block. Do NOT paraphrase, summarize, or write sentences like "Still building at 48s — on track." The raw checklist output from cosmos_deploy_monitor.py is the user's view of the pipeline; replacing it with a summary destroys that visibility.
-
-**Monitor exit code handling:**
-
-| Exit code | Meaning | Agent action |
+| Priority | Type | Rate |
 |---|---|---|
-| `0` | Gradio live — URL in `/tmp/cosmos_deploy_state.json` | Read URL, post Teams kill alert |
-| `1` | Unrecoverable error — message in state file | Read error, surface to user. **STOP. Do not attempt to fix, redeploy, or relaunch anything.** |
-| `2` | All providers exhausted / needs user input — options in state file | Read state file, call `AskUserQuestion` with options from `state["options"]` |
-| timeout | Monitor timed out | Re-read state file to determine phase; re-arm if appropriate |
+| 0 | Existing stopped H200 (from brev ls) | existing rate |
+| 1 | `gpu-h200-sxm.1gpu-16vcpu-200gb` | $4.20/hr |
+| 2 | `digitalocean_H200_sxm5` | $4.13/hr |
 
-**On exit 1 — mandatory stop:**
-Read `/tmp/cosmos_deploy_state.json`, report `state["message"]` to the user, and stop. Do NOT:
-- Run `scp` or `brev copy` to redeploy scripts
-- Run `brev exec` with `pkill`, `nohup`, or any relaunch command
-- Use SSH directly to recover
-- Attempt any recovery without explicit user instruction
+### PROVIDER FALLBACK — Auto-rotation on provisioning failure
 
-Example correct response on exit 1:
-```
-Monitor exited with error: <state["message"]>
-Waiting for your instruction — retry, try a different instance, or abort?
-```
+Rotate silently (no AskUserQuestion) on UNHEALTHY after 3 min, `brev create` error, or reset failure. Emit one line per rotation: `✗ <type> failed — trying <next-type>`.
 
-**On exit 0:**
-```python
-state = json.load(open("/tmp/cosmos_deploy_state.json"))
-url = state["gradio_url"]
-# post kill alert
-run("~/.claude/scripts/teams-notify.sh 'Cosmos demo live at <url>. Kill when ready.'")
-```
+**Standard (all models except 32B/C3-32B):**
 
-**On exit 2:**
-```python
-state = json.load(open("/tmp/cosmos_deploy_state.json"))
-AskUserQuestion({ questions: [{ question: state["message"], options: state["options"] }] })
-```
-
-**Provider/rate values for Monitor dispatch** (derive from MODEL_SIZE and GPU tier):
-
-| MODEL_SIZE | --provider | --provider-label | --rate |
+| Priority | Type | GPU | Rate |
 |---|---|---|---|
-| `32B`, `C3-32B` | `gpu-h200-sxm.1gpu-16vcpu-200gb` | `"H200 SXM"` | `4.20` |
-| All others (new Nebius H100) | `gpu-h100-sxm.1gpu-16vcpu-200gb` | `"H100 SXM"` | `3.54` |
-| Existing instance | Use `--provider` type from `brev ls` GPU column if known; else use H100 SXM defaults |
+| 1 | `gpu-h100-sxm.1gpu-16vcpu-200gb` | H100 SXM 80GB | $3.54/hr |
+| 2 | `hyperstack_A100_80G` | A100 80GB | $1.62/hr |
+| 3 | `hyperstack_H100` | H100 80GB | $2.28/hr |
+| 4 | `scaleway_A40` | A40 48GB | $1.10/hr (2B LOW_VRAM only) |
 
-**Notify the user at dispatch:**
-```
-⟳ Deployment monitor starting — will track <instance-name> from SHELL READY through Gradio live.
-  Checklist appears every 30s in this thread. I'll notify when Gradio is live or if I need input.
-```
+If rotating to a tier >$1.50/hr more expensive than the current one: display a one-line cost warning, wait 30s (allows interruption), then proceed.
 
-The `/tmp/gradio_live.flag` file is the authoritative live signal — written by `byo_video_setup.py`
-only after the Gradio liveness probe passes.
+Only AskUserQuestion when all providers exhausted — present the failure summary and options.
 
 ---
 
