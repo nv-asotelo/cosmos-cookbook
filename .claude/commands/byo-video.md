@@ -7,9 +7,8 @@ For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separa
 Default output: **Gradio web UI at a `gradio.live` public URL** — user uploads video in browser.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
-- `~/.claude/scripts/gradio_cr2_byo.py`       — Gradio app (all supported models)
-- `~/.claude/scripts/byo_video_setup.py`      — Bootstrap + launch script
-- `~/.claude/scripts/cosmos_deploy_monitor.py` — Local deployment monitor (state machine, checklist, provider rotation)
+- `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
+- `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 
 ---
 
@@ -21,19 +20,16 @@ This script shows live step-by-step progress with ETAs for every install stage, 
 
 ---
 
-## AGENT PROTOCOL — Main session handles interactive phases
+## SKILL PROTOCOL — Main session handles all phases
 
-**Phase split.** `AskUserQuestion` is only available in the main session context — subagent
-environments do not have it as a deferred tool. Therefore:
+The main session is the only agent for this skill. **Never spawn a subagent.** All phases run
+directly in the main session turn, from pre-checks through Gradio live. `AskUserQuestion` is
+available at any point — at the picker, at exception boundaries, or whenever user input is needed.
 
-- **Main session** runs PHASE 0 (pre-checks) and PHASE 1 (picker) using `AskUserQuestion`.
-- **Observer agent** is spawned after all parameters are resolved and handles PHASE 2–6
-  (provisioning → deployment → URL capture) with the resolved values baked into its prompt.
-
-### Main session — PHASE 0: Pre-checks
+### PHASE 0 — Pre-checks
 
 1. Run `brev ls` via Bash. Capture the full output.
-2. Note stopped H100/H200 instances (priority-0 candidates for Q3).
+2. Note stopped H100/H200 instances — these become options in the PHASE 1 picker (Q3).
 3. Note any RUNNING instances (may be reusable).
 
 Display initial panel:
@@ -48,7 +44,7 @@ Display initial panel:
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
-### Main session — PHASE 1: Picker
+### PHASE 1 — Picker
 
 Load `AskUserQuestion` via ToolSearch: `query: "select:AskUserQuestion"`, then fire all 3
 questions in a single call (see PICKER section below for the full call).
@@ -57,44 +53,9 @@ Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACK
 `DEPLOY_TARGET` per the answer→env var mapping table.
 
 If Q3 answer is "Existing Brev" or "SSH target", fire one follow-up `AskUserQuestion` to collect
-the instance name or host before spawning the observer.
+the instance name or host.
 
-### Main session — Spawn observer (after PHASE 1 complete)
-
-With all parameters resolved, spawn the observer:
-
-```python
-Agent({
-  description: "byo-video observer",
-  prompt: f"""
-You are the byo-video observer. You own PHASE 2 through PHASE 6 of the Cosmos BYO-Video
-deployment (provisioning → scripts → setup → URL capture). PHASE 0 and PHASE 1 are already
-complete — do NOT re-run them.
-
-Resolved parameters:
-  MODEL_ID           = <MODEL_ID>
-  MODEL_SIZE         = <MODEL_SIZE>
-  INFERENCE_BACKEND  = <INFERENCE_BACKEND>
-  DEPLOY_TARGET      = <DEPLOY_TARGET>
-
-Brev pre-check output (from PHASE 0):
-<brev_ls_output>
-
-Your rules:
-- Never run anything silently. Every action produces visible output.
-- Never use Bash(run_in_background=true).
-- Display the LIVE STATUS PANEL after every phase change.
-- If blocked: show the panel with the block reason, then call AskUserQuestion (load via
-  ToolSearch first: query "select:AskUserQuestion") with recovery options.
-- Never ask the user to run commands themselves.
-
-Begin with PHASE 2 immediately using the resolved parameters above.
-"""
-})
-```
-
-The observer executes PHASE 2–6 as defined in the OBSERVER PROTOCOL below and returns when
-a Gradio URL is live (or an unrecoverable error occurs).
+Record `PROVISION_START_TS` immediately after all answers are in. Then proceed directly to PHASE 2.
 
 ---
 
@@ -214,30 +175,30 @@ AskUserQuestion({
 | Qwen3-VL-8B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
 | Qwen3-VL-32B-Instruct | `MODEL_ID=Qwen/Qwen3-VL-32B-Instruct` · `MODEL_SIZE=QW3-32B` |
 
-Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: spawn the
-OBSERVER AGENT as described in the AGENT PROTOCOL section above. No further questions from the
-main session.
+Once `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`, `DEPLOY_TARGET` are all resolved: record
+`PROVISION_START_TS` and proceed directly to PHASE 2.
 
 ---
 
-## OBSERVER PROTOCOL
+## EXECUTION PROTOCOL — Phases 2–6
 
-The observer receives resolved parameters in its prompt and executes PHASE 2–6. Each phase ends
-with a panel update. The panel is the user's single source of truth — it shows instance, GPU,
-rate, elapsed time, ETA, cost, and checklist state. Never replace panel updates with prose
-summaries.
+The main session executes PHASE 2–6 directly. Each phase ends with a panel update. The panel
+is the user's single source of truth — it shows instance, GPU, rate, elapsed time, ETA, cost,
+and checklist state. Never replace panel updates with prose summaries.
 
-**Elapsed timer rule:** `PROVISION_START_TS` is recorded once at the top of PHASE 2. On every
-30s poll cycle (PHASE 3, PHASE 5, PHASE 6), compute `elapsed = int(time.time() - PROVISION_START_TS)`
-and embed it in the panel header line as `elapsed: Xm Ys`. Reprint the full panel on every poll
-cycle — not only on phase transitions. This keeps elapsed time accurate to within 30s without
-flooding the session with rapid refreshes.
+**Compaction-safety rule:** Every panel reprint must include all critical state: instance name,
+GPU type, rate, MODEL_ID, MODEL_SIZE, backend, elapsed, and the full checklist. If context
+compaction fires during a polling loop, the next panel reprint is a complete recovery anchor —
+the agent picks up from the last printed panel without losing state.
+
+**Elapsed timer rule:** `PROVISION_START_TS` is recorded once in PHASE 1 (immediately after
+picker answers). On every 30s poll cycle (PHASE 3, PHASE 5, PHASE 6), compute
+`elapsed = int(time.time() - PROVISION_START_TS)` and embed it in the panel header line as
+`elapsed: Xm Ys`. Reprint the full panel on every poll cycle — not only on phase transitions.
 
 ---
 
 ### PHASE 2 — PROVISION
-
-Record `PROVISION_START_TS` = now (Python: `import time; PROVISION_START_TS = time.time()`).
 
 **HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote instance.
 Do NOT ask the user for it. Do NOT pass it as a CLI arg. The script handles it.
@@ -247,7 +208,8 @@ Do NOT ask the user for it. Do NOT pass it as a CLI arg. The script handles it.
 **For `DEPLOY_TARGET=brev:new`:**
 
 1. Check PHASE 0 pre-check results for stopped instances with a compatible GPU:
-   - If found: fire `AskUserQuestion`: "Found stopped <name> (<GPU type>) — restart it or provision fresh?"
+   - If found: fire `AskUserQuestion` (load via ToolSearch first: `query: "select:AskUserQuestion"`):
+     "Found stopped <name> (<GPU type>) — restart it or provision fresh?"
      Options: "Restart <name> (existing rate)" · "Provision new <type> (~$<rate>/hr)"
    - If not found: proceed directly to `brev create`.
 
@@ -436,7 +398,7 @@ Do NOT auto-terminate the instance. Wait for explicit kill instruction from the 
 
 ### SSH DEPLOYMENTS (non-Brev)
 
-The observer handles SSH targets with the same panel, minus the `brev ls` polling.
+The main session handles SSH targets with the same panel and polling loop, minus the `brev ls` instance-status polling (replaced by SSH connectivity checks).
 
 Deploy scripts:
 ```bash
@@ -459,6 +421,63 @@ URL capture:
 ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null"
 ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_url.txt 2>/dev/null"
 ```
+
+---
+
+---
+
+## HALT-AND-ASK PROTOCOL
+
+When an exception requires user input, the main session halts the current phase, updates the
+panel to show the error state, and fires `AskUserQuestion`. After the user responds, the main
+session acts immediately and resumes the appropriate phase. No relay. No subagent required.
+
+**Load AskUserQuestion** before firing: `ToolSearch({ query: "select:AskUserQuestion" })`.
+
+### Exception triggers and question templates
+
+**Setup failure (PHASE 5):**
+Panel: `[✗] Setup failed at Step N — <one-line error>`
+```
+AskUserQuestion: "Setup failed at Step N: <error>. What next?"
+Options:
+  "Retry setup on this instance"
+  "Provision a new instance (current will be deleted)"
+  "Abort — delete instance and exit"
+```
+On "Retry": re-run the PHASE 5 launch command, re-enter log-tail loop.
+On "New instance": run provider rotation (PHASE 2), restart from PHASE 3.
+On "Abort": `brev delete <name>`, exit skill.
+
+**All providers exhausted (PHASE 2 or PHASE 3):**
+Panel: `[✗] All providers tried — no SHELL READY achieved`
+```
+AskUserQuestion: "All GPU providers exhausted. What next?"
+Options:
+  "Try again from the top (same provider list)"
+  "Abort — no instance provisioned"
+```
+
+**UNHEALTHY — manual decision needed (PHASE 3, after auto-recovery fails):**
+Panel: `[!] UNHEALTHY — auto-recovery failed after 3 min`
+```
+AskUserQuestion: "<name> is UNHEALTHY and could not be reset. What next?"
+Options:
+  "Delete and provision a new instance"
+  "Try brev reset again"
+  "Abort"
+```
+
+**Stopped instance found (PHASE 2):**
+```
+AskUserQuestion: "Found stopped <name> (<GPU type>) — restart or provision fresh?"
+Options:
+  "Restart <name> (existing rate ~$<rate>/hr)"
+  "Provision new <type> (~$<rate>/hr)"
+```
+
+**Rule:** For any exception not listed here, apply the closest matching template. The goal is
+one clear question with 2–3 concrete options. Never ask open-ended questions mid-deployment.
 
 ---
 
