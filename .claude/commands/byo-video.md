@@ -322,20 +322,21 @@ the SHELL READY wait internally — polling `brev ls` and displaying the checkli
 the instance is ready, then deploying scripts, launching setup, and watching for the
 Gradio URL. The agent's only job is to fire the monitor and then let it run.
 
-**TOOL: Background Agent subagent. Do NOT use Monitor or Bash(run_in_background=true).**
-Monitor is a deferred tool that requires ToolSearch first and frequently fails on schema
-load. Background Bash runs silently below the fold. A background Agent is always
-available and surfaces its output as notifications in the main thread.
+**TOOL: Foreground Agent subagent. Do NOT use Bash(run_in_background=true) or set run_in_background: true on the Agent.**
+A foreground Agent blocks the main thread and streams its output inline in the conversation —
+the checklist updates appear directly in the thread as the monitor polls. Background Agent
+hides output behind a collapsed UI element and shows nothing until completion, which destroys
+deployment visibility. Do NOT run_in_background.
 
 **Canonical script:** `~/.claude/scripts/cosmos_deploy_monitor.py`
 
-**Dispatch via Agent tool** (background, streams checklist output as notifications):
+**Dispatch via Agent tool** (foreground, output streams inline in conversation):
 
 ```python
 Agent({
   description: "byo-video deploy — <instance-name>",
   prompt: (
-    "Run the Cosmos deployment monitor and report each checklist update back as a message.\n\n"
+    "Run the Cosmos deployment monitor and print each checklist update as it arrives.\n\n"
     "Command:\n"
     "python3 ~/.claude/scripts/cosmos_deploy_monitor.py"
     " --instance <name>"
@@ -348,8 +349,7 @@ Agent({
     "Run the command with Bash. Copy each block of stdout output verbatim into your "
     "response as it arrives. When the script exits, report the exit code and the final "
     "contents of /tmp/cosmos_deploy_state.json."
-  ),
-  run_in_background: true
+  )
 })
 ```
 
