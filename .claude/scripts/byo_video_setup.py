@@ -12,7 +12,7 @@ URL is also written to /tmp/gradio_url.txt for agent capture.
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only; not needed for Cosmos3)
-  MODEL_SIZE        — 2B | 8B | 32B | C3-2B | C3-8B  (default: C3-2B)
+  MODEL_SIZE        — 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
   MODEL_DIR         — override local download path for primary model
   GRADIO_PORT       — port for Gradio (default: 7860)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
@@ -66,7 +66,7 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
 
 # ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
 _MODEL_CONFIGS = {
-    # ── Cosmos3-Reasoner (C3-2B/C3-32B gated; C3-8B = Cosmos3-Nano-Reasoner, now public) ──
+    # ── Cosmos3-Reasoner (C3-2B/C3-32B/C3-super gated; C3-8B = Cosmos3-Nano-Reasoner, public) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "~TBD"),
@@ -89,6 +89,18 @@ _MODEL_CONFIGS = {
         # vLLM flags: tensor-parallel-size 1 + high memory utilization for single H100 80GB.
         # NOTE: weight size unverified (25 safetensor files, estimate ~60-70GB BF16).
         # If weights exceed ~72GB, OOM will occur — flag for review before production deploy.
+        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
+    },
+    "C3-super": {
+        "variants": [
+            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~TBD"),
+        ],
+        "nim": None,
+        # 32B model — requires H200 SXM 141GB (confirmed from live deployment 2026-05-05).
+        "disk_gb": 1024,
+        # Architecture: NemotronVLForConditionCausalLM. vLLM may raise "Unsupported architecture"
+        # if this arch is not registered in the installed vLLM build. Use INFERENCE_BACKEND=hf
+        # as a fallback — confirmed working on H200 at 2026-05-05 live run.
         "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
     },
     # ── Cosmos Reason2 ──

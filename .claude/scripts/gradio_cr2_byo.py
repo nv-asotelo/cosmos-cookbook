@@ -162,7 +162,7 @@ MODEL_CONFIGS = {
         ],
         "nim": None,  # TBD
     },
-    # ── Cosmos3-Reasoner (C3-2B/C3-32B gated; C3-8B = Cosmos3-Nano-Reasoner, now public) ──
+    # ── Cosmos3-Reasoner (C3-2B/C3-32B/C3-super gated; C3-8B = Cosmos3-Nano-Reasoner, public) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "bf16"),
@@ -183,6 +183,15 @@ MODEL_CONFIGS = {
         # disk_gb: 1024 (1TB minimum — Alex explicit requirement for 32B)
         # vLLM: --tensor-parallel-size 1 --gpu-memory-utilization 0.93 on single H100 80GB
         # Weight size unverified (25 files, est ~60-70GB BF16). Review if OOM occurs.
+    },
+    "C3-super": {
+        "variants": [
+            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "bf16"),
+        ],
+        "nim": None,
+        # 32B model on H200 SXM 141GB (confirmed 2026-05-05 live deployment).
+        # Architecture: NemotronVLForConditionCausalLM. vLLM may raise "Unsupported architecture"
+        # if arch is not registered. Use INFERENCE_BACKEND=hf as fallback (confirmed working).
     },
     # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
     # vLLM-only: uses video_url content type with file:// path (same pattern as Nemotron).
@@ -248,7 +257,8 @@ _MODEL_SIZE_DEFAULTS = {
     "32B":   {"fps": 1, "max_tokens": 512},
     "C3-2B": {"fps": 2, "max_tokens": 512},
     "C3-8B": {"fps": 2, "max_tokens": 512},
-    "C3-32B":{"fps": 1, "max_tokens": 1024},
+    "C3-32B":  {"fps": 1, "max_tokens": 1024},
+    "C3-super":{"fps": 1, "max_tokens": 1024},
 }
 # Flat map: checkpoint UI label → MODEL_CONFIGS size key (built after MODEL_CONFIGS is complete)
 _LABEL_TO_MODEL_SIZE = {
@@ -259,7 +269,7 @@ _LABEL_TO_MODEL_SIZE = {
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
@@ -353,6 +363,7 @@ if INFERENCE_BACKEND == "vllm":
         "C3-2B":   "C3R-2B BF16",
         "C3-8B":   "C3R-Nano BF16",
         "C3-32B":  "C3R-32B BF16",
+        "C3-super":"C3-Super BF16",
         "32B":     "CR2-32B BF16",
     }
     _VLLM_DD_DEFAULT = _VLLM_DD_MAP.get(MODEL_SIZE, "CR2-8B BF16")
