@@ -41,9 +41,9 @@ AskUserQuestion({
       question: "Model?",
       options: [
         "Cosmos Reason2 2B — nvidia/Cosmos-Reason2-2B (default, ≥40GB VRAM)",
-        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (public, 8B, ≥40GB VRAM)",
-        "Qwen3-VL 8B — Qwen/Qwen3-VL-8B-Instruct (public, no HF_TOKEN)",
-        "Nemotron-Nano-12B — nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16 (gated, vLLM only)"
+        "Cosmos3-Nano-Reasoner — nvidia/Cosmos3-Nano-Reasoner (8B, ≥40GB VRAM)",
+        "Cosmos Reason2 8B — nvidia/Cosmos-Reason2-8B (≥80GB VRAM)",
+        "Something else — Nemotron-Nano-12B, Qwen3-VL, or any HF model ID"
       ]
     },
     {
@@ -67,17 +67,15 @@ AskUserQuestion({
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
-| Q2 Model | Qwen3-VL 8B | `MODEL_ID=Qwen/Qwen3-VL-8B-Instruct` · `MODEL_SIZE=QW3-8B` |
-| Q2 Model | Nemotron-Nano-12B | `MODEL_ID=nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
-| Q2 Model | Cosmos Reason2 8B | (Other) `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
-| Q2 Model | Other (free text) | Use the typed HF model ID; derive `MODEL_SIZE` from supported models table |
+| Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
+| Q2 Model | Something else | Ask: "Enter the HuggingFace model ID (e.g. nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16, Qwen/Qwen3-VL-8B-Instruct, or any public/gated model):" → derive `MODEL_SIZE` from supported models table; default `MODEL_SIZE=2B` if not found |
 | Q3 Env | New Brev H100 | `DEPLOY_TARGET=brev:new` — agent calls `brev create` |
 | Q3 Env | Existing Brev | Follow up: "Instance name?" (free text) → `DEPLOY_TARGET=brev:<name>` |
 | Q3 Env | SSH target | Follow up: "user@host or IP?" (free text) → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
 | Q3 Env | Other (free text) | Parse as instance name or host as appropriate |
 
-**Other (custom model):** If the user selects "Other" on Q2, ask: "Enter the full HuggingFace model ID:" then look up `MODEL_SIZE` from the supported models table below. If not found, use `MODEL_SIZE=2B` as default and warn.
+**Something else:** Ask: "Enter the HuggingFace model ID:" then look up `MODEL_SIZE` from the supported models table. If not found, use `MODEL_SIZE=2B` and warn.
 
 Once all 3 answers are resolved: agent runs autonomously to Gradio URL capture. No further questions.
 
