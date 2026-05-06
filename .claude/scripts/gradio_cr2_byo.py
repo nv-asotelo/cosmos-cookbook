@@ -432,15 +432,107 @@ else:
 DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
 DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
 
+_GENERIC_SYSTEM = "You are a helpful assistant."
+_WAREHOUSE_SYSTEM = "You are a helpful warehouse monitoring system."
+
+# (label, user_prompt, system_prompt, reasoning_on)
+# reasoning_on signals whether the prompt instructs the model to wrap its
+# chain-of-thought in <think>...</think>. The Gradio "Reasoning: ON/OFF"
+# badge reads this; the actual rendering of <think> blocks is handled by
+# _render_with_think() regardless.
 DEMO_PROMPTS = [
-    ("General description",   "Describe what is happening in this video. What are the key actions, objects, and events?"),
-    ("Safety analysis",       "Identify any safety hazards, risks, or unsafe behaviors visible in this video. Be specific."),
-    ("Non-expert summary",    "Summarize this video in plain language for someone with no domain expertise."),
-    ("Action recognition",    "List every distinct action or motion performed in this video, in the order they occur."),
-    ("Object inventory",      "List all objects, equipment, and people visible. Note their state."),
-    ("Anomaly detection",     "Identify anything unusual, unexpected, or out of place in this video."),
-    ("Temporal summary",      "Break this video into time segments and describe what changes in each segment."),
+    ("General description",
+     "Describe what is happening in this video. What are the key actions, objects, and events?",
+     DEFAULT_SYSTEM, False),
+    ("Safety analysis",
+     "Identify any safety hazards, risks, or unsafe behaviors visible in this video. Be specific.",
+     DEFAULT_SYSTEM, False),
+    ("Non-expert summary",
+     "Summarize this video in plain language for someone with no domain expertise.",
+     DEFAULT_SYSTEM, False),
+    ("Action recognition",
+     "List every distinct action or motion performed in this video, in the order they occur.",
+     DEFAULT_SYSTEM, False),
+    ("Object inventory",
+     "List all objects, equipment, and people visible. Note their state.",
+     DEFAULT_SYSTEM, False),
+    ("Anomaly detection",
+     "Identify anything unusual, unexpected, or out of place in this video.",
+     DEFAULT_SYSTEM, False),
+    ("Temporal summary",
+     "Break this video into time segments and describe what changes in each segment.",
+     DEFAULT_SYSTEM, False),
+
+    # ── Cosmos Reason2 reasoning showcases (mirror build.nvidia.com) ───────────
+    ("Race car: timestamps",
+     "Describe the video. Add timestamps in mm:ss format.\n\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag and "
+     "include the timestamps.",
+     _GENERIC_SYSTEM, True),
+    ("Forklift: load weight (JSON)",
+     "Locate the bounding box of the load and determine if its size and "
+     "weight of load within the forklift's limits. Estimate weights. "
+     "Return all as json. Include json location, estimated weight of the "
+     "load, and if it's in the limit.",
+     _GENERIC_SYSTEM, False),
+    ("Mail package: pickup allowed?",
+     "Is the person allowed to pick up the packages?\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag.",
+     _GENERIC_SYSTEM, True),
+    ("Warehouse: who picked up the box?",
+     "Which worker picked up the dropped box?\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag.",
+     _WAREHOUSE_SYSTEM, True),
+    ("AV: next ego action",
+     "What's the next immediate action for the Ego vehicle?\n\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag.",
+     _GENERIC_SYSTEM, True),
+    ("Robot arm: 2D trajectory (JSON)",
+     "You are given the task \"Move the tape into the basket\". Specify "
+     "the 2D trajectory your end effector should follow in pixel space. "
+     "Return the trajectory coordinates in JSON format like this: "
+     "{\"point_2d\": [x, y], \"label\": \"gripper trajectory\"}.\n\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag.",
+     _GENERIC_SYSTEM, True),
+    ("SDG critic: approve / reject",
+     "Approve or reject this generated video for inclusion in a dataset "
+     "for physical world model ai training. It must perfectly adhere to "
+     "physics, object permanence, and have no anomalies. Any issue or "
+     "concern causes rejection.\n"
+     "Answer the question using the following format:\n\n"
+     "<think>\nYour reasoning.\n</think>\n\n"
+     "Write your final answer immediately after the </think> tag. "
+     "Answer with Approve or Reject only.",
+     _GENERIC_SYSTEM, True),
 ]
+
+
+def _reasoning_badge_html(reasoning_on):
+    """Inline pill rendered above the response area. NV-green for ON,
+    slate-300 for OFF — both readable on Gradio's light theme."""
+    if reasoning_on:
+        return (
+            '<div style="display:inline-flex;align-items:center;gap:6px;'
+            'background:#76b900;color:#0f172a;padding:4px 12px;'
+            'border-radius:14px;font-size:0.85em;font-weight:600;'
+            'margin-bottom:6px">🧠 Reasoning: ON</div>'
+        )
+    return (
+        '<div style="display:inline-flex;align-items:center;gap:6px;'
+        'background:#cbd5e1;color:#0f172a;padding:4px 12px;'
+        'border-radius:14px;font-size:0.85em;font-weight:600;'
+        'margin-bottom:6px">○ Reasoning: OFF</div>'
+    )
 
 HF_STEPS = [
     "Resolve checkpoint & GPU",
@@ -2413,6 +2505,12 @@ with gr.Blocks(
     # ── Output row ───────────────────────────────────────────────────────────
     with gr.Row():
         with gr.Column(scale=2):
+            # Initial badge state matches the first DEMO_PROMPT (which is the
+            # default selection in the dropdown). Updated by on_demo().
+            reasoning_badge = gr.HTML(
+                value=_reasoning_badge_html(DEMO_PROMPTS[0][3]),
+                show_label=False,
+            )
             response_out = gr.HTML(label="Model Response", value="", show_label=True)
         with gr.Column(scale=1):
             status_panel = gr.HTML(_status_html(["wait"] * 5), show_progress="hidden")
@@ -2493,12 +2591,18 @@ with gr.Blocks(
     image_input.change(on_image_upload, inputs=[image_input, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
 
     def on_demo(name):
-        for n, p in DEMO_PROMPTS:
-            if n == name:
-                return p
-        return DEFAULT_PROMPT
+        """Pick a demo: populate user prompt + system prompt + Reasoning badge."""
+        for entry in DEMO_PROMPTS:
+            if entry[0] == name:
+                _, user_p, system_p, reasoning_on = entry
+                return user_p, system_p, _reasoning_badge_html(reasoning_on)
+        return DEFAULT_PROMPT, DEFAULT_SYSTEM, _reasoning_badge_html(False)
 
-    demo_picker.change(on_demo, inputs=[demo_picker], outputs=[user_box])
+    demo_picker.change(
+        on_demo,
+        inputs=[demo_picker],
+        outputs=[user_box, system_box, reasoning_badge],
+    )
 
     if INFERENCE_BACKEND == "vllm":
         checkpoint_dd.change(
