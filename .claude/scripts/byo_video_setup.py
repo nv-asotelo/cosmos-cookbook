@@ -18,7 +18,7 @@ Env vars:
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
-import os, sys, time, subprocess, re, shutil, json, urllib.request
+import os, sys, time, subprocess, re, shutil, json, urllib.request, socket
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 GREEN  = "\033[32m"
@@ -738,8 +738,16 @@ proc = subprocess.Popen(
     bufsize=1,
 )
 
+# BUG-SHARE-TIMEOUT: When gradio.live is firewalled (Horde, locked-down Brev orgs,
+# air-gapped hosts), the share link never appears and the loop used to terminate
+# the child Gradio process after 300s — destroying a working local-only demo.
+# Fix: detect explicit "Could not create share link" or "Running on local URL"
+# signals and fall back to a host-reachable local URL instead of killing.
 url = None
+local_url = None
+share_failed = False
 url_pattern        = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
+local_url_pattern  = re.compile(r'Running on local URL:\s+(http://[^\s]+)')
 URL_CAPTURE_TIMEOUT = 300
 t_launch = time.time()
 with open(LOG_FILE, "w") as log:
@@ -753,14 +761,61 @@ with open(LOG_FILE, "w") as log:
         if m:
             url = m.group(1).rstrip(".")
             break
+        ml = local_url_pattern.search(stripped)
+        if ml and not local_url:
+            local_url = ml.group(1).rstrip("/")
+        if "Could not create share link" in stripped:
+            share_failed = True
+            if local_url:
+                break
         if time.time() - t_launch > URL_CAPTURE_TIMEOUT:
-            print(f"  ✗  Timed out after {URL_CAPTURE_TIMEOUT}s waiting for Gradio URL.")
-            proc.terminate()
-            sys.exit(1)
+            print(f"  ⚠  No gradio.live URL after {URL_CAPTURE_TIMEOUT}s — falling back to local URL.")
+            break
+
+def _detect_host_ip():
+    env_ip = os.environ.get("BYO_VIDEO_LOCAL_HOST")
+    if env_ip:
+        return env_ip
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+        for tok in out.stdout.split():
+            if "." in tok and not tok.startswith("127."):
+                return tok
+    except Exception:
+        pass
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return None
 
 if not url:
-    print("  ✗  Gradio did not print a public URL. Check /tmp/gradio_demo.log")
-    sys.exit(1)
+    if not local_url:
+        print("  ✗  Gradio printed no URL (neither share nor local). Check /tmp/gradio_demo.log")
+        proc.terminate()
+        sys.exit(1)
+    host_ip = _detect_host_ip()
+    if host_ip:
+        url = local_url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
+    else:
+        url = local_url
+    reason = "share link unavailable (host firewalled)" if share_failed else "share link timed out"
+    print(f"  ⚠  {reason}. Using local URL: {url}")
+    print(f"     {DIM}If your machine can't reach {url} directly, run on your client:{RESET}")
+    print(f"     {DIM}  ssh -L {GRADIO_PORT}:localhost:{GRADIO_PORT} <user@host>{RESET}")
+    print(f"     {DIM}then open http://localhost:{GRADIO_PORT}/ in your browser.{RESET}")
 
 # BUG-LIVENESS: probe Gradio /info before declaring live.
 # Writing URL_FILE before confirming the process survived causes stale live declarations.
