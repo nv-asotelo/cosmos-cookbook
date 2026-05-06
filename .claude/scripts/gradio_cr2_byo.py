@@ -1208,10 +1208,21 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
     ), gr.update()
 
     if is_image:
+        # Image auto-cap: mirror the video logic with n_frames=1. Without this,
+        # qwen_vl_utils uses the model default max_pixels (e.g. 1,048,576 → ~6k
+        # vision tokens for Cosmos3-8B), making single-image inference take
+        # several minutes on HF backend. The estimated-time math in _auto_cap
+        # treats prefill cost as linear in pixel count, so n_frames=1 is the
+        # correct input for a single image.
+        if not disable_autocap:
+            capped_px, est_s = _auto_cap(1, max_pixels)
+            if capped_px < max_pixels:
+                print(f"[auto-cap image] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est)", flush=True)
+                max_pixels = capped_px
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
             {"role": "user", "content": [
-                {"type": "image", "image": video_path},
+                {"type": "image", "image": video_path, "max_pixels": max_pixels},
                 {"type": "text", "text": user_prompt},
             ]},
         ]
@@ -2191,18 +2202,39 @@ with gr.Blocks(
     fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     disable_autocap_chk.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
 
-    def on_image_upload(path):
+    def on_image_upload(path, disable_autocap):
         if not path:
             return "*Upload an image to see info*", gr.update()
         try:
             from PIL import Image as _pil
             img = _pil.open(path)
             w, h = img.size
-            return f"**{w}×{h}** · {img.mode} image", gr.update()
+            info_str = f"**{w}×{h}** · {img.mode} image"
         except Exception:
             return "*Image info unavailable*", gr.update()
+        # vLLM serves at high throughput; HF-backend timing math doesn't apply.
+        if INFERENCE_BACKEND == "vllm":
+            return info_str, gr.update()
+        est_s_full = _est_tokens(1, DEFAULT_MAX_PIXELS) / PREFILL_TPS
+        capped_px, est_s_capped = _auto_cap(1, DEFAULT_MAX_PIXELS)
+        if not disable_autocap:
+            if capped_px < DEFAULT_MAX_PIXELS:
+                info_str += (f"\n> ⚠ **Auto-cap:** {capped_px:,} px"
+                             f" → ~{est_s_capped:.0f}s est (was ~{est_s_full:.0f}s)")
+                return info_str, gr.update(value=capped_px)
+        else:
+            if capped_px < DEFAULT_MAX_PIXELS:
+                ratio = est_s_full / max(est_s_capped, 1.0)
+                info_str += (
+                    f"\n> ⚠ **Auto-cap DISABLED** — ~{est_s_full:.0f}s est · "
+                    f"**~{ratio:.1f}× longer** than auto-cap (~{est_s_capped:.0f}s)"
+                )
+            else:
+                info_str += f"\n> ℹ Auto-cap not needed · ~{est_s_full:.0f}s est"
+            return info_str, gr.update()
+        return info_str, gr.update()
 
-    image_input.change(on_image_upload, inputs=[image_input], outputs=[clip_info, maxpx_slider])
+    image_input.change(on_image_upload, inputs=[image_input, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
 
     def on_demo(name):
         for n, p in DEMO_PROMPTS:
