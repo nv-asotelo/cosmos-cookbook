@@ -459,6 +459,14 @@ def poll_once(remote, rate, session_id, model_id):
             new_metrics[-1]["prompt"] = (parsed_result.get("prompt") or "")[:2000]
             new_metrics[-1]["response"] = (parsed_result.get("response") or "")[:8000]
             new_metrics[-1]["status"] = parsed_result.get("status", "unknown")
+            # Fallback for prefill_tokens: if the [infer] Prefilling N tokens
+            # marker arrived in a different poll than the [done] marker (so
+            # detect_inferences's local pending_prefill was None), the result
+            # JSON's tokens_in field is authoritative.
+            if new_metrics[-1].get("prefill_tokens") is None:
+                tokens_in = parsed_result.get("tokens_in")
+                if tokens_in is not None:
+                    new_metrics[-1]["prefill_tokens"] = tokens_in
             parsed_result = None  # consumed
         for m in new_metrics:
             append_metric(m)

@@ -93,6 +93,14 @@ TEXT_TOKENS    = 50
 _EMPIRICAL_VPF = 128
 _BASELINE_PX   = 524288
 _PIXEL_TIERS   = [131072, 262144, 524288, 1048576, 2097152]
+# IMAGE_AUTO_CAP_MAX bounds the auto-cap result for single images.
+# _EMPIRICAL_VPF was calibrated for video tokenization (temporal merging halves
+# tokens/frame); for Cosmos3 single-image inputs the actual vision token count
+# is ~3-5x higher per pixel, so the est-time math is too lenient and snaps to
+# the highest tier (2M px). Bound the image path to ≤512K, which empirically
+# yields ~30-50s prefill on RTX PRO 6000 Blackwell + HF Transformers.
+# User can disable auto-cap to override and use higher resolutions.
+IMAGE_AUTO_CAP_MAX = 524288
 
 NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 
@@ -1208,16 +1216,16 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
     ), gr.update()
 
     if is_image:
-        # Image auto-cap: mirror the video logic with n_frames=1. Without this,
-        # qwen_vl_utils uses the model default max_pixels (e.g. 1,048,576 → ~6k
-        # vision tokens for Cosmos3-8B), making single-image inference take
-        # several minutes on HF backend. The estimated-time math in _auto_cap
-        # treats prefill cost as linear in pixel count, so n_frames=1 is the
-        # correct input for a single image.
+        # Image auto-cap: same _auto_cap math as video with n_frames=1, then
+        # bound at IMAGE_AUTO_CAP_MAX. _EMPIRICAL_VPF is calibrated for video
+        # token math; for Cosmos3 single-image inputs the per-pixel token rate
+        # is ~3-5x higher, so unbounded auto-cap snaps to the 2M-px tier and
+        # still produces 5+ min prefills on HF backend.
         if not disable_autocap:
             capped_px, est_s = _auto_cap(1, max_pixels)
+            capped_px = min(capped_px, IMAGE_AUTO_CAP_MAX)
             if capped_px < max_pixels:
-                print(f"[auto-cap image] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est)", flush=True)
+                print(f"[auto-cap image] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est, hard cap={IMAGE_AUTO_CAP_MAX:,})", flush=True)
                 max_pixels = capped_px
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -2217,6 +2225,7 @@ with gr.Blocks(
             return info_str, gr.update()
         est_s_full = _est_tokens(1, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(1, DEFAULT_MAX_PIXELS)
+        capped_px = min(capped_px, IMAGE_AUTO_CAP_MAX)
         if not disable_autocap:
             if capped_px < DEFAULT_MAX_PIXELS:
                 info_str += (f"\n> ⚠ **Auto-cap:** {capped_px:,} px"
