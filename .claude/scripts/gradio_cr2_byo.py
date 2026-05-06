@@ -506,6 +506,67 @@ def _expected_quant(model_id):
     return "bf16"
 
 
+# ── Reasoning panel (build.nvidia.com style) ─────────────────────────────────
+# Cosmos Reason 2 emits its chain-of-thought between <think>...</think> tags
+# inside the streamed `delta.content`. Mirrors build.nvidia.com's UI: a
+# collapsible "Reasoning Complete ✓" header above the final answer; while
+# tokens are still streaming inside <think>, the header reads "Reasoning…"
+# and stays expanded so the user can watch the model think.
+_REASONING_PANEL_CSS = """
+.cr-output { padding: 4px; font-size: 0.95em; line-height: 1.45; max-height: 540px; overflow-y: auto; }
+.cr-reasoning { border: 1px solid #76b900; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; background: rgba(118,185,0,0.05); }
+.cr-reasoning summary { cursor: pointer; color: #76b900; font-weight: 600; user-select: none; list-style: none; padding: 2px 0; }
+.cr-reasoning summary::-webkit-details-marker { display: none; }
+.cr-reasoning summary::before { content: '▸ '; color: #76b900; font-size: 0.9em; }
+.cr-reasoning[open] summary::before { content: '▾ '; }
+.cr-reasoning .cr-reasoning-blurb { color: #aaa; font-size: 0.85em; margin: 6px 0 8px 0; font-style: italic; }
+.cr-reasoning .cr-think-body { white-space: pre-wrap; color: #cfcfcf; padding: 4px 8px 4px 10px; border-left: 2px solid #2a4a1c; font-size: 0.92em; }
+.cr-answer { white-space: pre-wrap; color: #eee; padding: 4px 0; }
+.cr-prelude { white-space: pre-wrap; color: #aaa; padding: 4px 0; font-style: italic; font-size: 0.92em; }
+"""
+
+
+def _render_with_think(text):
+    """Split streamed model output on <think>...</think> and render the
+    reasoning as a collapsible panel + the answer plainly below.
+    Plain text (no <think>) renders as-is. Streaming mid-think shows a
+    "Reasoning…" header (open by default); once </think> arrives the
+    header switches to "Reasoning Complete ✓" and collapses by default.
+    Always returns HTML safe for gr.HTML — escapes user-visible text."""
+    import html as _html
+    if not text:
+        return "<div class='cr-output'></div>"
+    open_tag, close_tag = "<think>", "</think>"
+    i_open = text.find(open_tag)
+    if i_open < 0:
+        return f"<div class='cr-output'><div class='cr-answer'>{_html.escape(text)}</div></div>"
+    pre = text[:i_open]
+    body_start = i_open + len(open_tag)
+    i_close = text.find(close_tag, body_start)
+    if i_close < 0:
+        reasoning = text[body_start:]
+        summary = "⏳ Reasoning…"
+        details_open = " open"
+        answer_html = ""
+        blurb = "<div class='cr-reasoning-blurb'>The model is thinking… stream continues below.</div>"
+    else:
+        reasoning = text[body_start:i_close]
+        post = text[i_close + len(close_tag):].lstrip("\n")
+        summary = "✓ Reasoning Complete"
+        details_open = ""
+        answer_html = f"<div class='cr-answer'>{_html.escape(post)}</div>" if post else ""
+        blurb = "<div class='cr-reasoning-blurb'>Below is the entire thinking process the model went through to arrive at its response.</div>"
+    pre_html = f"<div class='cr-prelude'>{_html.escape(pre)}</div>" if pre.strip() else ""
+    reasoning_html = (
+        f"<details{details_open} class='cr-reasoning'>"
+        f"<summary>{summary}</summary>"
+        f"{blurb}"
+        f"<div class='cr-think-body'>{_html.escape(reasoning)}</div>"
+        f"</details>"
+    )
+    return f"<div class='cr-output'>{pre_html}{reasoning_html}{answer_html}</div>"
+
+
 def _status_html(statuses, metrics=None, steps=None):
     """
     statuses : list of 5 strings — "ok" | "run" | "wait"
@@ -1886,6 +1947,7 @@ def _clean_hf_cache():
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 with gr.Blocks(
     title="Cosmos Reason — BYO Video Demo",
+    css=_REASONING_PANEL_CSS,
 ) as demo:
 
     _variant_labels = " → ".join(lbl for lbl, _, _, _ in _cfg["variants"])
@@ -2194,7 +2256,7 @@ with gr.Blocks(
     # ── Output row ───────────────────────────────────────────────────────────
     with gr.Row():
         with gr.Column(scale=2):
-            response_out = gr.Textbox(label="Model Response", lines=18, interactive=False)
+            response_out = gr.HTML(label="Model Response", value="", show_label=True)
         with gr.Column(scale=1):
             status_panel = gr.HTML(_status_html(["wait"] * 5), show_progress="hidden")
 
@@ -2318,7 +2380,7 @@ with gr.Blocks(
             top_p=top_p,
             rep_penalty=rep_penalty,
         ):
-            yield text, status, tbl
+            yield _render_with_think(text), status, tbl
 
     def _run_all(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
                  disable_autocap, reload_vllm):
@@ -2328,7 +2390,7 @@ with gr.Blocks(
             disable_autocap=disable_autocap,
             reload_vllm=reload_vllm,
         ):
-            yield combined, status, tbl
+            yield _render_with_think(combined), status, tbl
 
     run_btn.click(
         fn=_run,
