@@ -1868,6 +1868,7 @@ def _nim_swap_banner(kind: str, label: str, msg: str = "", elapsed: float = 0) -
 def _on_nim_swap(label: str):
     """Stop the cosmos-nim container and relaunch it serving the selected NIM.
     Yields (banner_html,) progress updates for the Gradio frontend."""
+    import subprocess  # module-level alias is `_sp_cleanup`; use a fresh local import
     import time as _time
     global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID  # updated after swap completes
 
