@@ -350,7 +350,15 @@ if INFERENCE_BACKEND == "nim_local":
             # Network unreachable or upstream removed every family we know — fall
             # back to the static slug map so the user is not stranded.
             _NIM_CATALOG = list(KNOWN_VLM_NIMS)
-        CHECKPOINT_PRESETS = [(n.label, f"nim://{n.served_model_id}") for n in _NIM_CATALOG]
+        # NO `nim://` prefix in nim_local mode — that prefix routes
+        # run_inference() to _run_nim_inference (the NVCF hosted-API path)
+        # which skips models like CR2-2B that are not in the public NVCF
+        # catalog. In nim_local mode the user wants the LOCAL Docker
+        # container, which is OpenAI-compatible and reached via
+        # _run_vllm_inference. Pass the served_model_id directly so
+        # _is_nim() returns False and routing falls through to the
+        # vLLM-style path against VLLM_BASE_URL=http://localhost:8000/v1.
+        CHECKPOINT_PRESETS = [(n.label, n.served_model_id) for n in _NIM_CATALOG]
         print(f"[nim_local] catalog: {len(_NIM_CATALOG)} VLM NIMs from {len([n for n in _NIM_CATALOG])} entries", flush=True)
     except Exception as _e:
         print(f"[nim_local] catalog fetch failed ({_e}); keeping default presets", flush=True)
