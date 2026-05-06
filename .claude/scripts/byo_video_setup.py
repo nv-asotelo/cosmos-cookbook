@@ -381,7 +381,9 @@ print_dashboard()
 # ── Step 2: HF token ──────────────────────────────────────────────────────────
 header("Step 2 — HuggingFace auth", eta="<5s")
 hf_cache = os.path.expanduser("~/.cache/huggingface/token")
-if HF_TOKEN:
+if INFERENCE_BACKEND == "nim_local":
+    info("nim_local backend — HF auth not required (NIM container ships the model). Skipping Step 2/2b.")
+elif HF_TOKEN:
     ok(f"HF_TOKEN set ({len(HF_TOKEN)} chars)")
 elif os.path.exists(hf_cache):
     ok(f"HF token found at ~/.cache/huggingface/token")
@@ -394,27 +396,35 @@ else:
     sys.exit(1)
 
 # ── Step 2b: Validate HF token ────────────────────────────────────────────────
-header("Step 2b — Validate HF token", eta="<2s")
-_hf_req = urllib.request.Request(
-    "https://huggingface.co/api/whoami",
-    headers={"Authorization": f"Bearer {HF_TOKEN}"}
-)
-try:
-    with urllib.request.urlopen(_hf_req, timeout=10) as _resp:
-        if _resp.status == 200:
-            ok("HF token valid")
-        else:
-            print(f"  ✗  HF token returned HTTP {_resp.status} — run 'huggingface-cli login' on this instance")
-            sys.exit(1)
-except Exception as _hf_err:
-    warn(f"HF token check failed ({_hf_err}) — continuing, will fail at download if token is bad")
+if INFERENCE_BACKEND != "nim_local":
+    header("Step 2b — Validate HF token", eta="<2s")
+    _hf_req = urllib.request.Request(
+        "https://huggingface.co/api/whoami",
+        headers={"Authorization": f"Bearer {HF_TOKEN}"}
+    )
+    try:
+        with urllib.request.urlopen(_hf_req, timeout=10) as _resp:
+            if _resp.status == 200:
+                ok("HF token valid")
+            else:
+                print(f"  ✗  HF token returned HTTP {_resp.status} — run 'huggingface-cli login' on this instance")
+                sys.exit(1)
+    except Exception as _hf_err:
+        warn(f"HF token check failed ({_hf_err}) — continuing, will fail at download if token is bad")
 
 STEPS_DONE.append(2)
 print_dashboard()
 
 # ── Step 3: NGC API key check (for NIM mode) ──────────────────────────────────
 header("Step 3 — NGC API key (NIM mode)", eta="<5s")
-if _cfg["nim"]:
+# nim_local backend = local Docker container (this sprint); _cfg["nim"] = NVCF cloud catalog (NIM hosted)
+if INFERENCE_BACKEND == "nim_local":
+    if not NGC_API_KEY:
+        print("  ✗  INFERENCE_BACKEND=nim_local requires NGC_API_KEY (export NGC_API_KEY=nvapi-...)"); sys.exit(1)
+    if not NGC_API_KEY.startswith("nvapi-"):
+        warn("NGC_API_KEY does not start with 'nvapi-' — docker pull nvcr.io may fail")
+    ok(f"NGC_API_KEY set ({len(NGC_API_KEY)} chars) — nim_local Docker mode enabled")
+elif _cfg["nim"]:
     if NGC_API_KEY:
         if NGC_API_KEY.startswith("nvapi-"):
             ok(f"NGC_API_KEY set ({len(NGC_API_KEY)} chars, nvapi- prefix) — NIM-{MODEL_SIZE} enabled")
@@ -630,18 +640,52 @@ def download_model(model_name, model_dir, size_hint, dl_env):
 
 dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
 
-for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants"]):
-    step_label = f"Step 9{'abcde'[i]} — {var_label} weights ({var_dirname})"
-    header(step_label, eta=f"<5s if cached, longer first time ({var_size})")
-    var_dir = os.path.join(MODELS_BASE, var_dirname)
-    ok_ = download_model(var_hf_id, var_dir, var_size, dl_env)
-    if not ok_ and i == 0:
-        sys.exit(1)  # primary variant is required
-    elif not ok_:
-        warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
+if INFERENCE_BACKEND == "nim_local":
+    info("nim_local backend — skipping HF weights download (NIM container ships the model)")
+else:
+    for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants"]):
+        step_label = f"Step 9{'abcde'[i]} — {var_label} weights ({var_dirname})"
+        header(step_label, eta=f"<5s if cached, longer first time ({var_size})")
+        var_dir = os.path.join(MODELS_BASE, var_dirname)
+        ok_ = download_model(var_hf_id, var_dir, var_size, dl_env)
+        if not ok_ and i == 0:
+            sys.exit(1)  # primary variant is required
+        elif not ok_:
+            warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
 
 STEPS_DONE.append(9)
 print_dashboard()
+
+# ── Step 9-NIM: Launch NIM container (nim_local backend only) ────────────────
+if INFERENCE_BACKEND == "nim_local":
+    header("Step 9-NIM — Launch NIM Docker container", eta="~30s if image cached, 10-30 min first pull")
+    # Resolve NIM image short id from MODEL_ID. Examples:
+    #   nvidia/Cosmos-Reason2-8B  -> cosmos-reason2-8b
+    #   nvidia/Cosmos-Reason2-2B  -> cosmos-reason2-2b
+    #   nvidia/Cosmos-Reason2-32B -> cosmos-reason2-32b
+    _nim_short = (MODEL_ID.split("/")[-1] if "/" in MODEL_ID else MODEL_ID).lower()
+    _nim_short = os.environ.get("NIM_MODEL_SHORT", _nim_short)
+    _nim_image = os.environ.get("NIM_IMAGE", f"nvcr.io/nim/nvidia/{_nim_short}:latest")
+    _nim_port = int(os.environ.get("NIM_PORT", "8000"))
+    _nim_launch = "/tmp/nim_launch.sh"
+    if not os.path.exists(_nim_launch):
+        print(f"  ✗  {_nim_launch} not found — deploy nim_launch.sh first"); sys.exit(1)
+    info(f"Image: {_nim_image} | Port: {_nim_port} | Container: cosmos-nim")
+    _nim_env = {
+        **ENV,
+        "NGC_API_KEY":     NGC_API_KEY,
+        "MODEL":           _nim_short,
+        "IMAGE":           _nim_image,
+        "PORT":            str(_nim_port),
+        "CONTAINER_NAME":  "cosmos-nim",
+        "LOCAL_NIM_CACHE": os.environ.get("LOCAL_NIM_CACHE", os.path.expanduser("~/.cache/nim")),
+    }
+    rc = stream_cmd(["bash", _nim_launch], env=_nim_env, prefix="NIM │ ")
+    if rc != 0:
+        print(f"  ✗  NIM launch failed (rc={rc}). Logs: /tmp/nim_launch.log + docker logs cosmos-nim"); sys.exit(1)
+    # Point Gradio at the NIM container by overriding VLLM_BASE_URL.
+    os.environ["VLLM_BASE_URL"] = f"http://localhost:{_nim_port}/v1"
+    ok(f"NIM container live at http://localhost:{_nim_port}/v1")
 
 # ── Step 9b: vLLM server auto-start (BUG-VLLM-AUTOSTART) ─────────────────────
 # In vLLM mode Gradio connects to localhost:8000. If vLLM isn't running, the first

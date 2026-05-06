@@ -826,8 +826,10 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         ]
         print(f"[vllm/nemotron] video_url: file://{_nem_path}", flush=True)
     else:
-        print(f"[vllm] Extracting frames fps={fps} max=8", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
+        # NIM container hard-caps at 5 images/prompt; vLLM has no such cap.
+        _max_frames = 5 if INFERENCE_BACKEND == "nim_local" else 8
+        print(f"[vllm] Extracting frames fps={fps} max={_max_frames}", flush=True)
+        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
         if not frames_b64:
             msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
@@ -1142,22 +1144,9 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
     yield "", _status_html(["run", "wait", "wait", "wait", "wait"],
                            {"elapsed_s": _elapsed()}), gr.update()
 
-    # NIM local Docker — not yet supported (container hard-caps at 5 images/prompt,
-    # incompatible with the multi-frame payload format used here).
-    if INFERENCE_BACKEND == "nim_local":
-        msg = (
-            "[NIM local Docker] Not yet supported.\n\n"
-            "The NIM container enforces a 5-image limit per prompt; this demo sends up to 8 "
-            "video frames. Support will be added once per-frame token packing is implemented.\n\n"
-            "Use HF Transformers or vLLM backend instead."
-        )
-        _log_run(model_id, total_s=_elapsed(), status="not-supported", display_label=display_label)
-        yield msg, _status_html(
-            ["ok", "wait", "wait", "wait", "wait"],
-            {"elapsed_s": _elapsed(), "backend": "NIM"},
-            steps=VLLM_STEPS,
-        ), _table_html()
-        return
+    # NIM local Docker is served by `_run_vllm_inference` via the OpenAI-compatible
+    # client at VLLM_BASE_URL. The NIM container enforces a 5-image-per-prompt cap;
+    # frame clamping is applied below at extraction time when INFERENCE_BACKEND=nim_local.
 
     if _is_nim(model_id):
         yield from _run_nim_inference(
