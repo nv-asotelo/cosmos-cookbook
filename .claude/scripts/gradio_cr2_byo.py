@@ -324,6 +324,37 @@ CHECKPOINT_PRESETS = [
 _nim_api_id = _cfg["nim"] or ""
 CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 
+# When running in NIM mode, the HF quantization variants (FP8 / NVFP4 / BF16)
+# are stale artifacts — the NIM container ships its own fixed quantization, so
+# all four entries collapse to the running NIM. Replace the dropdown with the
+# upstream VLM NIM catalog from
+#   https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html
+# (cross-referenced against KNOWN_VLM_NIMS in ~/.claude/scripts/nim_catalog.py).
+# We skip the docker-manifest probe at module-load to keep Gradio startup snappy
+# — probing happens at switch time when the user actually wants to swap models.
+_NIM_CATALOG = []
+if INFERENCE_BACKEND == "nim_local":
+    try:
+        # Catalog helper sits next to this script (and is also scp'd to /tmp/).
+        for _p in (os.path.dirname(os.path.abspath(__file__)), "/tmp"):
+            if _p and _p not in sys.path:
+                sys.path.insert(0, _p)
+        from nim_catalog import list_available_nims, KNOWN_VLM_NIMS  # type: ignore
+        _NIM_CATALOG = list_available_nims(
+            ngc_api_key=NGC_API_KEY,
+            vram_mb=None,           # don't VRAM-filter at startup; show everything supported
+            use_upstream=True,      # fetch docs.nvidia.com — this is the agent's source of truth
+            do_probe=False,         # probe lazily on switch (avoids 10-30s startup penalty)
+        )
+        if not _NIM_CATALOG:
+            # Network unreachable or upstream removed every family we know — fall
+            # back to the static slug map so the user is not stranded.
+            _NIM_CATALOG = list(KNOWN_VLM_NIMS)
+        CHECKPOINT_PRESETS = [(n.label, f"nim://{n.served_model_id}") for n in _NIM_CATALOG]
+        print(f"[nim_local] catalog: {len(_NIM_CATALOG)} VLM NIMs from {len([n for n in _NIM_CATALOG])} entries", flush=True)
+    except Exception as _e:
+        print(f"[nim_local] catalog fetch failed ({_e}); keeping default presets", flush=True)
+
 # ── vLLM dropdown: all variants across all model sizes ─────────────────────────
 # In vLLM mode the checkpoint dropdown exposes every quantization across 2B/8B/32B.
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
@@ -379,6 +410,14 @@ if INFERENCE_BACKEND == "vllm":
         "32B":     "CR2-32B BF16",
     }
     _VLLM_DD_DEFAULT = _VLLM_DD_MAP.get(MODEL_SIZE, "CR2-8B BF16")
+elif INFERENCE_BACKEND == "nim_local" and _NIM_CATALOG:
+    # Default to the currently-served NIM (whichever one the running container
+    # reports via /v1/models). If we can't match, fall back to first entry.
+    _matched = next(
+        (n.label for n in _NIM_CATALOG if n.served_model_id == (_SERVER_MODEL_ID or "")),
+        None,
+    )
+    _VLLM_DD_DEFAULT = _matched or CHECKPOINT_PRESETS[0][0]
 else:
     _VLLM_DD_DEFAULT = CHECKPOINT_PRESETS[0][0]
 
@@ -1808,6 +1847,114 @@ def _on_download_and_load(label):
     yield from _vllm_swap_yields(label, local_path, hf_id)
 
 
+# ── NIM runtime swap ──────────────────────────────────────────────────────────
+def _nim_swap_banner(kind: str, label: str, msg: str = "", elapsed: float = 0) -> str:
+    palette = {
+        "info":    ("#1e3a5f", "#60a5fa", "#dbeafe", "↻"),
+        "warn":    ("#3b2e0f", "#fbbf24", "#fef3c7", "⏳"),
+        "ok":      ("#0f3a1a", "#76b900", "#bbf7d0", "✓"),
+        "error":   ("#450a0a", "#f87171", "#fee2e2", "✗"),
+    }
+    bg, border, color, icon = palette.get(kind, palette["info"])
+    elapsed_str = f" · {elapsed:.0f}s" if elapsed else ""
+    return (
+        f'<div style="background:{bg};border:1px solid {border};border-radius:6px;'
+        f'padding:10px 14px;font-size:13px;color:{color};margin:4px 0">'
+        f'{icon} <b>NIM swap → {label}</b>{elapsed_str}'
+        f'{("<br>" + msg) if msg else ""}</div>'
+    )
+
+
+def _on_nim_swap(label: str):
+    """Stop the cosmos-nim container and relaunch it serving the selected NIM.
+    Yields (banner_html,) progress updates for the Gradio frontend."""
+    import time as _time
+    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID  # updated after swap completes
+
+    # Locate the catalog entry for the selected label.
+    target = None
+    for n in _NIM_CATALOG:
+        if n.label == label:
+            target = n
+            break
+    if target is None:
+        yield _nim_swap_banner("error", label, "Label not found in NIM catalog. Refresh Gradio after editing nim_catalog.py.")
+        return
+
+    if target.served_model_id == (_SERVER_MODEL_ID or ""):
+        yield _nim_swap_banner("ok", label, "This NIM is already running — nothing to swap.")
+        return
+
+    if not NGC_API_KEY:
+        yield _nim_swap_banner("error", label, "NGC_API_KEY not set in the Gradio process environment. Restart Gradio with the key exported.")
+        return
+
+    nim_launch = "/tmp/nim_launch.sh"
+    if not os.path.exists(nim_launch):
+        nim_launch_alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nim_launch.sh")
+        if os.path.exists(nim_launch_alt):
+            nim_launch = nim_launch_alt
+        else:
+            yield _nim_swap_banner("error", label, "nim_launch.sh missing on the target. Re-run /byo-video setup.")
+            return
+
+    t0 = _time.time()
+    yield _nim_swap_banner("warn", label, "Stopping current NIM container (cosmos-nim)…", _time.time() - t0)
+
+    try:
+        subprocess.run(["docker", "rm", "-f", "cosmos-nim"], capture_output=True, timeout=30)
+    except Exception as e:
+        yield _nim_swap_banner("error", label, f"Failed to stop existing container: {e}", _time.time() - t0)
+        return
+
+    yield _nim_swap_banner("warn", label,
+                           f"Pulling + starting <code>{target.image}</code>… first pull can take 10-30 min.",
+                           _time.time() - t0)
+
+    env = {
+        **os.environ,
+        "NGC_API_KEY": NGC_API_KEY,
+        "MODEL": target.short_id,
+        "IMAGE": target.image,
+        "PORT": "8000",
+        "CONTAINER_NAME": "cosmos-nim",
+        "LOCAL_NIM_CACHE": os.path.expanduser(os.environ.get("LOCAL_NIM_CACHE", "~/.cache/nim")),
+    }
+
+    proc = subprocess.Popen(
+        ["bash", nim_launch],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=env,
+    )
+    last_yield = _time.time()
+    last_line = ""
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            last_line = line.strip()[:240]
+            now = _time.time()
+            if now - last_yield > 8:  # throttle Gradio updates
+                yield _nim_swap_banner("warn", label, f"<code style='font-size:11px'>{last_line}</code>", now - t0)
+                last_yield = now
+    rc = proc.wait()
+    if rc != 0:
+        yield _nim_swap_banner("error", label, f"nim_launch.sh exited rc={rc}. Last log: <code>{last_line}</code>", _time.time() - t0)
+        return
+
+    # Refresh the cached served model id from /v1/models.
+    try:
+        import urllib.request as _ur, json as _json
+        with _ur.urlopen(f"{VLLM_BASE_URL}/models", timeout=5) as r:
+            _SERVER_MODEL_ID = _json.loads(r.read())["data"][0]["id"]
+            _NIM_LOCAL_MODEL_ID = _SERVER_MODEL_ID
+    except Exception as e:
+        yield _nim_swap_banner("warn", label, f"Container is up but /v1/models query failed ({e}). Reloading the page should resolve.", _time.time() - t0)
+        return
+
+    yield _nim_swap_banner("ok", label,
+                           f"Now serving <b>{_SERVER_MODEL_ID}</b> on <code>{VLLM_BASE_URL}</code>.",
+                           _time.time() - t0)
+
+
 # ── HF auth helpers ───────────────────────────────────────────────────────────
 def _hf_apply_token(token_val):
     """Apply an HF token to the running process and HF token cache."""
@@ -2093,17 +2240,28 @@ with gr.Blocks(
             outputs=[backend_warn, vllm_url_box],
         )
 
+        _is_nim_local = INFERENCE_BACKEND == "nim_local"
+        _ckpt_label = "VLM NIM" if _is_nim_local else "Checkpoint"
+        _ckpt_info = (
+            "VLM NIMs supported on this target. Source: "
+            "docs.nvidia.com/nim/vision-language-models/latest/introduction.html. "
+            "Pick a different NIM and click 'Switch to selected NIM' to swap the "
+            "running container — pull + load takes 5-15 min on first run."
+            if _is_nim_local else
+            "Preset checkpoints — changing this in vLLM mode reloads the server"
+        )
         with gr.Row():
             checkpoint_dd = gr.Dropdown(
-                label="Checkpoint",
+                label=_ckpt_label,
                 choices=[p[0] for p in CHECKPOINT_PRESETS],
                 value=_VLLM_DD_DEFAULT,
-                info="Preset checkpoints — changing this in vLLM mode reloads the server",
+                info=_ckpt_info,
             )
             custom_ckpt = gr.Textbox(
                 label="Custom Checkpoint ID (overrides dropdown)",
                 placeholder="nvidia/Cosmos-Reason2-8B  or  /path/to/local",
                 value="",
+                visible=not _is_nim_local,
             )
 
         _vllm_mode = INFERENCE_BACKEND == "vllm"
@@ -2119,6 +2277,22 @@ with gr.Blocks(
         if not _vllm_mode:
             vllm_swap_banner = gr.HTML(value="", visible=False)
             download_load_btn = gr.Button(visible=False)
+
+        # NIM runtime swap: stop the cosmos-nim container, run nim_launch.sh
+        # with the new MODEL short-id, wait for /v1/models. Banner reports
+        # progress + final status. Only visible in nim_local mode.
+        with gr.Row(visible=_is_nim_local):
+            nim_swap_banner = gr.HTML(value="", visible=_is_nim_local)
+            nim_swap_btn = gr.Button(
+                "↻ Switch to selected NIM",
+                variant="primary",
+                visible=_is_nim_local,
+                scale=0,
+                min_width=240,
+            )
+        if not _is_nim_local:
+            nim_swap_banner = gr.HTML(value="", visible=False)
+            nim_swap_btn = gr.Button(visible=False)
 
         with gr.Row():
             system_box = gr.Textbox(label="System Prompt",  value=DEFAULT_SYSTEM, lines=2)
@@ -2353,6 +2527,12 @@ with gr.Blocks(
             fn=_on_download_and_load,
             inputs=[checkpoint_dd],
             outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
+        )
+    elif INFERENCE_BACKEND == "nim_local":
+        nim_swap_btn.click(
+            fn=_on_nim_swap,
+            inputs=[checkpoint_dd],
+            outputs=[nim_swap_banner],
         )
 
     def resolve_model_id(ckpt_name, custom_val):

@@ -454,14 +454,29 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). This sprint targets **horde@10.57.233.111** only; Brev and local NIM paths are follow-on work.
 
+**Source of truth for available VLM NIMs — fetch this URL every time the user selects NIM:**
+
+> [https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html](https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html)
+
+The `~/.claude/scripts/nim_catalog.py` helper does this automatically (and is also deployed to `/tmp/nim_catalog.py` on the target). The agent must:
+
+1. **In the Phase 1 picker (main session)** — when the user selects "NIM (local Docker)" as the backend, run `python3 ~/.claude/scripts/nim_catalog.py upstream` to refresh the canonical model list from the URL above. If a model name appears upstream that is NOT in `KNOWN_VLM_NIMS` (the slug map inside `nim_catalog.py`), surface a one-line note to the user (e.g., *"Heads-up: docs added `Foo VLM`; the byo-video skill doesn't know its nvcr.io short-id yet — file a one-line PR adding it to KNOWN_VLM_NIMS, or use Custom Checkpoint ID."*).
+2. **In observer Phase 4 (script deploy)** — deploy `nim_catalog.py` alongside the other scripts (see deploy block below).
+3. **In runtime debug (the morning runtime-agent loop)** — re-run `nim_catalog.py upstream` each session start to detect upstream catalog changes (deprecations, new models, version bumps).
+
+**Runtime NIM swap (Gradio UI):** the Advanced Settings dropdown lists every VLM NIM that survives the upstream-cross-reference. When the user picks a different NIM and clicks **↻ Switch to selected NIM**, the Gradio app stops `cosmos-nim`, runs `nim_launch.sh` with the new `MODEL` env, polls `/v1/models`, and refreshes its in-process `_SERVER_MODEL_ID`. No Gradio restart needed.
+
 **Required env on the target:**
 - `NGC_API_KEY` (must start with `nvapi-`) — used by both `docker login nvcr.io` and the running container
 - `HF_TOKEN` — **not needed**; NIM ships the model
 
-**Deploy `nim_launch.sh` alongside the other scripts (Phase 4 step 1):**
+**Deploy `nim_launch.sh` AND `nim_catalog.py` alongside the other scripts (Phase 4 step 1):**
 ```bash
-brev exec <name> "python3 -c \"import base64; open('/tmp/nim_launch.sh','wb').write(base64.b64decode('<B64_NIM>'))\""
+# nim_launch.sh
+brev exec <name> "python3 -c \"import base64; open('/tmp/nim_launch.sh','wb').write(base64.b64decode('<B64_NIM_SH>'))\""
 brev exec <name> "chmod +x /tmp/nim_launch.sh"
+# nim_catalog.py — used by Gradio at startup AND by the runtime agent
+brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').write(base64.b64decode('<B64_NIM_CATALOG>'))\""
 ```
 (For SSH targets: replace `brev exec <name>` with `ssh -i ~/.ssh/id_ed25519 <user@host>`.)
 
