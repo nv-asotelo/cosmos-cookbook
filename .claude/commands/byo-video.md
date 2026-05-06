@@ -881,6 +881,58 @@ Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+).
 
 ---
 
+## VLM NIM Catalog (for `INFERENCE_BACKEND=nim_local`)
+
+Canonical catalog: `~/.claude/scripts/nim_catalog.py` → `KNOWN_VLM_NIMS`. The agent walks BOTH `https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html` AND every versioned release-notes page in `KNOWN_RELEASE_VERSIONS` to keep older containers (e.g. Cosmos Reason1 7B) discoverable when a newer release drops them from the introduction table. When a name appears upstream that is NOT in `KNOWN_VLM_NIMS`, surface it to the user as a one-line PR-this hint.
+
+Two catalogs to keep separate:
+
+| Catalog | URL | What it lists | Auth |
+|---|---|---|---|
+| **Self-host Docker images** (used by `nim_local`) | `nvcr.io/nim/<vendor>/<short-id>:latest` (entitlements at `docs.nvidia.com/nim/...`) | Containers you can `docker pull` and run on your own GPU | NGC_API_KEY (`nvapi-…`) |
+| **Hosted serverless API** (separate path) | `integrate.api.nvidia.com/v1/chat/completions` (catalog at `build.nvidia.com`) | Subset of NIMs NVIDIA serves for you | NGC_API_KEY |
+
+CR2-2B is in the Docker catalog only. CR2-8B is in both. The "[NIM] Skipped — not in public NVCF catalog" message in Gradio refers to the hosted-API catalog and does NOT mean the local container is unavailable.
+
+### Video-capable NIMs (relevant to `/byo-video`)
+
+| Family | Short-id | Min VRAM | Notes |
+|---|---|---|---|
+| Cosmos Reason2 | `cosmos-reason2-2b` | 20 GB | FP8; reasoning; temp ≥ 0.3 to avoid `<think>+EOS` bug at greedy decode. Container only — not on hosted API. |
+| Cosmos Reason2 | `cosmos-reason2-8b` | 40 GB | FP8; reasoning; Efficient Video Sampling (EVS); same temp constraint as 2B. Container + hosted API. |
+| Cosmos Reason2 | `cosmos-reason2-32b` | 80 GB | May require allowlisting via build.nvidia.com. |
+| Cosmos Reason1 | `cosmos-reason1-7b` | 24 GB | Older release; preserved via release-notes walk. |
+| Nemotron | `nemotron-3-nano-omni-30b-a3b-reasoning` | 40 GB | Specialized container; release 1.7.0+. |
+| Nemotron | `nemotron-nano-12b-v2-vl` | 40 GB | Image+video; vLLM-style backend. |
+| Mistral | `ministral-14b-instruct-2512` | 40 GB | Tool calling; 100k context on L40S. |
+| Qwen | `qwen3.5-35b-a3b` | 40 GB | MoE; high-concurrency video constraints. |
+| Qwen | `qwen3.5-122b-a10b` | 140 GB | MoE; KV cache saturation risk on long video. Multi-GPU. |
+| Qwen | `qwen3.5-397b-a17b` | 400 GB | Video not enabled by default — config flag required. Multi-node. |
+| Qwen | `qwen3.6-35b-a3b` | 40 GB | MoE; SGLang backend. |
+| Gemma | `gemma-4-31b-it` | 40 GB | Structured output not supported. |
+
+### Image-only NIMs (filtered OUT of `/byo-video` by `list_video_nims()`)
+
+`mistral-medium-3.5-128b` · `mistral-small-4-119b-2603` · `mistral-small-3.2-24b-instruct-2506` · `mistral-large-3-675b-instruct-2512` · `kimi-k2.5` · `kimi-k2.6` · `qwen3.6-27b` · `llama-3.1-nemotron-nano-vl-8b-v1` · `llama-3.2-11b-vision-instruct` · `llama-3.2-90b-vision-instruct` · `llama-4-maverick-17b-128e-instruct` · `llama-4-scout-17b-16e-instruct` · `nemotron-parse-v1.2` · `nemotron-3-content-safety`
+
+Adding a new NIM:
+
+1. Find its row in either the latest [introduction](https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html) or a [release notes](https://docs.nvidia.com/nim/vision-language-models/1.7.0/release-notes.html) page.
+2. Read the model card linked from that row — note image short-id, served model ID, VRAM minimum, and whether the card mentions multi-frame video input.
+3. Append a new `NimImage(...)` line to `KNOWN_VLM_NIMS` in `~/.claude/scripts/nim_catalog.py` with `supports_video=` set correctly. Append the new release version to `KNOWN_RELEASE_VERSIONS` if it's newer than the latest entry.
+4. Mirror the change to `<repo>/.claude/scripts/nim_catalog.py` and commit.
+
+Querying from the agent or runbook:
+
+```bash
+python3 ~/.claude/scripts/nim_catalog.py upstream      # raw upstream model-name list
+python3 ~/.claude/scripts/nim_catalog.py list --no-probe  # full known catalog as JSON
+python3 -c "from nim_catalog import list_video_nims; \
+            [print(n.short_id, n.min_vram_mb) for n in list_video_nims()]"
+```
+
+---
+
 ## VRAM auto-selection
 
 The setup script (`byo_video_setup.py`) handles all of this automatically. Rules as of 2026-04-21:
