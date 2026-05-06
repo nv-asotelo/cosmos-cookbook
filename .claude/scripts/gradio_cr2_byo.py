@@ -2274,7 +2274,7 @@ with gr.Blocks(
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
                 label="Disable resolution auto-cap",
-                value=INFERENCE_BACKEND in ("vllm", "nim_local"),
+                value=INFERENCE_BACKEND != "hf",
                 info=(
                     "Advanced users only. Bypasses automatic max_pixels reduction. "
                     "Expect long and inconsistent load times, OOM crashes, silent failures, "
@@ -2364,27 +2364,27 @@ with gr.Blocks(
         n_frames = max(1, int(m.duration_s * fps_val))
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                     f"{n_frames} frames sampled")
-        # vLLM is 100-500x faster than HF — HF-based timing estimates are meaningless.
-        if INFERENCE_BACKEND == "vllm":
+        # Fast backends (vLLM, NIM) are 100-500x faster than HF — HF-based
+        # timing estimates are meaningless and auto-cap is unnecessary.
+        if INFERENCE_BACKEND in ("vllm", "nim_local"):
             return info_str, gr.update()
         est_s_full = _est_tokens(n_frames, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(n_frames, DEFAULT_MAX_PIXELS)
         if not disable_autocap:
-            if capped_px < DEFAULT_MAX_PIXELS:
-                info_str += (f"\n> ⚠ **Auto-cap:** {capped_px:,} px/frame"
-                             f" → ~{est_s_capped:.0f}s est (was ~{est_s_full:.0f}s)")
-                return info_str, gr.update(value=capped_px)
-        else:
+            # Auto-cap ENABLED — the exception (HF and other unoptimized backends).
             if capped_px < DEFAULT_MAX_PIXELS:
                 ratio = est_s_full / max(est_s_capped, 1.0)
                 info_str += (
-                    f"\n> ⚠ **Auto-cap DISABLED** — ~{est_s_full:.0f}s est · "
-                    f"**~{ratio:.1f}× longer** than auto-cap (~{est_s_capped:.0f}s)"
+                    f"\n> ⚠ **Auto-cap ENABLED** · capping at {capped_px:,} px/frame "
+                    f"→ ~{est_s_capped:.0f}s est "
+                    f"(full-res would be ~{est_s_full:.0f}s, **~{ratio:.1f}× slower**)"
                 )
-            else:
-                info_str += f"\n> ℹ Auto-cap not needed for this video · ~{est_s_full:.0f}s est"
+                return info_str, gr.update(value=capped_px)
+            info_str += f"\n> ✓ **Auto-cap ENABLED** · cap not needed for this clip · ~{est_s_full:.0f}s est"
             return info_str, gr.update()
-        return info_str + f" · ~{est_s_full:.0f}s est", gr.update()
+        # Auto-cap DISABLED — the default. Generic + expressive.
+        info_str += "\n> ✓ **Full resolution** — every frame delivered at the native pixel count above"
+        return info_str, gr.update()
 
     video_input.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
@@ -2400,27 +2400,27 @@ with gr.Blocks(
             info_str = f"**{w}×{h}** · {img.mode} image"
         except Exception:
             return "*Image info unavailable*", gr.update()
-        # vLLM serves at high throughput; HF-backend timing math doesn't apply.
-        if INFERENCE_BACKEND == "vllm":
+        # Fast backends (vLLM, NIM) serve at high throughput; HF-backend
+        # timing math doesn't apply and auto-cap is unnecessary.
+        if INFERENCE_BACKEND in ("vllm", "nim_local"):
             return info_str, gr.update()
         est_s_full = _est_tokens(1, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(1, DEFAULT_MAX_PIXELS)
         capped_px = min(capped_px, IMAGE_AUTO_CAP_MAX)
         if not disable_autocap:
-            if capped_px < DEFAULT_MAX_PIXELS:
-                info_str += (f"\n> ⚠ **Auto-cap:** {capped_px:,} px"
-                             f" → ~{est_s_capped:.0f}s est (was ~{est_s_full:.0f}s)")
-                return info_str, gr.update(value=capped_px)
-        else:
+            # Auto-cap ENABLED — the exception (HF and other unoptimized backends).
             if capped_px < DEFAULT_MAX_PIXELS:
                 ratio = est_s_full / max(est_s_capped, 1.0)
                 info_str += (
-                    f"\n> ⚠ **Auto-cap DISABLED** — ~{est_s_full:.0f}s est · "
-                    f"**~{ratio:.1f}× longer** than auto-cap (~{est_s_capped:.0f}s)"
+                    f"\n> ⚠ **Auto-cap ENABLED** · capping at {capped_px:,} px "
+                    f"→ ~{est_s_capped:.0f}s est "
+                    f"(full-res would be ~{est_s_full:.0f}s, **~{ratio:.1f}× slower**)"
                 )
-            else:
-                info_str += f"\n> ℹ Auto-cap not needed · ~{est_s_full:.0f}s est"
+                return info_str, gr.update(value=capped_px)
+            info_str += f"\n> ✓ **Auto-cap ENABLED** · cap not needed for this image · ~{est_s_full:.0f}s est"
             return info_str, gr.update()
+        # Auto-cap DISABLED — the default. Generic + expressive.
+        info_str += "\n> ✓ **Full resolution** — image delivered at the native pixel count above"
         return info_str, gr.update()
 
     image_input.change(on_image_upload, inputs=[image_input, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
