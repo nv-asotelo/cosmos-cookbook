@@ -70,10 +70,18 @@ Display initial panel:
 Load `AskUserQuestion` via ToolSearch: `query: "select:AskUserQuestion"`, then fire all 3
 questions in a single call (see PICKER section below for the full call).
 
-**Q3 options are built dynamically from PHASE 0 results.** If PHASE 0 found a stopped
-instance with a compatible GPU for the selected model, prepend it as an option:
-`{ label: "Restart <name> (<GPU> · existing rate)", description: "Resume stopped instance — faster to SHELL READY" }`
-This option maps to `DEPLOY_TARGET=brev:<name>` (restart path, not fresh provision).
+**Q3 always offers four options.** The first slot is dynamic; the remaining three are fixed:
+
+- **Slot 1 (dynamic):** If PHASE 0 found exactly one stopped instance with a compatible GPU for
+  the selected model, use: `{ label: "Restart <name> (<GPU>)", description: "Resume stopped — faster to SHELL READY" }`
+  mapping to `DEPLOY_TARGET=brev:<name>`. If multiple stopped instances match, pick the one
+  whose GPU tier best fits MODEL_SIZE (prefer H200 for 32B/C3-32B, H100 for all others).
+  If no stopped instances match, use `{ label: "New Brev instance", description: "Agent provisions appropriate GPU tier" }`.
+- **Slot 2 (fixed):** `{ label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" }` — always present unless Slot 1 is already "New Brev".
+- **Slot 3 (fixed):** `{ label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" }` → follow-up AskUserQuestion for host.
+- **Slot 4 (fixed):** `{ label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally first" }` → `DEPLOY_TARGET=local`.
+
+This ensures SSH and Local are always reachable regardless of how many Brev instances exist.
 
 Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`,
 `DEPLOY_TARGET` per the answer→env var mapping table.
@@ -120,10 +128,17 @@ AskUserQuestion({
       header: "Environment",
       multiSelect: false,
       options: [
+        // Slot 1: best stopped Brev instance for selected model, OR "New Brev instance" if none
+        { label: "Restart <name> (<GPU>)", description: "Resume stopped instance — faster to SHELL READY" },
+        // OR if no stopped instance matches:
+        // { label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" },
+
+        // Slot 2: always present (unless Slot 1 is already "New Brev instance")
         { label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" },
-        { label: "Existing Brev", description: "Provide instance name when prompted" },
-        { label: "SSH target", description: "Provide user@host or IP when prompted" },
-        { label: "Local machine", description: "Agent runs nvidia-smi locally" }
+
+        // Slots 3 & 4: always present — never omit these
+        { label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" },
+        { label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally" }
       ]
     }
   ]
@@ -437,9 +452,27 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 Record `SETUP_DISPATCHED_AT` = now.
 
-Launch setup (one Bash call — nohup so brev exec returns immediately):
+**Pre-launch VRAM check (mandatory — runs before setup):**
 ```bash
-brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+brev exec <name> "nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1"
+```
+(For SSH: replace `brev exec <name>` with `ssh -i ~/.ssh/id_ed25519 <user@host>`.)
+
+Look up `MODEL_GPU_REQUIREMENTS[MODEL_SIZE].min_vram` in MB (multiply GB values by 1000):
+`2B`→40000 · `8B`→80000 · `32B`→141000 · `C3-8B`→40000 · `C3-32B`→141000 · `NEM-12B`→40000 · `QW3-2B`→8000 · `QW3-8B`→20000 · `QW3-32B`→64000 · `C3-super`→141000
+
+If `free_vram_mb < min_vram_mb`:
+  Write to `/tmp/byo_video_observer_result.json` on the LOCAL machine and exit immediately:
+  ```json
+  {"status":"failed","phase":5,"error":"insufficient_vram","vram_free_mb":<free>,"vram_needed_mb":<needed>,"model_size":"<MODEL_SIZE>","instance":"<name>"}
+  ```
+  Do NOT launch setup. The main session handles model switching via AskUserQuestion (see HALT-AND-ASK).
+
+If `free_vram_mb >= min_vram_mb`: proceed with the user's requested model — do not substitute.
+
+Launch setup (one Bash call — nohup so brev exec returns immediately). Pass `MODEL_NAME` and `MODEL_SIZE` explicitly so the setup script does not auto-select a different model:
+```bash
+brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 **Log tail loop (every 30s):** Tail the log, print a compact status line (not a full panel —
@@ -537,7 +570,7 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "python3 -c \"import base64; open('/tmp/gra
 
 Launch setup:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Tail logs:
@@ -587,6 +620,25 @@ Options:
 On "Retry": spawn a new observer with the same state, `DEPLOY_TARGET=brev:<existing-name>`.
 On "New instance": delete the failed instance, spawn a new observer with `DEPLOY_TARGET=brev:new`.
 On "Abort": `brev delete <name>`, exit skill.
+
+**Insufficient VRAM — triggered by main session detecting `"insufficient_vram"` in failure JSON:**
+
+Read `vram_free_mb` and `vram_needed_mb` from the failure JSON. Build options from MODEL_GPU_REQUIREMENTS — include only models whose `min_vram_mb` ≤ `vram_free_mb`.
+
+```
+AskUserQuestion: "The requested model (<MODEL_SIZE>, needs ~<vram_needed_mb/1000>GB VRAM) won't fit on
+<instance> (<vram_free_mb/1000>GB free). Switch to a model that fits, or abort?"
+Options (show only what fits — examples for 40GB free):
+  "Cosmos Reason2 2B (needs ~40GB)"     → MODEL_ID=nvidia/Cosmos-Reason2-2B, MODEL_SIZE=2B
+  "Cosmos3-Nano-Reasoner (needs ~40GB)" → MODEL_ID=nvidia/Cosmos3-Nano-Reasoner, MODEL_SIZE=C3-8B
+  "Abort — exit without deleting instance"
+```
+
+On model switch: update MODEL_ID, MODEL_SIZE, MODEL_NAME to the new selection, respawn observer.
+On Abort: exit skill. Do not delete the instance (user may want it for other work).
+
+**Rule:** Never silently substitute a different model. If the requested model does not fit and there
+is no confirmed user-approved alternative, always ask. A silent downgrade is a broken demo.
 
 **Rule:** For any exception not listed here, apply the closest matching template. The goal is
 one clear question with 2–3 concrete options. Never ask open-ended questions mid-deployment.
