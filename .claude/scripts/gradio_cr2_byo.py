@@ -268,6 +268,9 @@ _LABEL_TO_MODEL_SIZE = {
 }
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
+# .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
+_MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
+MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 if MODEL_SIZE not in MODEL_CONFIGS:
     print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
@@ -321,6 +324,7 @@ _ALL_VARIANTS_DD_RAW = [
     ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
     ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner",                 "nvidia/Cosmos3-Nano-Reasoner",                   "bf16"),
     ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
+    ("C3-Super BF16", "Cosmos3-Super-Reasoner",               "nvidia/Cosmos3-Super-Reasoner",                  "bf16"),
     ("CR2-2B BF16",   "Cosmos-Reason2-2B",                    "nvidia/Cosmos-Reason2-2B",                       "bf16"),
     ("CR2-2B FP8",    "Cosmos-Reason2-2B-FP8",                "nvidia/Cosmos-Reason2-2B-FP8",                   "fp8"),
     ("CR2-2B NVFP4",  "Cosmos-Reason2-2B-NVFP4",              "nvidia/Cosmos-Reason2-2B-NVFP4",                 "nvfp4"),

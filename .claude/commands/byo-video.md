@@ -381,6 +381,19 @@ On SHELL READY: update checklist `[✓] Shell ready`, proceed to PHASE 4.
 
 Read and base64-encode each script. One Bash call per file. One Bash call per deploy.
 
+**Step 0 — Auto-deploy HF token (before scripts, always):**
+Check if a cached HF token exists locally. If so, deploy it to the instance so the setup script can authenticate without user interaction.
+```bash
+# Check local token
+cat ~/.cache/huggingface/token 2>/dev/null || echo "NO_TOKEN"
+```
+If a token is found (starts with `hf_`):
+```bash
+brev exec <name> "mkdir -p ~/.cache/huggingface"
+brev exec <name> "echo <token> > ~/.cache/huggingface/token"
+```
+This prevents the Step 2 HF auth failure that requires a full setup restart.
+
 ```bash
 # Step 1: read + encode byo_video_setup.py (Bash call 1)
 python3 -c "import base64, sys; sys.stdout.write(base64.b64encode(open('/Users/asotelo/.claude/scripts/byo_video_setup.py','rb').read()).decode())"
@@ -595,7 +608,7 @@ one clear question with 2–3 concrete options. Never ask open-ended questions m
 | `QW3-32B` | 64 GB | `gpu-h100-sxm.1gpu-16vcpu-200gb` | $3.54/hr | — |
 | `C3-super` | TBD (32B) | `gpu-h200-sxm.1gpu-16vcpu-200gb` | $4.20/hr | — |
 
-> **TODO (next sprint):** `nvidia/Cosmos3-Super-Reasoner` is a 32B model (not the 2B edge model). The setup script currently maps unknown C3-super MODEL_SIZE to `Cosmos3-Reasoner-2B`. Add `C3-super` as an explicit alias for `C3-32B` in `byo_video_setup.py` MODEL_SIZE routing and update `MODEL_ID` mapping to `nvidia/Cosmos3-Super-Reasoner`. VRAM requirement ~141GB (H200 required).
+> **C3-super** is a native MODEL_SIZE key in both `byo_video_setup.py` and `gradio_cr2_byo.py`. Requires H200 SXM (141GB VRAM). VLLM_TIMEOUT is 420s for this size (32B torch.compile takes ~5 min).
 
 **32B and C3-32B — H200 only.** H100 80GB is insufficient. If the user has an existing H100 and selects 32B: warn them and offer to provision an H200.
 

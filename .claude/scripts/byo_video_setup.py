@@ -206,6 +206,9 @@ ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', ''
 HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
 MODEL_SIZE    = os.environ.get("MODEL_SIZE", "C3-2B").upper()
+# .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
+_MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
+MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 # Cosmos3-Reasoner uses cosmos-reason2 working dir until a dedicated repo is published.
 # Set COSMOS_DIR env var to override if the repo path changes.
 REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
@@ -672,7 +675,9 @@ if INFERENCE_BACKEND == "vllm":
             subprocess.Popen(_vllm_cmd, cwd=REASON2_DIR, env=_vllm_proc_env,
                              stdout=_vf, stderr=subprocess.STDOUT)
 
-        VLLM_TIMEOUT = 180
+        # 32B models need ~5 min for torch.compile + CUDA graph warmup.
+        _LARGE_MODEL_SIZES = {"32B", "C3-32B", "C3-super", "QW3-32B"}
+        VLLM_TIMEOUT = 420 if MODEL_SIZE in _LARGE_MODEL_SIZES else 180
         t_vllm = time.time()
         while time.time() - t_vllm < VLLM_TIMEOUT:
             try:
