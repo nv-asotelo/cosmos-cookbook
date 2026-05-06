@@ -36,6 +36,7 @@ POLL_INTERVAL = 30
 LOG_TAIL_LINES = 400
 SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 SSH_TIMEOUT = 15
+HANG_THRESHOLD_S = int(os.environ.get("BYO_VIDEO_HANG_THRESHOLD_S", "180"))
 
 STATE_FILE   = Path("/tmp/byo_video_runtime_state.json")
 ALERTS_FILE  = Path("/tmp/byo_video_runtime_alerts.jsonl")
@@ -102,12 +103,41 @@ ERROR_RULES = [
         "fix": "Set TORCH_COMPILE_DISABLE=1 and restart, or wait — first compile takes 2-5 min on 32B models.",
     },
     {
+        "name": "nim_api_error",
+        "patterns": [r"\[NIM ERROR\]"],
+        "severity": "high",
+        "summary": "NIM API call failed (NVCF endpoint).",
+        "fix": "Check NGC_API_KEY (must start with nvapi-), verify network can reach integrate.api.nvidia.com, confirm the model is in the NVCF catalog. NIM 2B = nvidia/cosmos-reason2-2b.",
+    },
+    {
+        "name": "vllm_runtime_error",
+        "patterns": [r"\[VLLM ERROR\]", r"\[vllm error\]"],
+        "severity": "high",
+        "summary": "vLLM inference call failed.",
+        "fix": "ssh <host> 'curl -sf localhost:8000/v1/models' to check vLLM. If down, restart it. Check /tmp/vllm_server.log on the remote for crash reason.",
+    },
+    {
         "name": "generic_traceback",
         "patterns": [r"^Traceback \(most recent call last\):"],
         "severity": "medium",
         "summary": "An unhandled exception was raised.",
         "fix": "Read the full traceback in /tmp/gradio_demo.log on the remote.",
     },
+]
+
+# Hang detection: temporal, not pattern-based. Inference is "started" when any of
+# these markers appears, "ended" when a completion or error marker appears.
+INFER_START_MARKERS = [
+    re.compile(r"\[infer\]\s+model="),       # HF backend kicks off
+    re.compile(r"\[vllm\]\s+endpoint="),     # vLLM backend kicks off
+    re.compile(r"\[nim\]\s+NGC_API_KEY"),    # NIM backend kicks off
+]
+INFER_END_MARKERS = [
+    re.compile(r"\[done\]\s+[\d.]+s"),        # HF success
+    re.compile(r"\[vllm done\]\s+[\d.]+s"),   # vLLM success
+    re.compile(r"\[nim done\]\s+[\d.]+s"),    # NIM success
+    re.compile(r"\[NIM ERROR\]"),             # NIM failure (counts as terminated)
+    re.compile(r"\[VLLM ERROR\]"),            # vLLM failure
 ]
 
 # gradio_cr2_byo.py emits one of three completion lines per inference:
@@ -132,28 +162,45 @@ def ssh_exec(remote, cmd):
         return -1, f"<ssh error: {e}>"
 
 
+_OFFSET_DEFAULTS = {
+    "log_offset": 0,
+    "result_mtime": 0,
+    "last_infer_start_ts": 0,
+    "last_completion_ts": 0,
+    "hang_alert_fired_for_start_ts": 0,
+}
+
+
 def _load_offset_record(remote):
-    """Returns dict {log_offset, result_mtime}. Migrates old bare-int schema."""
+    """Returns dict with all keys in _OFFSET_DEFAULTS. Migrates old bare-int schema."""
+    rec = dict(_OFFSET_DEFAULTS)
     if not OFFSET_FILE.exists():
-        return {"log_offset": 0, "result_mtime": 0}
+        return rec
     try:
         d = json.loads(OFFSET_FILE.read_text())
-        rec = d.get(remote, 0)
-        if isinstance(rec, int):
-            return {"log_offset": rec, "result_mtime": 0}
-        return {"log_offset": rec.get("log_offset", 0), "result_mtime": rec.get("result_mtime", 0)}
+        stored = d.get(remote, 0)
+        if isinstance(stored, int):
+            rec["log_offset"] = stored
+        elif isinstance(stored, dict):
+            for k in _OFFSET_DEFAULTS:
+                if k in stored:
+                    rec[k] = stored[k]
     except Exception:
-        return {"log_offset": 0, "result_mtime": 0}
+        pass
+    return rec
 
 
-def _save_offset_record(remote, log_offset, result_mtime):
+def _save_offset_record(remote, **updates):
+    """Merge `updates` into the remote's offset record."""
+    rec = _load_offset_record(remote)
+    rec.update(updates)
     d = {}
     if OFFSET_FILE.exists():
         try:
             d = json.loads(OFFSET_FILE.read_text())
         except Exception:
             pass
-    d[remote] = {"log_offset": log_offset, "result_mtime": result_mtime}
+    d[remote] = rec
     OFFSET_FILE.write_text(json.dumps(d))
 
 
@@ -166,13 +213,11 @@ def load_result_mtime(remote):
 
 
 def save_offset(remote, offset):
-    rec = _load_offset_record(remote)
-    _save_offset_record(remote, offset, rec["result_mtime"])
+    _save_offset_record(remote, log_offset=offset)
 
 
 def save_result_mtime(remote, mtime):
-    rec = _load_offset_record(remote)
-    _save_offset_record(remote, rec["log_offset"], mtime)
+    _save_offset_record(remote, result_mtime=mtime)
 
 
 def append_alert(alert):
@@ -438,6 +483,48 @@ def poll_once(remote, rate, session_id, model_id):
         append_alert(a)
         state["last_alert"] = a
         log("ALERT: gradio_cr2_byo process disappeared")
+
+    # ── Hang detection (temporal) ─────────────────────────────────────────────
+    # If we observe a backend start marker but no end marker has arrived within
+    # HANG_THRESHOLD_S, fire one inference_hung alert. Resets when next
+    # completion lands.
+    rec = _load_offset_record(remote)
+    last_start_ts = rec["last_infer_start_ts"]
+    last_end_ts   = rec["last_completion_ts"]
+    last_alerted_for = rec["hang_alert_fired_for_start_ts"]
+    now = int(time.time())
+
+    if log_size > last_offset or log_size < last_offset:
+        # We already processed log_tail above; reuse to scan markers
+        saw_start = any(p.search(log_tail) for p in INFER_START_MARKERS)
+        saw_end   = any(p.search(log_tail) for p in INFER_END_MARKERS)
+        if saw_start and now > last_start_ts:
+            last_start_ts = now
+            _save_offset_record(remote, last_infer_start_ts=last_start_ts)
+        if saw_end:
+            last_end_ts = now
+            _save_offset_record(remote, last_completion_ts=last_end_ts)
+
+    state["last_infer_start_ts"] = last_start_ts
+    state["last_completion_ts"]  = last_end_ts
+
+    if last_start_ts > last_end_ts:
+        elapsed_since_start = now - last_start_ts
+        state["pending_inference_s"] = elapsed_since_start
+        if elapsed_since_start > HANG_THRESHOLD_S and last_alerted_for != last_start_ts:
+            a = {
+                "ts": now,
+                "rule": "inference_hung",
+                "severity": "high",
+                "summary": f"Inference started {elapsed_since_start}s ago but no completion observed.",
+                "fix": "Likely network or API hang (NIM mode without reachable integrate.api.nvidia.com, vLLM not responding, or stuck preprocess). Check the latest backend marker in /tmp/gradio_demo.log on remote, kill the Gradio process, and relaunch.",
+                "trigger_line": f"(no [done]/[vllm done]/[nim done] within {HANG_THRESHOLD_S}s of last [infer]/[vllm]/[nim] start marker)",
+                "context": log_tail[-1000:],
+            }
+            append_alert(a)
+            state["last_alert"] = a
+            _save_offset_record(remote, hang_alert_fired_for_start_ts=last_start_ts)
+            log(f"ALERT: inference_hung — {elapsed_since_start}s since last start, no completion")
 
     state["alerts_total"] = count_lines(ALERTS_FILE)
     state["metrics_total"] = count_lines(METRICS_FILE)
