@@ -452,7 +452,7 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 **Only when `INFERENCE_BACKEND=nim_local`. Otherwise skip to Phase 5.**
 
-The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). This sprint targets **horde@10.57.233.111** only; Brev and local NIM paths are follow-on work.
+The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). Works on any reachable target — Brev, SSH host, or local Docker — provided NGC_API_KEY and Docker are present. The user supplies the target via the Phase 1 picker; the skill never assumes a default host.
 
 **Source of truth for available VLM NIMs — fetch this URL every time the user selects NIM:**
 
