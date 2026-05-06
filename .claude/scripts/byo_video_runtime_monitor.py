@@ -343,15 +343,20 @@ def count_lines(p):
 
 
 RESULT_JSON_PATH = "/tmp/byo_video_reason2_results.json"
+LOG_BYTE_CAP = 65536  # last 64KB of log per poll, max
 
 
 def poll_once(remote, rate, session_id, model_id):
+    # tail -c 65536 returns raw bytes from end-of-file (not lines). Combined
+    # with log_size and last_offset we slice the actual NEW bytes locally —
+    # avoids the duplicate-metric bug where detect_inferences re-fired on every
+    # [done] line in the tail each time log_size grew.
     bundle = (
         "echo '---PROCS---'; pgrep -af gradio_cr2_byo | head -3; "
         "echo '---PORT---'; ss -tlnp 2>/dev/null | grep 7860 | head -1; "
         "echo '---GPU---'; nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.free,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>&1 | head -1; "
         "echo '---LOGSIZE---'; stat -c %s /tmp/gradio_demo.log 2>/dev/null || echo 0; "
-        f"echo '---LOGTAIL---'; tail -{LOG_TAIL_LINES} /tmp/gradio_demo.log 2>/dev/null; "
+        f"echo '---LOGTAIL---'; tail -c {LOG_BYTE_CAP} /tmp/gradio_demo.log 2>/dev/null; "
         f"echo '---RESULT_MTIME---'; stat -c %Y {RESULT_JSON_PATH} 2>/dev/null || echo 0; "
         f"echo '---RESULT---'; cat {RESULT_JSON_PATH} 2>/dev/null"
     )
@@ -429,15 +434,27 @@ def poll_once(remote, rate, session_id, model_id):
             log(f"result json parse failed: {e}")
 
     last_offset = load_offset(remote)
-    if log_size > last_offset or log_size < last_offset:
-        # log_size < last_offset detects truncation (e.g., post-restart)
+    # Slice only NEW bytes. log_tail is the last LOG_BYTE_CAP bytes from the
+    # remote; new_content is the suffix of that representing what was added
+    # since last poll. Truncation (log_size < last_offset) → reset to full tail.
+    new_content = ""
+    log_changed = False
+    if log_size > last_offset:
+        delta = log_size - last_offset
+        new_content = log_tail[-delta:] if len(log_tail) >= delta else log_tail
         save_offset(remote, log_size)
-        for a in detect_errors(log_tail):
+        log_changed = True
+    elif log_size < last_offset:
+        new_content = log_tail
+        save_offset(remote, log_size)
+        log_changed = True
+
+    if log_changed:
+        for a in detect_errors(new_content):
             append_alert(a)
             log(f"ALERT [{a['severity']}] {a['rule']}: {a['summary']}")
             state["last_alert"] = a
-        new_metrics = detect_inferences(log_tail, session_id, model_id)
-        # Attach prompt/response from result JSON to the most recent metric (if any)
+        new_metrics = detect_inferences(new_content, session_id, model_id)
         if parsed_result and new_metrics:
             new_metrics[-1]["prompt"] = (parsed_result.get("prompt") or "")[:2000]
             new_metrics[-1]["response"] = (parsed_result.get("response") or "")[:8000]
@@ -494,10 +511,9 @@ def poll_once(remote, rate, session_id, model_id):
     last_alerted_for = rec["hang_alert_fired_for_start_ts"]
     now = int(time.time())
 
-    if log_size > last_offset or log_size < last_offset:
-        # We already processed log_tail above; reuse to scan markers
-        saw_start = any(p.search(log_tail) for p in INFER_START_MARKERS)
-        saw_end   = any(p.search(log_tail) for p in INFER_END_MARKERS)
+    if log_changed and new_content:
+        saw_start = any(p.search(new_content) for p in INFER_START_MARKERS)
+        saw_end   = any(p.search(new_content) for p in INFER_END_MARKERS)
         if saw_start and now > last_start_ts:
             last_start_ts = now
             _save_offset_record(remote, last_infer_start_ts=last_start_ts)
