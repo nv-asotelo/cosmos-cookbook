@@ -761,6 +761,13 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         t_run_start = time.time()
     _be_label = "NIM" if INFERENCE_BACKEND == "nim_local" else "VLLM"
 
+    # NIM-8B-FP8-THINK-EOS safety net: at greedy decode the FP8 model emits
+    # `<think>` then an EOS-like token, finishing in 2-3 tokens with no answer.
+    # Clamp to a small positive temperature to break the deterministic trap.
+    if INFERENCE_BACKEND == "nim_local" and temperature < 0.3:
+        print(f"[nim_local] Clamping temperature {temperature} → 0.3 (NIM-8B-FP8 <think>+EOS bug at greedy decode)", flush=True)
+        temperature = 0.3
+
     def _elapsed():
         return time.time() - t_run_start
 
@@ -2071,22 +2078,54 @@ with gr.Blocks(
                 label="Max output tokens",
             )
 
+        # NIM-8B-FP8-THINK-EOS: greedy decode (temp=0) on the FP8-quantized
+        # cosmos-reason2-8b NIM emits `<think>` then an EOS-like token, terminating
+        # before any reasoning or final answer is produced. Temperature ≥ ~0.3 breaks
+        # the trap by avoiding the deterministic post-`<think>` EOS path.
+        # build.nvidia.com NIM defaults for cosmos-reason2-8b: T=0.6, top_p=0.3, rep=1.2
+        _NIM_DEFAULTS = (0.6, 0.3, 1.2)
+        _is_nim = INFERENCE_BACKEND == "nim_local"
+        _default_temp = _NIM_DEFAULTS[0] if _is_nim else 0.0
+        _default_top_p = _NIM_DEFAULTS[1] if _is_nim else 1.0
+        _default_rep   = _NIM_DEFAULTS[2] if _is_nim else 1.05
+        nim_defaults_chk = gr.Checkbox(
+            label="Use build.nvidia.com parameter settings",
+            info="One-click apply: Temperature=0.6, Top P=0.3, Repetition Penalty=1.2 (cosmos-reason2-8b NIM defaults).",
+            value=_is_nim,
+        )
         with gr.Row():
             temp_slider = gr.Slider(
-                minimum=0.0, maximum=1.0, step=0.05, value=0.0,
+                minimum=0.0, maximum=1.0, step=0.05, value=_default_temp,
                 label="Temperature",
-                info="0 = deterministic. Higher = more creative/varied output.",
+                info=("0 = deterministic. Higher = more creative/varied output."
+                      + (" NIM mode: keep ≥ 0.3 — greedy decode triggers a <think>+EOS"
+                         " bug on the FP8-quantized 8B NIM."
+                         if _is_nim else "")),
             )
             top_p_slider = gr.Slider(
-                minimum=0.01, maximum=1.0, step=0.01, value=1.0,
+                minimum=0.01, maximum=1.0, step=0.01, value=_default_top_p,
                 label="Top P",
                 info="Nucleus sampling threshold. 1.0 = disabled.",
             )
             rep_penalty_slider = gr.Slider(
-                minimum=1.0, maximum=2.0, step=0.05, value=1.05,
+                minimum=1.0, maximum=2.0, step=0.05, value=_default_rep,
                 label="Repetition Penalty",
                 info="1.0 = no penalty. Higher discourages repeated phrases.",
             )
+
+        def _apply_nim_defaults(checked):
+            # Toggle ON  → snap sliders to build.nvidia.com NIM defaults.
+            # Toggle OFF → no-op; preserve whatever the user has dialed in.
+            if checked:
+                t, p, r = _NIM_DEFAULTS
+                return gr.update(value=t), gr.update(value=p), gr.update(value=r)
+            return gr.update(), gr.update(), gr.update()
+
+        nim_defaults_chk.change(
+            fn=_apply_nim_defaults,
+            inputs=[nim_defaults_chk],
+            outputs=[temp_slider, top_p_slider, rep_penalty_slider],
+        )
 
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(

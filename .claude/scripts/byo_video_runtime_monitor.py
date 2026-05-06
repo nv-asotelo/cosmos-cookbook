@@ -96,6 +96,16 @@ ERROR_RULES = [
         "fix": "Confirm NGC_API_KEY is current (nvapi- prefix), then 'docker login nvcr.io --username $oauthtoken --password-stdin'. If still denied, the model variant may require allowlisting via build.nvidia.com.",
     },
     {
+        # NIM-8B-FP8-THINK-EOS bug: greedy decode (temperature=0) on the FP8-quantized
+        # cosmos-reason2-8b NIM emits `<think>` then EOS, finishing in ≤3 tokens with no
+        # actual answer. Gradio shows the bare `<think>` opener and nothing else.
+        "name": "nim_local_think_eos_truncation",
+        "patterns": [r"\[vllm done\]\s+[\d.]+s\s+·\s+[123]\s+tok"],
+        "severity": "high",
+        "summary": "NIM 8B emitted only a few tokens — likely the <think>+EOS bug at greedy decode.",
+        "fix": "Raise temperature ≥ 0.3 in the Gradio Advanced Settings panel. The Gradio app already clamps internally for nim_local, but if the slider was force-pushed to 0 the bug returns. Confirm with: docker logs cosmos-nim 2>&1 | tail -20 and inspect the actual completion.",
+    },
+    {
         "name": "process_killed",
         "patterns": [r"out of memory: Killed process", r"oom-killer"],
         "severity": "critical",

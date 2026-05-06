@@ -485,6 +485,8 @@ Override at any time with `NIM_MODEL_SHORT` or full `NIM_IMAGE` env var.
 
 **NIM-specific runtime constraint:** the container caps at 5 images per prompt. The Gradio app clamps `max_frames` to 5 when `INFERENCE_BACKEND=nim_local` (vs 8 for vLLM). For single-image inference this is a no-op.
 
+**NIM-8B-FP8-THINK-EOS bug (greedy decode):** the FP8-quantized cosmos-reason2-8b NIM emits a bare `<think>` opener then an EOS-like token at `temperature=0`, finishing in 2-3 tokens with no reasoning trace and no final answer. Visible symptom in Gradio: response shows only `<think>` (or appears empty) and the run completes in <1s with `tok=2` or `tok=3` in `gradio_demo.log`. Workaround: keep temperature ≥ 0.3. The Gradio app defaults the slider to 0.6 in `nim_local` mode and clamps server-side calls to ≥0.3 as a safety net. Runtime monitor rule `nim_local_think_eos_truncation` flags any `[vllm done] X.Xs · 1|2|3 tok` line.
+
 **Failure modes the runtime monitor catches** (`byo_video_runtime_monitor.py` rule names):
 - `nim_local_container_down` — Gradio reports `[NIM] Container not responding at` (port 8000 unreachable)
 - `nim_local_image_unauthorized` — NGC denied the pull (key invalid or model not allowlisted)
