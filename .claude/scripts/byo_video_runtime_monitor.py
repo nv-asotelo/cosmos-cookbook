@@ -132,24 +132,47 @@ def ssh_exec(remote, cmd):
         return -1, f"<ssh error: {e}>"
 
 
-def load_offset(remote):
+def _load_offset_record(remote):
+    """Returns dict {log_offset, result_mtime}. Migrates old bare-int schema."""
     if not OFFSET_FILE.exists():
-        return 0
+        return {"log_offset": 0, "result_mtime": 0}
     try:
-        return json.loads(OFFSET_FILE.read_text()).get(remote, 0)
+        d = json.loads(OFFSET_FILE.read_text())
+        rec = d.get(remote, 0)
+        if isinstance(rec, int):
+            return {"log_offset": rec, "result_mtime": 0}
+        return {"log_offset": rec.get("log_offset", 0), "result_mtime": rec.get("result_mtime", 0)}
     except Exception:
-        return 0
+        return {"log_offset": 0, "result_mtime": 0}
 
 
-def save_offset(remote, offset):
+def _save_offset_record(remote, log_offset, result_mtime):
     d = {}
     if OFFSET_FILE.exists():
         try:
             d = json.loads(OFFSET_FILE.read_text())
         except Exception:
             pass
-    d[remote] = offset
+    d[remote] = {"log_offset": log_offset, "result_mtime": result_mtime}
     OFFSET_FILE.write_text(json.dumps(d))
+
+
+def load_offset(remote):
+    return _load_offset_record(remote)["log_offset"]
+
+
+def load_result_mtime(remote):
+    return _load_offset_record(remote)["result_mtime"]
+
+
+def save_offset(remote, offset):
+    rec = _load_offset_record(remote)
+    _save_offset_record(remote, offset, rec["result_mtime"])
+
+
+def save_result_mtime(remote, mtime):
+    rec = _load_offset_record(remote)
+    _save_offset_record(remote, rec["log_offset"], mtime)
 
 
 def append_alert(alert):
@@ -274,13 +297,18 @@ def count_lines(p):
         return 0
 
 
+RESULT_JSON_PATH = "/tmp/byo_video_reason2_results.json"
+
+
 def poll_once(remote, rate, session_id, model_id):
     bundle = (
         "echo '---PROCS---'; pgrep -af gradio_cr2_byo | head -3; "
         "echo '---PORT---'; ss -tlnp 2>/dev/null | grep 7860 | head -1; "
         "echo '---GPU---'; nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.free,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>&1 | head -1; "
         "echo '---LOGSIZE---'; stat -c %s /tmp/gradio_demo.log 2>/dev/null || echo 0; "
-        f"echo '---LOGTAIL---'; tail -{LOG_TAIL_LINES} /tmp/gradio_demo.log 2>/dev/null"
+        f"echo '---LOGTAIL---'; tail -{LOG_TAIL_LINES} /tmp/gradio_demo.log 2>/dev/null; "
+        f"echo '---RESULT_MTIME---'; stat -c %Y {RESULT_JSON_PATH} 2>/dev/null || echo 0; "
+        f"echo '---RESULT---'; cat {RESULT_JSON_PATH} 2>/dev/null"
     )
     rc, out = ssh_exec(remote, bundle)
     state = {
@@ -336,17 +364,66 @@ def poll_once(remote, rate, session_id, model_id):
             "power_w": to_float(parts[6]) if len(parts) > 6 else None,
         }
 
+    # Result JSON capture: gradio_cr2_byo writes the full result (prompt, response,
+    # timing, token counts, status) to /tmp/byo_video_reason2_results.json on each
+    # inference completion, OVERWRITING the previous result. We track its mtime so
+    # we only parse it when it advances. Pair it with the most recent log [done]
+    # line in this poll so prompt/response attach to the right metric record.
+    try:
+        result_mtime = int("\n".join(sections.get("RESULT_MTIME", [])).strip() or "0")
+    except Exception:
+        result_mtime = 0
+    result_text = "\n".join(sections.get("RESULT", [])).strip()
+    parsed_result = None
+    last_result_mtime = load_result_mtime(remote)
+    if result_mtime > last_result_mtime and result_text:
+        try:
+            parsed_result = json.loads(result_text)
+            save_result_mtime(remote, result_mtime)
+        except Exception as e:
+            log(f"result json parse failed: {e}")
+
     last_offset = load_offset(remote)
-    if log_size > last_offset:
+    if log_size > last_offset or log_size < last_offset:
+        # log_size < last_offset detects truncation (e.g., post-restart)
         save_offset(remote, log_size)
         for a in detect_errors(log_tail):
             append_alert(a)
             log(f"ALERT [{a['severity']}] {a['rule']}: {a['summary']}")
             state["last_alert"] = a
-        for m in detect_inferences(log_tail, session_id, model_id):
+        new_metrics = detect_inferences(log_tail, session_id, model_id)
+        # Attach prompt/response from result JSON to the most recent metric (if any)
+        if parsed_result and new_metrics:
+            new_metrics[-1]["prompt"] = (parsed_result.get("prompt") or "")[:2000]
+            new_metrics[-1]["response"] = (parsed_result.get("response") or "")[:8000]
+            new_metrics[-1]["status"] = parsed_result.get("status", "unknown")
+            parsed_result = None  # consumed
+        for m in new_metrics:
             append_metric(m)
             ttft_str = f"{m['ttft_s']}s" if m.get('ttft_s') is not None else "n/a"
-            log(f"INFER backend={m['backend']} total={m['total_s']}s ttft={ttft_str} tokens={m['tokens']}")
+            has_text = " +text" if m.get("response") else ""
+            log(f"INFER backend={m['backend']} total={m['total_s']}s ttft={ttft_str} tokens={m['tokens']}{has_text}")
+
+    # Result JSON updated but no [done] line in log window — synthesize a metric
+    # from the result JSON alone (covers the case where log offset already passed
+    # the [done] line in a prior poll, or log was truncated).
+    if parsed_result:
+        synth = {
+            "ts": int(time.time()),
+            "session_id": session_id,
+            "model_id": parsed_result.get("model") or model_id,
+            "backend": "from_result_json",
+            "prefill_tokens": parsed_result.get("tokens_in"),
+            "total_s": parsed_result.get("infer_time_s"),
+            "ttft_s": parsed_result.get("ttft_s"),
+            "gen_s": None,
+            "tokens": parsed_result.get("tokens_out"),
+            "prompt": (parsed_result.get("prompt") or "")[:2000],
+            "response": (parsed_result.get("response") or "")[:8000],
+            "status": parsed_result.get("status", "unknown"),
+        }
+        append_metric(synth)
+        log(f"INFER (from result json) tokens_out={synth['tokens']} ttft={synth['ttft_s']}s")
 
     if not state["gradio_alive"] and last_offset > 0:
         a = {
