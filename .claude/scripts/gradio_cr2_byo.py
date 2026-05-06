@@ -980,22 +980,60 @@ def _load(model_id):
 
 # ── Frame extraction for NIM ───────────────────────────────────────────────────
 def _extract_frames_b64(video_path, fps=1, max_frames=8):
-    """Return list of base64 JPEG strings sampled at `fps` from video."""
+    """Return list of base64 JPEG strings sampled from `video_path`.
+
+    Sampling strategy:
+      - target_count = duration_s * fps (what fps would yield without a cap)
+      - if target_count <= max_frames: pick every `frame_rate/fps`-th frame
+        starting at 0. Behaviour identical to the prior version.
+      - if target_count > max_frames: uniformly distribute `max_frames` picks
+        across the FULL video duration (frame indices spaced by
+        (total_frames-1)/(max_frames-1)). This is the critical fix for
+        long clips where the cap previously truncated everything to the
+        first ~max_frames/fps seconds, e.g. for a 30-fps 40-s clip with
+        fps=8 max=5 the prior logic took only the first 0.4 s of footage.
+    """
     if not _AV_OK:
         return []
     try:
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
         frame_rate = float(stream.average_rate) or 25.0
-        interval = max(1, int(frame_rate / fps))
+
+        # PyAV's stream.frames is reliable for most container formats; fall
+        # back to duration*rate when it's 0 (some streaming codecs).
+        total_frames = int(stream.frames or 0)
+        if total_frames <= 0:
+            duration_s = float(stream.duration * stream.time_base) if stream.duration else 0.0
+            total_frames = max(1, int(duration_s * frame_rate))
+
+        # How many frames the requested sample fps would produce if no cap.
+        target_count = max(1, int(round(total_frames * (fps / frame_rate))))
+
+        if target_count <= max_frames:
+            # Below the cap — take every Nth frame from the start (fps == sample fps).
+            interval = max(1, int(round(frame_rate / fps)))
+            target_indices = set(range(0, total_frames, interval))
+            n_to_take = max_frames
+        else:
+            # Hit the cap — distribute uniformly across the full video.
+            n_to_take = max_frames
+            if n_to_take == 1:
+                target_indices = {0}
+            else:
+                target_indices = {
+                    int(round(j * (total_frames - 1) / (n_to_take - 1)))
+                    for j in range(n_to_take)
+                }
+
         frames = []
         for i, frame in enumerate(container.decode(stream)):
-            if i % interval == 0:
+            if i in target_indices:
                 img = frame.to_image().convert("RGB")
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=80)
                 frames.append(base64.b64encode(buf.getvalue()).decode())
-                if len(frames) >= max_frames:
+                if len(frames) >= n_to_take:
                     break
         container.close()
         return frames
