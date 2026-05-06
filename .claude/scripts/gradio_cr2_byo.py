@@ -2276,20 +2276,28 @@ with gr.Blocks(
                 label="Disable resolution auto-cap",
                 value=INFERENCE_BACKEND != "hf",
                 info=(
-                    "Advanced users only. Bypasses automatic max_pixels reduction. "
-                    "Expect long and inconsistent load times, OOM crashes, silent failures, "
-                    "or Gradio freezing. Not recommended."
+                    "Auto-cap reduces max_pixels per frame so HF prefill finishes "
+                    "in ~55s on H100. Off by default on fast backends (vLLM, NIM); "
+                    "on by default on HF. Toggle to override."
                 ),
                 interactive=True,
             )
-            gr.HTML(
-                '<div style="color:#f87171;font-size:12px;padding-top:4px">'
-                '⚠ <b>Not recommended.</b> Auto-cap keeps inference under ~55s on H100. '
-                'Disabling it passes full-resolution frames — for longer videos this can '
-                'run <b>3–5× slower</b>, and may OOM or hang. Upload a video to see the '
-                'estimated time multiplier for your clip.'
-                '</div>'
-            )
+            if INFERENCE_BACKEND == "hf":
+                gr.HTML(
+                    '<div style="color:#f87171;font-size:12px;padding-top:4px">'
+                    '⚠ <b>Auto-cap is on by default on HF.</b> Disabling sends full-resolution '
+                    'frames; longer videos can run <b>3–5× slower</b> or OOM. Upload a video to '
+                    'see the estimated time multiplier.'
+                    '</div>'
+                )
+            else:
+                gr.HTML(
+                    '<div style="color:#475569;font-size:12px;padding-top:4px">'
+                    'Auto-cap is <b>off</b> by default on this backend — full-resolution '
+                    'frames go to the model. Auto-cap only matters for HF Transformers, '
+                    'where it keeps prefill from ballooning to many minutes per clip.'
+                    '</div>'
+                )
 
         # Run All Variants disabled — reload checkbox hidden accordingly
         reload_vllm_chk = gr.Checkbox(value=False, visible=False, interactive=False)
