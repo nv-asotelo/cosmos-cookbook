@@ -109,7 +109,8 @@ AskUserQuestion({
       multiSelect: false,
       options: [
         { label: "vLLM (Recommended)", description: "~15–20 min setup, quantization support, fast inference" },
-        { label: "HF Transformers", description: "~8–12 min setup, no quantization, simpler" }
+        { label: "HF Transformers", description: "~8–12 min setup, no quantization, simpler" },
+        { label: "NIM (local Docker)", description: "Pull nvcr.io NIM container, serve OpenAI-compatible API on port 8000 — needs NGC_API_KEY + Docker on the target" }
       ]
     },
     {
@@ -151,6 +152,7 @@ AskUserQuestion({
 |---|---|---|
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
+| Q1 Backend | NIM (local Docker) | `INFERENCE_BACKEND=nim_local` · `NIM_IMAGE=nvcr.io/nim/nvidia/<model-short-id>:latest` (resolved from MODEL_ID) · requires `NGC_API_KEY` |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
@@ -446,6 +448,50 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 ---
 
+### OBSERVER PROTOCOL — PHASE 4-NIM: NIM-LOCAL ADDENDUM
+
+**Only when `INFERENCE_BACKEND=nim_local`. Otherwise skip to Phase 5.**
+
+The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). This sprint targets **horde@10.57.233.111** only; Brev and local NIM paths are follow-on work.
+
+**Required env on the target:**
+- `NGC_API_KEY` (must start with `nvapi-`) — used by both `docker login nvcr.io` and the running container
+- `HF_TOKEN` — **not needed**; NIM ships the model
+
+**Deploy `nim_launch.sh` alongside the other scripts (Phase 4 step 1):**
+```bash
+brev exec <name> "python3 -c \"import base64; open('/tmp/nim_launch.sh','wb').write(base64.b64decode('<B64_NIM>'))\""
+brev exec <name> "chmod +x /tmp/nim_launch.sh"
+```
+(For SSH targets: replace `brev exec <name>` with `ssh -i ~/.ssh/id_ed25519 <user@host>`.)
+
+**`byo_video_setup.py` handles the NIM launch automatically** when `INFERENCE_BACKEND=nim_local`:
+- Step 2/2b — HF auth is **skipped**
+- Step 3 — NGC_API_KEY is **mandatory** (script exits if missing)
+- Step 9 (HF weights download) — **skipped**
+- Step 9-NIM (new) — runs `bash /tmp/nim_launch.sh` which:
+  1. Reuses an existing healthy container with the same name (idempotent)
+  2. Otherwise: `docker login nvcr.io`, `docker pull` the image, `docker run -d` per official build.nvidia.com snippet (`--gpus all --ipc host --shm-size=32GB -e NGC_API_KEY -v $LOCAL_NIM_CACHE:/opt/nim/.cache -u $(id -u) -p 8000:8000`)
+  3. Waits up to 1800s for `GET /v1/models` to respond (model download from NGC + load can take 10-15 min on first run for 8B)
+- Step 10 — Gradio launches with `VLLM_BASE_URL=http://localhost:8000/v1`. The Gradio app auto-detects the served model name via `/v1/models` (so `_SERVER_MODEL_ID` matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
+
+**NIM image short-id resolution (in `byo_video_setup.py`):**
+```
+MODEL_ID=nvidia/Cosmos-Reason2-8B   →  short=cosmos-reason2-8b   →  nvcr.io/nim/nvidia/cosmos-reason2-8b:latest
+MODEL_ID=nvidia/Cosmos-Reason2-2B   →  short=cosmos-reason2-2b   →  nvcr.io/nim/nvidia/cosmos-reason2-2b:latest
+MODEL_ID=nvidia/Cosmos-Reason2-32B  →  short=cosmos-reason2-32b  →  nvcr.io/nim/nvidia/cosmos-reason2-32b:latest
+```
+Override at any time with `NIM_MODEL_SHORT` or full `NIM_IMAGE` env var.
+
+**NIM-specific runtime constraint:** the container caps at 5 images per prompt. The Gradio app clamps `max_frames` to 5 when `INFERENCE_BACKEND=nim_local` (vs 8 for vLLM). For single-image inference this is a no-op.
+
+**Failure modes the runtime monitor catches** (`byo_video_runtime_monitor.py` rule names):
+- `nim_local_container_down` — Gradio reports `[NIM] Container not responding at` (port 8000 unreachable)
+- `nim_local_image_unauthorized` — NGC denied the pull (key invalid or model not allowlisted)
+- `vllm_disconnect` — generic port-8000 failure (covers both vLLM and NIM-local container)
+
+---
+
 ### OBSERVER PROTOCOL — PHASE 5: SETUP LAUNCH + LOG TAIL
 
 **This phase runs inside the observer subagent, not the main session.**
@@ -688,10 +734,10 @@ On "Abort": `brev delete <name>`, exit skill.
 Read `vram_free_mb` and `vram_needed_mb` from the failure JSON. Build options from MODEL_GPU_REQUIREMENTS — include only models whose `min_vram_mb` ≤ `vram_free_mb`.
 
 ```
-AskUserQuestion: "The requested model (<MODEL_SIZE>, needs ~<vram_needed_mb/1000>GB VRAM) won't fit on
-<instance> (<vram_free_mb/1000>GB free). Switch to a model that fits, or abort?"
+AskUserQuestion: "The requested model (<MODEL_SIZE>, needs ~<vram_needed_mb/1000>GB VRAM) won't fit on <instance>
+(<vram_free_mb/1000>GB free). Switch to a model that fits, or abort?"
 Options (show only what fits — examples for 40GB free):
-  "Cosmos Reason2 2B (needs ~40GB)"     → MODEL_ID=nvidia/Cosmos-Reason2-2B, MODEL_SIZE=2B
+  "Cosmos Reason2 2B (needs ~40GB)"    → MODEL_ID=nvidia/Cosmos-Reason2-2B, MODEL_SIZE=2B
   "Cosmos3-Nano-Reasoner (needs ~40GB)" → MODEL_ID=nvidia/Cosmos3-Nano-Reasoner, MODEL_SIZE=C3-8B
   "Abort — exit without deleting instance"
 ```
@@ -1294,7 +1340,6 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 | HF 429 rate limit on download | Script retries 5× with 30s sleep. Common on shared Horde IP. Usually succeeds by attempt 3-4. |
 | `brev login` fails with EOF | `brev login` requires a browser handoff — it cannot run via `! brev login` in Claude Code (non-TTY). Open a separate terminal tab, run `brev login` there, complete the browser prompt, then return. |
 | vLLM Connection refused on first inference | `byo_video_setup.py` now auto-starts vLLM before Gradio (Step 9b). If running the Gradio script manually, start vLLM first: `nohup .venv/bin/vllm serve <model_dir> --port 8000 ... &` then poll `curl localhost:8000/v1/models`. |
-| Gradio share link (`gradio.live`) firewalled / never appears | Setup script now falls back to a host-reachable local URL automatically (e.g. `http://10.57.233.111:7860/`) instead of killing the child Gradio process after 300s. If your client can't reach the host directly, run `ssh -L 7860:localhost:7860 <user@host>` and open `http://localhost:7860/`. Override IP detection with `BYO_VIDEO_LOCAL_HOST=<ip>`. |
 | Nemotron: `no module named 'mamba_ssm'` or `selective_scan_cuda` | vLLM PyPI build doesn't include mamba-ssm. Use vLLM nightly Docker: `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067` or `nvcr.io/nvidia/vllm:25.12.post1-py3`. |
 | Nemotron: `video_url not supported` or `unsupported content type` | vLLM version doesn't support `video_url` message type. Requires vLLM nightly; PyPI ≤0.11.0 unsupported. |
 | Nemotron: 400 error from vLLM on inference | Check that `--allowed-local-media-path /tmp` is in the vLLM serve command (set automatically by `byo_video_setup.py`). |
