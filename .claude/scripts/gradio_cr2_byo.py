@@ -1223,11 +1223,20 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
             if capped_px < max_pixels:
                 print(f"[auto-cap] {max_pixels:,} → {capped_px:,} px (~{est_s:.0f}s est)", flush=True)
                 max_pixels = capped_px
+        # BUG-FPS-NFRAMES: newer qwen_vl_utils raises "Only accept either fps or nframes"
+        # if both keys are present in the video dict. Pick whichever yields fewer frames:
+        # use nframes (uniform subsample to _MAX_HF_FRAMES) when fps would exceed the cap,
+        # otherwise pass fps and let the backend sample naturally.
+        n_at_fps = max(1, int((m.duration_s if m.duration_s > 0 else 1) * fps))
+        video_part = {"type": "video", "video": video_path, "max_pixels": max_pixels}
+        if n_at_fps > _MAX_HF_FRAMES:
+            video_part["nframes"] = _MAX_HF_FRAMES
+        else:
+            video_part["fps"] = fps
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
             {"role": "user", "content": [
-                {"type": "video", "video": video_path, "fps": fps, "max_pixels": max_pixels,
-                 "nframes": _MAX_HF_FRAMES},
+                video_part,
                 {"type": "text", "text": user_prompt},
             ]},
         ]
