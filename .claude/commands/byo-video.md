@@ -464,7 +464,28 @@ The `~/.claude/scripts/nim_catalog.py` helper does this automatically (and is al
 2. **In observer Phase 4 (script deploy)** — deploy `nim_catalog.py` alongside the other scripts (see deploy block below).
 3. **In runtime debug (the morning runtime-agent loop)** — re-run `nim_catalog.py upstream` each session start to detect upstream catalog changes (deprecations, new models, version bumps).
 
-**Runtime NIM swap (Gradio UI):** the Advanced Settings dropdown lists every VLM NIM that survives the upstream-cross-reference. When the user picks a different NIM and clicks **↻ Switch to selected NIM**, the Gradio app stops `cosmos-nim`, runs `nim_launch.sh` with the new `MODEL` env, polls `/v1/models`, and refreshes its in-process `_SERVER_MODEL_ID`. No Gradio restart needed.
+**Runtime NIM swap — out-of-band (not via a Gradio button):**
+
+A previous version (commit `4ed5951`) wired a "Switch to selected NIM" button inside Gradio that streamed `nim_launch.sh` output to the browser. It was removed because a 5-15 min docker pull + 1-3 min vLLM warmup blows past Gradio's streaming heartbeat, so the UI froze even when the backend was making progress. The dropdown still lists every VLM NIM in the upstream catalog (so the user knows their options), but the swap itself is performed out-of-band by one of:
+
+1. **Runtime agent path (preferred)** — when the user says *"switch the NIM to X"*, Claude runs the SSH commands below, watches `docker logs -f cosmos-nim`, confirms `/v1/models` is back up, and tells the user to refresh the Gradio page. Gradio re-queries `/v1/models` on every page load and picks up the new served model id automatically.
+
+2. **Manual SSH path (no Claude needed)** — the Gradio info panel in `nim_local` mode displays this snippet directly:
+   ```bash
+   ssh <user@host>
+   docker rm -f cosmos-nim
+   MODEL=<short-id> CONTAINER_NAME=cosmos-nim PORT=8000 \
+     bash /tmp/nim_launch.sh <NGC_API_KEY>
+   # Then reload the Gradio page.
+   ```
+   Valid short-ids come from `python3 /tmp/nim_catalog.py list --no-probe` (or the static panel inside Gradio).
+
+**Agent runbook for "switch the NIM" requests:**
+1. Run `python3 ~/.claude/scripts/nim_catalog.py upstream` to refresh the catalog from `docs.nvidia.com/nim/vision-language-models/latest/introduction.html`. Surface any upstream model name not in `KNOWN_VLM_NIMS` as a one-line note.
+2. Resolve the user's request (e.g. *"Cosmos Reason2 2B"*) to a short-id (e.g. `cosmos-reason2-2b`) via the slug map in `nim_catalog.py`.
+3. SSH to the target. Run `docker rm -f cosmos-nim` then `MODEL=<short-id> bash /tmp/nim_launch.sh <NGC_API_KEY>`. Stream the log so the user can see progress.
+4. Verify with `curl -sf http://localhost:8000/v1/models | jq '.data[0].id'` — confirm the served model id matches.
+5. Tell the user to refresh the Gradio page.
 
 **Required env on the target:**
 - `NGC_API_KEY` (must start with `nvapi-`) — used by both `docker login nvcr.io` and the running container

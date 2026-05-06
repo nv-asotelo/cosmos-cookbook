@@ -1847,115 +1847,6 @@ def _on_download_and_load(label):
     yield from _vllm_swap_yields(label, local_path, hf_id)
 
 
-# ── NIM runtime swap ──────────────────────────────────────────────────────────
-def _nim_swap_banner(kind: str, label: str, msg: str = "", elapsed: float = 0) -> str:
-    palette = {
-        "info":    ("#1e3a5f", "#60a5fa", "#dbeafe", "↻"),
-        "warn":    ("#3b2e0f", "#fbbf24", "#fef3c7", "⏳"),
-        "ok":      ("#0f3a1a", "#76b900", "#bbf7d0", "✓"),
-        "error":   ("#450a0a", "#f87171", "#fee2e2", "✗"),
-    }
-    bg, border, color, icon = palette.get(kind, palette["info"])
-    elapsed_str = f" · {elapsed:.0f}s" if elapsed else ""
-    return (
-        f'<div style="background:{bg};border:1px solid {border};border-radius:6px;'
-        f'padding:10px 14px;font-size:13px;color:{color};margin:4px 0">'
-        f'{icon} <b>NIM swap → {label}</b>{elapsed_str}'
-        f'{("<br>" + msg) if msg else ""}</div>'
-    )
-
-
-def _on_nim_swap(label: str):
-    """Stop the cosmos-nim container and relaunch it serving the selected NIM.
-    Yields (banner_html,) progress updates for the Gradio frontend."""
-    import subprocess  # module-level alias is `_sp_cleanup`; use a fresh local import
-    import time as _time
-    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID  # updated after swap completes
-
-    # Locate the catalog entry for the selected label.
-    target = None
-    for n in _NIM_CATALOG:
-        if n.label == label:
-            target = n
-            break
-    if target is None:
-        yield _nim_swap_banner("error", label, "Label not found in NIM catalog. Refresh Gradio after editing nim_catalog.py.")
-        return
-
-    if target.served_model_id == (_SERVER_MODEL_ID or ""):
-        yield _nim_swap_banner("ok", label, "This NIM is already running — nothing to swap.")
-        return
-
-    if not NGC_API_KEY:
-        yield _nim_swap_banner("error", label, "NGC_API_KEY not set in the Gradio process environment. Restart Gradio with the key exported.")
-        return
-
-    nim_launch = "/tmp/nim_launch.sh"
-    if not os.path.exists(nim_launch):
-        nim_launch_alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nim_launch.sh")
-        if os.path.exists(nim_launch_alt):
-            nim_launch = nim_launch_alt
-        else:
-            yield _nim_swap_banner("error", label, "nim_launch.sh missing on the target. Re-run /byo-video setup.")
-            return
-
-    t0 = _time.time()
-    yield _nim_swap_banner("warn", label, "Stopping current NIM container (cosmos-nim)…", _time.time() - t0)
-
-    try:
-        subprocess.run(["docker", "rm", "-f", "cosmos-nim"], capture_output=True, timeout=30)
-    except Exception as e:
-        yield _nim_swap_banner("error", label, f"Failed to stop existing container: {e}", _time.time() - t0)
-        return
-
-    yield _nim_swap_banner("warn", label,
-                           f"Pulling + starting <code>{target.image}</code>… first pull can take 10-30 min.",
-                           _time.time() - t0)
-
-    env = {
-        **os.environ,
-        "NGC_API_KEY": NGC_API_KEY,
-        "MODEL": target.short_id,
-        "IMAGE": target.image,
-        "PORT": "8000",
-        "CONTAINER_NAME": "cosmos-nim",
-        "LOCAL_NIM_CACHE": os.path.expanduser(os.environ.get("LOCAL_NIM_CACHE", "~/.cache/nim")),
-    }
-
-    proc = subprocess.Popen(
-        ["bash", nim_launch],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=env,
-    )
-    last_yield = _time.time()
-    last_line = ""
-    if proc.stdout is not None:
-        for line in proc.stdout:
-            last_line = line.strip()[:240]
-            now = _time.time()
-            if now - last_yield > 8:  # throttle Gradio updates
-                yield _nim_swap_banner("warn", label, f"<code style='font-size:11px'>{last_line}</code>", now - t0)
-                last_yield = now
-    rc = proc.wait()
-    if rc != 0:
-        yield _nim_swap_banner("error", label, f"nim_launch.sh exited rc={rc}. Last log: <code>{last_line}</code>", _time.time() - t0)
-        return
-
-    # Refresh the cached served model id from /v1/models.
-    try:
-        import urllib.request as _ur, json as _json
-        with _ur.urlopen(f"{VLLM_BASE_URL}/models", timeout=5) as r:
-            _SERVER_MODEL_ID = _json.loads(r.read())["data"][0]["id"]
-            _NIM_LOCAL_MODEL_ID = _SERVER_MODEL_ID
-    except Exception as e:
-        yield _nim_swap_banner("warn", label, f"Container is up but /v1/models query failed ({e}). Reloading the page should resolve.", _time.time() - t0)
-        return
-
-    yield _nim_swap_banner("ok", label,
-                           f"Now serving <b>{_SERVER_MODEL_ID}</b> on <code>{VLLM_BASE_URL}</code>.",
-                           _time.time() - t0)
-
-
 # ── HF auth helpers ───────────────────────────────────────────────────────────
 def _hf_apply_token(token_val):
     """Apply an HF token to the running process and HF token cache."""
@@ -1988,41 +1879,6 @@ def _hf_check_status():
         )
     except Exception:
         return '<div style="color:#fbbf24;font-size:12px">⚠ Not authenticated — gated models require a token.</div>'
-
-
-def _hf_get_login_url():
-    """
-    Start HuggingFace device-flow login on the server and return a clickable auth URL.
-    Requires huggingface_hub >= 0.23 (device_authorization_grant flow).
-    Falls back to instructions for token paste if device flow isn't available.
-    """
-    try:
-        import subprocess, re, sys
-        result = subprocess.run(
-            [sys.executable, "-c",
-             "from huggingface_hub import login; login(new_session=False, write_permission=True)"],
-            capture_output=True, text=True, timeout=15,
-            input="",
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        urls = re.findall(r'https://huggingface\.co/[^\s\'"]+', output)
-        if urls:
-            url = urls[0].rstrip(".")
-            return (
-                f'<div style="color:#7dd3fc;font-size:12px">'
-                f'Open in browser to authenticate: '
-                f'<a href="{url}" target="_blank" style="color:#7dd3fc;text-decoration:underline">{url}</a><br>'
-                f'After approving, click <b>Check Auth Status</b>.</div>'
-            )
-        return (
-            '<div style="color:#fbbf24;font-size:12px">'
-            '⚠ Device flow URL not captured. '
-            'Paste your HF token directly in the box above instead.<br>'
-            'Get your token at <a href="https://huggingface.co/settings/tokens" '
-            'target="_blank" style="color:#7dd3fc">huggingface.co/settings/tokens</a></div>'
-        )
-    except Exception as e:
-        return f'<div style="color:#f87171;font-size:12px">❌ {e}</div>'
 
 
 # ── Disk / storage helpers ────────────────────────────────────────────────────
@@ -2279,21 +2135,55 @@ with gr.Blocks(
             vllm_swap_banner = gr.HTML(value="", visible=False)
             download_load_btn = gr.Button(visible=False)
 
-        # NIM runtime swap: stop the cosmos-nim container, run nim_launch.sh
-        # with the new MODEL short-id, wait for /v1/models. Banner reports
-        # progress + final status. Only visible in nim_local mode.
-        with gr.Row(visible=_is_nim_local):
-            nim_swap_banner = gr.HTML(value="", visible=_is_nim_local)
-            nim_swap_btn = gr.Button(
-                "↻ Switch to selected NIM",
-                variant="primary",
-                visible=_is_nim_local,
-                scale=0,
-                min_width=240,
+        # NIM runtime swap — handled out-of-band, not via a Gradio button. The
+        # earlier in-Gradio swap button (commit 4ed5951) attempted to stream
+        # `nim_launch.sh` output through the browser tunnel, but a 5-15 min
+        # docker pull plus 1-3 min vLLM warmup easily blows past Gradio's
+        # streaming heartbeat — the UI appeared to freeze even when the
+        # backend was making progress. Two reliable paths instead:
+        #   (a) Ask the runtime agent (Claude) to swap — it has SSH and can
+        #       run the commands below, watch the logs, and report back.
+        #   (b) Run the commands manually on the host (instructions below).
+        # When the swap finishes, refresh this page — Gradio re-queries
+        # /v1/models on every reload and picks up the new served model id.
+        if _is_nim_local:
+            gr.HTML(
+                "<div style=\"background:#1e3a5f;border:1px solid #60a5fa;border-radius:6px;"
+                "padding:12px 14px;margin:8px 0;color:#dbeafe;font-size:13px;line-height:1.5\">"
+                "<b>↻ Switching the running NIM</b><br>"
+                "<span style=\"color:#9ca3af\">"
+                "The dropdown above lists every VLM NIM in the upstream catalog "
+                "(<a href=\"https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html\" "
+                "target=\"_blank\" style=\"color:#7dd3fc\">docs source</a>). To actually swap "
+                "the running container, do one of:"
+                "</span>"
+                "<ol style=\"margin:8px 0 4px 18px;color:#dbeafe\">"
+                "<li><b>Ask the runtime agent</b> (e.g. Claude) — say <i>“switch the NIM to "
+                "Cosmos Reason2 2B”</i> and it will SSH in, stop the container, run "
+                "<code style=\"font-size:11px\">nim_launch.sh</code>, and confirm "
+                "<code style=\"font-size:11px\">/v1/models</code> is back up.</li>"
+                "<li><b>Run it yourself by SSH</b> (no Claude needed):"
+                "<pre style=\"background:#0f1a2e;border:1px solid #334155;border-radius:4px;"
+                "padding:8px 10px;margin:6px 0;color:#e5e7eb;font-size:11px;overflow-x:auto;"
+                "white-space:pre-wrap\">"
+                "ssh &lt;user@host&gt;\n"
+                "docker rm -f cosmos-nim\n"
+                "MODEL=&lt;short-id&gt; CONTAINER_NAME=cosmos-nim PORT=8000 \\\n"
+                "  bash /tmp/nim_launch.sh &lt;NGC_API_KEY&gt;\n"
+                "# Then reload this Gradio page."
+                "</pre>"
+                "<span style=\"color:#9ca3af;font-size:12px\">"
+                "Short-id values: <code>cosmos-reason2-2b</code> · <code>cosmos-reason2-8b</code> · "
+                "<code>cosmos-reason1-7b</code> · <code>nemotron-nano-12b-v2-vl</code> · "
+                "<code>llama-3.1-nemotron-nano-vl-8b-v1</code> · <code>llama-3.2-11b-vision-instruct</code> · "
+                "<code>llama-3.2-90b-vision-instruct</code> · <code>llama-4-maverick-17b-128e-instruct</code> · "
+                "<code>llama-4-scout-17b-16e-instruct</code> · <code>mistral-small-3.2-24b-instruct-2506</code>. "
+                "First-time pulls take 5–15 min; subsequent restarts ~3 min for vLLM warmup."
+                "</span>"
+                "</li></ol>"
+                "</div>",
+                visible=True,
             )
-        if not _is_nim_local:
-            nim_swap_banner = gr.HTML(value="", visible=False)
-            nim_swap_btn = gr.Button(visible=False)
 
         with gr.Row():
             system_box = gr.Textbox(label="System Prompt",  value=DEFAULT_SYSTEM, lines=2)
@@ -2387,28 +2277,36 @@ with gr.Blocks(
         # Run All Variants disabled — reload checkbox hidden accordingly
         reload_vllm_chk = gr.Checkbox(value=False, visible=False, interactive=False)
 
-        gr.HTML('<hr style="margin:12px 0;border:none;border-top:1px solid #444"/>')
-        gr.Markdown(
-            "**HuggingFace Auth** — required for gated models (e.g. CR2-8B BF16, CR2-8B FP8, custom checkpoints)"
-        )
-        with gr.Row():
-            hf_token_box = gr.Textbox(
-                label="HF Token",
-                placeholder="hf_...",
-                type="password",
-                info="Paste a token from huggingface.co/settings/tokens",
-                scale=3,
-                interactive=True,
+        # HF auth is only relevant when the backend loads gated checkpoints from
+        # the HF Hub (HF Transformers / vLLM modes). NIM ships its own weights,
+        # so this whole block is hidden in nim_local mode to remove a confusing
+        # surface area. The "Get Login URL (browser)" button was removed because
+        # the HF device flow can't be reliably captured from inside this Gradio
+        # process (no TTY, no browser handoff) — pasting a token directly from
+        # huggingface.co/settings/tokens is the supported path.
+        _hf_auth_visible = INFERENCE_BACKEND in ("hf", "vllm")
+        with gr.Group(visible=_hf_auth_visible):
+            gr.HTML('<hr style="margin:12px 0;border:none;border-top:1px solid #444"/>')
+            gr.Markdown(
+                "**HuggingFace Auth** — required for gated models (e.g. CR2-8B BF16, CR2-8B FP8, custom checkpoints).  \n"
+                "Get a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and paste it below."
             )
-            with gr.Column(scale=1, min_width=160):
-                hf_apply_btn  = gr.Button("Apply Token",          size="sm", variant="primary")
-                hf_browser_btn = gr.Button("Get Login URL (browser)", size="sm", variant="secondary")
-                hf_status_btn  = gr.Button("Check Auth Status",   size="sm")
-        hf_auth_html = gr.HTML(_hf_check_status())
+            with gr.Row():
+                hf_token_box = gr.Textbox(
+                    label="HF Token",
+                    placeholder="hf_...",
+                    type="password",
+                    info="Paste a token from huggingface.co/settings/tokens",
+                    scale=3,
+                    interactive=True,
+                )
+                with gr.Column(scale=1, min_width=160):
+                    hf_apply_btn  = gr.Button("Apply Token",        size="sm", variant="primary")
+                    hf_status_btn = gr.Button("Check Auth Status",  size="sm")
+            hf_auth_html = gr.HTML(_hf_check_status())
 
-        hf_apply_btn.click(fn=_hf_apply_token,   inputs=[hf_token_box], outputs=[hf_auth_html])
-        hf_browser_btn.click(fn=_hf_get_login_url, inputs=[],           outputs=[hf_auth_html])
-        hf_status_btn.click(fn=_hf_check_status,  inputs=[],            outputs=[hf_auth_html])
+            hf_apply_btn.click(fn=_hf_apply_token,    inputs=[hf_token_box], outputs=[hf_auth_html])
+            hf_status_btn.click(fn=_hf_check_status,  inputs=[],             outputs=[hf_auth_html])
 
         gr.HTML('<hr style="margin:12px 0;border:none;border-top:1px solid #444"/>')
         with gr.Accordion("Storage & Disk Management", open=False):
@@ -2529,12 +2427,7 @@ with gr.Blocks(
             inputs=[checkpoint_dd],
             outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
         )
-    elif INFERENCE_BACKEND == "nim_local":
-        nim_swap_btn.click(
-            fn=_on_nim_swap,
-            inputs=[checkpoint_dd],
-            outputs=[nim_swap_banner],
-        )
+    # nim_local: no click wiring — swap is done out-of-band (see info panel).
 
     def resolve_model_id(ckpt_name, custom_val):
         if custom_val.strip():
