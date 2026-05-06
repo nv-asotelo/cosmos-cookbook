@@ -2228,14 +2228,14 @@ with gr.Blocks(
         # the trap by avoiding the deterministic post-`<think>` EOS path.
         # build.nvidia.com NIM defaults for cosmos-reason2-8b: T=0.6, top_p=0.3, rep=1.2
         _NIM_DEFAULTS = (0.6, 0.3, 1.2)
-        _is_nim = INFERENCE_BACKEND == "nim_local"
-        _default_temp = _NIM_DEFAULTS[0] if _is_nim else 0.0
-        _default_top_p = _NIM_DEFAULTS[1] if _is_nim else 1.0
-        _default_rep   = _NIM_DEFAULTS[2] if _is_nim else 1.05
+        _nim_active = INFERENCE_BACKEND == "nim_local"
+        _default_temp = _NIM_DEFAULTS[0] if _nim_active else 0.0
+        _default_top_p = _NIM_DEFAULTS[1] if _nim_active else 1.0
+        _default_rep   = _NIM_DEFAULTS[2] if _nim_active else 1.05
         nim_defaults_chk = gr.Checkbox(
             label="Use build.nvidia.com parameter settings",
             info="One-click apply: Temperature=0.6, Top P=0.3, Repetition Penalty=1.2 (cosmos-reason2-8b NIM defaults).",
-            value=_is_nim,
+            value=_nim_active,
         )
         with gr.Row():
             temp_slider = gr.Slider(
@@ -2244,7 +2244,7 @@ with gr.Blocks(
                 info=("0 = deterministic. Higher = more creative/varied output."
                       + (" NIM mode: keep ≥ 0.3 — greedy decode triggers a <think>+EOS"
                          " bug on the FP8-quantized 8B NIM."
-                         if _is_nim else "")),
+                         if _nim_active else "")),
             )
             top_p_slider = gr.Slider(
                 minimum=0.01, maximum=1.0, step=0.01, value=_default_top_p,
