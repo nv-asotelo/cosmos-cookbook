@@ -110,9 +110,14 @@ ERROR_RULES = [
     },
 ]
 
-INFER_DONE_RE = re.compile(r"\[infer-done\].*?ttft=([\d.]+)s.*?gen=([\d.]+)s.*?tokens=(\d+)")
-INFER_RESULT_RE = re.compile(r"\[infer-result\]\s+(.+)$")
-PROMPT_RE = re.compile(r"\[infer\]\s+prompt=(.+?)(?:\s+max_tokens|$)")
+# gradio_cr2_byo.py emits one of three completion lines per inference:
+#   HF backend:   "[done] 41.9s · 44 tok · ttft=15.08s"
+#   vLLM backend: "[vllm done] 30.5s · 287 tok out"
+#   NIM backend:  "[nim done] 12.3s · 156 tok out"
+# Plus a prefill marker: "[infer] Prefilling 297 tokens ..."
+HF_DONE_RE     = re.compile(r"\[done\]\s+([\d.]+)s\s+·\s+(\d+)\s+tok\s+·\s+ttft=([\d.]+)s")
+VLLM_DONE_RE   = re.compile(r"\[(vllm|nim) done\]\s+([\d.]+)s\s+·\s+(\d+)\s+tok")
+PREFILL_RE     = re.compile(r"\[infer\]\s+Prefilling\s+([\d,]+)\s+tokens")
 
 
 def ssh_exec(remote, cmd):
@@ -197,31 +202,52 @@ def detect_errors(new_log_text):
 
 
 def detect_inferences(new_log_text, session_id, model_id):
+    """Parse completed inferences from log text. Each [done]/[vllm done]/[nim done]
+    line yields one metric record. Prefill token count is carried from the most
+    recent [infer] Prefilling N tokens line. gen_s is computed as total - ttft
+    when ttft is available (HF backend only); otherwise null."""
     metrics = []
-    pending_prompt = None
+    pending_prefill = None
     for line in new_log_text.split("\n"):
-        m_p = PROMPT_RE.search(line)
-        if m_p:
-            pending_prompt = m_p.group(1).strip()[:500]
-        m_d = INFER_DONE_RE.search(line)
-        if m_d:
+        m_pre = PREFILL_RE.search(line)
+        if m_pre:
+            try:
+                pending_prefill = int(m_pre.group(1).replace(",", ""))
+            except Exception:
+                pending_prefill = None
+            continue
+        m_hf = HF_DONE_RE.search(line)
+        if m_hf:
+            total_s = float(m_hf.group(1))
+            tokens = int(m_hf.group(2))
+            ttft_s = float(m_hf.group(3))
             metrics.append({
                 "ts": int(time.time()),
                 "session_id": session_id,
                 "model_id": model_id,
-                "prompt": pending_prompt,
-                "ttft_s": float(m_d.group(1)),
-                "gen_s": float(m_d.group(2)),
-                "tokens": int(m_d.group(3)),
+                "backend": "hf",
+                "prefill_tokens": pending_prefill,
+                "total_s": total_s,
+                "ttft_s": ttft_s,
+                "gen_s": round(max(0.0, total_s - ttft_s), 2),
+                "tokens": tokens,
             })
-            pending_prompt = None
-        m_r = INFER_RESULT_RE.search(line)
-        if m_r and metrics:
-            try:
-                payload = json.loads(m_r.group(1))
-                metrics[-1]["response"] = payload.get("response", "")[:2000]
-            except Exception:
-                pass
+            pending_prefill = None
+            continue
+        m_v = VLLM_DONE_RE.search(line)
+        if m_v:
+            metrics.append({
+                "ts": int(time.time()),
+                "session_id": session_id,
+                "model_id": model_id,
+                "backend": m_v.group(1),
+                "prefill_tokens": pending_prefill,
+                "total_s": float(m_v.group(2)),
+                "ttft_s": None,
+                "gen_s": None,
+                "tokens": int(m_v.group(3)),
+            })
+            pending_prefill = None
     return metrics
 
 
@@ -319,7 +345,8 @@ def poll_once(remote, rate, session_id, model_id):
             state["last_alert"] = a
         for m in detect_inferences(log_tail, session_id, model_id):
             append_metric(m)
-            log(f"INFER ttft={m['ttft_s']}s gen={m['gen_s']}s tokens={m['tokens']}")
+            ttft_str = f"{m['ttft_s']}s" if m.get('ttft_s') is not None else "n/a"
+            log(f"INFER backend={m['backend']} total={m['total_s']}s ttft={ttft_str} tokens={m['tokens']}")
 
     if not state["gradio_alive"] and last_offset > 0:
         a = {
@@ -405,18 +432,27 @@ def cmd_metrics(args):
     print(f"Total inferences: {len(lines)}")
     if not lines:
         return
-    ttfts, gens, toks = [], [], []
+    totals, ttfts, gens, toks = [], [], [], []
+    by_backend = {}
     for line in lines:
         try:
             m = json.loads(line)
-            ttfts.append(m.get("ttft_s", 0))
-            gens.append(m.get("gen_s", 0))
+            totals.append(m.get("total_s", 0))
+            if m.get("ttft_s") is not None:
+                ttfts.append(m["ttft_s"])
+            if m.get("gen_s") is not None:
+                gens.append(m["gen_s"])
             toks.append(m.get("tokens", 0))
+            by_backend[m.get("backend", "?")] = by_backend.get(m.get("backend", "?"), 0) + 1
         except Exception:
             pass
-    if ttfts:
-        print(f"TTFT  min/avg/max: {min(ttfts):.2f}s / {sum(ttfts)/len(ttfts):.2f}s / {max(ttfts):.2f}s")
-        print(f"Gen   min/avg/max: {min(gens):.2f}s / {sum(gens)/len(gens):.2f}s / {max(gens):.2f}s")
+    if totals:
+        print(f"By backend: {by_backend}")
+        print(f"Total min/avg/max: {min(totals):.2f}s / {sum(totals)/len(totals):.2f}s / {max(totals):.2f}s")
+        if ttfts:
+            print(f"TTFT  min/avg/max: {min(ttfts):.2f}s / {sum(ttfts)/len(ttfts):.2f}s / {max(ttfts):.2f}s  (n={len(ttfts)})")
+        if gens:
+            print(f"Gen   min/avg/max: {min(gens):.2f}s / {sum(gens)/len(gens):.2f}s / {max(gens):.2f}s  (n={len(gens)})")
         print(f"Tokens min/avg/max: {min(toks)} / {sum(toks)//len(toks)} / {max(toks)}")
 
 
