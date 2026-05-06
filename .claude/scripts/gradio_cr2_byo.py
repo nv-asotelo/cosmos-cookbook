@@ -2257,7 +2257,7 @@ with gr.Blocks(
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
                 label="Disable resolution auto-cap",
-                value=INFERENCE_BACKEND == "vllm",
+                value=INFERENCE_BACKEND in ("vllm", "nim_local"),
                 info=(
                     "Advanced users only. Bypasses automatic max_pixels reduction. "
                     "Expect long and inconsistent load times, OOM crashes, silent failures, "
