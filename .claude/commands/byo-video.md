@@ -556,6 +556,68 @@ Do NOT auto-terminate the instance.
 
 ---
 
+### POST-LIVE — Runtime Monitor (optional, opt-in)
+
+Once Gradio is live, the user is on their own — but the Gradio UI swallows most server-side
+errors as a generic "Error" toast. Errors at preprocess, prefill, or generate stages are
+fully visible in `/tmp/gradio_demo.log` on the remote, but invisible in the browser.
+
+The **runtime monitor** is a lightweight polling daemon (`~/.claude/scripts/byo_video_runtime_monitor.py`)
+that watches the remote Gradio process, GPU stats, and log tail; pattern-matches errors
+against a rule catalog (cuda_oom, pyav_decode, preprocess_empty, shape_mismatch,
+vllm_disconnect, process_killed, broken_pipe, torch_compile_fail, generic_traceback,
+process_disappeared); and saves per-inference metrics for later review.
+
+After the LIVE panel, fire `AskUserQuestion` to offer the monitor:
+
+```
+AskUserQuestion: "Gradio is live. Spawn the runtime monitor to watch for errors and capture session metrics?"
+Options:
+  "Yes (Recommended)"  — "Polls every 30s; surfaces errors with suggested fixes; saves all inference metrics for later questions"
+  "Skip"               — "No background watcher. Spawn later with: python3 ~/.claude/scripts/byo_video_runtime_monitor.py poll --remote <host>"
+```
+
+If yes, launch the daemon:
+
+```bash
+nohup python3 ~/.claude/scripts/byo_video_runtime_monitor.py poll \
+  --remote <user@host> --rate <rate_per_hour> \
+  --session-id <session_name> --model-id <model_id> \
+  > /tmp/byo_video_runtime_monitor.out 2>&1 &
+```
+
+Then schedule a 1-min cron progress loop that reads the alert stream:
+
+```
+CronCreate({
+  cron: "*/1 * * * *",
+  prompt: "Read /tmp/byo_video_runtime_state.json and /tmp/byo_video_runtime_alerts.jsonl. Compare alert line count to /tmp/byo_video_runtime_alerts_seen.txt (default 0). For each new alert: print one-line summary 'severity rule: summary — fix'. Update the seen counter. Then print one-line state: 'gradio=alive|dead | GPU util=N% mem=Xused/Yfree | alerts=N metrics=N'. If gradio_alive=false, fire AskUserQuestion (load via ToolSearch) with options 'Restart Gradio' / 'Investigate log' / 'Abort'. Cancel this cron when user dismisses the monitor.",
+  recurring: true
+})
+```
+
+**Output files (all local /tmp):**
+- `byo_video_runtime_state.json` — current snapshot (overwritten each poll)
+- `byo_video_runtime_alerts.jsonl` — append-only alert stream
+- `byo_video_session_metrics.jsonl` — append-only inference history (prompt, response, ttft_s, gen_s, tokens, model_id)
+
+**Querying session data later:**
+```bash
+python3 ~/.claude/scripts/byo_video_runtime_monitor.py status
+python3 ~/.claude/scripts/byo_video_runtime_monitor.py alerts -v
+python3 ~/.claude/scripts/byo_video_runtime_monitor.py metrics
+```
+
+**Stopping the monitor:**
+```bash
+python3 ~/.claude/scripts/byo_video_runtime_monitor.py stop
+```
+Also cancel the cron loop (`CronDelete <id>`) when stopping.
+
+The monitor is read-only on the remote. Polling cost: one SSH bundle every 30s, ~1KB.
+
+---
+
 ### SSH DEPLOYMENTS (non-Brev)
 
 PHASE 0–4 run in the main session with SSH commands replacing `brev exec`. After scripts are
