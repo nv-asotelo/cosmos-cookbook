@@ -2008,7 +2008,7 @@ with gr.Blocks(
         _be_choices = [
             "HF Transformers" + (" (active)" if _active_be == "HF" else ""),
             _vllm_label + (" (active)" if _active_be == "VLLM" else ""),
-            "NIM (local Docker) — not yet supported" + (" (active)" if _active_be == "NIM_LOCAL" else ""),
+            "NIM (local Docker)" + (" (active)" if _active_be == "NIM_LOCAL" else ""),
             "TRT-LLM (not yet supported)",
         ]
         _be_map = {c: v for c, v in zip(
@@ -2047,22 +2047,22 @@ with gr.Blocks(
                 )
                 return gr.update(value=warn_html, visible=True), gr.update(visible=False)
             if selected == "nim_local" and active != "nim_local":
+                _code_pill = ('background:#dbeafe;color:#1e293b;padding:2px 6px;'
+                              'border-radius:4px;font-size:12px')
                 nim_html = (
-                    '<div style="background:#1e3a5f;color:#bae6fd;padding:10px 14px;'
-                    'border-radius:6px;margin:4px 0;font-size:13px">'
-                    '<b>NIM (local Docker)</b> — runs the NIM container on this instance.<br>'
-                    '<b>Step 1:</b> Start NIM container (one-time, ~10-20 min download):<br>'
-                    '<code style="background:#1c1917;padding:3px 6px;border-radius:4px;font-size:12px">'
-                    'bash /tmp/nim_launch.sh &lt;NGC_API_KEY&gt;</code><br>'
-                    '<b>Step 2:</b> Restart Gradio with NIM backend:<br>'
-                    '<code style="background:#1c1917;padding:3px 6px;border-radius:4px;font-size:12px">'
-                    'INFERENCE_BACKEND=nim_local VLLM_BASE_URL=http://localhost:8000/v1 '
-                    'python /tmp/gradio_cr2_byo.py</code><br>'
-                    '<b>Model name for checkpoint:</b> use the name from '
-                    '<code style="font-size:11px">curl http://localhost:8000/v1/models</code> '
-                    'or set Custom Checkpoint ID to <code style="font-size:11px">nvidia/cosmos-reason2-2b</code><br>'
-                    '<b>Check NIM status:</b> '
-                    '<code style="font-size:11px">docker logs cosmos-nim</code>'
+                    '<div style="background:#eff6ff;border:1px solid #3b82f6;color:#1e3a8a;'
+                    'padding:10px 14px;border-radius:6px;margin:4px 0;font-size:13px">'
+                    '<b style="color:#1e3a8a">NIM (local Docker)</b> — runs the NIM container on this instance.<br>'
+                    '<b style="color:#1e3a8a">Step 1:</b> Start NIM container (one-time, ~10-20 min download):<br>'
+                    f'<code style="{_code_pill}">bash /tmp/nim_launch.sh &lt;NGC_API_KEY&gt;</code><br>'
+                    '<b style="color:#1e3a8a">Step 2:</b> Restart Gradio with NIM backend:<br>'
+                    f'<code style="{_code_pill}">INFERENCE_BACKEND=nim_local '
+                    'VLLM_BASE_URL=http://localhost:8000/v1 python /tmp/gradio_cr2_byo.py</code><br>'
+                    '<b style="color:#1e3a8a">Model name for checkpoint:</b> use the name from '
+                    f'<code style="{_code_pill}">curl http://localhost:8000/v1/models</code> '
+                    f'or set Custom Checkpoint ID to <code style="{_code_pill}">nvidia/cosmos-reason2-2b</code><br>'
+                    '<b style="color:#1e3a8a">Check NIM status:</b> '
+                    f'<code style="{_code_pill}">docker logs cosmos-nim</code>'
                     '</div>'
                 )
                 return gr.update(value=nim_html, visible=True), gr.update(visible=True)
