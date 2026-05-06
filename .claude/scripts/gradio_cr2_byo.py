@@ -560,16 +560,67 @@ def _expected_quant(model_id):
 # tokens are still streaming inside <think>, the header reads "Reasoning…"
 # and stays expanded so the user can watch the model think.
 _REASONING_PANEL_CSS = """
-.cr-output { padding: 4px; font-size: 0.95em; line-height: 1.45; max-height: 540px; overflow-y: auto; }
-.cr-reasoning { border: 1px solid #76b900; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; background: rgba(118,185,0,0.05); }
-.cr-reasoning summary { cursor: pointer; color: #76b900; font-weight: 600; user-select: none; list-style: none; padding: 2px 0; }
+/* Self-contained dark wrapper so contrast holds regardless of Gradio
+   theme (light/dark). Mirrors build.nvidia.com's reasoning panel. */
+.cr-output {
+  padding: 14px 16px;
+  font-size: 0.95em;
+  line-height: 1.5;
+  max-height: 540px;
+  overflow-y: auto;
+  background: #0f172a;          /* slate-900 — guarantees dark backdrop */
+  color: #f1f5f9;               /* slate-100 — default text on the wrapper */
+  border-radius: 8px;
+  border: 1px solid #334155;    /* slate-700 — visible edge on light themes */
+}
+.cr-prelude {
+  white-space: pre-wrap;
+  color: #cbd5e1;               /* slate-300 */
+  padding: 4px 0;
+  font-style: italic;
+  font-size: 0.92em;
+}
+.cr-reasoning {
+  border: 1px solid #76b900;    /* NV green */
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: rgba(118,185,0,0.10);
+}
+.cr-reasoning summary {
+  cursor: pointer;
+  color: #76b900;
+  font-weight: 600;
+  user-select: none;
+  list-style: none;
+  padding: 2px 0;
+  font-size: 0.95em;
+}
 .cr-reasoning summary::-webkit-details-marker { display: none; }
 .cr-reasoning summary::before { content: '▸ '; color: #76b900; font-size: 0.9em; }
 .cr-reasoning[open] summary::before { content: '▾ '; }
-.cr-reasoning .cr-reasoning-blurb { color: #aaa; font-size: 0.85em; margin: 6px 0 8px 0; font-style: italic; }
-.cr-reasoning .cr-think-body { white-space: pre-wrap; color: #cfcfcf; padding: 4px 8px 4px 10px; border-left: 2px solid #2a4a1c; font-size: 0.92em; }
-.cr-answer { white-space: pre-wrap; color: #eee; padding: 4px 0; }
-.cr-prelude { white-space: pre-wrap; color: #aaa; padding: 4px 0; font-style: italic; font-size: 0.92em; }
+.cr-reasoning .cr-reasoning-blurb {
+  color: #94a3b8;               /* slate-400 */
+  font-size: 0.85em;
+  margin: 6px 0 8px 0;
+  font-style: italic;
+}
+.cr-reasoning .cr-think-body {
+  white-space: pre-wrap;
+  color: #e2e8f0;               /* slate-200 — clearly readable on dark */
+  padding: 6px 10px;
+  border-left: 2px solid #76b900;
+  font-size: 0.92em;
+  background: rgba(15,23,42,0.5);
+  border-radius: 0 4px 4px 0;
+}
+.cr-answer {
+  white-space: pre-wrap;
+  color: #f8fafc;               /* slate-50 — brightest, the headline output */
+  padding: 8px 0 4px 0;
+  font-size: 1.02em;
+  font-weight: 500;
+}
 """
 
 
