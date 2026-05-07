@@ -1,7 +1,8 @@
 # /vlm-race — VLM Race: Multi-Model Video Comparison
 
-Shared Codex/Kimi-compatible source: `.agents/skills/vlm-race/SKILL.md`. This
-legacy Claude slash command keeps `/vlm-race` working for Claude Code users.
+> Compatibility note: this runbook contains legacy Claude Code path examples.
+> Before executing, apply the pre-flight and adapter in `../SKILL.md`; do not
+> run unless the comparison helper scripts exist.
 
 Side-by-side inference comparison across Cosmos Reason 2, Nemotron-Nano-12B-v2, and Qwen3-VL.
 Upload one video, get all model outputs with TTFT, inference time, tokens in/out, and a winner badge.

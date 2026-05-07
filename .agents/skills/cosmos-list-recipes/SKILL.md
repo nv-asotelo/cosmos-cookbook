@@ -1,3 +1,9 @@
+---
+name: cosmos-list-recipes
+description: List Cosmos Cookbook recipes by category, model family, domain, and directory path. Use when a user asks what recipes are available or wants help choosing a recipe.
+compatibility: Codex, Claude Code, and Kimi Code CLI.
+---
+
 List all available Cosmos Cookbook recipes organized by category and model.
 
 Steps:

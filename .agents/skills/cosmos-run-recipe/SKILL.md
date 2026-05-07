@@ -1,3 +1,9 @@
+---
+name: cosmos-run-recipe
+description: Run a Cosmos Cookbook recipe end-to-end with agent assistance. Fuzzy-match recipe names, read AGENTS.md or CLAUDE.md guidance, check compute and environment variables, execute entry points, and recover from documented gotchas.
+compatibility: Codex, Claude Code, and Kimi Code CLI.
+---
+
 Run a Cosmos Cookbook recipe end-to-end with full agent assistance.
 
 $ARGUMENTS is the recipe name or path (e.g., "worker-safety", "predict2/cosmos_policy"). Leave blank to choose interactively.

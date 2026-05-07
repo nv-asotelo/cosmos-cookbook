@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Validates CLAUDE.md files added or modified in a PR.
+Validates AGENTS.md and CLAUDE.md files added or modified in a PR.
 
 Rules:
 - If Data Source Access is "Public", verify the dataset/model/URL is reachable
@@ -12,7 +12,7 @@ Rules:
 - If the Access field is missing entirely, fail — contributors must declare it.
 
 Usage:
-    python validate_claude_md.py path/to/CLAUDE.md [path/to/another/CLAUDE.md ...]
+    python validate_claude_md.py path/to/AGENTS.md [path/to/CLAUDE.md ...]
 """
 
 import ipaddress
@@ -40,7 +40,7 @@ except ImportError:
 
 def parse_data_source_block(text):
     """
-    Extract the ## Data Source section from a CLAUDE.md file and parse its fields.
+    Extract the ## Data Source section from an agent guidance file and parse its fields.
 
     Locates the section by its markdown heading, strips HTML comment blocks (which
     contain contributor guidance and should not be treated as field values), then
@@ -157,7 +157,7 @@ def _is_blocked(url):
     """
     Return True if the URL targets a private, loopback, or cloud-metadata address.
 
-    Prevents SSRF attacks where a malicious CLAUDE.md contributor could include
+    Prevents SSRF attacks where a malicious agent-guidance contributor could include
     an internal endpoint (e.g. the EC2 instance metadata service) as the data
     source URL, causing the CI runner to leak network topology or credentials
     via the HTTP response code alone.
@@ -271,7 +271,7 @@ def validate_command(command):
 
 def check_file(path):
     """
-    Run all validation checks against a single CLAUDE.md file.
+    Run all validation checks against a single AGENTS.md or CLAUDE.md file.
 
     Enforces the following rules in order:
       1. The ## Data Source section must exist.
@@ -328,20 +328,20 @@ def check_file(path):
 
 def main():
     """
-    Entry point. Accepts one or more CLAUDE.md file paths as arguments,
+    Entry point. Accepts one or more AGENTS.md or CLAUDE.md file paths as arguments,
     runs check_file on each, and exits non-zero if any file fails validation.
     """
     if len(sys.argv) < 2:
-        print("Usage: validate_claude_md.py <CLAUDE.md> [...]")
+        print("Usage: validate_claude_md.py <AGENTS.md|CLAUDE.md> [...]")
         sys.exit(1)
 
     results = [check_file(p) for p in sys.argv[1:]]
 
     if not all(results):
-        print("\nOne or more CLAUDE.md files failed validation.")
+        print("\nOne or more agent guidance files failed validation.")
         sys.exit(1)
 
-    print("\nAll CLAUDE.md files passed validation.")
+    print("\nAll agent guidance files passed validation.")
 
 
 if __name__ == "__main__":

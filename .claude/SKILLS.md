@@ -1,16 +1,18 @@
 # Cosmos Cookbook Skills
 
-Five slash commands for running, deploying, and authoring Cosmos recipes — usable by both humans in Claude Code and autonomous agents.
+Seven agent skills for running, deploying, authoring, and demoing Cosmos recipes. The canonical cross-agent versions live in `.agents/skills/` for Codex and Kimi; Claude Code can use the wrappers in `.claude/skills/` or the legacy slash commands in `.claude/commands/`.
 
 ## Quick Reference
 
-| Command | What It Does | When to Use |
-|---------|-------------|-------------|
-| `/cosmos-setup` | Validate environment, check GPU, install deps | First thing, every session |
-| `/cosmos-list-recipes` | Show all 35 recipes organized by domain | Discovering what's available |
-| `/cosmos-run-recipe <name>` | Execute a recipe end-to-end with guidance | Running inference or post-training |
-| `/cosmos-add-recipe <name> <type>` | Scaffold a new recipe from templates | Creating a new recipe |
-| `/cosmos-brev-deploy <path>` | Deploy any recipe to a Brev GPU instance | Cloud execution |
+| Claude command | Shared skill | What It Does | When to Use |
+|---|---|---|---|
+| `/cosmos-setup` | `$cosmos-setup` / `/skill:cosmos-setup` | Validate environment, check GPU, install deps | First thing, every session |
+| `/cosmos-list-recipes` | `$cosmos-list-recipes` / `/skill:cosmos-list-recipes` | Show all recipes organized by domain | Discovering what's available |
+| `/cosmos-run-recipe <name>` | `$cosmos-run-recipe` / `/skill:cosmos-run-recipe` | Execute a recipe end-to-end with guidance | Running inference or post-training |
+| `/cosmos-add-recipe <name> <type>` | `$cosmos-add-recipe` / `/skill:cosmos-add-recipe` | Scaffold a new recipe from templates | Creating a new recipe |
+| `/cosmos-brev-deploy <path>` | `$cosmos-brev-deploy` / `/skill:cosmos-brev-deploy` | Deploy any recipe to a Brev GPU instance | Cloud execution |
+| `/byo-video` | `$byo-video` / `/skill:byo-video` | Launch a single-model Gradio VLM demo | BYO video/image demos |
+| `/vlm-race` | `$vlm-race` / `/skill:vlm-race` | Compare multiple VLMs when helper scripts are present | Side-by-side model evaluation |
 
 ---
 
@@ -22,7 +24,7 @@ Five slash commands for running, deploying, and authoring Cosmos recipes — usa
 ```
 /cosmos-setup
 ```
-Run this at the start of every session. Claude will check all dependencies and report a summary table. If something is missing, it will offer to install it.
+Run this at the start of every session. The agent will check all dependencies and report a summary table. If something is missing, it will offer to install it.
 
 **Agent usage:** Invoke at session start before any `/cosmos-run-recipe` call. If the GPU check fails, pivot to `/cosmos-brev-deploy`.
 
@@ -73,7 +75,7 @@ Total: 35 recipes. Run /cosmos-run-recipe <recipe-name> to execute.
 
 ## `/cosmos-run-recipe`
 
-**Purpose:** Execute a Cosmos recipe end-to-end with full Claude guidance — validates compute, checks env vars, runs commands one at a time, and handles errors using the recipe's Gotchas section.
+**Purpose:** Execute a Cosmos recipe end-to-end with full agent guidance — validates compute, checks env vars, runs commands one at a time, and handles errors using the recipe's Gotchas section.
 
 **Human usage:**
 ```
@@ -82,11 +84,11 @@ Total: 35 recipes. Run /cosmos-run-recipe <recipe-name> to execute.
 /cosmos-run-recipe                         # interactive chooser
 ```
 
-**Agent usage:** Pass the recipe slug or partial path. Claude fuzzy-matches to the correct directory (e.g., `"carla"` → `inference-carla-sdg-augmentation`). For post-training recipes, Claude launches the training job and returns control — it does NOT wait for completion.
+**Agent usage:** Pass the recipe slug or partial path. The agent fuzzy-matches to the correct directory (e.g., `"carla"` → `inference-carla-sdg-augmentation`). For post-training recipes, the agent launches the training job and returns control — it does NOT wait for completion.
 
 **Flow:**
 1. Fuzzy-match recipe name → directory
-2. Read CLAUDE.md in that directory
+2. Read AGENTS.md or CLAUDE.md in that directory
 3. Check GPU VRAM vs compute requirements
 4. Verify required env vars — prompt for any missing
 5. Walk through Setup Prerequisites checklist
@@ -95,13 +97,13 @@ Total: 35 recipes. Run /cosmos-run-recipe <recipe-name> to execute.
 8. For inference: run to completion, show Expected Output
 9. On failure: check Gotchas section → attempt fix → re-run
 
-**If compute is insufficient:** Claude says exactly this — "This recipe requires [X]GB VRAM but you have [Y]GB. You can provision a matching instance on NVIDIA Brev. Do you have a Brev API token?" Then pivots to `/cosmos-brev-deploy`.
+**If compute is insufficient:** the agent says exactly this — "This recipe requires [X]GB VRAM but you have [Y]GB. You can provision a matching instance on NVIDIA Brev. Do you have a Brev API token?" Then pivots to `/cosmos-brev-deploy`.
 
 ---
 
 ## `/cosmos-add-recipe`
 
-**Purpose:** Scaffold a new recipe with the correct directory structure, templates, and CLAUDE.md — then validate with CI before returning.
+**Purpose:** Scaffold a new recipe with the correct directory structure, templates, AGENTS.md, and CLAUDE.md — then validate with CI before returning.
 
 **Human usage:**
 ```
@@ -109,20 +111,21 @@ Total: 35 recipes. Run /cosmos-run-recipe <recipe-name> to execute.
 /cosmos-add-recipe                                     # interactive
 ```
 
-**Agent usage:** Provide recipe slug and type. Claude asks for model, domain, and description, then creates the scaffolding, pre-fills the description, and runs CI validation automatically.
+**Agent usage:** Provide recipe slug and type. The agent asks for model, domain, and description, then creates the scaffolding, pre-fills the description, and runs CI validation automatically.
 
 **What gets created:**
 ```
 docs/recipes/inference/reason2/my-robot-safety-detector/
   inference.md       ← full recipe walkthrough (from template)
-  CLAUDE.md          ← agent guidance file (from template, pre-filled)
+  AGENTS.md          ← shared agent guidance file (from template, pre-filled)
+  CLAUDE.md          ← Claude-compatible mirror (from template, pre-filled)
   SUMMARY.md         ← one-line description
   assets/            ← media directory
 ```
 
 **Templates used:**
-- `assets/templates/claude_md_inference_template.md` — for inference and data curation
-- `assets/templates/claude_md_post_training_template.md` — for post-training and end2end
+- `assets/templates/agents_md_inference_template.md` and `assets/templates/claude_md_inference_template.md` — for inference and data curation
+- `assets/templates/agents_md_post_training_template.md` and `assets/templates/claude_md_post_training_template.md` — for post-training and end2end
 - `assets/templates/inference_template.md` — for the human-readable recipe doc
 
 **CI validation runs automatically.** The CI requires:
@@ -200,11 +203,13 @@ Note: `intbot_edge_vlm` requires physical Jetson AGX Thor hardware — no Brev d
 
 ## How Agents Discover and Use These Skills
 
-Claude Code automatically reads CLAUDE.md files in the working directory and subdirectories. When a session starts in the cosmos-cookbook repo root:
+Agents discover this pack through their native project-skill mechanisms:
 
-1. The root `CLAUDE.md` is loaded — it lists all 35 recipes with compute scale indicators (🟢/🟡/🔴)
-2. The `.claude/commands/` directory makes all 5 slash commands available
-3. When the user navigates to a recipe directory, that recipe's `CLAUDE.md` is loaded with exact entry points
+1. Codex scans `.agents/skills/` from the current directory up to the repository root.
+2. Kimi Code CLI scans `.agents/skills/` and can invoke skills with `/skill:<name>`.
+3. Claude Code scans `.claude/skills/`; those wrappers point to `.agents/skills/`.
+4. Claude Code legacy slash commands remain available in `.claude/commands/`.
+5. When the user navigates to a recipe directory, prefer that recipe's `AGENTS.md`, then `CLAUDE.md`, then the human recipe docs.
 
 **Agent decision tree for running a recipe:**
 ```
@@ -215,7 +220,7 @@ User wants to run recipe X
       → No deploy config? → Tell user to add one via RECIPE_AUTHORING.md
 ```
 
-**Agent safety rules (from CLAUDE.md comments):**
+**Agent safety rules (from AGENTS.md or CLAUDE.md comments):**
 - Always check `## Compute Requirements` before running — ask about Brev if insufficient
 - For post-training: launch job and return control — never wait for completion in-context
 - On Hyperstack: `brev stop` is a NO-OP — always use `brev delete`

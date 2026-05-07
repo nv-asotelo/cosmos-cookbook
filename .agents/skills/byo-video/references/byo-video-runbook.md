@@ -1,7 +1,8 @@
 # /byo-video — Cosmos BYO-Video Demo
 
-Shared Codex/Kimi-compatible source: `.agents/skills/byo-video/SKILL.md`. This
-legacy Claude slash command keeps `/byo-video` working for Claude Code users.
+> Compatibility note: this runbook contains legacy Claude Code tool names and
+> `~/.claude/scripts` examples. Before executing, apply the adapter in
+> `../SKILL.md`; for shared use, prefer the bundled `../scripts/` directory.
 
 **Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to a Gradio web UI at a `gradio.live` public URL — user uploads video in browser.
 

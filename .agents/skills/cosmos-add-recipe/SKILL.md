@@ -1,3 +1,9 @@
+---
+name: cosmos-add-recipe
+description: Scaffold a new Cosmos Cookbook recipe from templates, including docs, SUMMARY.md, assets, and matching AGENTS.md plus CLAUDE.md agent guidance files with validation.
+compatibility: Codex, Claude Code, and Kimi Code CLI.
+---
+
 Scaffold a new Cosmos Cookbook recipe from the official templates.
 
 $ARGUMENTS format: "<recipe-name> <type>" where type is one of: inference, post-training, data-curation, end2end
