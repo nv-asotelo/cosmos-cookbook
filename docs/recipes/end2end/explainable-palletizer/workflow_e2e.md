@@ -23,8 +23,7 @@ This recipe runs Doosan Robotics' "explainable palletizer" proof-of-concept. Cos
   <img src="./assets/main_workflow.svg" alt="Explainable palletizer workflow" width="900">
 </p>
 
-The project won first place at the NVIDIA Cosmos Cookoff. It is a hackathon proof-of-concept, not an official Doosan Robotics product. Treat the CES 2027 note from the project research brief as roadmap context, not a requirement for running the recipe.
-
+The project won first place at the NVIDIA Cosmos Cookoff. 
 ## What You Will Run
 
 The upstream project launches a Docker Compose stack with four services on the `zenith-net` network:
