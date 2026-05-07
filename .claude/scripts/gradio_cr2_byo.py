@@ -2191,6 +2191,17 @@ with gr.Blocks(
     # ── Advanced Settings ────────────────────────────────────────────────────
     with gr.Accordion("⚙️  Advanced Settings", open=False):
 
+        # System + User prompt — first thing in Advanced Settings so users
+        # don't have to scroll past backend / NIM panel to edit them.
+        # lines=10, max_lines=10 → fixed-height textboxes with internal
+        # scrollbar for prompts longer than ~10 visual lines (covers the
+        # full <think>-template demo prompts without truncation).
+        with gr.Row():
+            system_box = gr.Textbox(label="System Prompt", value=DEFAULT_SYSTEM,
+                                    lines=10, max_lines=10)
+            user_box   = gr.Textbox(label="User Prompt",   value=DEFAULT_PROMPT,
+                                    lines=10, max_lines=10)
+
         # ── Backend selector ────────────────────────────────────────────────
         _active_be = INFERENCE_BACKEND.upper()
         _vllm_label = f"vLLM ({_VLLM_VERSION})" if _VLLM_VERSION else "vLLM (not installed)"
@@ -2390,10 +2401,6 @@ with gr.Blocks(
                 "</div>",
                 visible=True,
             )
-
-        with gr.Row():
-            system_box = gr.Textbox(label="System Prompt",  value=DEFAULT_SYSTEM, lines=2)
-            user_box   = gr.Textbox(label="User Prompt",    value=DEFAULT_PROMPT,  lines=2)
 
         with gr.Row():
             fps_slider = gr.Slider(
