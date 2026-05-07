@@ -130,8 +130,19 @@ ERROR_RULES = [
         "name": "nim_api_error",
         "patterns": [r"\[NIM ERROR\]"],
         "severity": "high",
-        "summary": "NIM API call failed (NVCF endpoint).",
-        "fix": "Check NGC_API_KEY (must start with nvapi-), verify network can reach integrate.api.nvidia.com, confirm the model is in the NVCF catalog. NIM 2B = nvidia/cosmos-reason2-2b.",
+        "summary": "NIM API call failed.",
+        "fix": (
+            "If running NIM-local (docker on the host): a 404 here is usually "
+            "a stale cached model_id after a NIM container swap. Gradio now "
+            "auto-recovers on the next inference (re-queries /v1/models and "
+            "retries once). If the alert keeps firing, the container is "
+            "likely down — check `docker ps --filter name=cosmos-nim` and, "
+            "if missing, relaunch via `bash /tmp/nim_launch.sh <NGC_API_KEY>` "
+            "(MODEL=cosmos-reason2-2b | nemotron-nano-12b-v2-vl | etc.). "
+            "If running NVCF (build.nvidia.com): verify NGC_API_KEY starts "
+            "with nvapi-, confirm network can reach integrate.api.nvidia.com, "
+            "and confirm the model is in the NVCF catalog."
+        ),
     },
     {
         "name": "vllm_runtime_error",

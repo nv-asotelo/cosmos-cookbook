@@ -133,6 +133,31 @@ if INFERENCE_BACKEND in ("vllm", "nim_local"):
     except Exception as _e:
         print(f"[{INFERENCE_BACKEND}] Could not detect model from {VLLM_BASE_URL}/models: {_e}", flush=True)
 
+
+def _refresh_server_model_id(timeout=2):
+    """Re-query /v1/models and update _SERVER_MODEL_ID in place if the served
+    model has changed (e.g. after a NIM container swap). Returns the current
+    served id or None on failure. Lets Gradio recover from a swap without a
+    process restart — see the retry-on-404 path in _run_vllm_inference.
+    """
+    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID
+    if INFERENCE_BACKEND not in ("vllm", "nim_local"):
+        return _SERVER_MODEL_ID
+    try:
+        import urllib.request as _urlreq, json as _json
+        with _urlreq.urlopen(f"{VLLM_BASE_URL}/models", timeout=timeout) as _r:
+            _new_id = _json.loads(_r.read())["data"][0]["id"]
+        if _new_id != _SERVER_MODEL_ID:
+            print(f"[{INFERENCE_BACKEND}] Server model changed: "
+                  f"{_SERVER_MODEL_ID} → {_new_id}", flush=True)
+            _SERVER_MODEL_ID = _new_id
+            _NIM_LOCAL_MODEL_ID = _new_id
+        return _new_id
+    except Exception as _e:
+        print(f"[{INFERENCE_BACKEND}] _refresh_server_model_id failed: {_e}", flush=True)
+        return None
+
+
 # ── Size-driven model configs ──────────────────────────────────────────────────
 # Each variant: (ui_label, local_dirname, hf_model_id, expected_quant)
 # expected_quant: "bf16" | "fp8" | "nvfp4" — used to detect HF runtime upcasting
@@ -1147,12 +1172,13 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                             steps=steps), gr.update()
 
     t_start = time.time()
-    try:
-        resp = _requests.post(
+
+    def _post_chat(_mid):
+        return _requests.post(
             endpoint,
             headers={"Authorization": f"Bearer {VLLM_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": model_id,
+                "model": _mid,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user",   "content": content},
@@ -1166,6 +1192,23 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
             stream=True,
             timeout=180,
         )
+
+    try:
+        resp = _post_chat(model_id)
+        # Auto-recover from a stale model_id after a NIM/vLLM container swap:
+        # a 404 here usually means the server is now serving a different model
+        # than the one Gradio cached at startup. Re-query /v1/models, and if
+        # the served name changed, retry once with the fresh value. Saves a
+        # full Gradio restart on every container swap.
+        if resp.status_code == 404 and INFERENCE_BACKEND in ("vllm", "nim_local"):
+            try: resp.close()
+            except Exception: pass
+            _new_mid = _refresh_server_model_id()
+            if _new_mid and _new_mid != model_id:
+                print(f"[{_be_label}] 404 on model='{model_id}'; "
+                      f"retrying with refreshed server model='{_new_mid}'", flush=True)
+                model_id = _new_mid
+                resp = _post_chat(model_id)
         resp.raise_for_status()
     except Exception as e:
         e_str = str(e)
