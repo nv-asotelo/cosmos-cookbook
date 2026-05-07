@@ -1,0 +1,185 @@
+{
+  "_meta": {
+    "source": "build.nvidia.com defaults + nim_catalog.py + per-model card heuristics; min fps=8 enforced; max_pixels & max_output_tokens maximized to model ceiling where known. Where build.nvidia.com defaults aren't published, used VLM-class typical values (T=0.6, top_p=0.95).",
+    "video_mode_notes": "Cosmos NIMs accept native video_url (data: or http://). Other VLMs are tried with video_url first; harness falls back to frames extraction at fps=8 on 4xx response.",
+    "scope_date": "2026-05-06"
+  },
+  "cosmos-reason2-2b": {
+    "image": "nvcr.io/nim/nvidia/cosmos-reason2-2b:latest",
+    "served_model_id": "nvidia/cosmos-reason2-2b",
+    "video_mode": "video_url",
+    "params": {
+      "fps": 8,
+      "max_pixels": 1048576,
+      "max_output_tokens": 4096,
+      "max_frames": 32,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "cosmos-reason2-8b": {
+    "image": "nvcr.io/nim/nvidia/cosmos-reason2-8b:latest",
+    "served_model_id": "nvidia/cosmos-reason2-8b",
+    "video_mode": "video_url",
+    "params": {
+      "fps": 8,
+      "max_pixels": 1048576,
+      "max_output_tokens": 4096,
+      "max_frames": 32,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "cosmos-reason2-32b": {
+    "image": "nvcr.io/nim/nvidia/cosmos-reason2-32b:latest",
+    "served_model_id": "nvidia/cosmos-reason2-32b",
+    "video_mode": "video_url",
+    "params": {
+      "fps": 8,
+      "max_pixels": 1048576,
+      "max_output_tokens": 8192,
+      "max_frames": 24,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "cosmos-reason1-7b": {
+    "image": "nvcr.io/nim/nvidia/cosmos-reason1-7b:latest",
+    "served_model_id": "nvidia/cosmos-reason1-7b",
+    "video_mode": "video_url",
+    "params": {
+      "fps": 8,
+      "max_pixels": 1048576,
+      "max_output_tokens": 4096,
+      "max_frames": 32,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "nemotron-3-nano-omni-30b-a3b-reasoning": {
+    "image": "nvcr.io/nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:latest",
+    "served_model_id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 8192,
+      "max_frames": 24,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "nemotron-nano-12b-v2-vl": {
+    "image": "nvcr.io/nim/nvidia/nemotron-nano-12b-v2-vl:latest",
+    "served_model_id": "nvidia/nemotron-nano-12b-v2-vl",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 4096,
+      "max_frames": 24,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "nemotron-parse-v1.2": {
+    "image": "nvcr.io/nim/nvidia/nemotron-parse-v1.2:latest",
+    "served_model_id": "nvidia/nemotron-parse-v1.2",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 4096,
+      "max_frames": 16,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0
+    }
+  },
+  "qwen3.6-27b": {
+    "image": "nvcr.io/nim/qwen/qwen3.6-27b:latest",
+    "served_model_id": "qwen/qwen3.6-27b",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 4096,
+      "max_frames": 24,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "qwen3.6-35b-a3b": {
+    "image": "nvcr.io/nim/qwen/qwen3.6-35b-a3b:latest",
+    "served_model_id": "qwen/qwen3.6-35b-a3b",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 8192,
+      "max_frames": 24,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    }
+  },
+  "gemma-4-31b-it": {
+    "image": "nvcr.io/nim/google/gemma-4-31b-it:latest",
+    "served_model_id": "google/gemma-4-31b-it",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 8192,
+      "max_frames": 24,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0
+    }
+  },
+  "mistral-medium-3-instruct": {
+    "image": "nvcr.io/nim/mistralai/mistral-medium-3.5-128b:latest",
+    "served_model_id_alias": "mistralai/mistral-medium-3-instruct",
+    "served_model_id": "mistralai/mistral-medium-3.5-128b",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 8192,
+      "max_frames": 16,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0
+    },
+    "vram_risk": "128B class on 96GB single GPU — likely fails to load; harness logs OOM/load failure and continues"
+  }
+}

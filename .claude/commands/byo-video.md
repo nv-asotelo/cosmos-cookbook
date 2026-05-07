@@ -918,6 +918,34 @@ CR2-2B is in the Docker catalog only. CR2-8B is in both. The "[NIM] Skipped — 
 
 `mistral-medium-3.5-128b` · `mistral-small-4-119b-2603` · `mistral-small-3.2-24b-instruct-2506` · `mistral-large-3-675b-instruct-2512` · `kimi-k2.5` · `kimi-k2.6` · `qwen3.6-27b` · `llama-3.1-nemotron-nano-vl-8b-v1` · `llama-3.2-11b-vision-instruct` · `llama-3.2-90b-vision-instruct` · `llama-4-maverick-17b-128e-instruct` · `llama-4-scout-17b-16e-instruct` · `nemotron-parse-v1.2` · `nemotron-3-content-safety`
 
+### NIM smoke validation matrix (Blackwell, 2026-05-07)
+
+Validated on horde@10.57.233.111 (RTX PRO 6000 Blackwell, 96 GB VRAM, SM120) with the
+shared `nim_smoke_one.py` harness. Use this table to gate `/byo-video` NIM picker entries.
+Full RCCA notes: `~/.claude/docs/reports/2026-05-06-nim-smoke-rootcauses.md`.
+
+| NIM short | Status | Recommendation | Notes |
+|---|---|---|---|
+| cosmos-reason2-2b | ✅ PASS | SUPPORT | `video_url` native; best timestamp adherence in cohort |
+| cosmos-reason2-8b | ✅ PASS | SUPPORT | `video_url` native; descriptive but ignores explicit "timestamps" ask |
+| cosmos-reason1-7b | ✅ PASS via frames | FIX param-table | Rejects `video_url` (HTTP 400); harness auto-falls-back to frames |
+| cosmos-reason2-32b | ❌ FAIL | FIX (NGC entitlement) | `docker pull` → DENIED; private/preview |
+| nemotron-nano-12b-v2-vl | ✅ PASS via video_url | FIX param-table | PREFER `video_url`; image-frame mode hard-capped at 5 frames |
+| nemotron-3-nano-omni-30b-a3b-reasoning | ✅ PASS | SUPPORT (caveat) | First boot ~25 min on Blackwell (no tuned MoE config for SM120) |
+| nemotron-parse-v1.2 | ❌ FAIL | DROP | Doc-parse model, max 1 image/prompt — not a video VLM |
+| qwen3.6-27b | ❌ FAIL | DROP (Blackwell) | Container exits 0 cleanly after model load; SGLang Blackwell silent-skip |
+| qwen3.6-35b-a3b | ❌ FAIL | DROP (Blackwell) | Same Blackwell silent-exit as qwen3.6-27b |
+| gemma-4-31b-it | ❌ FAIL → fixable | FIX env override | KV cache 27 GiB > available 22.4 GiB; pass `NIM_MAX_MODEL_LEN=131072` |
+| mistral-medium-3.5-128b | ❌ FAIL | DROP (no Blackwell profile) | `ManifestProfileSelector found no compatible profiles` |
+
+**Sprint-derived rules embedded in the harness (and recommended for `nim_launch.sh`):**
+- Always try `video_url` first; fall back to image-frames at 4xx; further fall back to `max_frames=5` on the "5 image(s) may be provided" cap.
+- Before any new image pull, drop ALL non-running NIM images (writable layers + image cache) — disk fills fast on a 244 GB host with 50–80 GB images.
+- Before swapping containers, run `docker container prune -f` — abandoned writable layers can balloon to 60+ GB.
+- DO NOT bind-mount `LOCAL_NIM_CACHE` to `/opt/nim/.cache` — some NIMs (nemotron-nano-12b-v2-vl) hit `PermissionError`. Container-internal cache is reliable.
+- `get_running_image()` must verify `{{.State.Running}}` is true — a stopped container's image still shows in `docker inspect`.
+- Per-NIM env overrides (e.g., `NIM_MAX_MODEL_LEN=131072` for gemma-4-31b-it) belong in the param table, threaded into `docker run -e`.
+
 Adding a new NIM:
 
 1. Find its row in either the latest [introduction](https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html) or a [release notes](https://docs.nvidia.com/nim/vision-language-models/1.7.0/release-notes.html) page.
