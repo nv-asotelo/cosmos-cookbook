@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="title desc">
+  <title id="title">Explainable palletizer workflow</title>
+  <desc id="desc">A four-service Docker Compose workflow connecting Isaac Sim, the FastAPI app server, vLLM serving Cosmos Reason 2, and a React frontend.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#345995"/>
+    </marker>
+    <linearGradient id="simGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#e7f4ff"/>
+      <stop offset="1" stop-color="#f4fbff"/>
+    </linearGradient>
+    <linearGradient id="appGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#eaf8ef"/>
+      <stop offset="1" stop-color="#f7fcf8"/>
+    </linearGradient>
+    <linearGradient id="vlmGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#fff4df"/>
+      <stop offset="1" stop-color="#fffaf0"/>
+    </linearGradient>
+    <linearGradient id="uiGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#f3ebff"/>
+      <stop offset="1" stop-color="#fbf7ff"/>
+    </linearGradient>
+    <style>
+      .bg { fill: #ffffff; }
+      .frame { fill: none; stroke: #d6dde8; stroke-width: 1.5; }
+      .card { stroke: #aeb8c8; stroke-width: 2; rx: 18; }
+      .title { fill: #152033; font: 700 25px Arial, Helvetica, sans-serif; }
+      .sub { fill: #45546c; font: 500 16px Arial, Helvetica, sans-serif; }
+      .body { fill: #233047; font: 400 15px Arial, Helvetica, sans-serif; }
+      .label { fill: #345995; font: 700 14px Arial, Helvetica, sans-serif; }
+      .port { fill: #59677d; font: 700 13px Arial, Helvetica, sans-serif; }
+      .arrow { stroke: #345995; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .loop { stroke: #6b7c93; stroke-width: 2.5; fill: none; stroke-dasharray: 8 8; marker-end: url(#arrow); }
+      .chip { fill: #f6f8fb; stroke: #cbd4e1; stroke-width: 1.2; rx: 9; }
+      .small { fill: #59677d; font: 400 13px Arial, Helvetica, sans-serif; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1200" height="640"/>
+  <rect class="frame" x="24" y="24" width="1152" height="592" rx="24"/>
+
+  <text class="title" x="600" y="70" text-anchor="middle">Explainable Mixed-SKU Palletizing Control Loop</text>
+  <text class="sub" x="600" y="98" text-anchor="middle">Cosmos Reason 2 turns box images into auditable, structured robot actions</text>
+
+  <rect class="card" x="64" y="160" width="250" height="300" fill="url(#simGrad)"/>
+  <text class="title" x="94" y="204">sim-server</text>
+  <text class="port" x="94" y="230">Port 8100</text>
+  <text class="body" x="94" y="270">Isaac Sim headless scene</text>
+  <text class="body" x="94" y="298">Doosan P3020 robot</text>
+  <text class="body" x="94" y="326">Conveyor + box crops</text>
+  <text class="body" x="94" y="354">cuRobo MotionGen</text>
+  <rect class="chip" x="94" y="388" width="156" height="34"/>
+  <text class="small" x="172" y="410" text-anchor="middle">/sim/health</text>
+
+  <rect class="card" x="358" y="160" width="250" height="300" fill="url(#appGrad)"/>
+  <text class="title" x="388" y="204">app-server</text>
+  <text class="port" x="388" y="230">Port 8000</text>
+  <text class="body" x="388" y="270">Prompt builder</text>
+  <text class="body" x="388" y="298">Pallet state + policy gates</text>
+  <text class="body" x="388" y="326">Action parser</text>
+  <text class="body" x="388" y="354">WebSocket event stream</text>
+  <rect class="chip" x="388" y="388" width="156" height="34"/>
+  <text class="small" x="466" y="410" text-anchor="middle">/api/health</text>
+
+  <rect class="card" x="652" y="160" width="250" height="300" fill="url(#vlmGrad)"/>
+  <text class="title" x="682" y="204">inference-server</text>
+  <text class="port" x="682" y="230">Port 8200</text>
+  <text class="body" x="682" y="270">vLLM OpenAI API</text>
+  <text class="body" x="682" y="298">Cosmos Reason 2 2B/8B</text>
+  <text class="body" x="682" y="326">Optional LoRA adapter</text>
+  <text class="body" x="682" y="354">qwen3 reasoning parser</text>
+  <rect class="chip" x="682" y="388" width="156" height="34"/>
+  <text class="small" x="760" y="410" text-anchor="middle">/health</text>
+
+  <rect class="card" x="946" y="160" width="190" height="300" fill="url(#uiGrad)"/>
+  <text class="title" x="976" y="204">frontend</text>
+  <text class="port" x="976" y="230">Port 3000</text>
+  <text class="body" x="976" y="270">Camera feed</text>
+  <text class="body" x="976" y="298">Reasoning trace</text>
+  <text class="body" x="976" y="326">Parsed action</text>
+  <text class="body" x="976" y="354">Execution status</text>
+  <rect class="chip" x="976" y="388" width="128" height="34"/>
+  <text class="small" x="1040" y="410" text-anchor="middle">React UI</text>
+
+  <path class="arrow" d="M 314 250 C 330 250, 340 250, 358 250"/>
+  <text class="label" x="336" y="230" text-anchor="middle">images + state</text>
+
+  <path class="arrow" d="M 608 250 C 624 250, 634 250, 652 250"/>
+  <text class="label" x="630" y="230" text-anchor="middle">multimodal prompt</text>
+
+  <path class="arrow" d="M 652 350 C 634 350, 624 350, 608 350"/>
+  <text class="label" x="630" y="378" text-anchor="middle">reasoning + JSON</text>
+
+  <path class="arrow" d="M 608 432 C 520 526, 220 526, 186 462"/>
+  <text class="label" x="410" y="548" text-anchor="middle">validated pick/place command</text>
+
+  <path class="arrow" d="M 902 310 C 918 310, 928 310, 946 310"/>
+  <text class="label" x="924" y="290" text-anchor="middle">events</text>
+
+  <path class="loop" d="M 184 160 C 210 116, 1030 116, 1042 160"/>
+  <text class="small" x="600" y="134" text-anchor="middle">Docker Compose network: zenith-net</text>
+
+  <text class="small" x="600" y="588" text-anchor="middle">Run with make docker-test for a no-token smoke test, or make docker-up for Cosmos Reason 2 inference.</text>
+</svg>
