@@ -68,8 +68,8 @@ except ImportError:
 
 try:
     import vllm as _vllm_module
-    _VLLM_VERSION = _vllm_module.__version__
-except ImportError:
+    _VLLM_VERSION = getattr(_vllm_module, "__version__", None)
+except Exception:
     _VLLM_VERSION = None
 
 # ── Config ─────────────────────────────────────────────────────────────────────
