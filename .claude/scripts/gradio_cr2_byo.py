@@ -1207,8 +1207,14 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         ]
         print(f"[vllm/nemotron] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
-        # NIM container hard-caps at 5 images/prompt; vLLM has no such cap.
-        _max_frames = 5 if INFERENCE_BACKEND == "nim_local" else 8
+        # Frame extraction path — used by Cosmos Reason 1/2 and Cosmos3 NIMs.
+        # The 5-frame cap that lived here was a stale assumption from
+        # nemotron-nano-12b-v2-vl's 1-image-cap discovery; nemotron and Qwen3-VL
+        # take the video_url branch above, so this branch only hits cosmos-style
+        # NIMs which accept 32+ frames cleanly (verified on cosmos-reason1-7b
+        # 2026-05-06 + cosmos-reason2 series). Cap at 32 to match HF mode and
+        # stay safely inside the 128k context budget at default max_pixels.
+        _max_frames = 32 if INFERENCE_BACKEND == "nim_local" else 8
         print(f"[vllm] Extracting frames fps={fps} max={_max_frames}", flush=True)
         frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
         if not frames_b64:
