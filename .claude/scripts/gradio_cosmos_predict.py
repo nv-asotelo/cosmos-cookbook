@@ -60,7 +60,6 @@ def generate(world_mode: str, video_file, image_file, prompt: str,
         media_field: media_b64,
         "guidance_scale": float(guidance_scale),
         "steps": int(steps),
-        "prompt_upsampling": bool(prompt_upsampling),
         "video_params": {
             "height": 704,
             "width": 1280,
@@ -70,6 +69,13 @@ def generate(world_mode: str, video_file, image_file, prompt: str,
     }
     if seed is not None and seed >= 0:
         payload["seed"] = int(seed)
+    # NOTE: build.nvidia.com playground exposes a "prompt_upsampling" toggle but
+    # the self-hosted cosmos-predict1-7b-video2world NIM rejects this field
+    # ("extra_forbidden" 422 — observed 2026-05-08). Schema for the hosted API
+    # differs from the self-host. Field omitted; the NIM uses its built-in
+    # default (true). The UI checkbox is preserved for future-compat with NIMs
+    # that DO accept it; today its value is informational only.
+    _ = prompt_upsampling  # intentionally unused — see note above
 
     req = urllib.request.Request(
         INFER_URL,

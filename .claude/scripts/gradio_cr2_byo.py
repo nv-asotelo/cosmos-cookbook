@@ -1186,21 +1186,32 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
     t_start = time.time()
 
     def _post_chat(_mid):
+        body = {
+            "model": _mid,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": content},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True,
+        }
+        # NVIDIA NIM rejects repetition_penalty at root level on older NIM
+        # generations (Cosmos Reason 1 NIM observed 2026-05-08 returning HTTP
+        # 400 with "Please include it in the `nvext` object field"). The
+        # official NVIDIA path is the `nvext` extension. Cosmos Reason 2 NIM
+        # accepts both root-level and nvext, so always use nvext in nim_local
+        # mode for portability across NIM generations. Bare vLLM (non-NIM)
+        # accepts root-level rep_penalty so use that path there.
+        if INFERENCE_BACKEND == "nim_local":
+            body["nvext"] = {"repetition_penalty": rep_penalty}
+        else:
+            body["repetition_penalty"] = rep_penalty
         return _requests.post(
             endpoint,
             headers={"Authorization": f"Bearer {VLLM_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": _mid,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": content},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "repetition_penalty": rep_penalty,
-                "stream": True,
-            },
+            json=body,
             stream=True,
             timeout=180,
         )
