@@ -147,7 +147,8 @@ def docker_pull(image: str, ngc_key: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def docker_run(image: str, ngc_key: str, hf_token: str | None = None) -> tuple[bool, str]:
+def docker_run(image: str, ngc_key: str, hf_token: str | None = None,
+               extra_env: dict | None = None) -> tuple[bool, str]:
     # No bind mount — some NIMs (nemotron-*) hit PermissionError on /opt/nim/.cache when host
     # dir perms differ from container UID. Container-internal cache is ephemeral but reliable.
     cmd = [
@@ -163,6 +164,12 @@ def docker_run(image: str, ngc_key: str, hf_token: str | None = None) -> tuple[b
     ]
     if hf_token:
         cmd += ["-e", f"HF_TOKEN={hf_token}"]
+    # Per-NIM env overrides from param_table[short]["env"] block.
+    # Used for known fixes like NIM_MAX_MODEL_LEN=131072 (gemma-4-31b-it KV-budget),
+    # NIM_ENGINE, NIM_MODEL_PROFILE, etc.
+    if extra_env:
+        for k, v in extra_env.items():
+            cmd += ["-e", f"{k}={v}"]
     cmd.append(image)
     p = run(cmd, timeout=120)
     if p.returncode != 0:
@@ -352,6 +359,7 @@ def smoke_one(short: str, param_table: dict) -> dict:
     served_id_expected = entry.get("served_model_id")
     video_mode = entry.get("video_mode", "frames")  # 'video_url' or 'frames'
     params = entry.get("params", {})
+    extra_env = entry.get("env", {}) or {}
     ngc_key = os.environ.get("NGC_API_KEY", "")
     hf_token = os.environ.get("HF_TOKEN")
 
@@ -395,7 +403,10 @@ def smoke_one(short: str, param_table: dict) -> dict:
                 result.update({"phase": "pull_failed", "error": msg})
                 return result
         result["phase"] = "starting_container"
-        ok, msg = docker_run(image, ngc_key, hf_token)
+        if extra_env:
+            log(f"applying per-NIM env overrides: {extra_env}")
+            result["env_overrides_applied"] = extra_env
+        ok, msg = docker_run(image, ngc_key, hf_token, extra_env=extra_env)
         if not ok:
             result.update({"phase": "run_failed", "error": msg})
             return result

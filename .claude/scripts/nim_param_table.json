@@ -2,7 +2,12 @@
   "_meta": {
     "source": "build.nvidia.com defaults + nim_catalog.py + per-model card heuristics; min fps=8 enforced; max_pixels & max_output_tokens maximized to model ceiling where known. Where build.nvidia.com defaults aren't published, used VLM-class typical values (T=0.6, top_p=0.95).",
     "video_mode_notes": "Cosmos NIMs accept native video_url (data: or http://). Other VLMs are tried with video_url first; harness falls back to frames extraction at fps=8 on 4xx response.",
-    "scope_date": "2026-05-06"
+    "env_block_notes": "Per-NIM `env` blocks specify environment variables to merge into `docker run -e KEY=VALUE` for that NIM. Used for known fixes like NIM_MAX_MODEL_LEN, NIM_ENGINE, NIM_MODEL_PROFILE. Harness reads this and applies on container start.",
+    "scope_date": "2026-05-08",
+    "history": [
+      "2026-05-06: initial 11-NIM smoke battery (5 PASS / 6 FAIL).",
+      "2026-05-08: dropped qwen3.6-27b and qwen3.6-35b-a3b (Alex decision — not supporting); added qwen3.5-397b-a17b (out-of-spec attempt on Blackwell); added env block to gemma-4-31b-it (NIM_MAX_MODEL_LEN=131072 KV-budget fix); re-verifying all PASS NIMs from fresh horde state."
+    ]
   },
   "cosmos-reason2-2b": {
     "image": "nvcr.io/nim/nvidia/cosmos-reason2-2b:latest",
@@ -116,42 +121,13 @@
       "repetition_penalty": 1.0
     }
   },
-  "qwen3.6-27b": {
-    "image": "nvcr.io/nim/qwen/qwen3.6-27b:latest",
-    "served_model_id": "qwen/qwen3.6-27b",
-    "video_mode": "frames",
-    "params": {
-      "fps": 8,
-      "max_pixels": 524288,
-      "max_output_tokens": 4096,
-      "max_frames": 24,
-      "temperature": 0.7,
-      "top_p": 0.8,
-      "frequency_penalty": 0.0,
-      "presence_penalty": 0.0,
-      "repetition_penalty": 1.05
-    }
-  },
-  "qwen3.6-35b-a3b": {
-    "image": "nvcr.io/nim/qwen/qwen3.6-35b-a3b:latest",
-    "served_model_id": "qwen/qwen3.6-35b-a3b",
-    "video_mode": "frames",
-    "params": {
-      "fps": 8,
-      "max_pixels": 524288,
-      "max_output_tokens": 8192,
-      "max_frames": 24,
-      "temperature": 0.7,
-      "top_p": 0.8,
-      "frequency_penalty": 0.0,
-      "presence_penalty": 0.0,
-      "repetition_penalty": 1.05
-    }
-  },
   "gemma-4-31b-it": {
     "image": "nvcr.io/nim/google/gemma-4-31b-it:latest",
     "served_model_id": "google/gemma-4-31b-it",
     "video_mode": "frames",
+    "env": {
+      "NIM_MAX_MODEL_LEN": "131072"
+    },
     "params": {
       "fps": 8,
       "max_pixels": 524288,
@@ -162,7 +138,25 @@
       "frequency_penalty": 0.0,
       "presence_penalty": 0.0,
       "repetition_penalty": 1.0
-    }
+    },
+    "blackwell_fix_note": "Default max_model_len=262144 needs 27 GiB KV cache; only 22.35 GiB available on 96 GB GPU. NIM_MAX_MODEL_LEN=131072 (128K) is safely under budget. Engine error indicated estimated max ~200672; we choose 131072 for headroom."
+  },
+  "qwen3.5-397b-a17b": {
+    "image": "nvcr.io/nim/qwen/qwen3.5-397b-a17b:latest",
+    "served_model_id": "qwen/qwen3.5-397b-a17b",
+    "video_mode": "frames",
+    "params": {
+      "fps": 8,
+      "max_pixels": 524288,
+      "max_output_tokens": 8192,
+      "max_frames": 24,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.05
+    },
+    "vram_risk": "397B parameters (17B active MoE). Build.nvidia.com lists A100 as required; on a single 96 GB Blackwell, expect either failure to load or the same SGLang-on-Blackwell silent-exit-0 pattern observed for qwen3.6 family. Image pull alone may exceed 100 GB. Out-of-spec attempt per Alex 2026-05-08."
   },
   "mistral-medium-3-instruct": {
     "image": "nvcr.io/nim/mistralai/mistral-medium-3.5-128b:latest",

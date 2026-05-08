@@ -162,6 +162,15 @@ def _refresh_server_model_id(timeout=2):
 # Each variant: (ui_label, local_dirname, hf_model_id, expected_quant)
 # expected_quant: "bf16" | "fp8" | "nvfp4" — used to detect HF runtime upcasting
 MODEL_CONFIGS = {
+    # ── Cosmos Reason 1 7B (earlier generation; container-only, BF16) ────────
+    "CR1-7B": {
+        "variants": [
+            ("CR1-7B BF16", "Cosmos-Reason1-7B", "nvidia/Cosmos-Reason1-7B", "bf16"),
+        ],
+        "nim": "nvidia/cosmos-reason1-7b",
+        # NIM image: nvcr.io/nim/nvidia/cosmos-reason1-7b:latest
+        # Smoke-validated 2026-05-08 via NIM Multi-Brev Validation sprint.
+    },
     "2B": {
         "variants": [
             ("CR2-2B FP8",   "Cosmos-Reason2-2B-FP8",   "nvidia/Cosmos-Reason2-2B-FP8",   "fp8"),
@@ -285,6 +294,7 @@ _MODEL_SIZE_DEFAULTS = {
     "QW3-8B":   {"max_tokens": 512},
     "QW3-32B":  {"max_tokens": 1024},
     # base64-frame models — fps controls extraction; set sensible per-size values
+    "CR1-7B":{"fps": 2, "max_tokens": 512},
     "2B":    {"fps": 2, "max_tokens": 512},
     "8B":    {"fps": 2, "max_tokens": 512},
     "32B":   {"fps": 1, "max_tokens": 512},
@@ -305,7 +315,7 @@ MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
@@ -393,6 +403,7 @@ if INFERENCE_BACKEND == "nim_local":
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
+    ("CR1-7B BF16",   "Cosmos-Reason1-7B",                    "nvidia/Cosmos-Reason1-7B",                       "bf16"),
     ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
     ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner",                 "nvidia/Cosmos3-Nano-Reasoner",                   "bf16"),
     ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
@@ -434,6 +445,7 @@ if INFERENCE_BACKEND == "vllm":
         "QW3-2B":  "Qwen3-VL-2B",
         "QW3-8B":  "Qwen3-VL-8B",
         "QW3-32B": "Qwen3-VL-32B",
+        "CR1-7B":  "CR1-7B BF16",
         "2B":      "CR2-2B BF16",
         "8B":      "CR2-8B BF16",
         "C3-2B":   "C3R-2B BF16",
