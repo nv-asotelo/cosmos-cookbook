@@ -26,6 +26,7 @@ Runtime: serves on 0.0.0.0:7860 (Gradio default). frpc tunnel exposes a public U
 import base64
 import json
 import os
+import subprocess
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -35,6 +36,22 @@ import gradio as gr  # type: ignore
 NIM_HOST = os.environ.get("NIM_HOST", "localhost")
 NIM_PORT = int(os.environ.get("NIM_PORT", "8000"))
 INFER_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1/infer"
+NIM_BASE_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1"
+
+
+def _gpu_info() -> tuple[str, int]:
+    """Return (gpu_name, free_mib). Uses nvidia-smi to avoid a torch dependency."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        line = (out.stdout or "").strip().splitlines()[0]
+        name, free = [s.strip() for s in line.split(",")]
+        return name, int(free)
+    except Exception:
+        return "CPU", 0
 
 
 def _b64_file(path: str) -> str:
@@ -109,9 +126,14 @@ def update_inputs(mode):
     return gr.update(visible=False), gr.update(visible=True)
 
 
+_gpu_name, _free_mib = _gpu_info()
+
 with gr.Blocks(title="Cosmos Predict 1 (Video2World)") as demo:
     gr.Markdown(
         "# Cosmos Predict 1 — Video2World\n"
+        f"**Load:** on demand &nbsp;·&nbsp; **GPU:** {_gpu_name} &nbsp;·&nbsp; "
+        f"**VRAM free:** {_free_mib:,} MiB &nbsp;·&nbsp; "
+        f"**Backend:** NIM local Docker (`{NIM_BASE_URL}`)\n\n"
         "Generate future frames of a physics-aware world state from a video or image input. "
         "Replicates the build.nvidia.com playground UX for the self-hosted NIM."
     )
