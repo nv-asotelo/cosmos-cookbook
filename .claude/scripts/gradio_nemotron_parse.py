@@ -37,7 +37,23 @@ from PIL import Image, ImageDraw, ImageFont  # type: ignore
 NIM_HOST = os.environ.get("NIM_HOST", "localhost")
 NIM_PORT = int(os.environ.get("NIM_PORT", "8000"))
 INFER_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1/chat/completions"
-MODEL = "nvidia/nemotron-parse"
+# Auto-detect served model id at startup (the NIM exposes the versioned form
+# nvidia/nemotron-parse-v1.2; the unversioned form nvidia/nemotron-parse is
+# rejected with 400 model-not-found). Fall back to versioned default.
+def _detect_model() -> str:
+    try:
+        with urllib.request.urlopen(
+            f"http://{NIM_HOST}:{NIM_PORT}/v1/models", timeout=5
+        ) as r:
+            data = json.loads(r.read())
+            ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+            if ids:
+                return ids[0]
+    except Exception:
+        pass
+    return os.environ.get("NEMOTRON_PARSE_MODEL_ID", "nvidia/nemotron-parse-v1.2")
+MODEL = _detect_model()
+print(f"[nemotron-parse] using served_model_id: {MODEL}", flush=True)
 
 TYPE_COLORS = {
     "Title":           (0xC0, 0x39, 0x2B),
