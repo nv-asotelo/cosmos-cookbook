@@ -1142,16 +1142,32 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                            steps=steps), gr.update()
 
     # Step 3: prepare media content
-    # Images: single image_url (file:// for Nemotron/Qwen, base64 for CR2/C3).
-    # Videos: Nemotron/Qwen3-VL use file:// video_url; CR2/C3 use base64 JPEG frames.
+    # Per NIM Message-Shape standing order (~/.claude/CLAUDE.md): always send
+    # media as base64 data URLs to match build.nvidia.com snippets. file://
+    # URLs are banned — vLLM gates them behind --allowed-local-media-path
+    # (a flag the official snippets don't set), causing HTTP 400 on default
+    # NIM/vLLM deployments.
+    # Images: single image_url, base64 data URL for ALL models.
+    # Videos: Nemotron/Qwen3-VL use base64 video_url; CR2/C3 use base64 JPEG frames.
     _nem = _uses_file_url(model_id) or _uses_file_url(_SERVER_MODEL_ID or "")
     if is_image:
         if _nem:
+            try:
+                with open(video_path, "rb") as _imf:
+                    _ib64 = base64.b64encode(_imf.read()).decode("ascii")
+                _ext  = video_path.lower().rsplit(".", 1)[-1] if "." in video_path else "jpeg"
+                _mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(_ext, "jpeg")
+            except Exception as _img_err:
+                msg = f"[vLLM ERROR] Could not read image: {_img_err}"
+                _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
+                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+                return
             content = [
-                {"type": "image_url", "image_url": {"url": f"file://{video_path}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/{_mime};base64,{_ib64}"}},
                 {"type": "text", "text": prompt},
             ]
-            print(f"[vllm/image] file:// image: {video_path}", flush=True)
+            print(f"[vllm/image] base64 data:image/{_mime} ({len(_ib64)//1000} KB)", flush=True)
         else:
             try:
                 from PIL import Image as _pil_img
@@ -1172,18 +1188,24 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
             print(f"[vllm/image] base64 image prepared", flush=True)
     elif _nem:
         import shutil as _shutil
-        _nem_path = "/tmp/gradio_upload.mp4"
+        # Per NIM Message-Shape standing order: send the video as a base64
+        # data URL, NOT file://. file:// requires --allowed-local-media-path
+        # on vLLM (which build.nvidia.com snippets do not set) and is never
+        # accepted by build.nvidia.com's hosted API. base64 works everywhere.
         try:
-            if os.path.abspath(video_path) != os.path.abspath(_nem_path):
-                _shutil.copy2(video_path, _nem_path)
-        except Exception as _cp_err:
-            _nem_path = video_path  # fall back to original path if copy fails
-            print(f"[vllm/nemotron] copy to /tmp failed ({_cp_err}), using original path", flush=True)
+            with open(video_path, "rb") as _vf:
+                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+        except Exception as _vread_err:
+            msg = f"[vLLM ERROR] Could not read video: {_vread_err}"
+            _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
+            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                    {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+            return
         content = [
-            {"type": "video_url", "video_url": {"url": f"file://{_nem_path}"}},
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
             {"type": "text", "text": prompt},
         ]
-        print(f"[vllm/nemotron] video_url: file://{_nem_path}", flush=True)
+        print(f"[vllm/nemotron] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
         # NIM container hard-caps at 5 images/prompt; vLLM has no such cap.
         _max_frames = 5 if INFERENCE_BACKEND == "nim_local" else 8
