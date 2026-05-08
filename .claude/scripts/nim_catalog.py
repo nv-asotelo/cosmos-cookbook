@@ -129,12 +129,8 @@ KNOWN_VLM_NIMS = [
                    "(HTTP 400 'At most 5 image(s) may be provided in one prompt'). "
                    "Do NOT bind-mount /opt/nim/.cache — PermissionError; use "
                    "container-internal cache."),
-    NimImage("nemotron-parse-v1.2",
-             "nvcr.io/nim/nvidia/nemotron-parse-v1.2:latest",
-             "Nemotron-Parse-v1.2", "Nemotron Parse v1.2 (NIM)",
-             "nvidia/nemotron-parse-v1.2", min_vram_mb=24000,
-             supports_video=False,
-             notes="Image parsing only; document-extraction VLM. Not for /byo-video."),
+    # nemotron-parse-v1.2 dropped 2026-05-08 (Alex decision) — irrelevant to
+    # Cosmos / Physical AI captioning. Document parser, not a video VLM.
     NimImage("nemotron-3-content-safety",
              "nvcr.io/nim/nvidia/nemotron-3-content-safety:latest",
              "Nemotron-3-Content-Safety", "Nemotron 3 Content Safety (NIM)",
