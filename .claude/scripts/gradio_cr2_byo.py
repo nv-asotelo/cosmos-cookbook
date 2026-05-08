@@ -2691,9 +2691,20 @@ with gr.Blocks(
         if not m.width:
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
-        n_frames = max(1, int(m.duration_s * fps_val))
+        target   = max(1, int(m.duration_s * fps_val))
+        # Post-cap honesty: nim_local frames branch caps at 32 (line ~1217).
+        # vLLM (non-NIM) caps at 8. HF mode caps at _MAX_HF_FRAMES (32).
+        # Show what the model ACTUALLY receives, not the pre-cap target.
+        if INFERENCE_BACKEND == "nim_local":
+            cap = 32
+        elif INFERENCE_BACKEND == "vllm":
+            cap = 8
+        else:
+            cap = _MAX_HF_FRAMES
+        n_frames = min(target, cap)
+        cap_note = f" (capped from {target})" if target > cap else ""
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
-                    f"{n_frames} frames sampled")
+                    f"{n_frames} frames sampled{cap_note}")
         # Fast backends (vLLM, NIM) are 100-500x faster than HF — HF-based
         # timing estimates are meaningless and auto-cap is unnecessary.
         if INFERENCE_BACKEND in ("vllm", "nim_local"):
