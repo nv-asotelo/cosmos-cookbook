@@ -269,6 +269,26 @@ MODEL_CONFIGS = {
         "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
         "vllm_swap_env":   {},
     },
+    # ── Nemotron-3-Nano-Omni-30B-A3B-Reasoning (NIM container; H200 recommended) ──
+    # Smoke-validated 2026-05-07 on RTX PRO 6000 Blackwell. ~25 min first boot
+    # (no tuned MoE config for SM120). Honest "not found" behavior on absent
+    # subjects — no race-car hallucination.
+    "OMNI-30B": {
+        "variants": [
+            ("Nem3-Omni-30B BF16", "Nemotron-3-Nano-Omni-30B-A3B-Reasoning",
+             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", "bf16"),
+        ],
+        "nim": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    },
+    # ── Gemma-4-31B-IT (Google; 96 GB GPU required for default KV cache) ─────────
+    # NIM_MAX_MODEL_LEN=131072 must be set in env block (default 262144 needs
+    # 27 GiB KV cache vs ~22 GiB available on 96 GB GPU). H200 SXM recommended.
+    "GM-4-31B": {
+        "variants": [
+            ("Gemma-4-31B IT", "gemma-4-31b-it", "google/gemma-4-31b-it", "bf16"),
+        ],
+        "nim": "google/gemma-4-31b-it",
+    },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
     # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
@@ -295,6 +315,8 @@ _MODEL_SIZE_DEFAULTS = {
     "QW3-32B":  {"max_tokens": 1024},
     # base64-frame models — fps controls extraction; set sensible per-size values
     "CR1-7B":{"fps": 2, "max_tokens": 512},
+    "OMNI-30B":{"fps": 1, "max_tokens": 1024},
+    "GM-4-31B":{"fps": 1, "max_tokens": 1024},
     "2B":    {"fps": 2, "max_tokens": 512},
     "8B":    {"fps": 2, "max_tokens": 512},
     "32B":   {"fps": 1, "max_tokens": 512},
@@ -315,7 +337,7 @@ MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, OMNI-30B, GM-4-31B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
@@ -403,7 +425,9 @@ if INFERENCE_BACKEND == "nim_local":
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
-    ("CR1-7B BF16",   "Cosmos-Reason1-7B",                    "nvidia/Cosmos-Reason1-7B",                       "bf16"),
+    ("CR1-7B BF16",         "Cosmos-Reason1-7B",                    "nvidia/Cosmos-Reason1-7B",                                  "bf16"),
+    ("Nem3-Omni-30B BF16",  "Nemotron-3-Nano-Omni-30B-A3B-Reasoning","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",            "bf16"),
+    ("Gemma-4-31B IT",      "gemma-4-31b-it",                       "google/gemma-4-31b-it",                                     "bf16"),
     ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
     ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner",                 "nvidia/Cosmos3-Nano-Reasoner",                   "bf16"),
     ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
@@ -441,11 +465,13 @@ if INFERENCE_BACKEND == "vllm":
     CHECKPOINT_PRESETS.append(("NIM 8B", "nim://nvidia/cosmos-reason2-8b"))
     # Auto-select the checkpoint that matches the loaded model so no swap fires on first use.
     _VLLM_DD_MAP = {
-        "NEM-12B": "Nem-12B BF16",
-        "QW3-2B":  "Qwen3-VL-2B",
-        "QW3-8B":  "Qwen3-VL-8B",
-        "QW3-32B": "Qwen3-VL-32B",
-        "CR1-7B":  "CR1-7B BF16",
+        "NEM-12B":  "Nem-12B BF16",
+        "QW3-2B":   "Qwen3-VL-2B",
+        "QW3-8B":   "Qwen3-VL-8B",
+        "QW3-32B":  "Qwen3-VL-32B",
+        "CR1-7B":   "CR1-7B BF16",
+        "OMNI-30B": "Nem3-Omni-30B BF16",
+        "GM-4-31B": "Gemma-4-31B IT",
         "2B":      "CR2-2B BF16",
         "8B":      "CR2-8B BF16",
         "C3-2B":   "C3R-2B BF16",
