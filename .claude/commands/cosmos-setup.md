@@ -22,8 +22,9 @@ Steps:
 9. Check git-lfs: run `git lfs version`. If missing, run: `sudo apt-get install -y git-lfs && git lfs install`
 10. Check ffmpeg: run `ffmpeg -version 2>/dev/null | head -1`. If missing, run: `sudo apt-get install -y ffmpeg`. If apt-get fails or ffmpeg is still not in PATH (common on Hyperstack/snap-only environments), try: `sudo snap install ffmpeg && sudo ln -s /snap/bin/ffmpeg /usr/local/bin/ffmpeg`.
     - On Horde: `sudo cp /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe` (if amd64 static binary pre-downloaded).
-11. Report a summary table: GPU, Arch, Python, Docker, HuggingFace (with nvidia org), NGC (optional), Disk, uv, just, git-lfs, ffmpeg — each ✓ or ✗ with version.
-12. If everything checks out, print: "Environment ready. Use /cosmos-run-recipe <recipe-name> to execute a recipe."
+11. If the target recipe mentions FiftyOne, verify it in the active recipe Python environment: `python -c "import fiftyone as fo; print(fo.__version__)"`. If missing, install it into that same environment with `uv pip install -U fiftyone` for uv-managed environments, or `python -m pip install -U fiftyone` when pip is available. For remote/headless runs, reserve a FiftyOne App port such as 5151 and use `FIFTYONE_ADDRESS=0.0.0.0 FIFTYONE_PORT=5151`; the local laptop should use `ssh -L 5151:localhost:5151 <host>` to view it.
+12. Report a summary table: GPU, Arch, Python, Docker, HuggingFace (with nvidia org), NGC (optional), Disk, uv, just, git-lfs, ffmpeg, and FiftyOne when relevant — each ✓ or ✗ with version.
+13. If everything checks out, print: "Environment ready. Use /cosmos-run-recipe <recipe-name> to execute a recipe."
 
 ## Model Family Selection
 

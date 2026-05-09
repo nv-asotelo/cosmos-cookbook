@@ -46,6 +46,7 @@
 # ### 2. Load dataset and copy the first video to assets/sample.mp4 - Testing the installation
 
 # %%
+import os
 import pathlib
 import shutil
 
@@ -57,10 +58,11 @@ import fiftyone.utils.huggingface as fouh
 ROOT = pathlib.Path.cwd()
 ASSETS = ROOT / "assets"
 ASSETS.mkdir(exist_ok=True)
+DATASET_NAME = os.environ.get("WORKER_SAFETY_DATASET", "pjramg/Safe_Unsafe_Test")
 
 # NOTE: omit overwrite=True so existing annotations are preserved
-dataset = fouh.load_from_hub("pjramg/Safe_Unsafe_Test", persistent=True)
-# dataset = fo.load_dataset("pjramg/Safe_Unsafe_Test") #
+dataset = fouh.load_from_hub(DATASET_NAME, persistent=True)
+# dataset = fo.load_dataset(DATASET_NAME) #
 
 sample = dataset.first()
 
@@ -81,8 +83,6 @@ print("Reference video copied to:", dst)
 
 # %%
 # 3. CUDA / environment sanity check
-import os
-
 import torch
 
 print("CUDA available:", torch.cuda.is_available())
@@ -117,7 +117,7 @@ warnings.filterwarnings("ignore")
 
 # --- MODEL INITIALIZATION ---
 def load_model():
-    model_name = "nvidia/Cosmos-Reason2-2B"
+    model_name = os.environ.get("WORKER_SAFETY_MODEL", "nvidia/Cosmos-Reason2-2B")
     model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
         model_name, dtype=torch.float16, device_map="auto", attn_implementation="sdpa"
     )
@@ -131,6 +131,33 @@ def load_model():
         "longest_edge": max_vision_tokens * PIXELS_PER_TOKEN,
     }
     return model, processor
+
+
+def load_fiftyone_dataset(dataset_name):
+    """Load the persistent FiftyOne dataset, downloading from Hugging Face once."""
+    if dataset_name in fo.list_datasets():
+        return fo.load_dataset(dataset_name)
+    return fouh.load_from_hub(dataset_name, persistent=True)
+
+
+def parse_model_json(output_text):
+    """Parse Cosmos Reason JSON, tolerating markdown fences or light preamble text."""
+    clean_json = output_text.strip().replace("```json", "").replace("```", "")
+    try:
+        return json.loads(clean_json)
+    except json.JSONDecodeError:
+        start = clean_json.find("{")
+        end = clean_json.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(clean_json[start : end + 1])
+        raise
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # --- PROMPTS ---
@@ -188,8 +215,7 @@ USER_PROMPT_CONTENT = """
 
 # %%
 # 1. Load the FiftyOne Dataset
-# Replace "your_dataset_name" with your actual dataset name
-dataset = fo.load_dataset("pjramg/Safe_Unsafe_Test")
+dataset = load_fiftyone_dataset(DATASET_NAME)
 
 # 2. Setup Model
 model, processor = load_model()
@@ -239,9 +265,7 @@ for sample in dataset.iter_samples(progress=True):
         # 4. Parse and Save to FiftyOne
         # Cosmos-Reason2 usually outputs clean JSON, but we wrap in try/except
         try:
-            # Cleaning markdown blocks if model returns ```json ... ```
-            clean_json = output_text.strip().replace("```json", "").replace("```", "")
-            json_data = json.loads(clean_json)
+            json_data = parse_model_json(output_text)
 
             # Store as a custom field "cosmos_analysis"
             sample["cosmos_analysis"] = json_data
@@ -260,15 +284,27 @@ for sample in dataset.iter_samples(progress=True):
     except Exception as e:
         print(f"Inference failed for {video_path}: {e}")
 
-print("Processing complete. Launching App...")
+print("Processing complete.")
 
 
 # %% [markdown]
 # ### 7. Visualize the results in FiftyOne, compare results with Ground Truth and make adjustments if needed.
 
 # %%
-session = fo.launch_app(dataset)
-session.wait()
+if env_flag("WORKER_SAFETY_LAUNCH_APP", default=True):
+    launch_kwargs = {}
+    if os.environ.get("FIFTYONE_ADDRESS"):
+        launch_kwargs["address"] = os.environ["FIFTYONE_ADDRESS"]
+    if os.environ.get("FIFTYONE_PORT"):
+        launch_kwargs["port"] = int(os.environ["FIFTYONE_PORT"])
+
+    session = fo.launch_app(dataset, **launch_kwargs)
+    print("FiftyOne App launched:", getattr(session, "url", "session active"))
+
+    if env_flag("WORKER_SAFETY_FIFTYONE_WAIT", default=False):
+        session.wait()
+else:
+    print("FiftyOne App launch skipped by WORKER_SAFETY_LAUNCH_APP=0.")
 
 # %% [markdown]
 # ### Output sample:

@@ -265,6 +265,24 @@ For the full code and to run this analysis yourself, verify you have the `pjramg
 
 Run the full workflow in the main notebook: [Worker Safety notebook](worker_safety.ipynb).
 
+For a headless smoke test on a remote GPU instance, run the paired Python export
+with the FiftyOne App configured not to block the process:
+
+```bash
+cd docs/recipes/inference/reason2/worker_safety
+WORKER_SAFETY_LAUNCH_APP=1 \
+WORKER_SAFETY_FIFTYONE_WAIT=0 \
+FIFTYONE_ADDRESS=0.0.0.0 \
+FIFTYONE_PORT=5151 \
+python worker_safety.py
+```
+
+If you want to inspect the app from your laptop, open a separate local tunnel:
+
+```bash
+ssh -L 5151:localhost:5151 <user>@<remote-host>
+```
+
 ### References
 
 - Safe and Unsafe Behaviours Dataset: [Mendeley Data](https://data.mendeley.com/datasets/xjmtb22pff/1)
