@@ -26,6 +26,7 @@ Runtime: serves on 0.0.0.0:7860 (Gradio default). frpc tunnel exposes a public U
 import base64
 import json
 import os
+import shutil
 import subprocess
 import urllib.request
 import urllib.error
@@ -58,14 +59,44 @@ def _b64_file(path: str) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
+def _preprocess_video(src_path: str) -> tuple[str, str]:
+    # Cosmos Predict's TorchScript autoencoder expects exactly 5s × 1280×704 × 24fps.
+    # Mismatched input shape fails inside the encoder forward pass (HTTP 500
+    # observed 2026-05-08 on a 0:45 1920×1080 clip). Normalize before send.
+    if not shutil.which("ffmpeg"):
+        return src_path, "⚠ ffmpeg missing — sending video as-is (autoencoder may reject)"
+    out_path = "/tmp/cosmos_predict_input.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-i", src_path,
+        "-vf",
+        "scale=1280:704:force_original_aspect_ratio=decrease,"
+        "pad=1280:704:(ow-iw)/2:(oh-ih)/2:black",
+        "-r", "24",
+        "-frames:v", "121",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-an",
+        out_path,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+        return out_path, "✂ 121 frames @ 24fps · 1280×704 · h264 (Cosmos Predict spec)"
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or b"").decode("utf-8", errors="replace")[-200:]
+        return src_path, f"⚠ ffmpeg failed (code {e.returncode}); sending as-is. {tail}"
+    except Exception as e:
+        return src_path, f"⚠ ffmpeg error: {e}; sending as-is"
+
+
 def generate(world_mode: str, video_file, image_file, prompt: str,
              guidance_scale: float, steps: int, seed: int,
              prompt_upsampling: bool):
+    prep_info = ""
     if world_mode == "Video-to-World":
         if not video_file:
             return None, "❌ Upload a video for Video-to-World mode.", None
         media_field = "video"
-        media_b64 = _b64_file(video_file)
+        prep_path, prep_info = _preprocess_video(video_file)
+        media_b64 = _b64_file(prep_path)
     else:
         if not image_file:
             return None, "❌ Upload an image for Image-to-World mode.", None
@@ -117,6 +148,8 @@ def generate(world_mode: str, video_file, image_file, prompt: str,
     out_path = "/tmp/cosmos_predict_output.mp4"
     Path(out_path).write_bytes(base64.b64decode(b64_video))
     info = f"✅ Generated {len(b64_video)//1000} KB mp4 · seed={data.get('seed', 'n/a')}"
+    if prep_info:
+        info = f"{prep_info}\n\n{info}"
     return out_path, info, json.dumps({k: v for k, v in data.items() if k != "b64_video"}, indent=2)
 
 

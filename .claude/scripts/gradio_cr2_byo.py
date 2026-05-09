@@ -1042,19 +1042,16 @@ def _load(model_id):
 
 
 # ── Frame extraction for NIM ───────────────────────────────────────────────────
-def _extract_frames_b64(video_path, fps=1, max_frames=8):
+def _extract_frames_b64(video_path, fps=1, max_frames=None):
     """Return list of base64 JPEG strings sampled from `video_path`.
 
-    Sampling strategy:
-      - target_count = duration_s * fps (what fps would yield without a cap)
-      - if target_count <= max_frames: pick every `frame_rate/fps`-th frame
-        starting at 0. Behaviour identical to the prior version.
-      - if target_count > max_frames: uniformly distribute `max_frames` picks
-        across the FULL video duration (frame indices spaced by
-        (total_frames-1)/(max_frames-1)). This is the critical fix for
-        long clips where the cap previously truncated everything to the
-        first ~max_frames/fps seconds, e.g. for a 30-fps 40-s clip with
-        fps=8 max=5 the prior logic took only the first 0.4 s of footage.
+    Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
+    `max_frames=None` means send all `duration × fps` frames. The NIM will
+    return 4xx if it can't handle the payload.
+
+    For backwards-compat callers may pass an integer `max_frames`; if so,
+    the cap is honored with uniform-distribution sampling. New code should
+    pass None.
     """
     if not _AV_OK:
         return []
@@ -1070,16 +1067,16 @@ def _extract_frames_b64(video_path, fps=1, max_frames=8):
             duration_s = float(stream.duration * stream.time_base) if stream.duration else 0.0
             total_frames = max(1, int(duration_s * frame_rate))
 
-        # How many frames the requested sample fps would produce if no cap.
+        # How many frames the requested sample fps would produce.
         target_count = max(1, int(round(total_frames * (fps / frame_rate))))
 
-        if target_count <= max_frames:
-            # Below the cap — take every Nth frame from the start (fps == sample fps).
+        if max_frames is None or target_count <= max_frames:
+            # No cap (or under it) — take every Nth frame at the requested fps.
             interval = max(1, int(round(frame_rate / fps)))
             target_indices = set(range(0, total_frames, interval))
-            n_to_take = max_frames
+            n_to_take = len(target_indices)
         else:
-            # Hit the cap — distribute uniformly across the full video.
+            # Caller opted into a cap (legacy) — uniform-distribute across full duration.
             n_to_take = max_frames
             if n_to_take == 1:
                 target_indices = {0}
@@ -1208,15 +1205,10 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         print(f"[vllm/nemotron] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
         # Frame extraction path — used by Cosmos Reason 1/2 and Cosmos3 NIMs.
-        # The 5-frame cap that lived here was a stale assumption from
-        # nemotron-nano-12b-v2-vl's 1-image-cap discovery; nemotron and Qwen3-VL
-        # take the video_url branch above, so this branch only hits cosmos-style
-        # NIMs which accept 32+ frames cleanly (verified on cosmos-reason1-7b
-        # 2026-05-06 + cosmos-reason2 series). Cap at 32 to match HF mode and
-        # stay safely inside the 128k context budget at default max_pixels.
-        _max_frames = 32 if INFERENCE_BACKEND == "nim_local" else 8
-        print(f"[vllm] Extracting frames fps={fps} max={_max_frames}", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
+        # Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
+        # Send `duration × fps` frames; let the NIM 4xx if it can't handle.
+        print(f"[vllm] Extracting frames fps={fps} (no client cap)", flush=True)
+        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
         if not frames_b64:
             msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
@@ -1246,11 +1238,13 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                 {"role": "system", "content": system},
                 {"role": "user",   "content": content},
             ],
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": top_p,
             "stream": True,
         }
+        # Standing rule (Alex 2026-05-08, all NIMs forever): no max_tokens cap.
+        # The server's max_model_len governs. The slider exists for UI honesty;
+        # its value is ignored at the wire.
         # NVIDIA NIM rejects repetition_penalty at root level on older NIM
         # generations (Cosmos Reason 1 NIM observed 2026-05-08 returning HTTP
         # 400 with "Please include it in the `nvext` object field"). The
@@ -1462,7 +1456,6 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                     {"role": "system", "content": system},
                     {"role": "user",   "content": content},
                 ],
-                "max_tokens": max_tokens,
                 "stream": True,
             },
             stream=True,
@@ -2524,17 +2517,17 @@ with gr.Blocks(
 
         with gr.Row():
             fps_slider = gr.Slider(
-                minimum=1, maximum=8, step=1, value=_UI_DEFAULT_FPS,
+                minimum=1, maximum=60, step=1, value=_UI_DEFAULT_FPS,
                 label="Video sampling rate (fps) — ignored for images",
-                info="Higher = more frames = more tokens = slower. HF mode caps at 32 frames total.",
+                info="Higher = more frames sent. The NIM will tell you if it's too much.",
             )
             maxpx_slider = gr.Slider(
-                minimum=64*(32**2), maximum=4096*(32**2), step=64*(32**2),
+                minimum=64*(32**2), maximum=8192*(32**2), step=64*(32**2),
                 value=DEFAULT_MAX_PIXELS,
-                label="Max pixels per frame",
+                label="Max pixels per frame (HF mode only — NIM ignores)",
             )
             maxtok_slider = gr.Slider(
-                minimum=64, maximum=2048, step=64, value=DEFAULT_MAX_TOKENS,
+                minimum=64, maximum=131072, step=64, value=DEFAULT_MAX_TOKENS,
                 label="Max output tokens",
             )
 

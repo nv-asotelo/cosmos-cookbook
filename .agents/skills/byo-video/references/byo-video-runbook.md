@@ -16,6 +16,25 @@ Default output: **Gradio web UI at a `gradio.live` public URL** — user uploads
 
 ---
 
+## NIM Message-Shape — Standing Order
+
+**Every NIM payload must match the build.nvidia.com snippet for that model.** No `file://` URLs. No HTML-tag-in-text shapes. No client-side frame extraction when the model accepts `video_url` natively.
+
+**Canonical shape (use this for every model the runbook supports unless build.nvidia.com publishes a different one):**
+
+```python
+{"role": "user", "content": [
+  {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{b64}"}},
+  {"type": "text",      "text": prompt}
+]}
+```
+
+This works on hosted (`integrate.api.nvidia.com`), local NIM (`nvcr.io/nim/...` on Brev port 8000), and vLLM-served checkpoints — without any server-side flag. The 2026-05-08 nem-12b incident showed `file://` returns HTTP 400 (`Cannot load local files without --allowed-local-media-path`) on default vLLM containers; build.nvidia.com hosted endpoints reject `file://` outright. Base64 `data:` URLs are the only shape that works everywhere.
+
+**When adding a new model to `KNOWN_VLM_NIMS`:** fetch its build.nvidia.com snippet first (or `python3 ~/.claude/scripts/nim_catalog.py upstream`), copy the `messages` payload shape verbatim, then wire it in. Do not extrapolate from another model.
+
+---
+
 **Primary launch command (all environments):**
 ```bash
 python3 /tmp/byo_video_setup.py
