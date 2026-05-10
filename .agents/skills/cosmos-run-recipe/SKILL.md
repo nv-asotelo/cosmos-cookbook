@@ -28,8 +28,6 @@ Steps:
 
 **SSH tunnel:** When the recipe output includes a localhost URL (e.g., `http://localhost:7860`), the SSH tunnel command (`ssh -L 7860:localhost:7860 ...`) runs on the **user's laptop**, not on the GPU instance. Instruct the user to run it in a local terminal tab.
 
-**FiftyOne recipes:** If the recipe guide or docs mention FiftyOne, verify `python -c "import fiftyone as fo; print(fo.__version__)"` from the same Python environment that will run the recipe. If missing, install inside the active venv with `uv pip install -U fiftyone` for uv-managed environments, or `python -m pip install -U fiftyone` when pip is available. For headless GPU instances, prefer explicit app settings such as `FIFTYONE_ADDRESS=0.0.0.0`, `FIFTYONE_PORT=5151`, and recipe-specific `*_FIFTYONE_WAIT=0` flags so smoke tests complete instead of blocking on `session.wait()`. If the user wants to view the app, give them a local SSH tunnel command for the chosen port.
-
 **Cosmos3-Reasoner recipes:** Use `MODEL_SIZE=C3-2B` (default) or `MODEL_SIZE=C3-8B`. Both use the `cosmos-reason2` working directory (Qwen3-VL compatible). HF_TOKEN with nvidia org access required — check `hf auth whoami` confirms `orgs: nvidia`. NGC not required.
 
 **aarch64 instances (Horde 2026-04-27 pool):** Verify `python3 -c "import torch; print(torch.cuda.is_available())"` before running any recipe. If False, the CUDA Python environment needs to be set up for ARM64+CUDA first — do not proceed until this passes.

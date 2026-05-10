@@ -88,17 +88,13 @@ Expected:
 ### Install FiftyOne
 
 ```bash
-uv pip install -U fiftyone
-# If your environment includes pip, this is also fine:
-# python -m pip install -U fiftyone
+pip install -U fiftyone
 ```
 
 ### Install JupyterLab + kernel support
 
 ```bash
-uv pip install -U jupyterlab ipykernel
-# If your environment includes pip, this is also fine:
-# python -m pip install -U jupyterlab ipykernel
+pip install -U jupyterlab ipykernel
 ```
 
 ---
@@ -138,25 +134,6 @@ jupyter lab
 In the JupyterLab UI:
 
 - **Kernel → Change Kernel → `Python (cosmos-reason2)`**
-
-### Headless or SSH FiftyOne App
-
-If you are running the recipe on a remote GPU instance, bind the FiftyOne App to
-a fixed port and keep notebook/script runs non-blocking:
-
-```bash
-export FIFTYONE_ADDRESS=0.0.0.0
-export FIFTYONE_PORT=5151
-export WORKER_SAFETY_FIFTYONE_WAIT=0
-```
-
-On your local machine, open a tunnel when you want to view the app:
-
-```bash
-ssh -L 5151:localhost:5151 <user>@<remote-host>
-```
-
-Then browse to `http://localhost:5151`.
 
 ---
 
