@@ -18,6 +18,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import statistics
@@ -25,7 +26,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import zipfile
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -128,6 +131,7 @@ else:
 DEFAULT_TEMPERATURE = float(os.getenv("RUNTIME_AGENT_TEMPERATURE", str(RECOMMENDED_TEMPERATURE)))
 DEFAULT_TOP_P = float(os.getenv("RUNTIME_AGENT_TOP_P", str(RECOMMENDED_TOP_P)))
 DEFAULT_REPETITION_PENALTY = float(os.getenv("RUNTIME_AGENT_REPETITION_PENALTY", str(RECOMMENDED_REPETITION_PENALTY)))
+HTTP_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_AGENT_HTTP_TIMEOUT_SECONDS", "20"))
 BUILD_NVIDIA_DEFAULTS = {
     "temperature": 0.6,
     "top_p": 0.3,
@@ -215,6 +219,29 @@ PROMPT_PRESETS = [
     {"label": "Robot arm: 2D trajectory (JSON)", "user_prompt": "You are given the task \"Move the tape into the basket\". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {\"point_2d\": [x, y], \"label\": \"gripper trajectory\"}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
     {"label": "SDG critic: approve / reject", "user_prompt": "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection.\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag. Answer with Approve or Reject only.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
 ]
+PAPER_FALLBACKS = {
+    "2603.29281": {
+        "title": "PRISM: A Multi-View Multi-Capability Retail Video Dataset for Embodied Vision-Language Models",
+        "datasets": ["DreamVu/PRISM-100K"],
+        "models": ["DreamVu/Cosmos-Reason2-2B-Retail-Grocery-EgoExo"],
+        "prompt_presets": [
+            {
+                "label": "PRISM ER-1: next subtask",
+                "system_prompt": GENERIC_SYSTEM,
+                "user_prompt": "What is the next subtask the person will perform?",
+                "reasoning": False,
+                "source": "DreamVu/PRISM-100K dataset card sample",
+            },
+            {
+                "label": "PRISM retail: person action",
+                "system_prompt": GENERIC_SYSTEM,
+                "user_prompt": "What is the person doing in this video?",
+                "reasoning": False,
+                "source": "DreamVu/Cosmos-Reason2-2B-Retail-Grocery-EgoExo model card",
+            },
+        ],
+    }
+}
 EXPORT_SECTIONS = [
     {"id": "overview", "label": "Executive overview", "default": True},
     {"id": "run_metrics", "label": "Run metrics", "default": True},
@@ -246,6 +273,7 @@ STATE: Dict[str, Any] = {
     "batch_metrics": None,
     "batch_history": [],
     "run_history": [],
+    "paper_import": None,
     "logs": [],
     "server": {},
     "defaults": {
@@ -295,6 +323,357 @@ def update_state(**items: Any) -> None:
 
 class ClientInputError(RuntimeError):
     """Raised when the browser submitted settings that should be corrected."""
+
+
+def hf_auth_headers() -> Dict[str, str]:
+    headers = {"User-Agent": "cosmos-byo-video-runtime-agent"}
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
+    headers = hf_auth_headers()
+    if requests is not None:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            body = (resp.text or "").strip()
+            raise RuntimeError(f"HTTP {resp.status_code} for {url}: {body[:400]}")
+        return resp.text
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as handle:
+            return handle.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code} for {url}: {body[:400]}")
+
+
+def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> Any:
+    return json.loads(http_get_text(url, timeout=timeout))
+
+
+def plain_text_from_html(text: str) -> str:
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"[ \t\r\f\v]+", " ", text)
+
+
+def ordered_unique(values: Iterable[str]) -> List[str]:
+    seen = set()
+    out = []
+    for value in values:
+        clean = str(value or "").strip().strip("/")
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+    return out
+
+
+def extract_arxiv_id(source: str) -> Optional[str]:
+    match = re.search(r"(\d{4}\.\d{4,5})(?:v\d+)?", source or "")
+    return match.group(1) if match else None
+
+
+def extract_hf_repo_from_url(source: str, repo_type: str) -> Optional[str]:
+    prefix = "datasets" if repo_type == "dataset" else ""
+    if prefix:
+        pattern = r"huggingface\.co/datasets/([^/?#]+/[^/?#]+)"
+    else:
+        pattern = r"huggingface\.co/(?!datasets/|papers/|spaces/)([^/?#]+/[^/?#]+)"
+    match = re.search(pattern, source or "")
+    return urllib.parse.unquote(match.group(1)).strip("/") if match else None
+
+
+def clean_imported_prompt(text: Any) -> str:
+    prompt = html.unescape(str(text or ""))
+    prompt = prompt.replace("\\n", "\n")
+    prompt = prompt.replace("<video>", "").replace("<image>", "")
+    return prompt.strip()
+
+
+def prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[Dict[str, Any]]:
+    readable = plain_text_from_html(text)
+    systems = re.findall(r'"role"\s*:\s*"system"\s*,\s*"content"\s*:\s*"([^"]+)"', readable)
+    users = re.findall(r'"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"([^"]+)"', readable)
+    presets = []
+    for index, user_prompt in enumerate(users[:6]):
+        system_prompt = systems[min(index, len(systems) - 1)] if systems else GENERIC_SYSTEM
+        user_prompt = clean_imported_prompt(user_prompt)
+        system_prompt = clean_imported_prompt(system_prompt) or GENERIC_SYSTEM
+        if not user_prompt:
+            continue
+        presets.append({
+            "label": f"{label_prefix}: sample prompt {index + 1}",
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "reasoning": "<think>" in user_prompt.lower(),
+            "source": source,
+            "paper_import": True,
+        })
+    return presets
+
+
+def conversation_prompt_preset(row: Dict[str, Any], label: str, source: str) -> Optional[Dict[str, Any]]:
+    conversations = row.get("conversations") or row.get("messages")
+    if not isinstance(conversations, list):
+        return None
+    system_prompt = GENERIC_SYSTEM
+    user_prompt = ""
+    for message in conversations:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").lower()
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in content)
+        if role == "system" and content:
+            system_prompt = clean_imported_prompt(content)
+        elif role == "user" and content and not user_prompt:
+            user_prompt = clean_imported_prompt(content)
+    if not user_prompt:
+        return None
+    return {
+        "label": label,
+        "system_prompt": system_prompt or GENERIC_SYSTEM,
+        "user_prompt": user_prompt,
+        "reasoning": "<think>" in user_prompt.lower(),
+        "source": source,
+        "paper_import": True,
+    }
+
+
+def iter_conversation_rows(value: Any, limit: int = 8) -> Iterable[Dict[str, Any]]:
+    found = 0
+    stack = [value]
+    while stack and found < limit:
+        current = stack.pop(0)
+        if isinstance(current, dict):
+            if isinstance(current.get("conversations") or current.get("messages"), list):
+                found += 1
+                yield current
+                continue
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current[:50])
+
+
+def dedupe_prompt_presets(presets: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    out = []
+    for preset in presets:
+        system_prompt = clean_imported_prompt(preset.get("system_prompt") or GENERIC_SYSTEM) or GENERIC_SYSTEM
+        user_prompt = clean_imported_prompt(preset.get("user_prompt") or "")
+        if not user_prompt:
+            continue
+        key = (system_prompt, user_prompt)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(preset)
+        item["system_prompt"] = system_prompt
+        item["user_prompt"] = user_prompt
+        item["reasoning"] = bool(item.get("reasoning") or "<think>" in user_prompt.lower())
+        item["paper_import"] = True
+        out.append(item)
+    return out
+
+
+def inspect_hf_dataset_for_prompts(repo_id: str) -> Dict[str, Any]:
+    info: Dict[str, Any] = {"repo_id": repo_id, "prompt_presets": [], "warnings": []}
+    encoded_repo = urllib.parse.quote(repo_id, safe="/")
+    try:
+        api_data = http_get_json(f"https://huggingface.co/api/datasets/{encoded_repo}")
+        info["gated"] = api_data.get("gated")
+        info["private"] = api_data.get("private")
+        info["tags"] = api_data.get("tags") or []
+    except Exception as exc:
+        info["warnings"].append(f"Could not read HF dataset API metadata: {exc}")
+
+    try:
+        page = http_get_text(f"https://huggingface.co/datasets/{repo_id}")
+        info["prompt_presets"].extend(prompt_presets_from_text(page, Path(repo_id).name, f"{repo_id} dataset card"))
+    except Exception as exc:
+        info["warnings"].append(f"Could not scrape dataset card prompts: {exc}")
+
+    max_bytes = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_MAX_BYTES", str(5 * 1024 * 1024)))
+    try:
+        tree = http_get_json(f"https://huggingface.co/api/datasets/{encoded_repo}/tree/main/annotations?expand=1")
+        for item in tree if isinstance(tree, list) else []:
+            path = str(item.get("path") or "")
+            size = int(item.get("size") or 0)
+            if not path.endswith((".json", ".jsonl")):
+                continue
+            if size > max_bytes:
+                info["warnings"].append(f"Skipped {path} prompt scan because it is {size:,} bytes; limit is {max_bytes:,}.")
+                continue
+            try:
+                raw = http_get_text(f"https://huggingface.co/datasets/{repo_id}/resolve/main/{path}")
+                if path.endswith(".jsonl"):
+                    rows = [json.loads(line) for line in raw.splitlines() if line.strip()][:20]
+                else:
+                    rows = json.loads(raw)
+                for index, row in enumerate(iter_conversation_rows(rows, limit=6), 1):
+                    preset = conversation_prompt_preset(row, f"{Path(repo_id).name}: annotation prompt {index}", path)
+                    if preset:
+                        info["prompt_presets"].append(preset)
+            except Exception as exc:
+                info["warnings"].append(f"Could not scan {path}: {exc}")
+    except Exception as exc:
+        info["warnings"].append(f"Could not inspect annotation files: {exc}")
+
+    info["prompt_presets"] = dedupe_prompt_presets(info["prompt_presets"])
+    return info
+
+
+def hf_links_from_paper_page(arxiv_id: str) -> Tuple[List[str], List[str]]:
+    try:
+        page = http_get_text(f"https://huggingface.co/papers/{arxiv_id}")
+    except Exception:
+        return [], []
+    dataset_links = re.findall(r'href=["\']/datasets/([^"\']+)["\']', page)
+    model_links = []
+    for repo in re.findall(r'href=["\']/([^"\'?#]+/[^"\'?#]+)["\']', page):
+        first = repo.split("/", 1)[0]
+        if first in {"datasets", "papers", "spaces", "models", "docs", "api", "settings", "front", "collections", "new"}:
+            continue
+        model_links.append(repo)
+    return ordered_unique(dataset_links), ordered_unique(model_links)
+
+
+def title_from_paper_markdown(arxiv_id: str) -> str:
+    try:
+        markdown = http_get_text(f"https://huggingface.co/papers/{arxiv_id}.md")
+    except Exception:
+        markdown = ""
+    match = re.search(r"^Title:\s*(.+)$", markdown, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    try:
+        abs_page = http_get_text(f"https://arxiv.org/abs/{arxiv_id}")
+        text = plain_text_from_html(abs_page)
+        match = re.search(r"Title:\s*(.+?)\s+Authors:", text)
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def discover_paper_source(source: str) -> Dict[str, Any]:
+    source = str(source or "").strip()
+    if not source:
+        raise ClientInputError("Enter an arXiv ID, arXiv URL, Hugging Face paper URL, or Hugging Face dataset URL.")
+    arxiv_id = extract_arxiv_id(source)
+    datasets = []
+    models = []
+    warnings: List[str] = []
+    prompt_presets: List[Dict[str, Any]] = []
+    title = ""
+
+    dataset_repo = extract_hf_repo_from_url(source, "dataset")
+    model_repo = extract_hf_repo_from_url(source, "model")
+    if dataset_repo:
+        datasets.append(dataset_repo)
+    if model_repo and model_repo != dataset_repo:
+        models.append(model_repo)
+
+    if arxiv_id:
+        title = title_from_paper_markdown(arxiv_id)
+        paper_datasets, paper_models = hf_links_from_paper_page(arxiv_id)
+        datasets.extend(paper_datasets)
+        models.extend(paper_models)
+        fallback = PAPER_FALLBACKS.get(arxiv_id)
+        if fallback:
+            title = title or fallback.get("title", "")
+            datasets.extend(fallback.get("datasets", []))
+            models.extend(fallback.get("models", []))
+            prompt_presets.extend(fallback.get("prompt_presets", []))
+
+    datasets = ordered_unique(datasets)
+    models = ordered_unique(models)
+    dataset_details = []
+    for repo_id in datasets[:5]:
+        details = inspect_hf_dataset_for_prompts(repo_id)
+        dataset_details.append(details)
+        prompt_presets.extend(details.get("prompt_presets") or [])
+        warnings.extend(details.get("warnings") or [])
+
+    prompt_presets = dedupe_prompt_presets(prompt_presets)
+    if not prompt_presets:
+        prompt_presets = [{
+            "label": "Paper import: general video QA",
+            "system_prompt": GENERIC_SYSTEM,
+            "user_prompt": DEFAULT_PROMPT,
+            "reasoning": False,
+            "source": "fallback",
+            "paper_import": True,
+        }]
+        warnings.append("No exact prompt examples were found; using the generic video QA prompt.")
+    if not datasets:
+        raise ClientInputError("No Hugging Face dataset link was found for this paper/source.")
+
+    return {
+        "source": source,
+        "arxiv_id": arxiv_id,
+        "title": title,
+        "datasets": datasets,
+        "selected_dataset": datasets[0],
+        "models": models,
+        "prompt_presets": prompt_presets,
+        "dataset_details": dataset_details,
+        "warnings": ordered_unique(warnings),
+    }
+
+
+def apply_paper_import(discovery: Dict[str, Any]) -> None:
+    imported = dedupe_prompt_presets(discovery.get("prompt_presets") or [])
+    primary = imported[0] if imported else {"system_prompt": GENERIC_SYSTEM, "user_prompt": DEFAULT_PROMPT}
+    merged = list(PROMPT_PRESETS)
+    existing_labels = {preset["label"] for preset in merged}
+    for preset in imported:
+        item = dict(preset)
+        label = str(item.get("label") or "Paper import")
+        if label in existing_labels:
+            label = f"{label} ({len(existing_labels) + 1})"
+        item["label"] = label
+        existing_labels.add(label)
+        merged.append(item)
+    with STATE_LOCK:
+        defaults = dict(STATE["defaults"])
+        defaults.update({
+            "system_prompt": primary.get("system_prompt") or GENERIC_SYSTEM,
+            "user_prompt": primary.get("user_prompt") or DEFAULT_PROMPT,
+            "prompt_presets": merged,
+        })
+        STATE["defaults"] = defaults
+        STATE["dataset_repo"] = discovery.get("selected_dataset") or STATE["dataset_repo"]
+        STATE["paper_import"] = discovery
+
+
+def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True) -> Dict[str, Any]:
+    discovery = discover_paper_source(source)
+    apply_paper_import(discovery)
+    log(f"Imported paper metadata for {discovery.get('arxiv_id') or source}: dataset {discovery.get('selected_dataset')}")
+    if load_now and discovery.get("selected_dataset"):
+        try:
+            videos = load_dataset(str(discovery["selected_dataset"]), max_videos)
+            discovery["loaded_videos"] = len(videos)
+        except Exception as exc:
+            discovery["load_error"] = str(exc)
+            log(f"Paper dataset load failed: {exc}")
+            with STATE_LOCK:
+                progress = dict(STATE.get("progress") or {})
+                progress.update({
+                    "updated_epoch": time.time(),
+                    "last_event": "Paper dataset load failed",
+                    "last_error": str(exc),
+                })
+                STATE["progress"] = progress
+    return discovery
 
 
 def video_id(path: str) -> str:
@@ -1983,6 +2362,8 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .export-sections .toggle-row { margin:3px 0; }
 .export-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
 .export-link { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; color:var(--accent); background:#fff; text-decoration:none; }
+.paper-panel { margin-top:12px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; }
+.paper-panel .kv { grid-template-columns:82px 1fr; margin-top:8px; }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
 .step strong { color:var(--ink); }
@@ -2012,6 +2393,15 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   </div>
   <label>Hugging Face dataset</label>
   <input id="repo" value="pjramg/Safe_Unsafe_Test" />
+  <div class="paper-panel">
+    <label>Paper, arXiv, or HF dataset</label>
+    <input id="paperSource" value="https://huggingface.co/papers/2603.29281" />
+    <p class="hint">Imports linked HF datasets and prompt examples from paper pages or dataset cards, then tries to load the selected dataset.</p>
+    <div class="actions">
+      <button class="secondary" id="paperBtn">Import paper + load</button>
+    </div>
+    <div class="kv" id="paperKv"></div>
+  </div>
   <label>Max videos to load (0 = all)</label>
   <input id="maxVideos" type="number" min="0" value="20" />
   <label>Concurrency</label>
@@ -2094,10 +2484,11 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 let state = null;
 let initialized = false;
 let contextBlocked = false;
+let promptPresetSig = '';
 const CONTEXT_WARNING_RATIO = 0.85;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
-function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn'].forEach(id=>document.getElementById(id).disabled=true); }
+function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn','paperBtn'].forEach(id=>document.getElementById(id).disabled=true); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
 function el(id){ return document.getElementById(id); }
 function num(id){ return Number(document.getElementById(id).value); }
@@ -2115,6 +2506,8 @@ function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; 
 function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
 function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
+function syncPromptPresets(){ const presets=state?.defaults?.prompt_presets||[]; const sig=presets.map(p=>`${p.label}|${p.user_prompt}`).join('||'); if(sig===promptPresetSig) return; const select=el('promptPreset'); const old=select.value; select.innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}${p.paper_import?' (paper)':''}</option>`).join(''); const importedIndex=presets.findIndex(p=>p.paper_import); if(importedIndex>=0 && (!old || old==='0')) select.value=String(importedIndex); else if(old && Number(old) < presets.length) select.value=old; promptPresetSig=sig; }
+function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if(p.arxiv_id) rows.push(['arXiv',p.arxiv_id]); if(p.title) rows.push(['title',clipText(p.title,90)]); if(p.selected_dataset) rows.push(['dataset',p.selected_dataset]); if(p.models?.length) rows.push(['model',p.models[0]]); if(p.prompt_presets?.length) rows.push(['prompts',p.prompt_presets.length]); if(p.load_error) rows.push(['load error',clipText(p.load_error,160)]); if(p.warnings?.length) rows.push(['warnings',clipText(p.warnings.join(' | '),180)]); el('paperKv').innerHTML = rows.length ? rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('') : '<div>paper</div><div>No paper imported yet.</div>'; }
 function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
 function renderExportSections(){ const sections=state?.defaults?.export_sections||[]; const target=el('exportSections'); if(!target || target.dataset.ready) return; target.innerHTML = sections.map(s=>`<label class="toggle-row"><input class="exportSection" type="checkbox" value="${esc(s.id)}" ${s.default?'checked':''}/><span><strong>${esc(s.label)}</strong></span></label>`).join(''); target.dataset.ready='1'; }
 function addExportLink(item){ const box=el('exportLinks'); const a=document.createElement('a'); a.className='export-link'; a.href=item.url; a.target='_blank'; a.textContent=`${item.format.toUpperCase()} | ${item.filename}`; box.prepend(a); }
@@ -2135,8 +2528,9 @@ function clipText(text, max=260){ const s=String(text||''); return s.length > ma
 function renderRuntimeStatus(){ const p=state.progress||{}; const bm=state.batch_metrics||{}; const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : 0; const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((state.running ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0); const eta=state.running && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastResult=Number(p.last_result_epoch||0); const waitSince=state.running ? now - (lastResult || started || now) : null; const latestError=latestRuntimeError(); const delayed=state.running && waitSince !== null && waitSince > 90; const stalled=state.running && waitSince !== null && waitSince > 300; const title=latestError ? (state.running ? 'Running with errors' : 'Attention') : state.running ? (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running') : total ? (errors ? 'Complete with errors' : 'Complete') : 'Idle'; const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`; const etaText=state.running ? (eta === null ? 'waiting for first completion' : span(eta)) : ''; const rows=[['completed', total ? `${fmt(done)}/${fmt(total)}` : 'none'],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['delay', state.running && waitSince !== null ? span(waitSince) : ''],['errors', fmt(errors)],['event', p.last_event||'']]; el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); const notice=el('runtimeNotice'); if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); } else if(stalled){ notice.className='status-note bad'; notice.textContent=`No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; } else if(delayed){ notice.className='status-note warn'; notice.textContent=`No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; } else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; } else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; } else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Batch finished with errors. See Results and Runtime log for details.' : 'Batch finished successfully.'; } else { notice.className='status-note'; notice.textContent='No batch is running.'; } }
 function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
 function applyBuildDefaults(checked){ const d=state.defaults; const b=d.build_defaults||{}; const m=d.slider_meta||{}; el('temperatureSlider').value = checked ? b.temperature : m.temperature.recommended; el('topPSlider').value = checked ? b.top_p : m.top_p.recommended; el('repPenaltySlider').value = checked ? b.repetition_penalty : m.repetition_penalty.recommended; render(); }
-function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); renderExportSections(); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
+function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; syncPromptPresets(); renderExportSections(); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
 function render(){ if(!state) return; initControls(); renderParamLabels();
+ syncPromptPresets(); renderPaperImport();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
  const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
@@ -2155,6 +2549,7 @@ document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults
 document.getElementById('allowOverContext').onchange = render;
 document.getElementById('fitBudgetBtn').onclick = fitToContext;
 document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
+document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; } await poll(); if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
@@ -2204,6 +2599,13 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/load":
                 videos = load_dataset(str(payload.get("repo_id") or DEFAULT_DATASET), int_payload(payload, "max_videos", 20))
                 self.send_json({"videos": videos})
+            elif self.path == "/api/paper":
+                discovery = import_paper_source(
+                    str(payload.get("source") or ""),
+                    int_payload(payload, "max_videos", 20),
+                    bool(payload.get("load_dataset", True)),
+                )
+                self.send_json(discovery)
             elif self.path == "/api/run":
                 if snapshot().get("running"):
                     raise RuntimeError("A batch is already running")
