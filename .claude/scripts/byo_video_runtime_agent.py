@@ -19,6 +19,7 @@ import mimetypes
 import os
 import shutil
 import socket
+import statistics
 import subprocess
 import sys
 import threading
@@ -87,6 +88,8 @@ OUTPUT FORMAT:
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv"}
 DEFAULT_DATASET = os.getenv("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test")
 RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_agent_results.json"))
+THUMBNAIL_DIR = Path(os.getenv("RUNTIME_AGENT_THUMBNAILS", "/tmp/byo_video_runtime_agent_thumbnails"))
+THUMBNAIL_SIZE = (220, 124)
 TEXT_TOKENS = 50
 EMPIRICAL_VISUAL_TOKENS_PER_FRAME = 128
 BASELINE_PIXELS = 524288
@@ -205,6 +208,8 @@ STATE: Dict[str, Any] = {
     "results": [],
     "running": False,
     "progress": {"done": 0, "total": 0, "errors": 0},
+    "batch_metrics": None,
+    "batch_history": [],
     "logs": [],
     "server": {},
     "defaults": {
@@ -279,6 +284,52 @@ def get_video_meta(path: str) -> Dict[str, Any]:
     return meta
 
 
+def stats_summary(values: Iterable[Optional[float]]) -> Dict[str, Any]:
+    nums = sorted(float(v) for v in values if v is not None)
+    if not nums:
+        return {"count": 0, "min": None, "max": None, "median": None, "average": None}
+    return {
+        "count": len(nums),
+        "min": nums[0],
+        "max": nums[-1],
+        "median": statistics.median(nums),
+        "average": sum(nums) / len(nums),
+    }
+
+
+def estimate_output_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, int(round(len(text) / 4)))
+
+
+def ensure_thumbnail(path: str) -> Optional[Path]:
+    target = THUMBNAIL_DIR / f"{video_id(path)}.jpg"
+    if target.exists():
+        return target
+    try:
+        import av
+
+        THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+        with av.open(path) as container:
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            if not stream:
+                return None
+            rate = float(stream.average_rate or 30)
+            total_frames = int(stream.frames or 0)
+            target_index = int(max(0, min(total_frames - 1, round(rate)))) if total_frames > 0 else int(max(0, round(rate)))
+            for index, frame in enumerate(container.decode(stream)):
+                if index < target_index:
+                    continue
+                image = frame.to_image().convert("RGB")
+                image.thumbnail(THUMBNAIL_SIZE)
+                image.save(target, format="JPEG", quality=82)
+                return target
+    except Exception as exc:
+        log(f"Could not extract thumbnail for {Path(path).name}: {exc}")
+    return None
+
+
 def estimate_plan(meta: Dict[str, Any], fps: float, max_pixels: int, max_frames: int, model: str = "") -> Dict[str, Any]:
     width = int(meta.get("width") or 0)
     height = int(meta.get("height") or 0)
@@ -320,6 +371,10 @@ def attach_meta(video: Dict[str, Any]) -> Dict[str, Any]:
         STATE["defaults"]["max_frames"],
         os.getenv("MODEL_NAME", ""),
     )
+    thumbnail = ensure_thumbnail(video["filepath"])
+    if thumbnail:
+        video["thumbnail_path"] = str(thumbnail)
+        video["thumbnail_url"] = f"/api/thumb/{video['id']}.jpg"
     return video
 
 
@@ -428,7 +483,7 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
         log(f"FiftyOne load failed; falling back to huggingface_hub: {exc}")
         videos = load_with_hf_hub(repo_id, max_videos)
         log(f"Loaded {len(videos)} videos with huggingface_hub")
-    update_state(dataset_repo=repo_id, videos=videos, results=[], progress={"done": 0, "total": 0, "errors": 0})
+    update_state(dataset_repo=repo_id, videos=videos, results=[], progress={"done": 0, "total": 0, "errors": 0}, batch_metrics=None)
     return videos
 
 
@@ -592,9 +647,93 @@ def parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def response_text_from_choice(choice: Dict[str, Any]) -> str:
+    delta = choice.get("delta") or {}
+    if isinstance(delta.get("content"), str):
+        return delta["content"]
+    if isinstance(delta.get("reasoning_content"), str):
+        return delta["reasoning_content"]
+    if isinstance(choice.get("text"), str):
+        return choice["text"]
+    return ""
+
+
+def raise_for_status_with_body(resp: Any) -> None:
+    if resp.status_code < 400:
+        return
+    body = (resp.text or "").strip()
+    detail = f"{resp.status_code} Client Error: {resp.reason} for url: {resp.url}"
+    if body:
+        detail += f" :: {body[:800]}"
+    raise requests.HTTPError(detail, response=resp)
+
+
+def post_chat_completion(base_url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = base_url.rstrip("/") + "/chat/completions"
+    request_started = time.monotonic()
+    stream_payload = dict(payload)
+    stream_payload["stream"] = True
+    stream_payload["stream_options"] = {"include_usage": True}
+    resp = requests.post(url, headers=headers, json=stream_payload, timeout=900, stream=True)
+    if resp.status_code >= 400 and "stream_options" in (resp.text or ""):
+        stream_payload.pop("stream_options", None)
+        resp = requests.post(url, headers=headers, json=stream_payload, timeout=900, stream=True)
+    raise_for_status_with_body(resp)
+
+    chunks: List[str] = []
+    usage: Dict[str, Any] = {}
+    first_token_at: Optional[float] = None
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if line == "[DONE]":
+            break
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+        for choice in event.get("choices") or []:
+            piece = response_text_from_choice(choice)
+            if not piece:
+                continue
+            if first_token_at is None:
+                first_token_at = time.monotonic()
+            chunks.append(piece)
+
+    request_ended = time.monotonic()
+    text = "".join(chunks)
+    output_tokens = usage.get("completion_tokens") if usage else None
+    tokens_estimated = output_tokens is None
+    if output_tokens is None:
+        output_tokens = estimate_output_tokens(text)
+    ttft = first_token_at - request_started if first_token_at is not None else None
+    decode_seconds = request_ended - first_token_at if first_token_at is not None else request_ended - request_started
+    output_tps = float(output_tokens) / decode_seconds if decode_seconds > 0 and output_tokens else 0.0
+    total_tps = float(output_tokens) / (request_ended - request_started) if request_ended > request_started and output_tokens else 0.0
+    return {
+        "text": text,
+        "usage": usage,
+        "metrics": {
+            "ttft_seconds": ttft,
+            "request_seconds": request_ended - request_started,
+            "decode_seconds": decode_seconds,
+            "output_tokens": int(output_tokens),
+            "output_tokens_estimated": tokens_estimated,
+            "output_tokens_per_second": output_tps,
+            "total_tokens_per_second": total_tps,
+        },
+    }
+
+
 def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if requests is None:
         raise RuntimeError(f"requests import failed: {REQUESTS_IMPORT_ERROR}")
+    overall_started = time.monotonic()
     server = detect_server()
     base_url = server.get("base_url") or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
     model = server.get("model") or os.getenv("MODEL_NAME") or "cosmos-reason"
@@ -609,6 +748,7 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         int(params.get("max_pixels") or STATE["defaults"]["max_pixels"]),
         int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"]),
     )
+    preprocessing_seconds = time.monotonic() - overall_started
     payload = {
         "model": model,
         "messages": [
@@ -621,11 +761,11 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         "repetition_penalty": float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"]),
         "stream": False,
     }
-    resp = requests.post(base_url.rstrip("/") + "/chat/completions", headers=headers, json=payload, timeout=900)
-    resp.raise_for_status()
-    data = resp.json()
-    message = data.get("choices", [{}])[0].get("message", {})
-    text = message.get("content") or data.get("choices", [{}])[0].get("text") or ""
+    completion = post_chat_completion(base_url, headers, payload)
+    text = completion["text"]
+    metrics = dict(completion["metrics"])
+    metrics["preprocessing_seconds"] = preprocessing_seconds
+    metrics["e2e_seconds"] = time.monotonic() - overall_started
     parsed = parse_json_from_text(text)
     result = {
         "id": video["id"],
@@ -635,6 +775,8 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         "json": parsed,
         "plan": plan,
         "params": params,
+        "usage": completion.get("usage") or {},
+        "metrics": metrics,
         "error": None,
     }
     write_fiftyone_result(video, result)
@@ -653,6 +795,7 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
         sample["runtime_agent_response"] = result.get("response") or ""
         sample["runtime_agent_plan"] = result.get("plan") or {}
         sample["runtime_agent_params"] = result.get("params") or {}
+        sample["runtime_agent_metrics"] = result.get("metrics") or {}
         if result.get("json") is not None:
             sample["runtime_agent_json"] = result["json"]
             label = result["json"].get("prediction_label")
@@ -665,31 +808,97 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
         log(f"Could not write result back to FiftyOne: {exc}")
 
 
+def batch_summary(
+    dataset_repo: str,
+    results: List[Dict[str, Any]],
+    total: int,
+    errors: int,
+    concurrency: int,
+    started_monotonic: float,
+    status: str,
+) -> Dict[str, Any]:
+    elapsed = max(time.monotonic() - started_monotonic, 0.0)
+    metrics = [r.get("metrics") or {} for r in results]
+    ok = max(0, len(results) - errors)
+    return {
+        "dataset_repo": dataset_repo,
+        "status": status,
+        "total": total,
+        "completed": len(results),
+        "ok": ok,
+        "errors": errors,
+        "concurrency": concurrency,
+        "batch_wall_seconds": elapsed,
+        "video_requests_per_second": (len(results) / elapsed) if elapsed > 0 else 0.0,
+        "e2e_seconds": stats_summary(m.get("e2e_seconds") for m in metrics),
+        "ttft_seconds": stats_summary(m.get("ttft_seconds") for m in metrics),
+        "output_tokens_per_second": stats_summary(m.get("output_tokens_per_second") for m in metrics),
+    }
+
+
+def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    started = time.monotonic()
+    try:
+        return run_one(video, system_prompt, user_prompt, params)
+    except Exception as exc:
+        result = {
+            "id": video["id"],
+            "name": video["name"],
+            "source_label": video.get("label"),
+            "response": "",
+            "json": None,
+            "plan": video.get("plan"),
+            "params": params,
+            "metrics": {"e2e_seconds": time.monotonic() - started},
+            "error": str(exc),
+        }
+        write_fiftyone_result(video, result)
+        return result
+
+
 def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> None:
-    videos_by_id = {v["id"]: v for v in snapshot()["videos"]}
+    snap = snapshot()
+    videos_by_id = {v["id"]: v for v in snap["videos"]}
     selected = [videos_by_id[i] for i in ids if i in videos_by_id] or list(videos_by_id.values())
-    update_state(running=True, results=[], progress={"done": 0, "total": len(selected), "errors": 0})
+    dataset_repo = str(snap.get("dataset_repo") or DEFAULT_DATASET)
+    batch_started = time.monotonic()
+    update_state(
+        running=True,
+        results=[],
+        progress={"done": 0, "total": len(selected), "errors": 0},
+        batch_metrics=batch_summary(dataset_repo, [], len(selected), 0, concurrency, batch_started, "running"),
+    )
     log(f"Running {len(selected)} videos with concurrency={concurrency}")
     results: List[Dict[str, Any]] = []
     errors = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        future_map = {pool.submit(run_one, v, system_prompt, user_prompt, params): v for v in selected}
+        future_map = {pool.submit(run_one_recorded, v, system_prompt, user_prompt, params): v for v in selected}
         for future in concurrent.futures.as_completed(future_map):
             video = future_map[future]
             try:
                 result = future.result()
-                log(f"Completed {video['name']}")
+                if result.get("error"):
+                    errors += 1
+                    log(f"Failed {video['name']}: {result['error']}")
+                else:
+                    log(f"Completed {video['name']}")
             except Exception as exc:
                 errors += 1
-                result = {"id": video["id"], "name": video["name"], "source_label": video.get("label"), "response": "", "json": None, "error": str(exc)}
+                result = {"id": video["id"], "name": video["name"], "source_label": video.get("label"), "response": "", "json": None, "plan": video.get("plan"), "params": params, "metrics": {}, "error": str(exc)}
                 write_fiftyone_result(video, result)
                 log(f"Failed {video['name']}: {exc}")
             results.append(result)
             with STATE_LOCK:
                 STATE["results"] = results
                 STATE["progress"] = {"done": len(results), "total": len(selected), "errors": errors}
+                STATE["batch_metrics"] = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "running")
             RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
-    update_state(running=False)
+    final_summary = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "complete")
+    with STATE_LOCK:
+        STATE["running"] = False
+        STATE["batch_metrics"] = final_summary
+        STATE["batch_history"] = (STATE.get("batch_history") or [])[-19:] + [final_summary]
+    RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
     log(f"Batch complete: {len(results) - errors} ok, {errors} errors")
 
 
@@ -749,6 +958,8 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .params { display:grid; grid-template-columns:repeat(2, minmax(220px, 1fr)); gap:10px 18px; margin:12px 0; }
 .param-value { color:var(--ink); font-weight:650; float:right; }
 .range-note { display:block; color:var(--muted); font-size:11px; line-height:1.3; margin-top:4px; }
+.thumb { width:96px; height:54px; object-fit:cover; border:1px solid var(--line); border-radius:6px; background:#e5e7eb; display:block; }
+td.metric { white-space:nowrap; color:var(--muted); }
 .toggle-row { display:flex; align-items:flex-start; gap:8px; color:var(--ink); margin:4px 0 10px; }
 .toggle-row span { display:block; color:var(--muted); font-size:11px; line-height:1.3; margin-top:2px; }
 .hint { color:var(--muted); font-size:12px; margin:6px 0 10px; }
@@ -797,6 +1008,8 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 <section>
   <div class="progress"><div id="bar"></div></div>
   <p id="progressText" class="pill">idle</p>
+  <h3>Batch metrics</h3>
+  <div class="kv" id="batchKv"></div>
   <label>Demo prompt</label>
   <select id="promptPreset"></select>
   <label>System instructions</label>
@@ -821,9 +1034,11 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
     <button class="secondary" id="noneBtn">Select none</button>
   </div>
   <h3>Videos</h3>
-  <div class="results"><table><thead><tr><th></th><th>Name</th><th>Resolution</th><th>Duration</th><th>Source frames</th><th>Frames to VLM</th><th>Est visual tokens</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
+  <div class="results"><table><thead><tr><th></th><th>Preview</th><th>Name</th><th>Resolution</th><th>Duration</th><th>Source frames</th><th>Frames to VLM</th><th>Est visual tokens</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
   <h3>Results</h3>
-  <div class="results"><table><thead><tr><th>Video</th><th>Prediction</th><th>Hazard</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
+  <div class="results"><table><thead><tr><th>Video</th><th>Prediction</th><th>Hazard</th><th>TTFT</th><th>Output tok/s</th><th>E2E</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
+  <h3>Batch history</h3>
+  <div class="results"><table><thead><tr><th>Dataset</th><th>Status</th><th>Videos</th><th>Errors</th><th>Batch E2E</th><th>Video req/s</th><th>Median video E2E</th><th>Avg video E2E</th></tr></thead><tbody id="batchRows"></tbody></table></div>
   <h3>Runtime log</h3>
   <div class="log" id="log"></div>
 </section>
@@ -841,6 +1056,9 @@ function params(){ return {fps:num('fpsSlider'),max_pixels:num('maxPixelsSlider'
 function nativeVideoMode(){ const srv=state?.server||{}; const model=String(srv.model||'').toLowerCase(); const backend=String(srv.backend||'').toLowerCase(); return backend.includes('nim') || model.includes('qwen') || model.includes('nemotron'); }
 function fmt(n, digits=0){ if(n === null || n === undefined || Number.isNaN(Number(n))) return ''; return Number(n).toLocaleString(undefined,{maximumFractionDigits:digits}); }
 function fmtMetaValue(v){ return typeof v === 'number' ? fmt(v, Number.isInteger(v) ? 0 : 2) : String(v ?? ''); }
+function sec(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : `${Number(v).toFixed(2)}s`; }
+function rate(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : Number(v).toFixed(2); }
+function statText(s){ if(!s || !s.count) return 'no samples yet'; return `min ${sec(s.min)} · max ${sec(s.max)} · median ${sec(s.median)} · avg ${sec(s.average)}`; }
 function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const tokens=Math.round(frames * effectivePx / 524288 * 128); return {frames, tokens, note:''}; }
 function sliderLabel(id, label, suffix=''){ document.getElementById(id+'Value').textContent = label + suffix; }
 function sliderHint(domId, key){ const m=(state.defaults.slider_meta||{})[key]||{}; const unit=m.unit ? ' '+m.unit : ''; const recommended = key === 'max_frames' && m.recommended === 0 ? 'disabled' : fmtMetaValue(m.recommended); document.getElementById(domId+'Hint').textContent = `min ${fmtMetaValue(m.min)}${unit} · max ${fmtMetaValue(m.max)}${unit} · recommended ${recommended}${unit}. ${m.note||''}`; }
@@ -852,8 +1070,10 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
  const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`;
- const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${esc(v.name)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
- document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const plan=r.plan||{}; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' · ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${pred}</td><td>${esc(hz.is_hazardous)}</td><td>${desc}</td></tr>`; }).join('');
+ const bm=state.batch_metrics||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
+ const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
+ document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' · ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${pred}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}</td></tr>`; }).join('');
+ document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>`<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td class="metric">${sec(b.e2e_seconds?.average)}</td></tr>`).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
  document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running; document.getElementById('smokeBtn').disabled = state.running; document.getElementById('foBtn').disabled = state.running; }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); render(); }
@@ -880,6 +1100,15 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/state":
             detect_server()
             self.send_json(snapshot())
+        elif self.path.startswith("/api/thumb/"):
+            thumb_id = Path(urllib.parse.urlparse(self.path).path).name.rsplit(".", 1)[0]
+            video = next((v for v in snapshot().get("videos", []) if v.get("id") == thumb_id), None)
+            thumb_value = video.get("thumbnail_path") if video else None
+            thumb = Path(thumb_value) if thumb_value else None
+            if not thumb or not thumb.exists():
+                self.send_error(404)
+                return
+            self.send_file(thumb, "image/jpeg")
         else:
             self.send_error(404)
 
@@ -941,6 +1170,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_text(self, text: str, content_type: str) -> None:
         body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_file(self, path: Path, content_type: str) -> None:
+        body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
