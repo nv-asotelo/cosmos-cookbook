@@ -1335,7 +1335,9 @@ label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
 input, textarea, select { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
 input[type=range] { padding:0; }
 input[type=checkbox] { width:auto; }
-textarea { min-height:120px; resize:vertical; }
+textarea { min-height:220px; max-height:60vh; resize:vertical; overflow-y:auto; line-height:1.45; }
+#systemPrompt { height:clamp(240px, 28vh, 360px); }
+#userPrompt { height:clamp(360px, 42vh, 560px); }
 button { border:0; border-radius:6px; padding:9px 12px; font-weight:650; color:#fff; background:var(--accent); cursor:pointer; }
 button.secondary { background:#334155; }
 button.warn { background:var(--warn); }
