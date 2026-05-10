@@ -259,7 +259,9 @@ def log(message: str) -> None:
 
 def snapshot() -> Dict[str, Any]:
     with STATE_LOCK:
-        return json.loads(json.dumps(STATE, default=str))
+        data = json.loads(json.dumps(STATE, default=str))
+    data["server_epoch"] = time.time()
+    return data
 
 
 def update_state(**items: Any) -> None:
@@ -640,7 +642,20 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
         log(f"FiftyOne load failed; falling back to huggingface_hub: {exc}")
         videos = load_with_hf_hub(repo_id, max_videos)
         log(f"Loaded {len(videos)} videos with huggingface_hub")
-    update_state(dataset_repo=repo_id, videos=videos, results=[], progress={"done": 0, "total": 0, "errors": 0}, batch_metrics=None)
+    update_state(
+        dataset_repo=repo_id,
+        videos=videos,
+        results=[],
+        progress={
+            "done": 0,
+            "total": 0,
+            "errors": 0,
+            "updated_epoch": time.time(),
+            "last_event": f"Loaded {len(videos)} videos",
+            "last_error": None,
+        },
+        batch_metrics=None,
+    )
     return videos
 
 
@@ -1246,11 +1261,25 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
     selected = [videos_by_id[i] for i in ids if i in videos_by_id] or list(videos_by_id.values())
     dataset_repo = str(snap.get("dataset_repo") or DEFAULT_DATASET)
     batch_started = time.monotonic()
+    started_epoch = time.time()
+    last_result_epoch: Optional[float] = None
     run_context = make_run_context(run_label, system_prompt, user_prompt, params)
     update_state(
         running=True,
         results=[],
-        progress={"done": 0, "total": len(selected), "errors": 0},
+        progress={
+            "done": 0,
+            "total": len(selected),
+            "errors": 0,
+            "started_epoch": started_epoch,
+            "updated_epoch": started_epoch,
+            "last_result_epoch": None,
+            "concurrency": concurrency,
+            "run_label": run_context["run_label"],
+            "prompt_hash": run_context["prompt_hash"],
+            "last_event": f"Running {len(selected)} videos with concurrency={concurrency}",
+            "last_error": None,
+        },
         batch_metrics=batch_summary(dataset_repo, [], len(selected), 0, concurrency, batch_started, "running", run_context),
     )
     log(f"Running {len(selected)} videos with concurrency={concurrency} ({run_context['run_label']}, {run_context['prompt_hash']})")
@@ -1274,14 +1303,43 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
                 write_fiftyone_result(video, result)
                 log(f"Failed {video['name']}: {exc}")
             results.append(result)
+            last_result_epoch = time.time()
+            last_event = f"Failed {video['name']}" if result.get("error") else f"Completed {video['name']}"
             with STATE_LOCK:
                 STATE["results"] = results
-                STATE["progress"] = {"done": len(results), "total": len(selected), "errors": errors}
+                STATE["progress"] = {
+                    "done": len(results),
+                    "total": len(selected),
+                    "errors": errors,
+                    "started_epoch": started_epoch,
+                    "updated_epoch": last_result_epoch,
+                    "last_result_epoch": last_result_epoch,
+                    "concurrency": concurrency,
+                    "run_label": run_context["run_label"],
+                    "prompt_hash": run_context["prompt_hash"],
+                    "last_event": last_event,
+                    "last_error": str(result.get("error") or "") or None,
+                }
                 STATE["batch_metrics"] = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "running", run_context)
             RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
     final_summary = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "complete", run_context)
+    finished_epoch = time.time()
     with STATE_LOCK:
         STATE["running"] = False
+        STATE["progress"] = {
+            "done": len(results),
+            "total": len(selected),
+            "errors": errors,
+            "started_epoch": started_epoch,
+            "updated_epoch": finished_epoch,
+            "finished_epoch": finished_epoch,
+            "last_result_epoch": last_result_epoch,
+            "concurrency": concurrency,
+            "run_label": run_context["run_label"],
+            "prompt_hash": run_context["prompt_hash"],
+            "last_event": f"Batch complete: {len(results) - errors} ok, {errors} errors",
+            "last_error": None,
+        }
         STATE["batch_metrics"] = final_summary
         STATE["batch_history"] = (STATE.get("batch_history") or [])[-19:] + [final_summary]
         STATE["run_history"] = (STATE.get("run_history") or [])[-5:] + [{"summary": final_summary, "results": compact_run_results(results)}]
@@ -1357,6 +1415,14 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .budget-ok { color:var(--accent); }
 .budget-warn { color:var(--warn); }
 .budget-bad { color:var(--bad); }
+.status-panel { margin-top:14px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; }
+.status-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.status-title { font-weight:700; color:var(--ink); }
+.status-pct { font-variant-numeric:tabular-nums; font-weight:700; color:var(--accent); }
+.status-panel .kv { grid-template-columns:96px 1fr; margin-top:10px; }
+.status-note { border-left:3px solid var(--line); padding-left:9px; color:var(--muted); font-size:12px; line-height:1.35; margin:10px 0 0; }
+.status-note.warn { border-left-color:var(--warn); color:var(--warn); }
+.status-note.bad { border-left-color:var(--bad); color:var(--bad); }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
 .step strong { color:var(--ink); }
@@ -1394,6 +1460,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
     <button id="loadBtn">Load dataset</button>
     <button class="warn" id="smokeBtn">Run smoke</button>
     <button class="secondary" id="foBtn">Open FiftyOne</button>
+  </div>
+  <h3>Run status</h3>
+  <div class="status-panel">
+    <div class="status-head"><span class="status-title" id="statusTitle">Idle</span><span class="status-pct" id="statusPct">0%</span></div>
+    <div class="progress"><div id="sideBar"></div></div>
+    <div class="kv" id="runtimeKv"></div>
+    <p class="status-note" id="runtimeNotice">No batch is running.</p>
   </div>
   <h3>Backend</h3>
   <div class="kv" id="serverKv"></div>
@@ -1451,7 +1524,7 @@ let contextBlocked = false;
 const CONTEXT_WARNING_RATIO = 0.85;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
-function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn'].forEach(id=>document.getElementById(id).disabled=true); }
+function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn'].forEach(id=>document.getElementById(id).disabled=true); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
 function el(id){ return document.getElementById(id); }
 function num(id){ return Number(document.getElementById(id).value); }
@@ -1461,6 +1534,8 @@ function fmt(n, digits=0){ if(n === null || n === undefined || Number.isNaN(Numb
 function fmtMetaValue(v){ return typeof v === 'number' ? fmt(v, Number.isInteger(v) ? 0 : 2) : String(v ?? ''); }
 function sec(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : `${Number(v).toFixed(2)}s`; }
 function rate(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : Number(v).toFixed(2); }
+function serverNow(){ const received=Number(state?._receivedAt||Date.now()/1000); const server=Number(state?.server_epoch||received); return server + (Date.now()/1000 - received); }
+function span(v){ if(v === null || v === undefined || Number.isNaN(Number(v))) return ''; const s=Math.max(0, Math.round(Number(v))); if(s < 60) return `${s}s`; const m=Math.floor(s/60); const r=s%60; if(m < 60) return `${m}m ${r}s`; const h=Math.floor(m/60); return `${h}h ${m%60}m`; }
 function statText(s){ if(!s || !s.count) return 'no samples yet'; return `min ${sec(s.min)} · max ${sec(s.max)} · median ${sec(s.median)} · avg ${sec(s.average)}`; }
 function percent(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : `${(Number(v)*100).toFixed(1)}%`; }
 function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; }
@@ -1479,13 +1554,16 @@ function currentSelectionVideos(){ const videos=state?.videos||[]; const ids=new
 function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const input=Number(plan.tokens||0)+prompt; const ratio=input/allowed; return {video:v, plan, input, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
 function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=state.running || !r.videos.length; allow.disabled=state.running; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
 function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); const prompt=promptTokensEst(); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
+function latestRuntimeError(){ const p=state?.progress||{}; if(p.last_error) return String(p.last_error); const results=[...(state?.results||[])].reverse(); const failed=results.find(r=>r && r.error); return failed ? `${failed.name||'video'}: ${failed.error}` : ''; }
+function clipText(text, max=260){ const s=String(text||''); return s.length > max ? s.slice(0, max-1)+'...' : s; }
+function renderRuntimeStatus(){ const p=state.progress||{}; const bm=state.batch_metrics||{}; const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : 0; const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((state.running ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0); const eta=state.running && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastResult=Number(p.last_result_epoch||0); const waitSince=state.running ? now - (lastResult || started || now) : null; const latestError=latestRuntimeError(); const delayed=state.running && waitSince !== null && waitSince > 90; const stalled=state.running && waitSince !== null && waitSince > 300; const title=latestError ? (state.running ? 'Running with errors' : 'Attention') : state.running ? (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running') : total ? (errors ? 'Complete with errors' : 'Complete') : 'Idle'; const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`; const etaText=state.running ? (eta === null ? 'waiting for first completion' : span(eta)) : ''; const rows=[['completed', total ? `${fmt(done)}/${fmt(total)}` : 'none'],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['delay', state.running && waitSince !== null ? span(waitSince) : ''],['errors', fmt(errors)],['event', p.last_event||'']]; el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); const notice=el('runtimeNotice'); if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); } else if(stalled){ notice.className='status-note bad'; notice.textContent=`No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; } else if(delayed){ notice.className='status-note warn'; notice.textContent=`No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; } else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; } else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; } else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Batch finished with errors. See Results and Runtime log for details.' : 'Batch finished successfully.'; } else { notice.className='status-note'; notice.textContent='No batch is running.'; } }
 function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
 function applyBuildDefaults(checked){ const d=state.defaults; const b=d.build_defaults||{}; const m=d.slider_meta||{}; el('temperatureSlider').value = checked ? b.temperature : m.temperature.recommended; el('topPSlider').value = checked ? b.top_p : m.top_p.recommended; el('repPenaltySlider').value = checked ? b.repetition_penalty : m.repetition_penalty.recommended; render(); }
 function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
 function render(){ if(!state) return; initControls(); renderParamLabels();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
- const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`;
+ const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
  const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['hazard accuracy',ev.evaluated ? `${ev.hazard_correct}/${ev.evaluated} (${percent(ev.hazard_accuracy)})` : 'no expected labels'],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
  contextBlocked = renderContextGuard();
@@ -1493,7 +1571,7 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
  document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running || contextBlocked; document.getElementById('smokeBtn').disabled = state.running || contextBlocked; document.getElementById('foBtn').disabled = state.running; }
-async function poll(){ const r = await fetch('/api/state'); state = await r.json(); render(); }
+async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
 document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; render(); };
 ['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=render);
 ['fpsSlider','maxPixelsSlider','maxTokensSlider','temperatureSlider','topPSlider','repPenaltySlider','maxFramesSlider'].forEach(id=>document.getElementById(id).oninput=render);
@@ -1580,6 +1658,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except Exception as exc:
             log(f"API error: {exc}")
+            with STATE_LOCK:
+                progress = dict(STATE.get("progress") or {})
+                progress.update({
+                    "updated_epoch": time.time(),
+                    "last_event": "API error",
+                    "last_error": str(exc),
+                })
+                STATE["progress"] = progress
             self.send_json({"error": str(exc)}, status=400 if isinstance(exc, ClientInputError) else 500)
 
     def read_json(self) -> Dict[str, Any]:
