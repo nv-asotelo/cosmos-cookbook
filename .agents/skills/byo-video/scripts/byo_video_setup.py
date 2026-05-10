@@ -140,7 +140,7 @@ _MODEL_CONFIGS = {
         "vllm_max_model_len": 4096,
     },
     # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
-    # vLLM-only: uses video_url content type with file:// path (same as Nemotron).
+    # vLLM-only: uses video_url content type with base64 data URLs.
     # Frame control via extra_body mm_processor_kwargs at inference time.
     # Variants: 2B fits 1x H100; 8B fits 1x H100 80GB; 32B needs TP=2 or FP8 on 1x H100.
     "QW3-2B": {
@@ -192,7 +192,7 @@ _MODEL_CONFIGS = {
     },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # Requires vLLM nightly or compatible build; PyPI vLLM ≤0.11.0 unsupported.
-    # Uses opencv video backend (not PyAV). Gradio sends video as file:// URL.
+    # Uses opencv video backend (not PyAV). Frontends send video as a base64 data URL.
     # NVFP4-QAD variant requires special vLLM build — use BF16 or FP8 for demos.
     "NEM-12B": {
         "variants": [
@@ -708,21 +708,77 @@ else:
 STEPS_DONE.append(8)
 print_dashboard()
 
+def _resolve_nim_launch_config(model_id, model_size, cfg):
+    """Resolve the exact NIM image/vendor/env from nim_catalog.py when present."""
+    requested = (
+        os.environ.get("NIM_MODEL_SHORT")
+        or model_id
+        or cfg.get("nim")
+        or (cfg["variants"][0][2] if cfg.get("variants") else "")
+    )
+    requested_l = requested.lower()
+    if requested_l.startswith("nvcr.io/nim/"):
+        requested_l = requested_l[len("nvcr.io/nim/"):]
+    if requested_l.endswith(":latest"):
+        requested_l = requested_l[:-len(":latest")]
+
+    catalog = []
+    for candidate_dir in ("/tmp", os.path.dirname(os.path.abspath(__file__))):
+        if candidate_dir not in sys.path:
+            sys.path.insert(0, candidate_dir)
+    try:
+        from nim_catalog import KNOWN_VLM_NIMS  # type: ignore
+        catalog = list(KNOWN_VLM_NIMS)
+    except Exception as exc:
+        warn(f"Could not import nim_catalog.py; using fallback NIM image resolution: {exc}")
+
+    matched = None
+    for nim in catalog:
+        image_key = getattr(nim, "image", "").lower()
+        if image_key.startswith("nvcr.io/nim/"):
+            image_key = image_key[len("nvcr.io/nim/"):]
+        if image_key.endswith(":latest"):
+            image_key = image_key[:-len(":latest")]
+        tokens = {
+            getattr(nim, "short_id", "").lower(),
+            getattr(nim, "served_model_id", "").lower(),
+            image_key,
+            image_key.split("/")[-1],
+        }
+        if requested_l in tokens or requested_l.split("/")[-1] in tokens:
+            matched = nim
+            break
+
+    if matched:
+        short = getattr(matched, "short_id")
+        image = getattr(matched, "image")
+        served = getattr(matched, "served_model_id")
+        env = dict(getattr(matched, "env", {}) or {})
+    else:
+        served = requested_l
+        short = requested_l.split("/")[-1]
+        if "/" in requested_l:
+            image = f"nvcr.io/nim/{requested_l}:latest"
+        else:
+            image = f"nvcr.io/nim/nvidia/{short}:latest"
+        env = {}
+
+    env.update(cfg.get("nim_env", {}) or {})
+    image = os.environ.get("NIM_IMAGE", image)
+    short = os.environ.get("NIM_MODEL_SHORT", short)
+    served = os.environ.get("NIM_SERVED_MODEL_NAME", served)
+    max_wait = str(os.environ.get("NIM_MAX_WAIT") or cfg.get("nim_max_wait") or 1800)
+    return short, image, served, env, max_wait
+
 # ── Step 9-NIM: Launch NIM container (nim_local backend only) ────────────────
 if INFERENCE_BACKEND == "nim_local":
     header("Step 9-NIM — Launch NIM Docker container", eta="~30s if image cached, 10-30 min first pull")
-    # Resolve NIM image short id from MODEL_ID. Examples:
-    #   nvidia/Cosmos-Reason2-8B  -> cosmos-reason2-8b
-    #   nvidia/Cosmos-Reason2-2B  -> cosmos-reason2-2b
-    #   nvidia/Cosmos-Reason2-32B -> cosmos-reason2-32b
-    _nim_short = (MODEL_ID.split("/")[-1] if "/" in MODEL_ID else MODEL_ID).lower()
-    _nim_short = os.environ.get("NIM_MODEL_SHORT", _nim_short)
-    _nim_image = os.environ.get("NIM_IMAGE", f"nvcr.io/nim/nvidia/{_nim_short}:latest")
+    _nim_short, _nim_image, _nim_served, _nim_extra_env, _nim_max_wait = _resolve_nim_launch_config(MODEL_ID, MODEL_SIZE, _cfg)
     _nim_port = int(os.environ.get("NIM_PORT", "8000"))
     _nim_launch = "/tmp/nim_launch.sh"
     if not os.path.exists(_nim_launch):
         print(f"  ✗  {_nim_launch} not found — deploy nim_launch.sh first"); sys.exit(1)
-    info(f"Image: {_nim_image} | Port: {_nim_port} | Container: cosmos-nim")
+    info(f"Image: {_nim_image} | Served model: {_nim_served} | Port: {_nim_port} | Container: cosmos-nim")
     _nim_env = {
         **ENV,
         "NGC_API_KEY":     NGC_API_KEY,
@@ -731,12 +787,16 @@ if INFERENCE_BACKEND == "nim_local":
         "PORT":            str(_nim_port),
         "CONTAINER_NAME":  "cosmos-nim",
         "LOCAL_NIM_CACHE": os.environ.get("LOCAL_NIM_CACHE", os.path.expanduser("~/.cache/nim")),
+        "NIM_CACHE_MODE":  os.environ.get("NIM_CACHE_MODE", "internal"),
+        "MAX_WAIT":        _nim_max_wait,
     }
+    _nim_env.update(_nim_extra_env)
     rc = stream_cmd(["bash", _nim_launch], env=_nim_env, prefix="NIM │ ")
     if rc != 0:
         print(f"  ✗  NIM launch failed (rc={rc}). Logs: /tmp/nim_launch.log + docker logs cosmos-nim"); sys.exit(1)
     # Point Gradio at the NIM container by overriding VLLM_BASE_URL.
     os.environ["VLLM_BASE_URL"] = f"http://localhost:{_nim_port}/v1"
+    MODEL_NAME = _nim_served
     ok(f"NIM container live at http://localhost:{_nim_port}/v1")
 
 # ── Step 9b: vLLM server auto-start (BUG-VLLM-AUTOSTART) ─────────────────────
@@ -771,9 +831,11 @@ if INFERENCE_BACKEND == "vllm":
             subprocess.Popen(_vllm_cmd, cwd=REASON2_DIR, env=_vllm_proc_env,
                              stdout=_vf, stderr=subprocess.STDOUT)
 
-        # 32B models need ~5 min for torch.compile + CUDA graph warmup.
+        # 32B models and C3-8B need extra warmup time; C3-8B was observed
+        # crossing the old 180s timeout while still loading cleanly.
         _LARGE_MODEL_SIZES = {"32B", "C3-32B", "C3-super", "QW3-32B"}
-        VLLM_TIMEOUT = 420 if MODEL_SIZE in _LARGE_MODEL_SIZES else 180
+        _VLLM_TIMEOUT_OVERRIDES = {"C3-8B": 900}
+        VLLM_TIMEOUT = _VLLM_TIMEOUT_OVERRIDES.get(MODEL_SIZE, 420 if MODEL_SIZE in _LARGE_MODEL_SIZES else 180)
         t_vllm = time.time()
         while time.time() - t_vllm < VLLM_TIMEOUT:
             try:
@@ -818,8 +880,8 @@ launch_env = {
     "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
     "VLLM_MAX_MODEL_LEN": str(_cfg.get("vllm_max_model_len", VLLM_MAX_MODEL_LEN)),
-    # PRELOAD-001: skip HF preload when using vLLM backend
-    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND == "vllm" else "0",
+    # PRELOAD-001: skip HF preload when using API-backed servers.
+    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local") else "0",
 }
 
 if FRONTEND in ("runtime_agent", "fiftyone"):
