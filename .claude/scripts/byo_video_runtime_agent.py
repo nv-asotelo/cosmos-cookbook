@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import csv
 import hashlib
 import html
 import json
@@ -25,9 +26,11 @@ import sys
 import threading
 import time
 import urllib.parse
+import zipfile
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import requests
@@ -101,6 +104,7 @@ RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_a
 THUMBNAIL_DIR = Path(os.getenv("RUNTIME_AGENT_THUMBNAILS", "/tmp/byo_video_runtime_agent_thumbnails"))
 THUMBNAIL_SIZE = (220, 124)
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_AGENT_REQUEST_TIMEOUT_SECONDS", "180"))
+EXPORT_DIR = Path(os.getenv("RUNTIME_AGENT_EXPORTS", "/tmp/byo_video_runtime_agent_exports"))
 CONTEXT_PATCH_PIXELS = int(os.getenv("RUNTIME_AGENT_CONTEXT_PATCH_PIXELS", str(14 * 14)))
 CONTEXT_SAFETY_RESERVE = int(os.getenv("RUNTIME_AGENT_CONTEXT_SAFETY_RESERVE", "1024"))
 DEFAULT_MODEL_MAX_LEN = int(os.getenv("RUNTIME_AGENT_MODEL_MAX_LEN", "32768"))
@@ -211,6 +215,25 @@ PROMPT_PRESETS = [
     {"label": "Robot arm: 2D trajectory (JSON)", "user_prompt": "You are given the task \"Move the tape into the basket\". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {\"point_2d\": [x, y], \"label\": \"gripper trajectory\"}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
     {"label": "SDG critic: approve / reject", "user_prompt": "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection.\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag. Answer with Approve or Reject only.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
 ]
+EXPORT_SECTIONS = [
+    {"id": "overview", "label": "Executive overview", "default": True},
+    {"id": "run_metrics", "label": "Run metrics", "default": True},
+    {"id": "evaluation", "label": "Evaluation summary", "default": True},
+    {"id": "class_breakdown", "label": "Per-class breakdown", "default": True},
+    {"id": "error_analysis", "label": "Errors and misses", "default": True},
+    {"id": "result_table", "label": "Per-video table", "default": True},
+    {"id": "samples", "label": "Representative samples", "default": True},
+    {"id": "prompt_params", "label": "Prompt and parameters", "default": False},
+    {"id": "infrastructure", "label": "Backend and instance", "default": False},
+    {"id": "recommendations", "label": "Recommendations", "default": True},
+]
+EXPORT_CONTENT_TYPES = {
+    "html": "text/html; charset=utf-8",
+    "json": "application/json",
+    "csv": "text/csv; charset=utf-8",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
 
 STATE: Dict[str, Any] = {
     "dataset_repo": DEFAULT_DATASET,
@@ -245,6 +268,7 @@ STATE: Dict[str, Any] = {
         "context_safety_reserve": CONTEXT_SAFETY_RESERVE,
         "context_text_tokens": TEXT_TOKENS,
         "default_model_max_len": DEFAULT_MODEL_MAX_LEN,
+        "export_sections": EXPORT_SECTIONS,
     },
 }
 
@@ -1205,6 +1229,537 @@ def batch_summary(
     }
 
 
+def export_section_ids(sections: Optional[Iterable[str]]) -> List[str]:
+    allowed = {section["id"] for section in EXPORT_SECTIONS}
+    selected = [str(section) for section in (sections or []) if str(section) in allowed]
+    if selected:
+        return selected
+    return [section["id"] for section in EXPORT_SECTIONS if section.get("default")]
+
+
+def export_stem(fmt: str) -> str:
+    return f"byo-video-runtime-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.{fmt}"
+
+
+def safe_cell(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, bool)):
+        return value
+    return str(value)
+
+
+def percent_value(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{value * 100:.1f}%"
+
+
+def seconds_value(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.2f}s"
+
+
+def result_rows(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    videos_by_id = {v.get("id"): v for v in snap.get("videos") or []}
+    rows: List[Dict[str, Any]] = []
+    for result in snap.get("results") or []:
+        video = videos_by_id.get(result.get("id")) or {}
+        meta = video.get("meta") or {}
+        parsed = result.get("json") or {}
+        evaluation = result.get("evaluation") or {}
+        metrics = result.get("metrics") or {}
+        hazard = parsed.get("hazard_detection") or {}
+        plan = result.get("plan") or video.get("plan") or {}
+        rows.append({
+            "video": result.get("name") or video.get("name") or "",
+            "expected_class_id": evaluation.get("expected_class_id"),
+            "expected_label": evaluation.get("expected_label"),
+            "expected_hazard": evaluation.get("expected_is_hazardous"),
+            "prediction_class_id": parsed.get("prediction_class_id"),
+            "prediction_label": parsed.get("prediction_label"),
+            "prediction_hazard": hazard.get("is_hazardous"),
+            "match": "correct" if evaluation.get("is_correct") else ("miss" if evaluation.get("has_expected") else ""),
+            "hazard_match": evaluation.get("hazard_match"),
+            "description": parsed.get("video_description") or result.get("response") or "",
+            "error": result.get("error") or "",
+            "ttft_seconds": metrics.get("ttft_seconds"),
+            "output_tokens_per_second": metrics.get("output_tokens_per_second"),
+            "e2e_seconds": metrics.get("e2e_seconds"),
+            "frames_to_vlm": plan.get("frames_passed"),
+            "visual_tokens_est": plan.get("visual_tokens_est"),
+            "resolution": f"{meta.get('width') or ''}x{meta.get('height') or ''}",
+            "duration_s": meta.get("duration_s"),
+            "source_frames": meta.get("total_frames"),
+            "filepath": video.get("filepath") or result.get("filepath") or "",
+            "hf_label": video.get("label") or result.get("source_label") or "",
+        })
+    if rows:
+        return rows
+    for video in snap.get("videos") or []:
+        meta = video.get("meta") or {}
+        expected = video.get("expected") or {}
+        plan = video.get("plan") or {}
+        rows.append({
+            "video": video.get("name") or "",
+            "expected_class_id": expected.get("class_id"),
+            "expected_label": expected.get("label"),
+            "expected_hazard": expected.get("hazardous"),
+            "prediction_class_id": "",
+            "prediction_label": "",
+            "prediction_hazard": "",
+            "match": "",
+            "hazard_match": "",
+            "description": "",
+            "error": "",
+            "ttft_seconds": None,
+            "output_tokens_per_second": None,
+            "e2e_seconds": None,
+            "frames_to_vlm": plan.get("frames_passed"),
+            "visual_tokens_est": plan.get("visual_tokens_est"),
+            "resolution": f"{meta.get('width') or ''}x{meta.get('height') or ''}",
+            "duration_s": meta.get("duration_s"),
+            "source_frames": meta.get("total_frames"),
+            "filepath": video.get("filepath") or "",
+            "hf_label": video.get("label") or "",
+        })
+    return rows
+
+
+def class_breakdown(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        label = row.get("expected_label") or row.get("hf_label") or "Unknown"
+        item = grouped.setdefault(label, {"label": label, "total": 0, "correct": 0, "errors": 0, "predictions": Counter()})
+        item["total"] += 1
+        if row.get("match") == "correct":
+            item["correct"] += 1
+        if row.get("error"):
+            item["errors"] += 1
+        pred = row.get("prediction_label") or ("ERROR" if row.get("error") else "unrun")
+        item["predictions"][str(pred)] += 1
+    out = []
+    for item in grouped.values():
+        total = item["total"] or 1
+        most_common = item["predictions"].most_common(1)
+        out.append({
+            "label": item["label"],
+            "total": item["total"],
+            "correct": item["correct"],
+            "errors": item["errors"],
+            "accuracy": item["correct"] / total,
+            "most_predicted": f"{most_common[0][0]} ({most_common[0][1]}/{item['total']})" if most_common else "",
+        })
+    return sorted(out, key=lambda item: (item["accuracy"], item["label"]))
+
+
+def export_summary(snap: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    bm = snap.get("batch_metrics") or {}
+    evaluation = bm.get("evaluation") or {}
+    evaluated_rows = [row for row in rows if row.get("match")]
+    correct = sum(1 for row in evaluated_rows if row.get("match") == "correct")
+    errors = sum(1 for row in rows if row.get("error"))
+    total = int(bm.get("total") or len(rows))
+    completed = int(bm.get("completed") or len(snap.get("results") or []))
+    accuracy = evaluation.get("accuracy")
+    if accuracy is None and evaluated_rows:
+        accuracy = correct / len(evaluated_rows)
+    return {
+        "dataset": snap.get("dataset_repo") or DEFAULT_DATASET,
+        "model": (snap.get("server") or {}).get("model") or "",
+        "backend": (snap.get("server") or {}).get("backend") or "",
+        "instance": (snap.get("server") or {}).get("instance") or "",
+        "total": total,
+        "completed": completed,
+        "correct": correct,
+        "errors": int(bm.get("errors") if bm.get("errors") is not None else errors),
+        "accuracy": accuracy,
+        "hazard_accuracy": evaluation.get("hazard_accuracy"),
+        "batch_e2e_seconds": bm.get("batch_wall_seconds"),
+        "video_requests_per_second": bm.get("video_requests_per_second"),
+        "median_video_e2e": (bm.get("e2e_seconds") or {}).get("median"),
+        "avg_video_e2e": (bm.get("e2e_seconds") or {}).get("average"),
+        "run_label": bm.get("run_label") or "",
+        "prompt_hash": bm.get("prompt_hash") or "",
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    }
+
+
+def export_recommendations(summary: Dict[str, Any], rows: List[Dict[str, Any]], classes: List[Dict[str, Any]]) -> List[str]:
+    recs: List[str] = []
+    if not rows or not any(row.get("prediction_label") or row.get("error") for row in rows):
+        recs.append("Run a batch before using the report for model quality decisions.")
+    if summary.get("errors"):
+        recs.append("Resolve runtime errors first; error rows can dominate accuracy and throughput interpretation.")
+    if summary.get("accuracy") is not None and summary["accuracy"] < 0.7:
+        recs.append("Use the per-class breakdown to target prompt or sampling changes before treating the run as production-ready.")
+    weak = [item["label"] for item in classes if item.get("total") and item.get("accuracy", 0) < 0.5][:3]
+    if weak:
+        recs.append("Prioritize review of weak classes: " + ", ".join(weak) + ".")
+    if not recs:
+        recs.append("Promote this configuration to a larger regression run and compare against alternate prompts or reasoning modes.")
+    return recs
+
+
+def export_payload(sections: List[str]) -> Dict[str, Any]:
+    snap = snapshot()
+    rows = result_rows(snap)
+    classes = class_breakdown(rows)
+    summary = export_summary(snap, rows)
+    recommendations = export_recommendations(summary, rows, classes)
+    return {
+        "snapshot": snap,
+        "sections": sections,
+        "summary": summary,
+        "rows": rows,
+        "class_breakdown": classes,
+        "recommendations": recommendations,
+    }
+
+
+def write_json_export(payload: Dict[str, Any], path: Path) -> None:
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def csv_headers() -> List[str]:
+    return [
+        "video",
+        "expected_class_id",
+        "expected_label",
+        "prediction_class_id",
+        "prediction_label",
+        "match",
+        "expected_hazard",
+        "prediction_hazard",
+        "hazard_match",
+        "ttft_seconds",
+        "output_tokens_per_second",
+        "e2e_seconds",
+        "frames_to_vlm",
+        "visual_tokens_est",
+        "resolution",
+        "duration_s",
+        "source_frames",
+        "error",
+        "description",
+        "filepath",
+    ]
+
+
+def write_csv_export(rows: List[Dict[str, Any]], path: Path) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=csv_headers(), extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def col_name(index: int) -> str:
+    name = ""
+    while index:
+        index, rem = divmod(index - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
+def xlsx_cell(value: Any, row: int, col: int) -> str:
+    ref = f"{col_name(col)}{row}"
+    if value is None or value == "":
+        return f'<c r="{ref}"/>'
+    if isinstance(value, bool):
+        return f'<c r="{ref}" t="b"><v>{1 if value else 0}</v></c>'
+    if isinstance(value, (int, float)):
+        return f'<c r="{ref}"><v>{value}</v></c>'
+    return f'<c r="{ref}" t="inlineStr"><is><t>{html.escape(str(value), quote=True)}</t></is></c>'
+
+
+def xlsx_sheet(rows: List[List[Any]]) -> str:
+    out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>']
+    out.append('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+    for ri, row in enumerate(rows, 1):
+        out.append(f'<row r="{ri}">')
+        for ci, value in enumerate(row, 1):
+            out.append(xlsx_cell(value, ri, ci))
+        out.append("</row>")
+    out.append("</sheetData></worksheet>")
+    return "".join(out)
+
+
+def write_xlsx_export(payload: Dict[str, Any], path: Path) -> None:
+    summary = payload["summary"]
+    rows = payload["rows"]
+    classes = payload["class_breakdown"]
+    errors = [row for row in rows if row.get("error") or row.get("match") == "miss"]
+    sheets: List[Tuple[str, List[List[Any]]]] = [
+        ("Summary", [["Metric", "Value"]] + [[key, value] for key, value in summary.items()]),
+        ("Results", [csv_headers()] + [[row.get(header) for header in csv_headers()] for row in rows]),
+        ("Class Breakdown", [["Class", "Correct", "Total", "Accuracy", "Errors", "Most Predicted"]] + [[item["label"], item["correct"], item["total"], percent_value(item["accuracy"]), item["errors"], item["most_predicted"]] for item in classes]),
+        ("Errors Misses", [csv_headers()] + [[row.get(header) for header in csv_headers()] for row in errors]),
+    ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        overrides = [
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        ]
+        for i, _ in enumerate(sheets, 1):
+            overrides.append(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' + "".join(overrides) + "</Types>")
+        zf.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        zf.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + "".join(f'<sheet name="{html.escape(name[:31], quote=True)}" sheetId="{i}" r:id="rId{i}"/>' for i, (name, _) in enumerate(sheets, 1)) + "</sheets></workbook>")
+        zf.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>' for i in range(1, len(sheets) + 1)) + "</Relationships>")
+        for i, (_, sheet_rows) in enumerate(sheets, 1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", xlsx_sheet(sheet_rows))
+
+
+def html_table(headers: List[str], rows: List[List[Any]]) -> str:
+    header_html = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    body = []
+    for row in rows:
+        body.append("<tr>" + "".join(f"<td>{html.escape(str(safe_cell(cell)))}</td>" for cell in row) + "</tr>")
+    return f"<table><thead><tr>{header_html}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def write_html_report(payload: Dict[str, Any], path: Path) -> None:
+    summary = payload["summary"]
+    rows = payload["rows"]
+    classes = payload["class_breakdown"]
+    sections = set(payload["sections"])
+    misses = [row for row in rows if row.get("error") or row.get("match") == "miss"]
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>",
+        f"<title>BYO Video Runtime Report</title><style>:root{{--green:#76B900;--dark:#1A1A1A;--gray:#f5f5f5;--border:#ddd;--bad:#b91c1c;}}*{{box-sizing:border-box}}body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;color:var(--dark);line-height:1.5}}header{{background:var(--dark);color:#fff;padding:32px 40px}}header h1{{margin:0 0 6px;font-size:28px}}header .sub{{color:#aaa}}main{{max-width:1200px;margin:0 auto;padding:32px 40px}}section{{margin-bottom:42px}}h2{{border-bottom:2px solid var(--green);padding-bottom:6px;text-transform:uppercase;font-size:16px;letter-spacing:.06em}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}}.stat{{background:var(--gray);border-radius:8px;padding:18px;text-align:center}}.val{{font-size:30px;font-weight:800;color:var(--green)}}.lbl{{font-size:12px;color:#666;text-transform:uppercase}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{background:var(--dark);color:#fff;text-align:left;padding:9px}}td{{border-bottom:1px solid var(--border);padding:8px;vertical-align:top}}tr:nth-child(even) td{{background:var(--gray)}}.bad{{color:var(--bad);font-weight:700}}.note{{background:#fffbef;border-left:4px solid var(--green);padding:14px 18px;border-radius:0 6px 6px 0}}</style></head><body>",
+        "<header><h1>BYO Video Runtime Report</h1>",
+        f"<div class='sub'>{html.escape(summary['dataset'])} | {html.escape(summary['model'])} | generated {html.escape(summary['generated_at'])}</div></header><main>",
+    ]
+    if "overview" in sections:
+        parts.append("<section><h2>Results Summary</h2><div class='stats'>")
+        for value, label in [
+            (summary["total"], "Total samples"),
+            (summary["completed"], "Completed"),
+            (percent_value(summary.get("accuracy")), "Accuracy"),
+            (summary["errors"], "Errors"),
+        ]:
+            parts.append(f"<div class='stat'><div class='val'>{html.escape(str(value))}</div><div class='lbl'>{html.escape(label)}</div></div>")
+        parts.append("</div></section>")
+    if "run_metrics" in sections:
+        parts.append("<section><h2>Run Metrics</h2>")
+        parts.append(html_table(["Metric", "Value"], [["Batch E2E", seconds_value(summary.get("batch_e2e_seconds"))], ["Video req/s", summary.get("video_requests_per_second")], ["Median video E2E", seconds_value(summary.get("median_video_e2e"))], ["Average video E2E", seconds_value(summary.get("avg_video_e2e"))], ["Prompt hash", summary.get("prompt_hash")]]))
+        parts.append("</section>")
+    if "evaluation" in sections:
+        parts.append("<section><h2>Evaluation</h2>")
+        parts.append(html_table(["Metric", "Value"], [["Correct", summary["correct"]], ["Accuracy", percent_value(summary.get("accuracy"))], ["Hazard accuracy", percent_value(summary.get("hazard_accuracy"))], ["Evaluated rows", len([row for row in rows if row.get("match")])]]))
+        parts.append("</section>")
+    if "class_breakdown" in sections:
+        parts.append("<section><h2>Per-Class Breakdown</h2>")
+        parts.append(html_table(["Class", "Correct / Total", "Accuracy", "Errors", "Most Predicted"], [[item["label"], f"{item['correct']} / {item['total']}", percent_value(item["accuracy"]), item["errors"], item["most_predicted"]] for item in classes]))
+        parts.append("</section>")
+    if "error_analysis" in sections:
+        parts.append("<section><h2>Errors and Misses</h2>")
+        parts.append(html_table(["Video", "Expected", "Prediction", "Match", "Error"], [[row["video"], row["expected_label"], row["prediction_label"], row["match"], row["error"]] for row in misses[:80]]))
+        parts.append("</section>")
+    if "result_table" in sections:
+        parts.append("<section><h2>Per-Video Results</h2>")
+        parts.append(html_table(["Video", "Expected", "Prediction", "Match", "Hazard match", "E2E", "Description / error"], [[row["video"], row["expected_label"], row["prediction_label"], row["match"], row["hazard_match"], seconds_value(row.get("e2e_seconds")), row["error"] or row["description"]] for row in rows[:200]]))
+        parts.append("</section>")
+    if "samples" in sections:
+        sample_rows = (misses[:5] or rows[:5])
+        parts.append("<section><h2>Representative Samples</h2>")
+        parts.append(html_table(["Video", "Expected", "Prediction", "Observation"], [[row["video"], row["expected_label"], row["prediction_label"], row["error"] or row["description"]] for row in sample_rows]))
+        parts.append("</section>")
+    if "prompt_params" in sections:
+        bm = payload["snapshot"].get("batch_metrics") or {}
+        params = (bm.get("params") or payload["snapshot"].get("defaults") or {})
+        parts.append("<section><h2>Prompt and Parameters</h2>")
+        parts.append(f"<pre>{html.escape(json.dumps(params, indent=2, default=str))}</pre></section>")
+    if "infrastructure" in sections:
+        server = payload["snapshot"].get("server") or {}
+        parts.append("<section><h2>Backend and Instance</h2>")
+        parts.append(html_table(["Field", "Value"], [[key, server.get(key)] for key in ["instance", "host_ip", "backend", "model", "base_url", "gpu", "vram_free_mib", "vram_total_mib", "ssd_free_gb", "ssd_total_gb"]]))
+        parts.append("</section>")
+    if "recommendations" in sections:
+        parts.append("<section><h2>Recommendations</h2><div class='note'><ul>")
+        parts.extend(f"<li>{html.escape(rec)}</li>" for rec in payload["recommendations"])
+        parts.append("</ul></div></section>")
+    parts.append("</main></body></html>")
+    path.write_text("".join(parts), encoding="utf-8")
+
+
+def ppt_escape(value: Any) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def emu(inches: float) -> int:
+    return int(inches * 914400)
+
+
+def ppt_text_shape(shape_id: int, name: str, x: float, y: float, w: float, h: float, lines: Iterable[str], size: int = 22, color: str = "1A1A1A", bold: bool = False, fill: Optional[str] = None) -> str:
+    fill_xml = f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>' if fill else ""
+    paragraphs = []
+    for line in lines:
+        paragraphs.append(f'<a:p><a:r><a:rPr lang="en-US" sz="{size * 100}" b="{1 if bold else 0}"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></a:rPr><a:t>{ppt_escape(line)}</a:t></a:r></a:p>')
+    return f'''<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{ppt_escape(name)}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{emu(x)}" y="{emu(y)}"/><a:ext cx="{emu(w)}" cy="{emu(h)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{fill_xml}</p:spPr><p:txBody><a:bodyPr wrap="square" lIns="91440" tIns="91440" rIns="91440" bIns="91440"/><a:lstStyle/>{"".join(paragraphs)}</p:txBody></p:sp>'''
+
+
+def ppt_slide_xml(shapes: List[str]) -> str:
+    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>{"".join(shapes)}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'''
+
+
+def ppt_metric_cards(summary: Dict[str, Any]) -> List[str]:
+    cards = [
+        (summary["total"], "samples"),
+        (summary["completed"], "completed"),
+        (percent_value(summary.get("accuracy")) or "n/a", "accuracy"),
+        (summary["errors"], "errors"),
+    ]
+    shapes = []
+    for i, (value, label) in enumerate(cards):
+        x = 0.7 + i * 3.05
+        shapes.append(ppt_text_shape(20 + i, label, x, 4.8, 2.65, 1.1, [str(value), label.upper()], 18, "FFFFFF", True, "1A1A1A" if i != 3 else "8B1A1A"))
+    return shapes
+
+
+def write_pptx_export(payload: Dict[str, Any], path: Path) -> None:
+    summary = payload["summary"]
+    rows = payload["rows"]
+    classes = payload["class_breakdown"]
+    sections = set(payload["sections"])
+    misses = [row for row in rows if row.get("error") or row.get("match") == "miss"]
+    slides: List[List[str]] = []
+    title_shapes = [
+        ppt_text_shape(2, "Title", 0.65, 0.55, 11.8, 1.1, ["BYO Video Runtime Report"], 34, "76B900", True),
+        ppt_text_shape(3, "Subtitle", 0.7, 1.55, 11.6, 0.8, [f"{summary['dataset']} | {summary['model']} | {summary['generated_at']}"], 16, "666666"),
+        ppt_text_shape(4, "Claim", 0.7, 2.45, 11.5, 1.3, [f"{summary['completed']} of {summary['total']} videos completed; accuracy {percent_value(summary.get('accuracy')) or 'not yet evaluated'}; errors {summary['errors']}."], 24, "1A1A1A", True, "F0F7E6"),
+    ] + ppt_metric_cards(summary)
+    slides.append(title_shapes)
+    if "run_metrics" in sections:
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Runtime metrics"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Metrics", 0.8, 1.4, 5.7, 4.9, [
+                f"Batch E2E: {seconds_value(summary.get('batch_e2e_seconds')) or 'n/a'}",
+                f"Video req/s: {summary.get('video_requests_per_second') or 'n/a'}",
+                f"Median video E2E: {seconds_value(summary.get('median_video_e2e')) or 'n/a'}",
+                f"Average video E2E: {seconds_value(summary.get('avg_video_e2e')) or 'n/a'}",
+                f"Prompt hash: {summary.get('prompt_hash') or 'n/a'}",
+            ], 20),
+            ppt_text_shape(4, "Frame", 7.0, 1.4, 5.2, 4.9, ["Performance readout should be interpreted with the selected frame budget, max pixels, concurrency, and backend context guard in mind."], 22, "FFFFFF", True, "1A1A1A"),
+        ])
+    if "evaluation" in sections:
+        evaluated = len([row for row in rows if row.get("match")])
+        lines = [
+            f"Correct: {summary['correct']} / {evaluated or 'not evaluated'}",
+            f"Class accuracy: {percent_value(summary.get('accuracy')) or 'n/a'}",
+            f"Hazard accuracy: {percent_value(summary.get('hazard_accuracy')) or 'n/a'}",
+            f"Runtime errors: {summary['errors']}",
+        ]
+        if classes:
+            weakest = classes[:3]
+            lines.append("Lowest-scoring classes: " + "; ".join(f"{item['label']} {percent_value(item['accuracy'])}" for item in weakest))
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Evaluation summary"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Evaluation", 0.8, 1.35, 11.7, 5.4, lines, 22, "1A1A1A", False, "F0F7E6"),
+        ])
+    if "class_breakdown" in sections:
+        lines = [f"{item['label']}: {item['correct']}/{item['total']} ({percent_value(item['accuracy'])}) - most predicted {item['most_predicted']}" for item in classes[:8]]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Per-class performance"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Classes", 0.8, 1.35, 11.7, 5.4, lines or ["No class-level results yet."], 16),
+        ])
+    if "error_analysis" in sections:
+        lines = [f"{row['video']}: {row['expected_label']} -> {row['prediction_label'] or 'ERROR'}" for row in misses[:10]]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Errors and misses"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Errors", 0.8, 1.35, 11.7, 5.4, lines or ["No errors or misses in the current exported result set."], 16),
+        ])
+    if "result_table" in sections:
+        lines = [
+            f"{row['video']}: expected {row['expected_label'] or 'n/a'}; predicted {row['prediction_label'] or 'unrun'}; E2E {seconds_value(row.get('e2e_seconds')) or 'n/a'}"
+            for row in rows[:9]
+        ]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Per-video result sample"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Results", 0.8, 1.35, 11.7, 5.4, lines or ["No video rows are loaded yet."], 15),
+        ])
+    if "samples" in sections:
+        sample_rows = (misses[:5] or rows[:5])
+        lines = [f"{row['video']}: {row['prediction_label'] or 'unrun'} - {str(row['description'] or row['error'])[:110]}" for row in sample_rows]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Representative evidence"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Samples", 0.8, 1.35, 11.7, 5.4, lines or ["No sample results yet."], 16),
+        ])
+    if "prompt_params" in sections:
+        bm = payload["snapshot"].get("batch_metrics") or {}
+        params = bm.get("params") or payload["snapshot"].get("defaults") or {}
+        param_lines = [
+            f"Run label: {summary.get('run_label') or 'Custom prompt'}",
+            f"Prompt hash: {summary.get('prompt_hash') or 'n/a'}",
+            f"FPS: {params.get('fps')}",
+            f"Max pixels/frame: {params.get('max_pixels')}",
+            f"Max output tokens: {params.get('max_tokens')}",
+            f"Temperature / top P / repetition: {params.get('temperature')} / {params.get('top_p')} / {params.get('repetition_penalty')}",
+            f"Max input frames: {params.get('max_frames')}",
+        ]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Prompt and parameters"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Params", 0.8, 1.35, 11.7, 5.4, param_lines, 18),
+        ])
+    if "recommendations" in sections:
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Recommended next actions"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Recommendations", 0.8, 1.35, 11.7, 5.4, payload["recommendations"], 21, "1A1A1A", False, "FFFBED"),
+        ])
+    if "infrastructure" in sections:
+        server = payload["snapshot"].get("server") or {}
+        lines = [f"{key}: {server.get(key)}" for key in ["instance", "host_ip", "backend", "model", "gpu", "vram_free_mib", "vram_total_mib", "ssd_free_gb"]]
+        slides.append([
+            ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Backend and instance"], 30, "1A1A1A", True),
+            ppt_text_shape(3, "Infra", 0.8, 1.35, 11.7, 5.4, lines, 18),
+        ])
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        slide_overrides = "".join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' + slide_overrides + "</Types>")
+        zf.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
+        sld_ids = "".join(f'<p:sldId id="{255+i}" r:id="rId{i}"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("ppt/presentation.xml", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>{sld_ids}</p:sldIdLst><p:sldSz cx="12192000" cy="6858000" type="wide"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>')
+        rels = "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i}.xml"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("ppt/_rels/presentation.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels + "</Relationships>")
+        for i, shapes in enumerate(slides, 1):
+            zf.writestr(f"ppt/slides/slide{i}.xml", ppt_slide_xml(shapes))
+
+
+def create_export(fmt: str, sections: Optional[Iterable[str]]) -> Path:
+    fmt = (fmt or "html").lower().strip()
+    if fmt == "report":
+        fmt = "html"
+    if fmt not in {"html", "json", "csv", "xlsx", "pptx"}:
+        raise ClientInputError(f"Unsupported export format: {fmt}")
+    section_ids = export_section_ids(sections)
+    payload = export_payload(section_ids)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = EXPORT_DIR / export_stem(fmt)
+    if fmt == "html":
+        write_html_report(payload, path)
+    elif fmt == "json":
+        write_json_export(payload, path)
+    elif fmt == "csv":
+        write_csv_export(payload["rows"], path)
+    elif fmt == "xlsx":
+        write_xlsx_export(payload, path)
+    elif fmt == "pptx":
+        write_pptx_export(payload, path)
+    log(f"Exported {fmt.upper()} report to {path}")
+    return path
+
+
+def resolve_export_download(filename: str) -> Path:
+    safe_name = Path(urllib.parse.unquote(filename)).name
+    if not safe_name:
+        raise ClientInputError("Missing export filename")
+    path = EXPORT_DIR / safe_name
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(safe_name)
+    return path
+
+
 def compact_run_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     compact: List[Dict[str, Any]] = []
     for result in results:
@@ -1423,6 +1978,11 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .status-note { border-left:3px solid var(--line); padding-left:9px; color:var(--muted); font-size:12px; line-height:1.35; margin:10px 0 0; }
 .status-note.warn { border-left-color:var(--warn); color:var(--warn); }
 .status-note.bad { border-left-color:var(--bad); color:var(--bad); }
+.export-panel { margin-top:10px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; }
+.export-sections { display:grid; grid-template-columns:repeat(2, minmax(180px, 1fr)); gap:2px 14px; margin:8px 0 10px; }
+.export-sections .toggle-row { margin:3px 0; }
+.export-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.export-link { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; color:var(--accent); background:#fff; text-decoration:none; }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
 .step strong { color:var(--ink); }
@@ -1515,6 +2075,19 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <div class="results"><table><thead><tr><th>Dataset</th><th>Prompt</th><th>Status</th><th>Videos</th><th>Errors</th><th>Accuracy</th><th>Batch E2E</th><th>Video req/s</th><th>Median video E2E</th><th>Prompt hash</th></tr></thead><tbody id="batchRows"></tbody></table></div>
   <h3>Runtime log</h3>
   <div class="log" id="log"></div>
+  <h3>Exports</h3>
+  <div class="export-panel">
+    <p class="hint">Choose the sections to include in the narrative report and PowerPoint. Raw JSON, CSV, and Excel exports include the current run data for downstream analysis.</p>
+    <div class="export-sections" id="exportSections"></div>
+    <div class="actions">
+      <button class="secondary exportBtn" data-format="html">Report</button>
+      <button class="secondary exportBtn" data-format="json">JSON</button>
+      <button class="secondary exportBtn" data-format="csv">CSV</button>
+      <button class="secondary exportBtn" data-format="xlsx">Excel</button>
+      <button class="secondary exportBtn" data-format="pptx">PowerPoint</button>
+    </div>
+    <div class="export-links" id="exportLinks"></div>
+  </div>
 </section>
 </main>
 <script>
@@ -1536,15 +2109,18 @@ function sec(v){ return v === null || v === undefined || Number.isNaN(Number(v))
 function rate(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : Number(v).toFixed(2); }
 function serverNow(){ const received=Number(state?._receivedAt||Date.now()/1000); const server=Number(state?.server_epoch||received); return server + (Date.now()/1000 - received); }
 function span(v){ if(v === null || v === undefined || Number.isNaN(Number(v))) return ''; const s=Math.max(0, Math.round(Number(v))); if(s < 60) return `${s}s`; const m=Math.floor(s/60); const r=s%60; if(m < 60) return `${m}m ${r}s`; const h=Math.floor(m/60); return `${h}h ${m%60}m`; }
-function statText(s){ if(!s || !s.count) return 'no samples yet'; return `min ${sec(s.min)} · max ${sec(s.max)} · median ${sec(s.median)} · avg ${sec(s.average)}`; }
+function statText(s){ if(!s || !s.count) return 'no samples yet'; return `min ${sec(s.min)} | max ${sec(s.max)} | median ${sec(s.median)} | avg ${sec(s.average)}`; }
 function percent(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : `${(Number(v)*100).toFixed(1)}%`; }
 function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; }
-function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' · '); }
+function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
 function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
+function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
+function renderExportSections(){ const sections=state?.defaults?.export_sections||[]; const target=el('exportSections'); if(!target || target.dataset.ready) return; target.innerHTML = sections.map(s=>`<label class="toggle-row"><input class="exportSection" type="checkbox" value="${esc(s.id)}" ${s.default?'checked':''}/><span><strong>${esc(s.label)}</strong></span></label>`).join(''); target.dataset.ready='1'; }
+function addExportLink(item){ const box=el('exportLinks'); const a=document.createElement('a'); a.className='export-link'; a.href=item.url; a.target='_blank'; a.textContent=`${item.format.toUpperCase()} | ${item.filename}`; box.prepend(a); }
 function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const patchPixels=Number(state?.defaults?.context_patch_pixels||196); const tokens=Math.ceil(frames * effectivePx / patchPixels); return {frames, tokens, effectivePx, note:''}; }
 function sliderLabel(id, label, suffix=''){ document.getElementById(id+'Value').textContent = label + suffix; }
-function sliderHint(domId, key){ const m=(state.defaults.slider_meta||{})[key]||{}; const unit=m.unit ? ' '+m.unit : ''; const recommended = key === 'max_frames' && m.recommended === 0 ? 'disabled' : fmtMetaValue(m.recommended); document.getElementById(domId+'Hint').textContent = `min ${fmtMetaValue(m.min)}${unit} · max ${fmtMetaValue(m.max)}${unit} · recommended ${recommended}${unit}. ${m.note||''}`; }
+function sliderHint(domId, key){ const m=(state.defaults.slider_meta||{})[key]||{}; const unit=m.unit ? ' '+m.unit : ''; const recommended = key === 'max_frames' && m.recommended === 0 ? 'disabled' : fmtMetaValue(m.recommended); document.getElementById(domId+'Hint').textContent = `min ${fmtMetaValue(m.min)}${unit} | max ${fmtMetaValue(m.max)}${unit} | recommended ${recommended}${unit}. ${m.note||''}`; }
 function renderParamLabels(){ const p=params(); sliderLabel('fps', p.fps, ' fps'); sliderLabel('maxPixels', fmt(p.max_pixels)); sliderLabel('maxTokens', fmt(p.max_tokens)); sliderLabel('temperature', p.temperature.toFixed(2)); sliderLabel('topP', p.top_p.toFixed(2)); sliderLabel('repPenalty', p.repetition_penalty.toFixed(2)); sliderLabel('maxFrames', p.max_frames === 0 ? 'disabled' : fmt(p.max_frames)); sliderHint('fps','fps'); sliderHint('maxPixels','max_pixels'); sliderHint('maxTokens','max_tokens'); sliderHint('temperature','temperature'); sliderHint('topP','top_p'); sliderHint('repPenalty','repetition_penalty'); sliderHint('maxFrames','max_frames'); const d=state.defaults; const buildOn=!!el('buildDefaultsToggle')?.checked; const mode=nativeVideoMode() ? 'native video_url; backend samples frames internally' : `image-frame mode; max input frames cap is ${p.max_frames === 0 ? 'disabled' : p.max_frames}`; const buildText=buildOn ? 'build.nvidia.com defaults are ON: temperature 0.6, top P 0.3, repetition 1.2. ' : ''; document.getElementById('paramSummary').textContent = `${buildText}Recommended: fps ${d.slider_meta.fps.recommended}, max pixels ${fmt(d.slider_meta.max_pixels.recommended)}, max tokens ${d.slider_meta.max_tokens.recommended}, temperature ${d.slider_meta.temperature.recommended}, top P ${d.slider_meta.top_p.recommended}, repetition ${d.slider_meta.repetition_penalty.recommended}, max frames ${d.slider_meta.max_frames.recommended}. Frame policy: ${mode}.`; }
 function modelMaxLen(){ return Number(state?.server?.model_max_len || state?.defaults?.default_model_max_len || 32768); }
 function reserveTokens(){ return Number(state?.server?.context_safety_reserve || state?.defaults?.context_safety_reserve || 1024); }
@@ -1559,7 +2135,7 @@ function clipText(text, max=260){ const s=String(text||''); return s.length > ma
 function renderRuntimeStatus(){ const p=state.progress||{}; const bm=state.batch_metrics||{}; const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : 0; const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((state.running ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0); const eta=state.running && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastResult=Number(p.last_result_epoch||0); const waitSince=state.running ? now - (lastResult || started || now) : null; const latestError=latestRuntimeError(); const delayed=state.running && waitSince !== null && waitSince > 90; const stalled=state.running && waitSince !== null && waitSince > 300; const title=latestError ? (state.running ? 'Running with errors' : 'Attention') : state.running ? (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running') : total ? (errors ? 'Complete with errors' : 'Complete') : 'Idle'; const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`; const etaText=state.running ? (eta === null ? 'waiting for first completion' : span(eta)) : ''; const rows=[['completed', total ? `${fmt(done)}/${fmt(total)}` : 'none'],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['delay', state.running && waitSince !== null ? span(waitSince) : ''],['errors', fmt(errors)],['event', p.last_event||'']]; el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); const notice=el('runtimeNotice'); if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); } else if(stalled){ notice.className='status-note bad'; notice.textContent=`No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; } else if(delayed){ notice.className='status-note warn'; notice.textContent=`No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; } else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; } else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; } else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Batch finished with errors. See Results and Runtime log for details.' : 'Batch finished successfully.'; } else { notice.className='status-note'; notice.textContent='No batch is running.'; } }
 function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
 function applyBuildDefaults(checked){ const d=state.defaults; const b=d.build_defaults||{}; const m=d.slider_meta||{}; el('temperatureSlider').value = checked ? b.temperature : m.temperature.recommended; el('topPSlider').value = checked ? b.top_p : m.top_p.recommended; el('repPenaltySlider').value = checked ? b.repetition_penalty : m.repetition_penalty.recommended; render(); }
-function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
+function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); renderExportSections(); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
 function render(){ if(!state) return; initControls(); renderParamLabels();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
@@ -1567,7 +2143,7 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['hazard accuracy',ev.evaluated ? `${ev.hazard_correct}/${ev.evaluated} (${percent(ev.hazard_accuracy)})` : 'no expected labels'],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
  contextBlocked = renderContextGuard();
- document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const ev=r.evaluation||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const expected=ev.has_expected ? `${esc(ev.expected_class_id)} ${esc(ev.expected_label)}` : ''; const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' · ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${expected}</td><td>${pred}</td><td>${esc(match)}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage})}</td></tr>`; }).join('');
+ document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const ev=r.evaluation||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const expected=ev.has_expected ? `${esc(ev.expected_class_id)} ${esc(ev.expected_label)}` : ''; const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${expected}</td><td>${pred}</td><td>${esc(match)}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
  document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running || contextBlocked; document.getElementById('smokeBtn').disabled = state.running || contextBlocked; document.getElementById('foBtn').disabled = state.running; }
@@ -1583,6 +2159,8 @@ document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading da
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
+async function exportArtifact(format){ const buttons=[...document.querySelectorAll('.exportBtn')]; let status=null; try{ buttons.forEach(b=>b.disabled=true); status=document.createElement('span'); status.className='export-link'; status.textContent=`Creating ${format.toUpperCase()}...`; el('exportLinks').prepend(status); const j=await api('/api/export',{format,sections:checkedExportSections()}); status.remove(); status=null; addExportLink(j); await poll(); }catch(e){ if(status) status.remove(); alert(e.message); await poll(); } finally{ buttons.forEach(b=>b.disabled=false); } }
+document.querySelectorAll('.exportBtn').forEach(btn=>{ btn.onclick = ()=>exportArtifact(btn.dataset.format); });
 document.getElementById('allBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=true); };
 document.getElementById('noneBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=false); };
 poll(); setInterval(poll, 1500);
@@ -1608,6 +2186,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             self.send_file(thumb, "image/jpeg")
+        elif self.path.startswith("/api/export/"):
+            filename = Path(urllib.parse.urlparse(self.path).path).name
+            try:
+                export_path = resolve_export_download(filename)
+            except FileNotFoundError:
+                self.send_error(404)
+                return
+            content_type = EXPORT_CONTENT_TYPES.get(export_path.suffix.lstrip(".").lower(), mimetypes.guess_type(str(export_path))[0] or "application/octet-stream")
+            self.send_file(export_path, content_type, download_name=export_path.name)
         else:
             self.send_error(404)
 
@@ -1654,6 +2241,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/fiftyone":
                 url = launch_fiftyone(int(payload.get("port") or os.getenv("FIFTYONE_PORT", "5151")))
                 self.send_json({"url": url})
+            elif self.path == "/api/export":
+                fmt = str(payload.get("format") or "html")
+                path = create_export(fmt, payload.get("sections") or [])
+                exported_fmt = path.suffix.lstrip(".").lower()
+                self.send_json({
+                    "ok": True,
+                    "format": exported_fmt,
+                    "filename": path.name,
+                    "url": "/api/export/" + urllib.parse.quote(path.name),
+                    "bytes": path.stat().st_size,
+                })
             else:
                 self.send_error(404)
         except Exception as exc:
@@ -1690,11 +2288,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_file(self, path: Path, content_type: str) -> None:
+    def send_file(self, path: Path, content_type: str, download_name: Optional[str] = None) -> None:
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if download_name:
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         self.end_headers()
         self.wfile.write(body)
 
