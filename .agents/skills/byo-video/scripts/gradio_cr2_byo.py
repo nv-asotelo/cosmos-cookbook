@@ -236,7 +236,7 @@ MODEL_CONFIGS = {
         # if arch is not registered. Use INFERENCE_BACKEND=hf as fallback (confirmed working).
     },
     # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
-    # vLLM-only: uses video_url content type with file:// path (same pattern as Nemotron).
+    # vLLM-only: uses video_url content type with base64 data URLs.
     # Frame control via extra_body mm_processor_kwargs at inference time (not server flags).
     # Three variants per size: Instruct (general), FP8 (quantized), Thinking (reasoning).
     "QW3-2B": {
@@ -290,7 +290,7 @@ MODEL_CONFIGS = {
         "nim": "google/gemma-4-31b-it",
     },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
-    # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
+    # vLLM-only: uses opencv backend + base64 video_url (not JPEG frames).
     # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
     "NEM-12B": {
         "variants": [
@@ -308,7 +308,7 @@ MODEL_CONFIGS = {
 # fps/max_pixels that are None inherit the GPU-tier value from DEFAULT_FPS/DEFAULT_MAX_PIXELS.
 # Thinking variants get a max_tokens boost automatically in _ckpt_slider_defaults().
 _MODEL_SIZE_DEFAULTS = {
-    # file:// models (NEM-12B, QW3-*) — fps slider unused by vLLM; inherit GPU-tier fps
+    # native video_url models (NEM-12B, QW3-*) — fps slider unused by vLLM; inherit GPU-tier fps
     "NEM-12B":  {"max_tokens": 512},
     "QW3-2B":   {"max_tokens": 512},
     "QW3-8B":   {"max_tokens": 512},
@@ -2722,11 +2722,12 @@ with gr.Blocks(
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
         target   = max(1, int(m.duration_s * fps_val))
-        # Post-cap honesty: nim_local frames branch caps at 32 (line ~1217).
-        # vLLM (non-NIM) caps at 8. HF mode caps at _MAX_HF_FRAMES (32).
-        # Show what the model ACTUALLY receives, not the pre-cap target.
+        # Post-cap honesty: NIM/native-video paths pass a video_url and let the
+        # service sample frames. OSS/HF frame paths still apply local caps.
         if INFERENCE_BACKEND == "nim_local":
-            cap = 32
+            info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
+                        "video_url sent to NIM (server samples frames)")
+            return info_str, gr.update()
         elif INFERENCE_BACKEND == "vllm":
             cap = 8
         else:
