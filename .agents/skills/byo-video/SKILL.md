@@ -59,6 +59,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `scripts/byo_video_runtime_agent.py`: browser runtime-agent frontend for HF
   dataset selection, concurrent inference, FiftyOne launch/result writeback,
   and `pjramg/Safe_Unsafe_Test` smoke testing with the worker-safety prompt.
+- `scripts/byo_video_runtime_guide.py`: friendly CLI companion for Claude Code
+  or terminal users to load datasets, import papers, run guarded batches, shape
+  structured prompts, and export artifacts through the runtime-agent API.
 - `scripts/gradio_cr2_byo.py`: Gradio app for video/image inference.
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
 - `scripts/cosmos_deploy_monitor.py`: deployment monitor helper for legacy flows.

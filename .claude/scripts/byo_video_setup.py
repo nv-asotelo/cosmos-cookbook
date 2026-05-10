@@ -902,6 +902,8 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
     print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
     print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)
     print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
+    if os.path.exists("/tmp/byo_video_runtime_guide.py"):
+        print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
     print(f"{'─'*62}", flush=True)
     print(flush=True)
 
@@ -1053,6 +1055,8 @@ print(f"  {DIM}Upload any MP4 → select checkpoint → Run Inference{RESET}", f
 print(f"  {DIM}Run All Variants: {_variant_labels}{RESET}", flush=True)
 print(f"  {DIM}Results: /tmp/byo_video_reason2_results.json{RESET}", flush=True)
 print(f"  {DIM}Benchmark: /tmp/byo_video_benchmark.json{RESET}", flush=True)
+if os.path.exists("/tmp/byo_video_runtime_guide.py"):
+    print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
 print(f"  {DIM}Link valid for 72h. Kill instance when done.{RESET}", flush=True)
 if _cfg["nim"] and not NGC_API_KEY:
     print(f"  {YELLOW}⚠  NIM-{MODEL_SIZE} mode requires NGC_API_KEY=nvapi-...{RESET}", flush=True)

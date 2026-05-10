@@ -18,6 +18,7 @@ Default output for dataset/batch work: **runtime-agent web UI** on `RUNTIME_AGEN
 - `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 - `~/.claude/scripts/byo_video_runtime_agent.py` — Runtime-agent frontend for HF dataset batch inference and FiftyOne support
+- `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
 
 ---
 
@@ -46,7 +47,7 @@ BYO_VIDEO_FRONTEND=runtime_agent \
 RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test \
 python3 /tmp/byo_video_setup.py
 ```
-This script shows live step-by-step progress with ETAs for every install stage, then prints a clickable hyperlink to the selected frontend. The URL is written to `/tmp/gradio_url.txt` for compatibility and to `/tmp/byo_video_runtime_agent_url.txt` when using the runtime-agent frontend. Deploy it to the instance before running (see deploy section below).
+This script shows live step-by-step progress with ETAs for every install stage, then prints a clickable hyperlink to the selected frontend and the companion CLI guide command when deployed. The URL is written to `/tmp/gradio_url.txt` for compatibility and to `/tmp/byo_video_runtime_agent_url.txt` when using the runtime-agent frontend. Deploy it to the instance before running (see deploy section below).
 
 ### Runtime-Agent HF Dataset Batch Smoke
 
@@ -87,7 +88,7 @@ The main session owns **PHASE 0–1** (pre-checks + picker). These phases are in
 `AskUserQuestion` resolves all user decisions before anything runs on a GPU.
 
 Immediately after the picker answers are resolved, the main session spawns a **background
-observer** for **PHASE 2–6** (provision → shell ready → deploy scripts → setup → Gradio live).
+observer** for **PHASE 2–6** (provision → shell ready → deploy scripts → setup → frontend live).
 The observer handles all long-running work autonomously, keeping the main session free for
 conversation. On completion the observer writes `/tmp/byo_video_observer_result.json`; the
 main session reads it via the task completion notification and either displays the final URL
@@ -481,7 +482,7 @@ SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 **Step 1** — Deploy required Python scripts:
 
 ```bash
-for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent; do
+for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -699,11 +700,92 @@ Do NOT auto-terminate the instance.
 
 ---
 
+### POST-LIVE — Guided Companion (recommended for casual users)
+
+After the LIVE panel, offer a friendlier post-deployment helper before handing
+the user the expert browser UI. This helper is for users who want Claude Code to
+talk them through the same capabilities as the runtime-agent HTML screen:
+dataset load, paper import, prompt selection, context guard, guarded batch run,
+progress, result review, and export.
+
+Fire `AskUserQuestion`:
+
+```
+AskUserQuestion: "The BYO-video frontend is live. How much guidance do you want for the first run?"
+Options:
+  "Guided companion (Recommended)" — "Claude asks one question at a time and can run the CLI guide alongside the browser UI"
+  "Monitor only"                   — "Keep the expert UI, but watch for runtime errors and stalled runs"
+  "Skip"                           — "Use the URL directly; you can start the guide later from the terminal"
+```
+
+If the user chooses the guided companion, spawn a post-deployment subagent:
+
+```
+Agent(
+  name: "byo-video-guide",
+  prompt: """
+You are the BYO-video post-deployment guide for a casual Claude Code user.
+Use AskUserQuestion for one decision at a time. Never ask open-ended questions
+when a small menu will do.
+
+Start by asking which surface they want to use:
+1. Runtime Agent HTML
+2. Claude CLI guide
+3. Gradio single-video UI
+4. FiftyOne dataset viewer
+
+Then ask what they want to accomplish:
+1. Worker-safety smoke test
+2. Load a Hugging Face dataset
+3. Import prompts/datasets from a paper or Hugging Face paper page
+4. Shape structured JSON output for an inference run
+5. Export a report, raw file, spreadsheet, or PowerPoint
+
+For runtime-agent work, prefer:
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> wizard
+or specific commands:
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> status
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> load pjramg/Safe_Unsafe_Test --max-videos 2
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> paper https://huggingface.co/papers/2603.29281 --max-videos 2
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> run --first 2 --concurrency 1
+  python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> export --format pptx
+
+Keep all safety guards on. Do not set allow_over_context. If the context guard
+blocks a run, explain the budget issue and offer: Fit to context in the HTML UI,
+lower max frames/FPS/max pixels, run fewer videos, or explicitly stress test
+only after the user confirms they accept possible 400 errors.
+
+For Gradio users, guide browser steps instead of inventing APIs: upload one MP4,
+choose the prompt preset, use build.nvidia.com defaults for NIM-local when
+appropriate, then run. If Gradio shows a generic error, inspect
+/tmp/gradio_demo.log and optionally start the runtime monitor.
+
+For structured output, help the user choose a schema first (classification,
+safety inspection, dataset evaluation, or custom JSON fields). When the dataset
+has expected answers, encourage an evaluation run and show match/miss summaries.
+
+During a run, surface progress, elapsed time, ETA, error count, and the most
+recent runtime error. End by helping the user export the artifact they need.
+"""
+)
+```
+
+The companion CLI is also safe to run manually from the instance:
+
+```bash
+python3 /tmp/byo_video_runtime_guide.py --url "$(cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || cat /tmp/gradio_url.txt)" wizard
+python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> status
+python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> export --format html --sections overview,run_metrics,evaluation,recommendations
+```
+
+---
+
 ### POST-LIVE — Runtime Monitor (optional, opt-in)
 
-Once Gradio is live, the user is on their own — but the Gradio UI swallows most server-side
-errors as a generic "Error" toast. Errors at preprocess, prefill, or generate stages are
-fully visible in `/tmp/gradio_demo.log` on the remote, but invisible in the browser.
+Even with the guided companion, keep the monitor available because Gradio and some
+backend paths can swallow server-side errors as a generic browser toast. Errors
+at preprocess, prefill, or generate stages are fully visible in `/tmp/gradio_demo.log`
+or `/tmp/byo_video_runtime_agent.log` on the remote, but may be invisible in the browser.
 
 The **runtime monitor** is a lightweight polling daemon (`~/.claude/scripts/byo_video_runtime_monitor.py`)
 that watches the remote Gradio process, GPU stats, and log tail; pattern-matches errors
@@ -711,10 +793,11 @@ against a rule catalog (cuda_oom, pyav_decode, preprocess_empty, shape_mismatch,
 vllm_disconnect, process_killed, broken_pipe, torch_compile_fail, generic_traceback,
 process_disappeared); and saves per-inference metrics for later review.
 
-After the LIVE panel, fire `AskUserQuestion` to offer the monitor:
+If the user chooses "Monitor only" above, or asks for extra watching while the
+guided companion runs, fire `AskUserQuestion` to offer the monitor:
 
 ```
-AskUserQuestion: "Gradio is live. Spawn the runtime monitor to watch for errors and capture session metrics?"
+AskUserQuestion: "Spawn the runtime monitor to watch for errors and capture session metrics?"
 Options:
   "Yes (Recommended)"  — "Polls every 30s; surfaces errors with suggested fixes; saves all inference metrics for later questions"
   "Skip"               — "No background watcher. Spawn later with: python3 ~/.claude/scripts/byo_video_runtime_monitor.py poll --remote <host>"
@@ -770,7 +853,7 @@ The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 Deploy scripts:
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent; do
+for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1206,7 +1289,7 @@ Agent steps:
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
    SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-   for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent; do
+   for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
      B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
