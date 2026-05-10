@@ -19,6 +19,7 @@ import mimetypes
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -86,8 +87,35 @@ OUTPUT FORMAT:
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv"}
 DEFAULT_DATASET = os.getenv("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test")
 RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_agent_results.json"))
+TEXT_TOKENS = 50
+EMPIRICAL_VISUAL_TOKENS_PER_FRAME = 128
+BASELINE_PIXELS = 524288
+DEFAULT_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_MAX_PIXELS", os.getenv("GRADIO_MAX_PIXELS", str(4096 * (32 ** 2)))))
+DEFAULT_MAX_FRAMES = int(os.getenv("RUNTIME_AGENT_MAX_FRAMES", "8"))
 STATE_LOCK = threading.Lock()
 FIFTYONE_SESSION = None
+
+GENERIC_SYSTEM = "You are a helpful assistant."
+WAREHOUSE_SYSTEM = "You are a helpful warehouse monitoring system."
+DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
+DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
+PROMPT_PRESETS = [
+    {"label": "Worker safety classification", "user_prompt": WORKER_SAFETY_USER, "system_prompt": WORKER_SAFETY_SYSTEM, "reasoning": False},
+    {"label": "General description", "user_prompt": DEFAULT_PROMPT, "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Safety analysis", "user_prompt": "Identify any safety hazards, risks, or unsafe behaviors visible in this video. Be specific.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Non-expert summary", "user_prompt": "Summarize this video in plain language for someone with no domain expertise.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Action recognition", "user_prompt": "List every distinct action or motion performed in this video, in the order they occur.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Object inventory", "user_prompt": "List all objects, equipment, and people visible. Note their state.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Anomaly detection", "user_prompt": "Identify anything unusual, unexpected, or out of place in this video.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Temporal summary", "user_prompt": "Break this video into time segments and describe what changes in each segment.", "system_prompt": DEFAULT_SYSTEM, "reasoning": False},
+    {"label": "Race car: timestamps", "user_prompt": "Describe the video. Add timestamps in mm:ss format.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag and include the timestamps.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
+    {"label": "Forklift: load weight (JSON)", "user_prompt": "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.", "system_prompt": GENERIC_SYSTEM, "reasoning": False},
+    {"label": "Mail package: pickup allowed?", "user_prompt": "Is the person allowed to pick up the packages?\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
+    {"label": "Warehouse: who picked up the box?", "user_prompt": "Which worker picked up the dropped box?\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": WAREHOUSE_SYSTEM, "reasoning": True},
+    {"label": "AV: next ego action", "user_prompt": "What's the next immediate action for the Ego vehicle?\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
+    {"label": "Robot arm: 2D trajectory (JSON)", "user_prompt": "You are given the task \"Move the tape into the basket\". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {\"point_2d\": [x, y], \"label\": \"gripper trajectory\"}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
+    {"label": "SDG critic: approve / reject", "user_prompt": "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection.\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag. Answer with Approve or Reject only.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
+]
 
 STATE: Dict[str, Any] = {
     "dataset_repo": DEFAULT_DATASET,
@@ -104,8 +132,14 @@ STATE: Dict[str, Any] = {
         "user_prompt": WORKER_SAFETY_USER,
         "concurrency": int(os.getenv("RUNTIME_AGENT_CONCURRENCY", "4")),
         "max_videos": int(os.getenv("RUNTIME_AGENT_MAX_VIDEOS", "20")),
-        "fps": float(os.getenv("RUNTIME_AGENT_FPS", "1")),
-        "max_tokens": int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", "1024")),
+        "fps": float(os.getenv("RUNTIME_AGENT_FPS", os.getenv("GRADIO_FPS", "2"))),
+        "max_pixels": DEFAULT_MAX_PIXELS,
+        "max_tokens": int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", os.getenv("GRADIO_MAX_TOKENS", "512"))),
+        "temperature": float(os.getenv("RUNTIME_AGENT_TEMPERATURE", "0.0")),
+        "top_p": float(os.getenv("RUNTIME_AGENT_TOP_P", "1.0")),
+        "repetition_penalty": float(os.getenv("RUNTIME_AGENT_REPETITION_PENALTY", "1.05")),
+        "max_frames": DEFAULT_MAX_FRAMES,
+        "prompt_presets": PROMPT_PRESETS,
     },
 }
 
@@ -136,6 +170,76 @@ def is_video_path(path: str) -> bool:
     return Path(path).suffix.lower() in VIDEO_EXTENSIONS
 
 
+def get_video_meta(path: str) -> Dict[str, Any]:
+    meta = {"width": 0, "height": 0, "fps": 0.0, "duration_s": 0.0, "total_frames": 0}
+    try:
+        import av
+
+        with av.open(path) as container:
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            if not stream:
+                return meta
+            fps = float(stream.average_rate) if stream.average_rate else 0.0
+            duration_s = float(container.duration) / 1_000_000 if container.duration else 0.0
+            total_frames = int(stream.frames or 0)
+            if total_frames <= 0 and duration_s and fps:
+                total_frames = max(1, int(round(duration_s * fps)))
+            meta.update({
+                "width": int(stream.width or 0),
+                "height": int(stream.height or 0),
+                "fps": fps,
+                "duration_s": duration_s,
+                "total_frames": total_frames,
+            })
+    except Exception as exc:
+        meta["error"] = str(exc)
+    return meta
+
+
+def estimate_plan(meta: Dict[str, Any], fps: float, max_pixels: int, max_frames: int, model: str = "") -> Dict[str, Any]:
+    width = int(meta.get("width") or 0)
+    height = int(meta.get("height") or 0)
+    duration_s = float(meta.get("duration_s") or 0)
+    source_frames = int(meta.get("total_frames") or 0)
+    if model_prefers_file_url(model) or model_prefers_video_data(model):
+        return {
+            "mode": "native_video_url",
+            "frames_passed": source_frames,
+            "visual_tokens_est": None,
+            "effective_pixels": width * height,
+            "note": "Video is passed as video_url; backend samples frames internally.",
+        }
+    requested = max(1, int(round(duration_s * max(fps, 0.1)))) if duration_s else max(1, source_frames)
+    frames_passed = requested if max_frames <= 0 else min(requested, max_frames)
+    native_pixels = width * height
+    effective_pixels = min(native_pixels, max_pixels) if native_pixels else max_pixels
+    visual_tokens = int(frames_passed * effective_pixels / BASELINE_PIXELS * EMPIRICAL_VISUAL_TOKENS_PER_FRAME)
+    return {
+        "mode": "image_frames",
+        "frames_passed": frames_passed,
+        "requested_frames": requested,
+        "max_frames": max_frames,
+        "visual_tokens_est": visual_tokens,
+        "total_tokens_est": visual_tokens + TEXT_TOKENS,
+        "effective_pixels": effective_pixels,
+        "native_pixels": native_pixels,
+        "note": "Set max frames to 0 to disable the cap; fps still controls sampling.",
+    }
+
+
+def attach_meta(video: Dict[str, Any]) -> Dict[str, Any]:
+    meta = get_video_meta(video["filepath"])
+    video["meta"] = meta
+    video["plan"] = estimate_plan(
+        meta,
+        STATE["defaults"]["fps"],
+        STATE["defaults"]["max_pixels"],
+        STATE["defaults"]["max_frames"],
+        os.getenv("MODEL_NAME", ""),
+    )
+    return video
+
+
 def load_with_fiftyone(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     import fiftyone as fo
     import fiftyone.utils.huggingface as fouh
@@ -157,14 +261,14 @@ def load_with_fiftyone(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
         path = str(sample.filepath)
         if not is_video_path(path):
             continue
-        videos.append({
+        videos.append(attach_meta({
             "id": video_id(path),
             "name": Path(path).name,
             "filepath": path,
             "sample_id": str(sample.id),
             "label": guess_label(sample),
             "source": "fiftyone",
-        })
+        }))
         if len(videos) >= max_videos:
             break
     if not videos:
@@ -196,14 +300,14 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     videos: List[Dict[str, Any]] = []
     for file_name in files[:max_videos]:
         local = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=file_name, local_dir=str(local_root))
-        videos.append({
+        videos.append(attach_meta({
             "id": video_id(local),
             "name": file_name,
             "filepath": local,
             "sample_id": None,
             "label": None,
             "source": "hf_hub",
-        })
+        }))
     try:
         import fiftyone as fo
 
@@ -246,7 +350,12 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
 
 
 def detect_server() -> Dict[str, Any]:
-    info = {"base_url": os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1"), "model": os.getenv("MODEL_NAME", "")}
+    info = {
+        "base_url": os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1"),
+        "model": os.getenv("MODEL_NAME", ""),
+        "backend": os.getenv("INFERENCE_BACKEND", "vllm"),
+        **detect_instance_resources(),
+    }
     if requests is None:
         info["error"] = f"requests import failed: {REQUESTS_IMPORT_ERROR}"
         update_state(server=info)
@@ -264,24 +373,77 @@ def detect_server() -> Dict[str, Any]:
     return info
 
 
-def extract_frames_b64(path: str, fps: float, max_frames: int = 8) -> List[str]:
+def detect_instance_resources() -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "instance": socket.gethostname(),
+        "host_ip": detect_host_ip(),
+        "user": os.getenv("USER") or os.getenv("LOGNAME") or "",
+    }
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.used,memory.free,memory.total", "--format=csv,noheader,nounits"],
+            text=True,
+            timeout=3,
+        ).strip().splitlines()[0]
+        name, used, free, total = [part.strip() for part in out.split(",")]
+        info["gpu"] = name
+        info["vram_used_mib"] = int(used)
+        info["vram_free_mib"] = int(free)
+        info["vram_total_mib"] = int(total)
+    except Exception as exc:
+        info["gpu_error"] = str(exc)
+    try:
+        path = os.getenv("COSMOS_DIR") or str(Path.home())
+        usage = shutil.disk_usage(path)
+        info["storage_path"] = path
+        info["ssd_free_gb"] = round(usage.free / (1024 ** 3), 1)
+        info["ssd_used_gb"] = round(usage.used / (1024 ** 3), 1)
+        info["ssd_total_gb"] = round(usage.total / (1024 ** 3), 1)
+    except Exception as exc:
+        info["storage_error"] = str(exc)
+    return info
+
+
+def resize_to_max_pixels(image: Any, max_pixels: int) -> Any:
+    width, height = image.size
+    pixels = width * height
+    if not max_pixels or pixels <= max_pixels:
+        return image
+    scale = (max_pixels / pixels) ** 0.5
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return image.resize(new_size)
+
+
+def extract_frames_b64(path: str, fps: float, max_frames: int = 8, max_pixels: int = DEFAULT_MAX_PIXELS) -> List[str]:
     import av
 
     frames: List[str] = []
     with av.open(path) as container:
         stream = container.streams.video[0]
         rate = float(stream.average_rate or 30)
-        step = max(1, int(rate / max(fps, 0.1)))
+        total_frames = int(stream.frames or 0)
+        if total_frames <= 0:
+            duration_s = float(container.duration) / 1_000_000 if container.duration else 0.0
+            total_frames = max(1, int(round(duration_s * rate)))
+        requested = max(1, int(round(total_frames * (max(fps, 0.1) / max(rate, 0.1)))))
+        if max_frames > 0 and requested > max_frames:
+            wanted = max_frames
+            target_indices = {int(round(i * (total_frames - 1) / max(wanted - 1, 1))) for i in range(wanted)}
+        else:
+            step = max(1, int(round(rate / max(fps, 0.1))))
+            target_indices = set(range(0, total_frames, step))
+            wanted = requested
         for index, frame in enumerate(container.decode(stream)):
-            if index % step:
+            if index not in target_indices:
                 continue
             image = frame.to_image().convert("RGB")
+            image = resize_to_max_pixels(image, max_pixels)
             from io import BytesIO
 
             buf = BytesIO()
             image.save(buf, format="JPEG", quality=85)
             frames.append(base64.b64encode(buf.getvalue()).decode("ascii"))
-            if len(frames) >= max_frames:
+            if len(frames) >= wanted:
                 break
     return frames
 
@@ -297,14 +459,16 @@ def model_prefers_video_data(model: str) -> bool:
     return backend == "nim" or ("cosmos-reason" in lower and "nim" in lower)
 
 
-def content_for_video(video_path: str, prompt: str, model: str, fps: float) -> List[Dict[str, Any]]:
+def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    meta = get_video_meta(video_path)
+    plan = estimate_plan(meta, fps, max_pixels, max_frames, model)
     if model_prefers_video_data(model):
         mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
         data = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
         return [
             {"type": "text", "text": prompt},
             {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{data}"}},
-        ]
+        ], plan
     if model_prefers_file_url(model):
         tmp = Path("/tmp") / ("byo_agent_" + Path(video_path).name)
         if Path(video_path).resolve() != tmp.resolve():
@@ -312,14 +476,15 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float) -> L
         return [
             {"type": "text", "text": prompt},
             {"type": "video_url", "video_url": {"url": tmp.as_uri()}},
-        ]
-    frames = extract_frames_b64(video_path, fps=fps)
+        ], plan
+    frames = extract_frames_b64(video_path, fps=fps, max_frames=max_frames, max_pixels=max_pixels)
     if not frames:
         raise RuntimeError("No frames could be extracted from the video")
     content = [{"type": "text", "text": prompt}]
     for frame in frames:
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}})
-    return content
+    plan["frames_passed"] = len(frames)
+    return content, plan
 
 
 def parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
@@ -344,7 +509,7 @@ def parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, fps: float, max_tokens: int) -> Dict[str, Any]:
+def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if requests is None:
         raise RuntimeError(f"requests import failed: {REQUESTS_IMPORT_ERROR}")
     server = detect_server()
@@ -353,15 +518,24 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, fps: fl
     headers = {"Content-Type": "application/json"}
     if os.getenv("VLLM_API_KEY"):
         headers["Authorization"] = f"Bearer {os.getenv('VLLM_API_KEY')}"
+    content, plan = content_for_video(
+        video["filepath"],
+        user_prompt,
+        model,
+        float(params.get("fps") or STATE["defaults"]["fps"]),
+        int(params.get("max_pixels") or STATE["defaults"]["max_pixels"]),
+        int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"]),
+    )
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_for_video(video["filepath"], user_prompt, model, fps)},
+            {"role": "user", "content": content},
         ],
-        "max_tokens": max_tokens,
-        "temperature": 0.0,
-        "top_p": 0.95,
+        "max_tokens": int(params.get("max_tokens") or STATE["defaults"]["max_tokens"]),
+        "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
+        "top_p": float(params.get("top_p") if params.get("top_p") is not None else STATE["defaults"]["top_p"]),
+        "repetition_penalty": float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"]),
         "stream": False,
     }
     resp = requests.post(base_url.rstrip("/") + "/chat/completions", headers=headers, json=payload, timeout=900)
@@ -376,6 +550,8 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, fps: fl
         "source_label": video.get("label"),
         "response": text,
         "json": parsed,
+        "plan": plan,
+        "params": params,
         "error": None,
     }
     write_fiftyone_result(video, result)
@@ -392,6 +568,8 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
         dataset = fo.load_dataset(snap["fo_dataset_name"])
         sample = dataset[video["sample_id"]]
         sample["runtime_agent_response"] = result.get("response") or ""
+        sample["runtime_agent_plan"] = result.get("plan") or {}
+        sample["runtime_agent_params"] = result.get("params") or {}
         if result.get("json") is not None:
             sample["runtime_agent_json"] = result["json"]
             label = result["json"].get("prediction_label")
@@ -404,7 +582,7 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
         log(f"Could not write result back to FiftyOne: {exc}")
 
 
-def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_prompt: str, fps: float, max_tokens: int) -> None:
+def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> None:
     videos_by_id = {v["id"]: v for v in snapshot()["videos"]}
     selected = [videos_by_id[i] for i in ids if i in videos_by_id] or list(videos_by_id.values())
     update_state(running=True, results=[], progress={"done": 0, "total": len(selected), "errors": 0})
@@ -412,7 +590,7 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
     results: List[Dict[str, Any]] = []
     errors = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        future_map = {pool.submit(run_one, v, system_prompt, user_prompt, fps, max_tokens): v for v in selected}
+        future_map = {pool.submit(run_one, v, system_prompt, user_prompt, params): v for v in selected}
         for future in concurrent.futures.as_completed(future_map):
             video = future_map[future]
             try:
@@ -475,7 +653,8 @@ h1 { font-size:20px; margin:0; letter-spacing:0; }
 main { max-width:1280px; margin:0 auto; padding:20px; display:grid; grid-template-columns: 340px 1fr; gap:18px; }
 section, aside { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
 label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-input, textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+input, textarea, select { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+input[type=range] { padding:0; }
 textarea { min-height:120px; resize:vertical; }
 button { border:0; border-radius:6px; padding:9px 12px; font-weight:650; color:#fff; background:var(--accent); cursor:pointer; }
 button.secondary { background:#334155; }
@@ -483,6 +662,9 @@ button.warn { background:var(--warn); }
 button:disabled { opacity:.55; cursor:not-allowed; }
 .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .kv { display:grid; grid-template-columns:110px 1fr; gap:6px; font-size:13px; color:var(--muted); }
+.params { display:grid; grid-template-columns:repeat(2, minmax(220px, 1fr)); gap:10px 18px; margin:12px 0; }
+.param-value { color:var(--ink); font-weight:650; float:right; }
+.hint { color:var(--muted); font-size:12px; margin:6px 0 10px; }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
 .step strong { color:var(--ink); }
@@ -523,21 +705,35 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   </div>
   <h3>Backend</h3>
   <div class="kv" id="serverKv"></div>
+  <p class="hint" id="framePolicy"></p>
 </aside>
 <section>
   <div class="progress"><div id="bar"></div></div>
   <p id="progressText" class="pill">idle</p>
+  <label>Demo prompt</label>
+  <select id="promptPreset"></select>
   <label>System instructions</label>
   <textarea id="systemPrompt"></textarea>
   <label>User prompt</label>
   <textarea id="userPrompt"></textarea>
+  <h3>Parameters</h3>
+  <div class="params">
+    <label>Sampling fps <span class="param-value" id="fpsValue"></span><input id="fpsSlider" type="range" min="1" max="8" step="1" /></label>
+    <label>Max pixels / frame <span class="param-value" id="maxPixelsValue"></span><input id="maxPixelsSlider" type="range" min="65536" max="4194304" step="65536" /></label>
+    <label>Max output tokens <span class="param-value" id="maxTokensValue"></span><input id="maxTokensSlider" type="range" min="64" max="2048" step="64" /></label>
+    <label>Temperature <span class="param-value" id="temperatureValue"></span><input id="temperatureSlider" type="range" min="0" max="1" step="0.05" /></label>
+    <label>Top P <span class="param-value" id="topPValue"></span><input id="topPSlider" type="range" min="0.01" max="1" step="0.01" /></label>
+    <label>Repetition penalty <span class="param-value" id="repPenaltyValue"></span><input id="repPenaltySlider" type="range" min="1" max="2" step="0.05" /></label>
+    <label>Max input frames <span class="param-value" id="maxFramesValue"></span><input id="maxFramesSlider" type="range" min="0" max="128" step="1" /></label>
+  </div>
+  <p class="hint" id="paramSummary"></p>
   <div class="actions">
     <button id="runBtn">Run selected videos</button>
     <button class="secondary" id="allBtn">Select all</button>
     <button class="secondary" id="noneBtn">Select none</button>
   </div>
   <h3>Videos</h3>
-  <div class="results"><table><thead><tr><th></th><th>Name</th><th>Source label</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
+  <div class="results"><table><thead><tr><th></th><th>Name</th><th>Resolution</th><th>Duration</th><th>Source frames</th><th>Frames to VLM</th><th>Est visual tokens</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
   <h3>Results</h3>
   <div class="results"><table><thead><tr><th>Video</th><th>Prediction</th><th>Hazard</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
   <h3>Runtime log</h3>
@@ -546,21 +742,33 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 </main>
 <script>
 let state = null;
+let initialized = false;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
 function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; ['loadBtn','runBtn','smokeBtn','foBtn'].forEach(id=>document.getElementById(id).disabled=true); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
-function render(){ if(!state) return; document.getElementById('systemPrompt').value ||= state.defaults.system_prompt; document.getElementById('userPrompt').value ||= state.defaults.user_prompt; document.getElementById('repo').value ||= state.dataset_repo; document.getElementById('maxVideos').value ||= state.defaults.max_videos; document.getElementById('concurrency').value ||= state.defaults.concurrency;
- const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); document.getElementById('serverKv').innerHTML = Object.entries(srv).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(Array.isArray(v)?v.join(', '):v)}</div>`).join('');
+function num(id){ return Number(document.getElementById(id).value); }
+function params(){ return {fps:num('fpsSlider'),max_pixels:num('maxPixelsSlider'),max_tokens:num('maxTokensSlider'),temperature:num('temperatureSlider'),top_p:num('topPSlider'),repetition_penalty:num('repPenaltySlider'),max_frames:num('maxFramesSlider')}; }
+function nativeVideoMode(){ const srv=state?.server||{}; const model=String(srv.model||'').toLowerCase(); const backend=String(srv.backend||'').toLowerCase(); return backend.includes('nim') || model.includes('qwen') || model.includes('nemotron'); }
+function fmt(n, digits=0){ if(n === null || n === undefined || Number.isNaN(Number(n))) return ''; return Number(n).toLocaleString(undefined,{maximumFractionDigits:digits}); }
+function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const tokens=Math.round(frames * effectivePx / 524288 * 128); return {frames, tokens, note:''}; }
+function sliderLabel(id, label, suffix=''){ document.getElementById(id+'Value').textContent = label + suffix; }
+function renderParamLabels(){ const p=params(); sliderLabel('fps', p.fps, ' fps'); sliderLabel('maxPixels', fmt(p.max_pixels)); sliderLabel('maxTokens', fmt(p.max_tokens)); sliderLabel('temperature', p.temperature.toFixed(2)); sliderLabel('topP', p.top_p.toFixed(2)); sliderLabel('repPenalty', p.repetition_penalty.toFixed(2)); sliderLabel('maxFrames', p.max_frames === 0 ? 'unlimited cap' : fmt(p.max_frames)); const mode=nativeVideoMode() ? 'native video_url; backend samples frames internally' : `image-frame mode; max input frames cap is ${p.max_frames === 0 ? 'disabled' : p.max_frames}`; document.getElementById('paramSummary').textContent = `Frame policy: ${mode}. Disabling the cap is allowed, but fps still controls how many frames are sampled and very long clips can exceed context or memory.`; }
+function initControls(){ if(initialized || !state) return; const d=state.defaults; document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; }
+function render(){ if(!state) return; initControls(); renderParamLabels();
+ const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
+ document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
  const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`;
- const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>`<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${esc(v.name)}</td><td>${esc(v.label||'')}</td><td>${esc(v.filepath)}</td></tr>`).join('');
- document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc(j.video_description||r.response||''); return `<tr><td>${esc(r.name)}</td><td>${pred}</td><td>${esc(hz.is_hazardous)}</td><td>${desc}</td></tr>`; }).join('');
+ const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${esc(v.name)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
+ document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const plan=r.plan||{}; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' · ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${pred}</td><td>${esc(hz.is_hazardous)}</td><td>${desc}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\n');
  document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running; document.getElementById('smokeBtn').disabled = state.running; document.getElementById('foBtn').disabled = state.running; }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); render(); }
+document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(promptPreset.value)]; if(!p) return; systemPrompt.value=p.system_prompt; userPrompt.value=p.user_prompt; };
+['fpsSlider','maxPixelsSlider','maxTokensSlider','temperatureSlider','topPSlider','repPenaltySlider','maxFramesSlider'].forEach(id=>document.getElementById(id).oninput=render);
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:repo.value,max_videos:Number(maxVideos.value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('runBtn').onclick = async()=>{ try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(concurrency.value),system_prompt:systemPrompt.value,user_prompt:userPrompt.value}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('smokeBtn').onclick = async()=>{ try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(maxVideos.value),concurrency:Number(concurrency.value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('runBtn').onclick = async()=>{ try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(concurrency.value),system_prompt:systemPrompt.value,user_prompt:userPrompt.value,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('smokeBtn').onclick = async()=>{ try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(maxVideos.value),concurrency:Number(concurrency.value),...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('allBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=true); };
 document.getElementById('noneBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=false); };
@@ -590,7 +798,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/run":
                 if snapshot().get("running"):
                     raise RuntimeError("A batch is already running")
-                thread = threading.Thread(target=run_batch, args=(payload.get("ids") or [], int(payload.get("concurrency") or 4), str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM), str(payload.get("user_prompt") or WORKER_SAFETY_USER), float(payload.get("fps") or 1), int(payload.get("max_tokens") or 1024)), daemon=True)
+                thread = threading.Thread(
+                    target=run_batch,
+                    args=(
+                        payload.get("ids") or [],
+                        int(payload.get("concurrency") or 4),
+                        str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM),
+                        str(payload.get("user_prompt") or WORKER_SAFETY_USER),
+                        params_from_payload(payload),
+                    ),
+                    daemon=True,
+                )
                 thread.start()
                 self.send_json({"ok": True})
             elif self.path == "/api/smoke":
@@ -600,7 +818,8 @@ class Handler(BaseHTTPRequestHandler):
                 concurrency = int(payload.get("concurrency") or 2)
                 load_dataset(DEFAULT_DATASET, max_videos)
                 ids = [v["id"] for v in snapshot()["videos"]]
-                thread = threading.Thread(target=run_batch, args=(ids, concurrency, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, 1.0, 1024), daemon=True)
+                params = params_from_payload(payload)
+                thread = threading.Thread(target=run_batch, args=(ids, concurrency, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, params), daemon=True)
                 thread.start()
                 self.send_json({"ok": True, "dataset": DEFAULT_DATASET, "videos": len(ids)})
             elif self.path == "/api/fiftyone":
@@ -638,6 +857,19 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+def params_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = STATE["defaults"]
+    return {
+        "fps": float(payload.get("fps") if payload.get("fps") is not None else defaults["fps"]),
+        "max_pixels": int(payload.get("max_pixels") if payload.get("max_pixels") is not None else defaults["max_pixels"]),
+        "max_tokens": int(payload.get("max_tokens") if payload.get("max_tokens") is not None else defaults["max_tokens"]),
+        "temperature": float(payload.get("temperature") if payload.get("temperature") is not None else defaults["temperature"]),
+        "top_p": float(payload.get("top_p") if payload.get("top_p") is not None else defaults["top_p"]),
+        "repetition_penalty": float(payload.get("repetition_penalty") if payload.get("repetition_penalty") is not None else defaults["repetition_penalty"]),
+        "max_frames": int(payload.get("max_frames") if payload.get("max_frames") is not None else defaults["max_frames"]),
+    }
+
+
 def serve(host: str, port: int) -> None:
     detect_server()
     url = f"http://{host}:{port}/"
@@ -650,7 +882,21 @@ def serve(host: str, port: int) -> None:
 def smoke(args: argparse.Namespace) -> int:
     load_dataset(args.dataset, args.max_videos)
     ids = [v["id"] for v in snapshot()["videos"]]
-    run_batch(ids, args.concurrency, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, args.fps, args.max_tokens)
+    run_batch(
+        ids,
+        args.concurrency,
+        WORKER_SAFETY_SYSTEM,
+        WORKER_SAFETY_USER,
+        {
+            "fps": args.fps,
+            "max_pixels": DEFAULT_MAX_PIXELS,
+            "max_tokens": args.max_tokens,
+            "temperature": STATE["defaults"]["temperature"],
+            "top_p": STATE["defaults"]["top_p"],
+            "repetition_penalty": STATE["defaults"]["repetition_penalty"],
+            "max_frames": STATE["defaults"]["max_frames"],
+        },
+    )
     snap = snapshot()
     print(json.dumps({"progress": snap["progress"], "results_file": str(RESULTS_FILE)}, indent=2))
     return 1 if snap["progress"].get("errors") else 0
