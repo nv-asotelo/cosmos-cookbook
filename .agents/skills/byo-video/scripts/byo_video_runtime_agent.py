@@ -90,8 +90,83 @@ RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_a
 TEXT_TOKENS = 50
 EMPIRICAL_VISUAL_TOKENS_PER_FRAME = 128
 BASELINE_PIXELS = 524288
-DEFAULT_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_MAX_PIXELS", os.getenv("GRADIO_MAX_PIXELS", str(4096 * (32 ** 2)))))
+INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "vllm").lower()
+MAX_PIXELS_MIN = 64 * (32 ** 2)
+MAX_PIXELS_MAX = 4096 * (32 ** 2)
+RECOMMENDED_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_RECOMMENDED_MAX_PIXELS", os.getenv("GRADIO_MAX_PIXELS", str(512 * (32 ** 2)))))
+DEFAULT_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_MAX_PIXELS", str(RECOMMENDED_MAX_PIXELS)))
+DEFAULT_FPS = float(os.getenv("RUNTIME_AGENT_FPS", os.getenv("GRADIO_FPS", "2")))
+DEFAULT_MAX_TOKENS = int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", os.getenv("GRADIO_MAX_TOKENS", "512")))
 DEFAULT_MAX_FRAMES = int(os.getenv("RUNTIME_AGENT_MAX_FRAMES", "8"))
+if INFERENCE_BACKEND == "nim_local":
+    RECOMMENDED_TEMPERATURE = 0.6
+    RECOMMENDED_TOP_P = 0.3
+    RECOMMENDED_REPETITION_PENALTY = 1.2
+else:
+    RECOMMENDED_TEMPERATURE = 0.0
+    RECOMMENDED_TOP_P = 1.0
+    RECOMMENDED_REPETITION_PENALTY = 1.05
+DEFAULT_TEMPERATURE = float(os.getenv("RUNTIME_AGENT_TEMPERATURE", str(RECOMMENDED_TEMPERATURE)))
+DEFAULT_TOP_P = float(os.getenv("RUNTIME_AGENT_TOP_P", str(RECOMMENDED_TOP_P)))
+DEFAULT_REPETITION_PENALTY = float(os.getenv("RUNTIME_AGENT_REPETITION_PENALTY", str(RECOMMENDED_REPETITION_PENALTY)))
+SLIDER_META = {
+    "fps": {
+        "min": 1,
+        "max": 8,
+        "step": 1,
+        "recommended": DEFAULT_FPS,
+        "unit": "fps",
+        "note": "Higher samples more frames and increases visual tokens.",
+    },
+    "max_pixels": {
+        "min": MAX_PIXELS_MIN,
+        "max": MAX_PIXELS_MAX,
+        "step": MAX_PIXELS_MIN,
+        "recommended": RECOMMENDED_MAX_PIXELS,
+        "unit": "pixels/frame",
+        "note": "Recommended keeps prefill tractable; raise for fine visual detail.",
+    },
+    "max_tokens": {
+        "min": 64,
+        "max": 2048,
+        "step": 64,
+        "recommended": DEFAULT_MAX_TOKENS,
+        "unit": "tokens",
+        "note": "Maximum generated text tokens.",
+    },
+    "temperature": {
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.05,
+        "recommended": RECOMMENDED_TEMPERATURE,
+        "unit": "",
+        "note": "0 is deterministic; NIM-local recommends 0.6.",
+    },
+    "top_p": {
+        "min": 0.01,
+        "max": 1.0,
+        "step": 0.01,
+        "recommended": RECOMMENDED_TOP_P,
+        "unit": "",
+        "note": "Nucleus sampling threshold; 1.0 disables nucleus truncation.",
+    },
+    "repetition_penalty": {
+        "min": 1.0,
+        "max": 2.0,
+        "step": 0.05,
+        "recommended": RECOMMENDED_REPETITION_PENALTY,
+        "unit": "",
+        "note": "Higher discourages repeated phrases.",
+    },
+    "max_frames": {
+        "min": 0,
+        "max": 128,
+        "step": 1,
+        "recommended": DEFAULT_MAX_FRAMES,
+        "unit": "frames",
+        "note": "0 disables this cap; fps still controls sampling.",
+    },
+}
 STATE_LOCK = threading.Lock()
 FIFTYONE_SESSION = None
 
@@ -132,14 +207,15 @@ STATE: Dict[str, Any] = {
         "user_prompt": WORKER_SAFETY_USER,
         "concurrency": int(os.getenv("RUNTIME_AGENT_CONCURRENCY", "4")),
         "max_videos": int(os.getenv("RUNTIME_AGENT_MAX_VIDEOS", "20")),
-        "fps": float(os.getenv("RUNTIME_AGENT_FPS", os.getenv("GRADIO_FPS", "2"))),
+        "fps": DEFAULT_FPS,
         "max_pixels": DEFAULT_MAX_PIXELS,
-        "max_tokens": int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", os.getenv("GRADIO_MAX_TOKENS", "512"))),
-        "temperature": float(os.getenv("RUNTIME_AGENT_TEMPERATURE", "0.0")),
-        "top_p": float(os.getenv("RUNTIME_AGENT_TOP_P", "1.0")),
-        "repetition_penalty": float(os.getenv("RUNTIME_AGENT_REPETITION_PENALTY", "1.05")),
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "temperature": DEFAULT_TEMPERATURE,
+        "top_p": DEFAULT_TOP_P,
+        "repetition_penalty": DEFAULT_REPETITION_PENALTY,
         "max_frames": DEFAULT_MAX_FRAMES,
         "prompt_presets": PROMPT_PRESETS,
+        "slider_meta": SLIDER_META,
     },
 }
 
@@ -664,6 +740,7 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .kv { display:grid; grid-template-columns:110px 1fr; gap:6px; font-size:13px; color:var(--muted); }
 .params { display:grid; grid-template-columns:repeat(2, minmax(220px, 1fr)); gap:10px 18px; margin:12px 0; }
 .param-value { color:var(--ink); font-weight:650; float:right; }
+.range-note { display:block; color:var(--muted); font-size:11px; line-height:1.3; margin-top:4px; }
 .hint { color:var(--muted); font-size:12px; margin:6px 0 10px; }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
@@ -718,13 +795,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <textarea id="userPrompt"></textarea>
   <h3>Parameters</h3>
   <div class="params">
-    <label>Sampling fps <span class="param-value" id="fpsValue"></span><input id="fpsSlider" type="range" min="1" max="8" step="1" /></label>
-    <label>Max pixels / frame <span class="param-value" id="maxPixelsValue"></span><input id="maxPixelsSlider" type="range" min="65536" max="4194304" step="65536" /></label>
-    <label>Max output tokens <span class="param-value" id="maxTokensValue"></span><input id="maxTokensSlider" type="range" min="64" max="2048" step="64" /></label>
-    <label>Temperature <span class="param-value" id="temperatureValue"></span><input id="temperatureSlider" type="range" min="0" max="1" step="0.05" /></label>
-    <label>Top P <span class="param-value" id="topPValue"></span><input id="topPSlider" type="range" min="0.01" max="1" step="0.01" /></label>
-    <label>Repetition penalty <span class="param-value" id="repPenaltyValue"></span><input id="repPenaltySlider" type="range" min="1" max="2" step="0.05" /></label>
-    <label>Max input frames <span class="param-value" id="maxFramesValue"></span><input id="maxFramesSlider" type="range" min="0" max="128" step="1" /></label>
+    <label>Sampling fps <span class="param-value" id="fpsValue"></span><input id="fpsSlider" type="range" min="1" max="8" step="1" /><span class="range-note" id="fpsHint"></span></label>
+    <label>Max pixels / frame <span class="param-value" id="maxPixelsValue"></span><input id="maxPixelsSlider" type="range" min="65536" max="4194304" step="65536" /><span class="range-note" id="maxPixelsHint"></span></label>
+    <label>Max output tokens <span class="param-value" id="maxTokensValue"></span><input id="maxTokensSlider" type="range" min="64" max="2048" step="64" /><span class="range-note" id="maxTokensHint"></span></label>
+    <label>Temperature <span class="param-value" id="temperatureValue"></span><input id="temperatureSlider" type="range" min="0" max="1" step="0.05" /><span class="range-note" id="temperatureHint"></span></label>
+    <label>Top P <span class="param-value" id="topPValue"></span><input id="topPSlider" type="range" min="0.01" max="1" step="0.01" /><span class="range-note" id="topPHint"></span></label>
+    <label>Repetition penalty <span class="param-value" id="repPenaltyValue"></span><input id="repPenaltySlider" type="range" min="1" max="2" step="0.05" /><span class="range-note" id="repPenaltyHint"></span></label>
+    <label>Max input frames <span class="param-value" id="maxFramesValue"></span><input id="maxFramesSlider" type="range" min="0" max="128" step="1" /><span class="range-note" id="maxFramesHint"></span></label>
   </div>
   <p class="hint" id="paramSummary"></p>
   <div class="actions">
@@ -751,10 +828,13 @@ function num(id){ return Number(document.getElementById(id).value); }
 function params(){ return {fps:num('fpsSlider'),max_pixels:num('maxPixelsSlider'),max_tokens:num('maxTokensSlider'),temperature:num('temperatureSlider'),top_p:num('topPSlider'),repetition_penalty:num('repPenaltySlider'),max_frames:num('maxFramesSlider')}; }
 function nativeVideoMode(){ const srv=state?.server||{}; const model=String(srv.model||'').toLowerCase(); const backend=String(srv.backend||'').toLowerCase(); return backend.includes('nim') || model.includes('qwen') || model.includes('nemotron'); }
 function fmt(n, digits=0){ if(n === null || n === undefined || Number.isNaN(Number(n))) return ''; return Number(n).toLocaleString(undefined,{maximumFractionDigits:digits}); }
+function fmtMetaValue(v){ return typeof v === 'number' ? fmt(v, Number.isInteger(v) ? 0 : 2) : String(v ?? ''); }
 function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const tokens=Math.round(frames * effectivePx / 524288 * 128); return {frames, tokens, note:''}; }
 function sliderLabel(id, label, suffix=''){ document.getElementById(id+'Value').textContent = label + suffix; }
-function renderParamLabels(){ const p=params(); sliderLabel('fps', p.fps, ' fps'); sliderLabel('maxPixels', fmt(p.max_pixels)); sliderLabel('maxTokens', fmt(p.max_tokens)); sliderLabel('temperature', p.temperature.toFixed(2)); sliderLabel('topP', p.top_p.toFixed(2)); sliderLabel('repPenalty', p.repetition_penalty.toFixed(2)); sliderLabel('maxFrames', p.max_frames === 0 ? 'unlimited cap' : fmt(p.max_frames)); const mode=nativeVideoMode() ? 'native video_url; backend samples frames internally' : `image-frame mode; max input frames cap is ${p.max_frames === 0 ? 'disabled' : p.max_frames}`; document.getElementById('paramSummary').textContent = `Frame policy: ${mode}. Disabling the cap is allowed, but fps still controls how many frames are sampled and very long clips can exceed context or memory.`; }
-function initControls(){ if(initialized || !state) return; const d=state.defaults; document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; }
+function sliderHint(domId, key){ const m=(state.defaults.slider_meta||{})[key]||{}; const unit=m.unit ? ' '+m.unit : ''; const recommended = key === 'max_frames' && m.recommended === 0 ? 'disabled' : fmtMetaValue(m.recommended); document.getElementById(domId+'Hint').textContent = `min ${fmtMetaValue(m.min)}${unit} · max ${fmtMetaValue(m.max)}${unit} · recommended ${recommended}${unit}. ${m.note||''}`; }
+function renderParamLabels(){ const p=params(); sliderLabel('fps', p.fps, ' fps'); sliderLabel('maxPixels', fmt(p.max_pixels)); sliderLabel('maxTokens', fmt(p.max_tokens)); sliderLabel('temperature', p.temperature.toFixed(2)); sliderLabel('topP', p.top_p.toFixed(2)); sliderLabel('repPenalty', p.repetition_penalty.toFixed(2)); sliderLabel('maxFrames', p.max_frames === 0 ? 'disabled' : fmt(p.max_frames)); sliderHint('fps','fps'); sliderHint('maxPixels','max_pixels'); sliderHint('maxTokens','max_tokens'); sliderHint('temperature','temperature'); sliderHint('topP','top_p'); sliderHint('repPenalty','repetition_penalty'); sliderHint('maxFrames','max_frames'); const d=state.defaults; const mode=nativeVideoMode() ? 'native video_url; backend samples frames internally' : `image-frame mode; max input frames cap is ${p.max_frames === 0 ? 'disabled' : p.max_frames}`; document.getElementById('paramSummary').textContent = `Recommended: fps ${d.slider_meta.fps.recommended}, max pixels ${fmt(d.slider_meta.max_pixels.recommended)}, max tokens ${d.slider_meta.max_tokens.recommended}, temperature ${d.slider_meta.temperature.recommended}, top P ${d.slider_meta.top_p.recommended}, repetition ${d.slider_meta.repetition_penalty.recommended}, max frames ${d.slider_meta.max_frames.recommended}. Frame policy: ${mode}.`; }
+function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
+function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; }
 function render(){ if(!state) return; initControls(); renderParamLabels();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
