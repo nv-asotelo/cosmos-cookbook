@@ -68,8 +68,8 @@ except ImportError:
 
 try:
     import vllm as _vllm_module
-    _VLLM_VERSION = _vllm_module.__version__
-except ImportError:
+    _VLLM_VERSION = getattr(_vllm_module, "__version__", None)
+except Exception:
     _VLLM_VERSION = None
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -133,10 +133,44 @@ if INFERENCE_BACKEND in ("vllm", "nim_local"):
     except Exception as _e:
         print(f"[{INFERENCE_BACKEND}] Could not detect model from {VLLM_BASE_URL}/models: {_e}", flush=True)
 
+
+def _refresh_server_model_id(timeout=2):
+    """Re-query /v1/models and update _SERVER_MODEL_ID in place if the served
+    model has changed (e.g. after a NIM container swap). Returns the current
+    served id or None on failure. Lets Gradio recover from a swap without a
+    process restart — see the retry-on-404 path in _run_vllm_inference.
+    """
+    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID
+    if INFERENCE_BACKEND not in ("vllm", "nim_local"):
+        return _SERVER_MODEL_ID
+    try:
+        import urllib.request as _urlreq, json as _json
+        with _urlreq.urlopen(f"{VLLM_BASE_URL}/models", timeout=timeout) as _r:
+            _new_id = _json.loads(_r.read())["data"][0]["id"]
+        if _new_id != _SERVER_MODEL_ID:
+            print(f"[{INFERENCE_BACKEND}] Server model changed: "
+                  f"{_SERVER_MODEL_ID} → {_new_id}", flush=True)
+            _SERVER_MODEL_ID = _new_id
+            _NIM_LOCAL_MODEL_ID = _new_id
+        return _new_id
+    except Exception as _e:
+        print(f"[{INFERENCE_BACKEND}] _refresh_server_model_id failed: {_e}", flush=True)
+        return None
+
+
 # ── Size-driven model configs ──────────────────────────────────────────────────
 # Each variant: (ui_label, local_dirname, hf_model_id, expected_quant)
 # expected_quant: "bf16" | "fp8" | "nvfp4" — used to detect HF runtime upcasting
 MODEL_CONFIGS = {
+    # ── Cosmos Reason 1 7B (earlier generation; container-only, BF16) ────────
+    "CR1-7B": {
+        "variants": [
+            ("CR1-7B BF16", "Cosmos-Reason1-7B", "nvidia/Cosmos-Reason1-7B", "bf16"),
+        ],
+        "nim": "nvidia/cosmos-reason1-7b",
+        # NIM image: nvcr.io/nim/nvidia/cosmos-reason1-7b:latest
+        # Smoke-validated 2026-05-08 via NIM Multi-Brev Validation sprint.
+    },
     "2B": {
         "variants": [
             ("CR2-2B FP8",   "Cosmos-Reason2-2B-FP8",   "nvidia/Cosmos-Reason2-2B-FP8",   "fp8"),
@@ -235,6 +269,26 @@ MODEL_CONFIGS = {
         "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
         "vllm_swap_env":   {},
     },
+    # ── Nemotron-3-Nano-Omni-30B-A3B-Reasoning (NIM container; H200 recommended) ──
+    # Smoke-validated 2026-05-07 on RTX PRO 6000 Blackwell. ~25 min first boot
+    # (no tuned MoE config for SM120). Honest "not found" behavior on absent
+    # subjects — no race-car hallucination.
+    "OMNI-30B": {
+        "variants": [
+            ("Nem3-Omni-30B BF16", "Nemotron-3-Nano-Omni-30B-A3B-Reasoning",
+             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", "bf16"),
+        ],
+        "nim": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    },
+    # ── Gemma-4-31B-IT (Google; 96 GB GPU required for default KV cache) ─────────
+    # NIM_MAX_MODEL_LEN=131072 must be set in env block (default 262144 needs
+    # 27 GiB KV cache vs ~22 GiB available on 96 GB GPU). H200 SXM recommended.
+    "GM-4-31B": {
+        "variants": [
+            ("Gemma-4-31B IT", "gemma-4-31b-it", "google/gemma-4-31b-it", "bf16"),
+        ],
+        "nim": "google/gemma-4-31b-it",
+    },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
     # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
@@ -260,6 +314,9 @@ _MODEL_SIZE_DEFAULTS = {
     "QW3-8B":   {"max_tokens": 512},
     "QW3-32B":  {"max_tokens": 1024},
     # base64-frame models — fps controls extraction; set sensible per-size values
+    "CR1-7B":{"fps": 2, "max_tokens": 512},
+    "OMNI-30B":{"fps": 1, "max_tokens": 1024},
+    "GM-4-31B":{"fps": 1, "max_tokens": 1024},
     "2B":    {"fps": 2, "max_tokens": 512},
     "8B":    {"fps": 2, "max_tokens": 512},
     "32B":   {"fps": 1, "max_tokens": 512},
@@ -280,7 +337,7 @@ MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, OMNI-30B, GM-4-31B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
@@ -368,6 +425,9 @@ if INFERENCE_BACKEND == "nim_local":
 # _VLLM_DD_META maps label → (local_path, hf_id) so _on_checkpoint_change can
 # locate the model and pass the right served-model-name to _launch_vllm_swap.
 _ALL_VARIANTS_DD_RAW = [
+    ("CR1-7B BF16",         "Cosmos-Reason1-7B",                    "nvidia/Cosmos-Reason1-7B",                                  "bf16"),
+    ("Nem3-Omni-30B BF16",  "Nemotron-3-Nano-Omni-30B-A3B-Reasoning","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",            "bf16"),
+    ("Gemma-4-31B IT",      "gemma-4-31b-it",                       "google/gemma-4-31b-it",                                     "bf16"),
     ("C3R-2B BF16",   "Cosmos3-Reasoner-2B",                  "nvidia/Cosmos3-Reasoner-2B-Private",             "bf16"),
     ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner",                 "nvidia/Cosmos3-Nano-Reasoner",                   "bf16"),
     ("C3R-32B BF16",  "Cosmos3-Reasoner-32B",                 "nvidia/Cosmos3-Reasoner-32B-Private",            "bf16"),
@@ -405,10 +465,13 @@ if INFERENCE_BACKEND == "vllm":
     CHECKPOINT_PRESETS.append(("NIM 8B", "nim://nvidia/cosmos-reason2-8b"))
     # Auto-select the checkpoint that matches the loaded model so no swap fires on first use.
     _VLLM_DD_MAP = {
-        "NEM-12B": "Nem-12B BF16",
-        "QW3-2B":  "Qwen3-VL-2B",
-        "QW3-8B":  "Qwen3-VL-8B",
-        "QW3-32B": "Qwen3-VL-32B",
+        "NEM-12B":  "Nem-12B BF16",
+        "QW3-2B":   "Qwen3-VL-2B",
+        "QW3-8B":   "Qwen3-VL-8B",
+        "QW3-32B":  "Qwen3-VL-32B",
+        "CR1-7B":   "CR1-7B BF16",
+        "OMNI-30B": "Nem3-Omni-30B BF16",
+        "GM-4-31B": "Gemma-4-31B IT",
         "2B":      "CR2-2B BF16",
         "8B":      "CR2-8B BF16",
         "C3-2B":   "C3R-2B BF16",
@@ -634,17 +697,6 @@ def _is_qwen3vl(model_id):
 def _uses_file_url(model_id):
     """True for any model that uses file:// video URL to vLLM (vs base64 JPEG frames)."""
     return _is_nemotron(model_id) or _is_qwen3vl(model_id)
-
-def _is_cosmos_reason_nim(model_id):
-    """True when running a Cosmos Reason NIM container that natively decodes video
-    server-side (NIM_MEDIA_IO_KWARGS controls fps/sampling). When True, video must be
-    sent as a single video_url content item — extracting frames client-side and sending
-    them as image_url entries collapses motion into stills (the 5-image NIM cap then
-    wrecks 30 s+ clips by leaving ~6 s gaps between samples)."""
-    if INFERENCE_BACKEND != "nim_local":
-        return False
-    mid = (model_id or _SERVER_MODEL_ID or "").lower()
-    return "cosmos-reason" in mid
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
@@ -990,19 +1042,16 @@ def _load(model_id):
 
 
 # ── Frame extraction for NIM ───────────────────────────────────────────────────
-def _extract_frames_b64(video_path, fps=1, max_frames=8):
+def _extract_frames_b64(video_path, fps=1, max_frames=None):
     """Return list of base64 JPEG strings sampled from `video_path`.
 
-    Sampling strategy:
-      - target_count = duration_s * fps (what fps would yield without a cap)
-      - if target_count <= max_frames: pick every `frame_rate/fps`-th frame
-        starting at 0. Behaviour identical to the prior version.
-      - if target_count > max_frames: uniformly distribute `max_frames` picks
-        across the FULL video duration (frame indices spaced by
-        (total_frames-1)/(max_frames-1)). This is the critical fix for
-        long clips where the cap previously truncated everything to the
-        first ~max_frames/fps seconds, e.g. for a 30-fps 40-s clip with
-        fps=8 max=5 the prior logic took only the first 0.4 s of footage.
+    Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
+    `max_frames=None` means send all `duration × fps` frames. The NIM will
+    return 4xx if it can't handle the payload.
+
+    For backwards-compat callers may pass an integer `max_frames`; if so,
+    the cap is honored with uniform-distribution sampling. New code should
+    pass None.
     """
     if not _AV_OK:
         return []
@@ -1018,16 +1067,16 @@ def _extract_frames_b64(video_path, fps=1, max_frames=8):
             duration_s = float(stream.duration * stream.time_base) if stream.duration else 0.0
             total_frames = max(1, int(duration_s * frame_rate))
 
-        # How many frames the requested sample fps would produce if no cap.
+        # How many frames the requested sample fps would produce.
         target_count = max(1, int(round(total_frames * (fps / frame_rate))))
 
-        if target_count <= max_frames:
-            # Below the cap — take every Nth frame from the start (fps == sample fps).
+        if max_frames is None or target_count <= max_frames:
+            # No cap (or under it) — take every Nth frame at the requested fps.
             interval = max(1, int(round(frame_rate / fps)))
             target_indices = set(range(0, total_frames, interval))
-            n_to_take = max_frames
+            n_to_take = len(target_indices)
         else:
-            # Hit the cap — distribute uniformly across the full video.
+            # Caller opted into a cap (legacy) — uniform-distribute across full duration.
             n_to_take = max_frames
             if n_to_take == 1:
                 target_indices = {0}
@@ -1090,23 +1139,32 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                            steps=steps), gr.update()
 
     # Step 3: prepare media content
-    # Images: single image_url (file:// for Nemotron/Qwen, base64 for CR2/C3).
-    # Videos:
-    #   - Nemotron/Qwen3-VL → file:// video_url (vLLM server-side decode)
-    #   - Cosmos Reason NIM → base64 data: video_url (NIM server-side decode @ 4 fps + EVS)
-    #   - Cosmos OSS (HF/vLLM) → base64 JPEG frames (no native video pipeline in OSS path)
+    # Per NIM Message-Shape standing order (~/.claude/CLAUDE.md): always send
+    # media as base64 data URLs to match build.nvidia.com snippets. file://
+    # URLs are banned — vLLM gates them behind --allowed-local-media-path
+    # (a flag the official snippets don't set), causing HTTP 400 on default
+    # NIM/vLLM deployments.
+    # Images: single image_url, base64 data URL for ALL models.
+    # Videos: Nemotron/Qwen3-VL use base64 video_url; CR2/C3 use base64 JPEG frames.
     _nem = _uses_file_url(model_id) or _uses_file_url(_SERVER_MODEL_ID or "")
-    _cosmos_nim_video = (
-        not is_image
-        and (_is_cosmos_reason_nim(model_id) or _is_cosmos_reason_nim(_SERVER_MODEL_ID or ""))
-    )
     if is_image:
         if _nem:
+            try:
+                with open(video_path, "rb") as _imf:
+                    _ib64 = base64.b64encode(_imf.read()).decode("ascii")
+                _ext  = video_path.lower().rsplit(".", 1)[-1] if "." in video_path else "jpeg"
+                _mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(_ext, "jpeg")
+            except Exception as _img_err:
+                msg = f"[vLLM ERROR] Could not read image: {_img_err}"
+                _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
+                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+                return
             content = [
-                {"type": "image_url", "image_url": {"url": f"file://{video_path}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/{_mime};base64,{_ib64}"}},
                 {"type": "text", "text": prompt},
             ]
-            print(f"[vllm/image] file:// image: {video_path}", flush=True)
+            print(f"[vllm/image] base64 data:image/{_mime} ({len(_ib64)//1000} KB)", flush=True)
         else:
             try:
                 from PIL import Image as _pil_img
@@ -1127,46 +1185,30 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
             print(f"[vllm/image] base64 image prepared", flush=True)
     elif _nem:
         import shutil as _shutil
-        _nem_path = "/tmp/gradio_upload.mp4"
-        try:
-            if os.path.abspath(video_path) != os.path.abspath(_nem_path):
-                _shutil.copy2(video_path, _nem_path)
-        except Exception as _cp_err:
-            _nem_path = video_path  # fall back to original path if copy fails
-            print(f"[vllm/nemotron] copy to /tmp failed ({_cp_err}), using original path", flush=True)
-        content = [
-            {"type": "video_url", "video_url": {"url": f"file://{_nem_path}"}},
-            {"type": "text", "text": prompt},
-        ]
-        print(f"[vllm/nemotron] video_url: file://{_nem_path}", flush=True)
-    elif _cosmos_nim_video:
-        # Cosmos Reason NIMs natively decode video server-side at NIM_MEDIA_IO_KWARGS
-        # (e.g. fps=4 for cosmos-reason2-8b) with EVS engaged. Send as one video_url
-        # content item; sending extracted frames as image_url[] would hit the
-        # NIM_MAX_IMAGES_PER_PROMPT=5 cap and destroy motion on clips >~10 s.
-        # Use a base64 data: URL so we don't depend on container mounts or
-        # --allowed-local-media-path config (which the cosmos NIM doesn't expose).
+        # Per NIM Message-Shape standing order: send the video as a base64
+        # data URL, NOT file://. file:// requires --allowed-local-media-path
+        # on vLLM (which build.nvidia.com snippets do not set) and is never
+        # accepted by build.nvidia.com's hosted API. base64 works everywhere.
         try:
             with open(video_path, "rb") as _vf:
-                _vid_b64 = base64.b64encode(_vf.read()).decode()
-        except Exception as _vid_err:
-            msg = f"[NIM ERROR] Could not read video for base64 encoding: {_vid_err}"
-            print(msg, flush=True)
-            _log_run(model_id, total_s=_elapsed(), status="video-read-error", display_label=display_label)
+                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+        except Exception as _vread_err:
+            msg = f"[vLLM ERROR] Could not read video: {_vread_err}"
+            _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                     {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
             return
         content = [
-            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vid_b64}"}},
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
             {"type": "text", "text": prompt},
         ]
-        _vid_mb = len(_vid_b64) * 3 / 4 / (1024 * 1024)
-        print(f"[nim_local/cosmos] video_url: data:video/mp4;base64 ({_vid_mb:.1f} MB) — server-side decode", flush=True)
+        print(f"[vllm/nemotron] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
-        # OSS path (HF/vLLM-OSS) for Cosmos Reason: extract frames client-side.
-        _max_frames = 8
-        print(f"[vllm] Extracting frames fps={fps} max={_max_frames}", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
+        # Frame extraction path — used by Cosmos Reason 1/2 and Cosmos3 NIMs.
+        # Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
+        # Send `duration × fps` frames; let the NIM 4xx if it can't handle.
+        print(f"[vllm] Extracting frames fps={fps} (no client cap)", flush=True)
+        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
         if not frames_b64:
             msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
@@ -1188,25 +1230,56 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                             steps=steps), gr.update()
 
     t_start = time.time()
-    try:
-        resp = _requests.post(
+
+    def _post_chat(_mid):
+        body = {
+            "model": _mid,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": content},
+            ],
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True,
+        }
+        # Standing rule (Alex 2026-05-08, all NIMs forever): no max_tokens cap.
+        # The server's max_model_len governs. The slider exists for UI honesty;
+        # its value is ignored at the wire.
+        # NVIDIA NIM rejects repetition_penalty at root level on older NIM
+        # generations (Cosmos Reason 1 NIM observed 2026-05-08 returning HTTP
+        # 400 with "Please include it in the `nvext` object field"). The
+        # official NVIDIA path is the `nvext` extension. Cosmos Reason 2 NIM
+        # accepts both root-level and nvext, so always use nvext in nim_local
+        # mode for portability across NIM generations. Bare vLLM (non-NIM)
+        # accepts root-level rep_penalty so use that path there.
+        if INFERENCE_BACKEND == "nim_local":
+            body["nvext"] = {"repetition_penalty": rep_penalty}
+        else:
+            body["repetition_penalty"] = rep_penalty
+        return _requests.post(
             endpoint,
             headers={"Authorization": f"Bearer {VLLM_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": model_id,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": content},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "repetition_penalty": rep_penalty,
-                "stream": True,
-            },
+            json=body,
             stream=True,
             timeout=180,
         )
+
+    try:
+        resp = _post_chat(model_id)
+        # Auto-recover from a stale model_id after a NIM/vLLM container swap:
+        # a 404 here usually means the server is now serving a different model
+        # than the one Gradio cached at startup. Re-query /v1/models, and if
+        # the served name changed, retry once with the fresh value. Saves a
+        # full Gradio restart on every container swap.
+        if resp.status_code == 404 and INFERENCE_BACKEND in ("vllm", "nim_local"):
+            try: resp.close()
+            except Exception: pass
+            _new_mid = _refresh_server_model_id()
+            if _new_mid and _new_mid != model_id:
+                print(f"[{_be_label}] 404 on model='{model_id}'; "
+                      f"retrying with refreshed server model='{_new_mid}'", flush=True)
+                model_id = _new_mid
+                resp = _post_chat(model_id)
         resp.raise_for_status()
     except Exception as e:
         e_str = str(e)
@@ -1383,7 +1456,6 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                     {"role": "system", "content": system},
                     {"role": "user",   "content": content},
                 ],
-                "max_tokens": max_tokens,
                 "stream": True,
             },
             stream=True,
@@ -1482,9 +1554,8 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
                            {"elapsed_s": _elapsed()}), gr.update()
 
     # NIM local Docker is served by `_run_vllm_inference` via the OpenAI-compatible
-    # client at VLLM_BASE_URL. Cosmos Reason NIMs decode video natively (one video_url
-    # content item, base64 data URL — see _is_cosmos_reason_nim dispatch below);
-    # the legacy NIM_MAX_IMAGES_PER_PROMPT=5 cap only applies if you send images.
+    # client at VLLM_BASE_URL. The NIM container enforces a 5-image-per-prompt cap;
+    # frame clamping is applied below at extraction time when INFERENCE_BACKEND=nim_local.
 
     if _is_nim(model_id):
         yield from _run_nim_inference(
@@ -2446,17 +2517,17 @@ with gr.Blocks(
 
         with gr.Row():
             fps_slider = gr.Slider(
-                minimum=1, maximum=8, step=1, value=_UI_DEFAULT_FPS,
+                minimum=1, maximum=60, step=1, value=_UI_DEFAULT_FPS,
                 label="Video sampling rate (fps) — ignored for images",
-                info="Higher = more frames = more tokens = slower. HF mode caps at 32 frames total.",
+                info="Higher = more frames sent. The NIM will tell you if it's too much.",
             )
             maxpx_slider = gr.Slider(
-                minimum=64*(32**2), maximum=4096*(32**2), step=64*(32**2),
+                minimum=64*(32**2), maximum=8192*(32**2), step=64*(32**2),
                 value=DEFAULT_MAX_PIXELS,
-                label="Max pixels per frame",
+                label="Max pixels per frame (HF mode only — NIM ignores)",
             )
             maxtok_slider = gr.Slider(
-                minimum=64, maximum=2048, step=64, value=DEFAULT_MAX_TOKENS,
+                minimum=64, maximum=131072, step=64, value=DEFAULT_MAX_TOKENS,
                 label="Max output tokens",
             )
 
@@ -2613,9 +2684,20 @@ with gr.Blocks(
         if not m.width:
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
-        n_frames = max(1, int(m.duration_s * fps_val))
+        target   = max(1, int(m.duration_s * fps_val))
+        # Post-cap honesty: nim_local frames branch caps at 32 (line ~1217).
+        # vLLM (non-NIM) caps at 8. HF mode caps at _MAX_HF_FRAMES (32).
+        # Show what the model ACTUALLY receives, not the pre-cap target.
+        if INFERENCE_BACKEND == "nim_local":
+            cap = 32
+        elif INFERENCE_BACKEND == "vllm":
+            cap = 8
+        else:
+            cap = _MAX_HF_FRAMES
+        n_frames = min(target, cap)
+        cap_note = f" (capped from {target})" if target > cap else ""
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
-                    f"{n_frames} frames sampled")
+                    f"{n_frames} frames sampled{cap_note}")
         # Fast backends (vLLM, NIM) are 100-500x faster than HF — HF-based
         # timing estimates are meaningless and auto-cap is unnecessary.
         if INFERENCE_BACKEND in ("vllm", "nim_local"):

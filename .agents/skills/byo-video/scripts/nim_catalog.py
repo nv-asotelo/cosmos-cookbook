@@ -97,10 +97,16 @@ KNOWN_VLM_NIMS = [
     NimImage("cosmos-reason2-32b", "nvcr.io/nim/nvidia/cosmos-reason2-32b:latest",
              "Cosmos Reason2", "Cosmos Reason2 32B (NIM)",
              "nvidia/cosmos-reason2-32b", min_vram_mb=80000, supports_video=True,
-             notes="May require allowlisting via build.nvidia.com (not in default NGC catalog)."),
+             notes="PRIVATE/PREVIEW: docker pull returns DENIED on default NGC API key "
+                   "(verified 2026-05-07 on horde). Contact NIM team for allowlist. "
+                   "Do not present as a self-serve option in /byo-video pickers."),
     NimImage("cosmos-reason1-7b",  "nvcr.io/nim/nvidia/cosmos-reason1-7b:latest",
              "Cosmos Reason1 7B", "Cosmos Reason1 7B (NIM)",
-             "nvidia/cosmos-reason1-7b", min_vram_mb=24000, supports_video=True),
+             "nvidia/cosmos-reason1-7b", min_vram_mb=24000, supports_video=True,
+             notes="Smoke-validated 2026-05-07 on RTX PRO 6000 Blackwell. "
+                   "Rejects native video_url with HTTP 400; harness must use "
+                   "image-frame mode (32 frames @ fps 8). Earlier generation — "
+                   "limited instruction following on terse prompts."),
 
     # ── Nemotron family (NVIDIA) ─────────────────────────────────────────
     NimImage("nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -108,19 +114,23 @@ KNOWN_VLM_NIMS = [
              "NVIDIA Nemotron 3 Nano Omni",
              "Nemotron 3 Nano Omni 30B (NIM)",
              "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-             min_vram_mb=40000, supports_video=True,
-             notes="Specialized container variant; release 1.7.0+."),
+             min_vram_mb=80000, supports_video=True,
+             notes="Smoke-validated 2026-05-07. ~25 min first boot on RTX PRO "
+                   "6000 Blackwell (no tuned MoE config for SM120). Subsequent "
+                   "starts are cached. Honest 'not found' behavior on absent "
+                   "subjects — no race-car hallucination."),
     NimImage("nemotron-nano-12b-v2-vl",
              "nvcr.io/nim/nvidia/nemotron-nano-12b-v2-vl:latest",
              "Nemotron Nano 12B v2 VL", "Nemotron Nano 12B v2 VL (NIM)",
              "nvidia/nemotron-nano-12b-v2-vl",
-             min_vram_mb=40000, supports_video=True),
-    NimImage("nemotron-parse-v1.2",
-             "nvcr.io/nim/nvidia/nemotron-parse-v1.2:latest",
-             "Nemotron-Parse-v1.2", "Nemotron Parse v1.2 (NIM)",
-             "nvidia/nemotron-parse-v1.2", min_vram_mb=24000,
-             supports_video=False,
-             notes="Image parsing only; document-extraction VLM. Not for /byo-video."),
+             min_vram_mb=40000, supports_video=True,
+             notes="Smoke-validated 2026-05-07. PREFER native video_url; image-"
+                   "frame mode is hard-capped at 5 frames per request "
+                   "(HTTP 400 'At most 5 image(s) may be provided in one prompt'). "
+                   "Do NOT bind-mount /opt/nim/.cache — PermissionError; use "
+                   "container-internal cache."),
+    # nemotron-parse-v1.2 dropped 2026-05-08 (Alex decision) — irrelevant to
+    # Cosmos / Physical AI captioning. Document parser, not a video VLM.
     NimImage("nemotron-3-content-safety",
              "nvcr.io/nim/nvidia/nemotron-3-content-safety:latest",
              "Nemotron-3-Content-Safety", "Nemotron 3 Content Safety (NIM)",
@@ -169,7 +179,11 @@ KNOWN_VLM_NIMS = [
              "Mistral Medium 3.5", "Mistral Medium 3.5 128B (NIM)",
              "mistralai/mistral-medium-3.5-128b",
              min_vram_mb=140000, supports_video=False,
-             notes="Image + text only; no video. Multi-GPU."),
+             notes="Smoke-validated 2026-05-07: ManifestProfileSelector found NO "
+                   "compatible profile on RTX PRO 6000 Blackwell. NIM ships only "
+                   "with H100/H200 profiles. Image + text only; no video. Multi-"
+                   "GPU. DROP from /byo-video Blackwell pickers until profile "
+                   "ships for SM120."),
     NimImage("mistral-small-4-119b-2603",
              "nvcr.io/nim/mistralai/mistral-small-4-119b-2603:latest",
              "Mistral-Small-4-119B-2603", "Mistral Small 4 119B (NIM)",
@@ -221,13 +235,20 @@ KNOWN_VLM_NIMS = [
              "Qwen3.6-27B", "Qwen3.6 27B (NIM)",
              "qwen/qwen3.6-27b",
              min_vram_mb=40000, supports_video=False,
-             notes="Image + text only; no video."),
+             notes="Smoke-validated 2026-05-07: container exits cleanly (code 0) "
+                   "after model load on RTX PRO 6000 Blackwell SM120. SGLang "
+                   "backend appears to silently skip serving on this GPU class. "
+                   "DROP from /byo-video Blackwell pickers; pending NIM team "
+                   "Blackwell roadmap. Image + text only; no video."),
     NimImage("qwen3.6-35b-a3b",
              "nvcr.io/nim/qwen/qwen3.6-35b-a3b:latest",
              "Qwen3.6-35B-A3B", "Qwen3.6 35B A3B (NIM)",
              "qwen/qwen3.6-35b-a3b",
              min_vram_mb=40000, supports_video=True,
-             notes="MoE; SGLang backend; video concurrency constraints."),
+             notes="Smoke-validated 2026-05-07: same Blackwell silent-exit failure "
+                   "as qwen3.6-27b. SGLang backend, MoE 35B/3B-active. Loads "
+                   "weights + KV cache successfully then exits 0 without binding "
+                   "the HTTP server. DROP from Blackwell pickers."),
 
     # ── Moonshot Kimi family ─────────────────────────────────────────────
     NimImage("kimi-k2.5",
@@ -248,8 +269,12 @@ KNOWN_VLM_NIMS = [
              "nvcr.io/nim/google/gemma-4-31b-it:latest",
              "Gemma 4 31B Instruct", "Gemma 4 31B Instruct (NIM)",
              "google/gemma-4-31b-it",
-             min_vram_mb=40000, supports_video=True,
-             notes="Structured output not supported on this NIM."),
+             min_vram_mb=80000, supports_video=True,
+             notes="Smoke-validated 2026-05-07: default max_model_len=262144 (256K) "
+                   "needs 27 GiB KV cache; 96 GB GPUs only have ~22.4 GiB free "
+                   "after weight load. FIX: set NIM_MAX_MODEL_LEN=131072 (or "
+                   "lower, max ~200672) on docker run. Engine exits 1 with "
+                   "ValueError otherwise. Structured output not supported."),
 ]
 
 
