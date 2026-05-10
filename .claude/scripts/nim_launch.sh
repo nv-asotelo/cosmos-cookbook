@@ -7,8 +7,10 @@
 #   PORT             — host port (default 8000)
 #   CONTAINER_NAME   — docker container name (default cosmos-nim)
 #   LOCAL_NIM_CACHE  — host cache dir (default $HOME/.cache/nim)
+#   NIM_CACHE_MODE   — internal | host (default internal; host bind-mounts LOCAL_NIM_CACHE)
 #   MAX_WAIT         — seconds to wait for /v1/models (default 1800; first-pull + first-load can be long)
 #   SHM_SIZE         — --shm-size value (default 32GB)
+#   NIM_EXTRA_ENV    — comma-separated KEY=VALUE pairs forwarded to docker run
 #
 # Output: detached container on $PORT serving OpenAI-compatible API at http://localhost:$PORT/v1.
 # Logs streamed to /tmp/nim_launch.log; container logs via `docker logs $CONTAINER_NAME`.
@@ -22,6 +24,8 @@ IMAGE="${IMAGE:-nvcr.io/nim/nvidia/${MODEL}:latest}"
 PORT="${PORT:-8000}"
 CONTAINER_NAME="${CONTAINER_NAME:-cosmos-nim}"
 LOCAL_NIM_CACHE="${LOCAL_NIM_CACHE:-$HOME/.cache/nim}"
+NIM_CACHE_MODE="${NIM_CACHE_MODE:-internal}"
+NIM_EXTRA_ENV="${NIM_EXTRA_ENV:-}"
 MAX_WAIT="${MAX_WAIT:-1800}"
 SHM_SIZE="${SHM_SIZE:-32GB}"
 
@@ -34,12 +38,17 @@ echo "IMAGE=$IMAGE"
 echo "PORT=$PORT"
 echo "CONTAINER_NAME=$CONTAINER_NAME"
 echo "LOCAL_NIM_CACHE=$LOCAL_NIM_CACHE"
+echo "NIM_CACHE_MODE=$NIM_CACHE_MODE"
 echo "HOME=$HOME"
 
 if [ -z "$NGC_API_KEY" ]; then
     echo "ERROR: NGC_API_KEY required as first argument or env var"
     echo "Usage: bash nim_launch.sh <NGC_API_KEY> [HF_TOKEN]"
     exit 1
+fi
+export NGC_API_KEY
+if [ -n "$HF_TOKEN" ]; then
+    export HF_TOKEN
 fi
 
 # 0. Idempotency: if a container of this name is already running AND /v1/models
@@ -73,9 +82,6 @@ if [ -z "${SKIP_LAUNCH:-}" ]; then
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 fi
 
-# 4. Ensure NIM cache dir exists with proper perms
-mkdir -p "$LOCAL_NIM_CACHE"
-
 if [ -z "${SKIP_LAUNCH:-}" ]; then
     # 5. Free any existing process on $PORT (best-effort, ignores failure)
     if command -v fuser &>/dev/null; then
@@ -84,16 +90,46 @@ if [ -z "${SKIP_LAUNCH:-}" ]; then
 
     # 6. Launch container in detached mode (mirrors official docker run from build.nvidia.com)
     echo "Starting NIM container on port $PORT..."
-    docker run -d \
-        --name "$CONTAINER_NAME" \
-        --gpus all \
-        --ipc host \
-        --shm-size="$SHM_SIZE" \
-        -e NGC_API_KEY="$NGC_API_KEY" \
-        -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
-        -u "$(id -u)" \
-        -p "${PORT}:8000" \
-        "$IMAGE"
+    DOCKER_ARGS=(
+        docker run -d
+        --name "$CONTAINER_NAME"
+        --gpus all
+        --ipc host
+        --shm-size="$SHM_SIZE"
+        --ulimit memlock=-1
+        --ulimit stack=67108864
+        -e NGC_API_KEY
+        -p "${PORT}:8000"
+    )
+    if [ -n "$HF_TOKEN" ]; then
+        DOCKER_ARGS+=(-e HF_TOKEN)
+    fi
+    if [ "$NIM_CACHE_MODE" = "host" ]; then
+        mkdir -p "$LOCAL_NIM_CACHE"
+        DOCKER_ARGS+=(-v "$LOCAL_NIM_CACHE:/opt/nim/.cache")
+    else
+        echo "Using container-internal NIM cache (set NIM_CACHE_MODE=host to bind-mount LOCAL_NIM_CACHE)."
+    fi
+    for _env_name in \
+        NIM_MAX_MODEL_LEN NIM_ENGINE NIM_MODEL_PROFILE NIM_SERVED_MODEL_NAME \
+        NIM_MODEL_NAME NIM_MEDIA_IO_KWARGS NIM_MAX_IMAGES_PER_PROMPT NIM_NSPECT_ID
+    do
+        if [ -n "${!_env_name:-}" ]; then
+            DOCKER_ARGS+=(-e "$_env_name=${!_env_name}")
+            echo "Forwarding $_env_name=${!_env_name}"
+        fi
+    done
+    if [ -n "$NIM_EXTRA_ENV" ]; then
+        IFS=',' read -ra _pairs <<< "$NIM_EXTRA_ENV"
+        for _pair in "${_pairs[@]}"; do
+            if [ -n "$_pair" ]; then
+                DOCKER_ARGS+=(-e "$_pair")
+                echo "Forwarding ${_pair%%=*}=<set>"
+            fi
+        done
+    fi
+    DOCKER_ARGS+=("$IMAGE")
+    "${DOCKER_ARGS[@]}"
 fi
 
 # 7. Wait for /v1/models (model download + load can be lengthy on first run)
