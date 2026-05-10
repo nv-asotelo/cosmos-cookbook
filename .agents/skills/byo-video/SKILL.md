@@ -64,6 +64,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   structured prompts, and export artifacts through the runtime-agent API.
 - `scripts/gradio_cr2_byo.py`: Gradio app for video/image inference.
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
+- `scripts/nim_runtime_monitor.py` and `scripts/nim_param_table.json`: NIM boot/readiness monitor and launch-parameter notes from the smoke sprints.
+- `scripts/gradio_cosmos_predict.py` and `scripts/gradio_cosmos_transfer.py`: generation frontends for the Cosmos Predict/Transfer BYO-video variants.
 - `scripts/cosmos_deploy_monitor.py`: deployment monitor helper for legacy flows.
 - `scripts/nim_catalog.py` and `scripts/nim_launch.sh`: NIM model catalog and launch helpers.
 - `scripts/smoke_cr2_byo.py` and `scripts/smoke_nem_vl.py`: smoke tests.

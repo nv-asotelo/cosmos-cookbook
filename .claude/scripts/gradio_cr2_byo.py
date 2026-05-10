@@ -236,7 +236,7 @@ MODEL_CONFIGS = {
         # if arch is not registered. Use INFERENCE_BACKEND=hf as fallback (confirmed working).
     },
     # ── Qwen3-VL (public — no HF_TOKEN required) ────────────────────────────────
-    # vLLM-only: uses video_url content type with file:// path (same pattern as Nemotron).
+    # vLLM-only: uses video_url content type with base64 data URLs.
     # Frame control via extra_body mm_processor_kwargs at inference time (not server flags).
     # Three variants per size: Instruct (general), FP8 (quantized), Thinking (reasoning).
     "QW3-2B": {
@@ -290,7 +290,7 @@ MODEL_CONFIGS = {
         "nim": "google/gemma-4-31b-it",
     },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
-    # vLLM-only: uses opencv backend + file:// video URL (not base64 frames).
+    # vLLM-only: uses opencv backend + base64 video_url (not JPEG frames).
     # Requires vLLM nightly; PyPI vLLM ≤0.11.0 unsupported.
     "NEM-12B": {
         "variants": [
@@ -308,7 +308,7 @@ MODEL_CONFIGS = {
 # fps/max_pixels that are None inherit the GPU-tier value from DEFAULT_FPS/DEFAULT_MAX_PIXELS.
 # Thinking variants get a max_tokens boost automatically in _ckpt_slider_defaults().
 _MODEL_SIZE_DEFAULTS = {
-    # file:// models (NEM-12B, QW3-*) — fps slider unused by vLLM; inherit GPU-tier fps
+    # native video_url models (NEM-12B, QW3-*) — fps slider unused by vLLM; inherit GPU-tier fps
     "NEM-12B":  {"max_tokens": 512},
     "QW3-2B":   {"max_tokens": 512},
     "QW3-8B":   {"max_tokens": 512},
@@ -686,17 +686,33 @@ def _is_vllm(model_id):
     return INFERENCE_BACKEND in ("vllm", "nim_local") and not _is_nim(model_id)
 
 def _is_nemotron(model_id):
-    """True for Nemotron models — they use file:// video URL instead of base64 frames."""
+    """True for Nemotron models — they use native video_url payloads."""
     return "nemotron" in (model_id or "").lower()
 
 def _is_qwen3vl(model_id):
-    """True for Qwen3-VL models — they use file:// video URL (same as Nemotron)."""
+    """True for Qwen3-VL models — they use native video_url payloads."""
     mid = (model_id or "").lower()
     return "qwen3-vl" in mid or "qwen3vl" in mid
 
 def _uses_file_url(model_id):
-    """True for any model that uses file:// video URL to vLLM (vs base64 JPEG frames)."""
+    """Backward-compatible name for models that use native video_url."""
     return _is_nemotron(model_id) or _is_qwen3vl(model_id)
+
+def _is_frames_fallback_nim(model_id):
+    mid = (model_id or _SERVER_MODEL_ID or "").lower()
+    return INFERENCE_BACKEND == "nim_local" and "cosmos-reason1" in mid
+
+def _uses_native_video_url(model_id):
+    """Use build.nvidia.com-style base64 video_url for NIM/vLLM models.
+
+    Cosmos Reason1 7B is the known exception from the May smoke sprint: its
+    NIM rejects native video_url and needs image-frame fallback.
+    """
+    if _is_frames_fallback_nim(model_id):
+        return False
+    if INFERENCE_BACKEND == "nim_local":
+        return True
+    return _uses_file_url(model_id)
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
@@ -1145,10 +1161,29 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
     # (a flag the official snippets don't set), causing HTTP 400 on default
     # NIM/vLLM deployments.
     # Images: single image_url, base64 data URL for ALL models.
-    # Videos: Nemotron/Qwen3-VL use base64 video_url; CR2/C3 use base64 JPEG frames.
-    _nem = _uses_file_url(model_id) or _uses_file_url(_SERVER_MODEL_ID or "")
+    # Videos: NIM/vLLM-native models use base64 video_url first; only known
+    # frame-fallback NIMs (currently Cosmos Reason1 7B) use JPEG frames.
+    _native_video = _uses_native_video_url(model_id) or _uses_native_video_url(_SERVER_MODEL_ID or "")
+
+    def _build_frame_content_for_video(reason="fallback"):
+        # Frame extraction fallback — known for Cosmos Reason1 7B and for OSS
+        # image-frame vLLM paths. No client cap: send duration x fps frames and
+        # let the model service reject oversized requests.
+        print(f"[vllm] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
+        if not _frames_b64:
+            raise RuntimeError("Could not extract frames (PyAV missing or video unreadable)")
+        print(f"[vllm] {len(_frames_b64)} frames extracted", flush=True)
+        _content = [{"type": "text", "text": f"[Video — {len(_frames_b64)} frames at {fps}fps]\n{prompt}"}]
+        for _fb64 in _frames_b64:
+            _content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{_fb64}"},
+            })
+        return _content
+
     if is_image:
-        if _nem:
+        if _native_video:
             try:
                 with open(video_path, "rb") as _imf:
                     _ib64 = base64.b64encode(_imf.read()).decode("ascii")
@@ -1183,8 +1218,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_img_b64}"}},
             ]
             print(f"[vllm/image] base64 image prepared", flush=True)
-    elif _nem:
-        import shutil as _shutil
+    elif _native_video:
         # Per NIM Message-Shape standing order: send the video as a base64
         # data URL, NOT file://. file:// requires --allowed-local-media-path
         # on vLLM (which build.nvidia.com snippets do not set) and is never
@@ -1202,26 +1236,16 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
             {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
             {"type": "text", "text": prompt},
         ]
-        print(f"[vllm/nemotron] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
+        print(f"[{_be_label}] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
-        # Frame extraction path — used by Cosmos Reason 1/2 and Cosmos3 NIMs.
-        # Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
-        # Send `duration × fps` frames; let the NIM 4xx if it can't handle.
-        print(f"[vllm] Extracting frames fps={fps} (no client cap)", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
-        if not frames_b64:
-            msg = "[vLLM ERROR] Could not extract frames (PyAV missing or video unreadable)"
+        try:
+            content = _build_frame_content_for_video("selected path")
+        except Exception as _frame_err:
+            msg = f"[vLLM ERROR] {_frame_err}"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                     {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
             return
-        print(f"[vllm] {len(frames_b64)} frames extracted", flush=True)
-        content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
-        for fb64 in frames_b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
-            })
 
     # Step 4: send to vLLM
 
@@ -1280,6 +1304,19 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
                       f"retrying with refreshed server model='{_new_mid}'", flush=True)
                 model_id = _new_mid
                 resp = _post_chat(model_id)
+        if resp.status_code in (400, 422) and INFERENCE_BACKEND == "nim_local" and _native_video and not is_image:
+            try:
+                _err_preview = resp.text[:500]
+            except Exception:
+                _err_preview = ""
+            try: resp.close()
+            except Exception: pass
+            print(f"[NIM] video_url rejected ({resp.status_code}); retrying with image-frame fallback. {_err_preview}", flush=True)
+            try:
+                content = _build_frame_content_for_video("video_url rejected")
+            except Exception as _frame_err:
+                raise RuntimeError(f"video_url rejected and frame fallback failed: {_frame_err}") from _frame_err
+            resp = _post_chat(model_id)
         resp.raise_for_status()
     except Exception as e:
         e_str = str(e)
@@ -1405,6 +1442,20 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                            {"elapsed_s": _elapsed()}, steps=steps), gr.update()
 
     # Step 3: prepare media content
+    def _build_hosted_frame_content(reason="fallback"):
+        print(f"[nim] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
+        if not _frames_b64:
+            raise RuntimeError("Could not extract frames from video (PyAV missing or video unreadable)")
+        print(f"[nim] {len(_frames_b64)} frames extracted", flush=True)
+        _content = [{"type": "text", "text": f"[Video — {len(_frames_b64)} frames at {fps}fps]\n{prompt}"}]
+        for _fb64 in _frames_b64:
+            _content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{_fb64}"},
+            })
+        return _content
+
     if is_image:
         try:
             from PIL import Image as _pil_img
@@ -1424,21 +1475,20 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         ]
         print(f"[nim/image] base64 image prepared", flush=True)
     else:
-        print(f"[nim] Extracting frames fps={fps} max={8}", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
-        if not frames_b64:
-            msg = "[NIM ERROR] Could not extract frames from video (PyAV missing or video unreadable)"
+        try:
+            with open(video_path, "rb") as _vf:
+                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+        except Exception as _vread_err:
+            msg = f"[NIM ERROR] Could not read video: {_vread_err}"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                {"elapsed_s": _elapsed()}, steps=steps), _table_html()
             return
-        print(f"[nim] {len(frames_b64)} frames extracted", flush=True)
-        content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
-        for fb64 in frames_b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
-            })
+        content = [
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
+            {"type": "text", "text": prompt},
+        ]
+        print(f"[nim] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
 
     # Step 4: send to NVCF
 
@@ -1461,6 +1511,29 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             stream=True,
             timeout=120,
         )
+        if resp.status_code in (400, 422) and not is_image:
+            try:
+                _err_preview = resp.text[:500]
+            except Exception:
+                _err_preview = ""
+            try: resp.close()
+            except Exception: pass
+            print(f"[NIM] video_url rejected ({resp.status_code}); retrying with image-frame fallback. {_err_preview}", flush=True)
+            content = _build_hosted_frame_content("video_url rejected")
+            resp = _requests.post(
+                NIM_ENDPOINT,
+                headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": NIM_MODEL_API,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": content},
+                    ],
+                    "stream": True,
+                },
+                stream=True,
+                timeout=120,
+            )
         resp.raise_for_status()
     except Exception as e:
         err = f"[NIM ERROR] {e}"
@@ -2685,11 +2758,12 @@ with gr.Blocks(
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
         target   = max(1, int(m.duration_s * fps_val))
-        # Post-cap honesty: nim_local frames branch caps at 32 (line ~1217).
-        # vLLM (non-NIM) caps at 8. HF mode caps at _MAX_HF_FRAMES (32).
-        # Show what the model ACTUALLY receives, not the pre-cap target.
+        # Post-cap honesty: NIM/native-video paths pass a video_url and let the
+        # service sample frames. OSS/HF frame paths still apply local caps.
         if INFERENCE_BACKEND == "nim_local":
-            cap = 32
+            info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
+                        "video_url sent to NIM (server samples frames)")
+            return info_str, gr.update()
         elif INFERENCE_BACKEND == "vllm":
             cap = 8
         else:

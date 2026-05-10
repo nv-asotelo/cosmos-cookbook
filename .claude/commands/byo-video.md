@@ -529,14 +529,14 @@ The `~/.claude/scripts/nim_catalog.py` helper does this automatically (and is al
 
 A previous version (commit `4ed5951`) wired a "Switch to selected NIM" button inside Gradio that streamed `nim_launch.sh` output to the browser. It was removed because a 5-15 min docker pull + 1-3 min vLLM warmup blows past Gradio's streaming heartbeat, so the UI froze even when the backend was making progress. The dropdown still lists every VLM NIM in the upstream catalog (so the user knows their options), but the swap itself is performed out-of-band by one of:
 
-1. **Runtime agent path (preferred)** — when the user says *"switch the NIM to X"*, Claude runs the SSH commands below, watches `docker logs -f cosmos-nim`, confirms `/v1/models` is back up, and tells the user to refresh the Gradio page. Gradio re-queries `/v1/models` on every page load and picks up the new served model id automatically.
+1. **Runtime agent path (preferred)** — when the user says *"switch the NIM to X"*, the agent runs the SSH commands below, watches `docker logs -f cosmos-nim`, confirms `/v1/models` is back up, and tells the user to refresh the Gradio page. Gradio re-queries `/v1/models` on every page load and picks up the new served model id automatically.
 
 2. **Manual SSH path (no Claude needed)** — the Gradio info panel in `nim_local` mode displays this snippet directly:
    ```bash
    ssh <user@host>
    docker rm -f cosmos-nim
    MODEL=<short-id> CONTAINER_NAME=cosmos-nim PORT=8000 \
-     bash /tmp/nim_launch.sh <NGC_API_KEY>
+     NGC_API_KEY="$NGC_API_KEY" bash /tmp/nim_launch.sh
    # Then reload the Gradio page.
    ```
    Valid short-ids come from `python3 /tmp/nim_catalog.py list --no-probe` (or the static panel inside Gradio).
@@ -544,7 +544,7 @@ A previous version (commit `4ed5951`) wired a "Switch to selected NIM" button in
 **Agent runbook for "switch the NIM" requests:**
 1. Run `python3 ~/.claude/scripts/nim_catalog.py upstream` to refresh the catalog from `docs.nvidia.com/nim/vision-language-models/latest/introduction.html`. Surface any upstream model name not in `KNOWN_VLM_NIMS` as a one-line note.
 2. Resolve the user's request (e.g. *"Cosmos Reason2 2B"*) to a short-id (e.g. `cosmos-reason2-2b`) via the slug map in `nim_catalog.py`.
-3. SSH to the target. Run `docker rm -f cosmos-nim` then `MODEL=<short-id> bash /tmp/nim_launch.sh <NGC_API_KEY>`. Stream the log so the user can see progress.
+3. SSH to the target. Run `docker rm -f cosmos-nim` then `MODEL=<short-id> NGC_API_KEY="$NGC_API_KEY" bash /tmp/nim_launch.sh`. Stream the log so the user can see progress. Do not put credentials in argv.
 4. Verify with `curl -sf http://localhost:8000/v1/models | jq '.data[0].id'` — confirm the served model id matches.
 5. Tell the user to refresh the Gradio page.
 
@@ -568,8 +568,9 @@ brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').w
 - Step 9 (HF weights download) — **skipped**
 - Step 9-NIM (new) — runs `bash /tmp/nim_launch.sh` which:
   1. Reuses an existing healthy container with the same name (idempotent)
-  2. Otherwise: `docker login nvcr.io`, `docker pull` the image, `docker run -d` per official build.nvidia.com snippet (`--gpus all --ipc host --shm-size=32GB -e NGC_API_KEY -v $LOCAL_NIM_CACHE:/opt/nim/.cache -u $(id -u) -p 8000:8000`)
-  3. Waits up to 1800s for `GET /v1/models` to respond (model download from NGC + load can take 10-15 min on first run for 8B)
+  2. Otherwise: `docker login nvcr.io`, `docker pull` the image, `docker run -d` per official build.nvidia.com style (`--gpus all --ipc host --shm-size=32GB --ulimit memlock=-1 --ulimit stack=67108864 -e NGC_API_KEY -p 8000:8000`). It uses container-internal `/opt/nim/.cache` by default; set `NIM_CACHE_MODE=host` only when you intentionally want to bind-mount `$LOCAL_NIM_CACHE`.
+  3. Forwards known per-NIM env overrides such as `NIM_MAX_MODEL_LEN`, `NIM_MODEL_PROFILE`, `NIM_MEDIA_IO_KWARGS`, and comma-separated `NIM_EXTRA_ENV=KEY=VALUE,...`.
+  4. Waits up to 1800s for `GET /v1/models` by default; Omni and Gemma use 2400s because first boot can run 20-30 min.
 - Step 10 — the selected frontend launches with `VLLM_BASE_URL=http://localhost:8000/v1`. The Gradio and runtime-agent frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or runtime-agent `server.model` matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
 
 **NIM image short-id resolution (in `byo_video_setup.py`):**
@@ -577,10 +578,16 @@ brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').w
 MODEL_ID=nvidia/Cosmos-Reason2-8B   →  short=cosmos-reason2-8b   →  nvcr.io/nim/nvidia/cosmos-reason2-8b:latest
 MODEL_ID=nvidia/Cosmos-Reason2-2B   →  short=cosmos-reason2-2b   →  nvcr.io/nim/nvidia/cosmos-reason2-2b:latest
 MODEL_ID=nvidia/Cosmos-Reason2-32B  →  short=cosmos-reason2-32b  →  nvcr.io/nim/nvidia/cosmos-reason2-32b:latest
+MODEL_ID=google/gemma-4-31b-it      →  short=gemma-4-31b-it      →  nvcr.io/nim/google/gemma-4-31b-it:latest
 ```
-Override at any time with `NIM_MODEL_SHORT` or full `NIM_IMAGE` env var.
+`byo_video_setup.py` resolves vendor/image/env through `nim_catalog.py`, so non-NVIDIA vendor images such as Gemma use the correct `nvcr.io/nim/google/...` path. Override at any time with `NIM_MODEL_SHORT` or full `NIM_IMAGE` env var.
 
-**NIM-specific runtime constraint:** the container caps at 5 images per prompt. The Gradio app clamps `max_frames` to 5 when `INFERENCE_BACKEND=nim_local` (vs 8 for vLLM). For single-image inference this is a no-op.
+**NIM payload rules learned from the smoke sprints:**
+- Send base64 `data:` `video_url` first for every video-capable NIM. No `file://`.
+- Do not send `max_tokens` to NIM `/v1/chat/completions`; server `max_model_len` governs.
+- Do not enforce client-side caps on frames, tokens, fps, pixels, or resolution. If a NIM cannot handle the request, let it return the service-owned 4xx.
+- Cosmos Reason1 7B is the known exception: it rejects native `video_url`, so Gradio/runtime-agent retry with image-frame fallback after a 400/422.
+- Nemotron Nano frame mode has a 5-image prompt limit, which is why the default path must be native `video_url`.
 
 **NIM-8B-FP8-THINK-EOS bug (greedy decode):** the FP8-quantized cosmos-reason2-8b NIM emits a bare `<think>` opener then an EOS-like token at `temperature=0`, finishing in 2-3 tokens with no reasoning trace and no final answer. Visible symptom in Gradio: response shows only `<think>` (or appears empty) and the run completes in <1s with `tok=2` or `tok=3` in `gradio_demo.log`. Workaround: keep temperature ≥ 0.3. The Gradio app defaults the slider to 0.6 in `nim_local` mode and clamps server-side calls to ≥0.3 as a safety net. Runtime monitor rule `nim_local_think_eos_truncation` flags any `[vllm done] X.Xs · 1|2|3 tok` line.
 

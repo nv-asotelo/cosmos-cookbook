@@ -1442,6 +1442,20 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                            {"elapsed_s": _elapsed()}, steps=steps), gr.update()
 
     # Step 3: prepare media content
+    def _build_hosted_frame_content(reason="fallback"):
+        print(f"[nim] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
+        if not _frames_b64:
+            raise RuntimeError("Could not extract frames from video (PyAV missing or video unreadable)")
+        print(f"[nim] {len(_frames_b64)} frames extracted", flush=True)
+        _content = [{"type": "text", "text": f"[Video — {len(_frames_b64)} frames at {fps}fps]\n{prompt}"}]
+        for _fb64 in _frames_b64:
+            _content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{_fb64}"},
+            })
+        return _content
+
     if is_image:
         try:
             from PIL import Image as _pil_img
@@ -1461,21 +1475,20 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         ]
         print(f"[nim/image] base64 image prepared", flush=True)
     else:
-        print(f"[nim] Extracting frames fps={fps} max={8}", flush=True)
-        frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=8)
-        if not frames_b64:
-            msg = "[NIM ERROR] Could not extract frames from video (PyAV missing or video unreadable)"
+        try:
+            with open(video_path, "rb") as _vf:
+                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+        except Exception as _vread_err:
+            msg = f"[NIM ERROR] Could not read video: {_vread_err}"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                {"elapsed_s": _elapsed()}, steps=steps), _table_html()
             return
-        print(f"[nim] {len(frames_b64)} frames extracted", flush=True)
-        content = [{"type": "text", "text": f"[Video — {len(frames_b64)} frames at {fps}fps]\n{prompt}"}]
-        for fb64 in frames_b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{fb64}"},
-            })
+        content = [
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
+            {"type": "text", "text": prompt},
+        ]
+        print(f"[nim] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
 
     # Step 4: send to NVCF
 
@@ -1498,6 +1511,29 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             stream=True,
             timeout=120,
         )
+        if resp.status_code in (400, 422) and not is_image:
+            try:
+                _err_preview = resp.text[:500]
+            except Exception:
+                _err_preview = ""
+            try: resp.close()
+            except Exception: pass
+            print(f"[NIM] video_url rejected ({resp.status_code}); retrying with image-frame fallback. {_err_preview}", flush=True)
+            content = _build_hosted_frame_content("video_url rejected")
+            resp = _requests.post(
+                NIM_ENDPOINT,
+                headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": NIM_MODEL_API,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": content},
+                    ],
+                    "stream": True,
+                },
+                stream=True,
+                timeout=120,
+            )
         resp.raise_for_status()
     except Exception as e:
         err = f"[NIM ERROR] {e}"
