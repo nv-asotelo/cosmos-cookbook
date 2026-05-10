@@ -1018,7 +1018,7 @@ Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+).
 - **Gated model** — HF_TOKEN required with nvidia org access
 - **vLLM 0.14.0+** — vLLM 0.11.0 is ABI-incompatible with torch 2.9.0+cu128. `byo_video_setup.py` auto-pins to 0.14.0 on CUDA 12.8 (driver < 575). Do not pin lower.
 - **opencv backend** — `VLLM_VIDEO_LOADER_BACKEND=opencv` is injected automatically. PyAV is not supported.
-- **file:// video protocol** — Gradio copies video to `/tmp/gradio_upload.mp4` and sends `file:///tmp/gradio_upload.mp4` to vLLM. `--allowed-local-media-path /tmp` is required (set automatically by setup script NEM-12B config).
+- **Base64 video protocol** — frontends send `data:video/...;base64,...` `video_url` content. Do not use `file://`; it fails on hosted NIMs and on default vLLM/NIM containers without local-media flags.
 - **FLASHINFER bypass** — `FLASHINFER_DISABLE_VERSION_CHECK=1` is injected automatically (flashinfer package/cubin version mismatch in cosmos-reason2 venv).
 - **NVFP4-QAD variant** — requires a special vLLM build; not available in standard setup. Use BF16 or FP8.
 - **Launch**: `MODEL_SIZE=NEM-12B INFERENCE_BACKEND=vllm python3 /tmp/byo_video_setup.py`
@@ -1026,8 +1026,8 @@ Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+).
 ### Qwen3-VL notes
 
 - **Public model** — no HF_TOKEN required
-- **vLLM only** — uses same `file://` video URL protocol as Nemotron; HF inference backend not supported
-- **`--allowed-local-media-path /tmp`** required — set automatically in QW3-* configs
+- **vLLM only** — uses the same base64 `video_url` protocol as Nemotron; HF inference backend not supported
+- **No `file://` dependency** — the base64 payload path works without `--allowed-local-media-path /tmp`
 - **Variant picker** — Gradio checkpoint dropdown shows Instruct, FP8, and Thinking for each size
 - **Thinking variant** — extended reasoning mode; max_tokens should be ≥2048 for best results
 - **VRAM**: 2B~8GB, 8B~20GB, 32B~64GB (FP8 halves these)
@@ -1054,20 +1054,19 @@ CR2-2B is in the Docker catalog only. CR2-8B is in both. The "[NIM] Skipped — 
 |---|---|---|---|
 | Cosmos Reason2 | `cosmos-reason2-2b` | 20 GB | FP8; reasoning; temp ≥ 0.3 to avoid `<think>+EOS` bug at greedy decode. Container only — not on hosted API. |
 | Cosmos Reason2 | `cosmos-reason2-8b` | 40 GB | FP8; reasoning; Efficient Video Sampling (EVS); same temp constraint as 2B. Container + hosted API. |
-| Cosmos Reason2 | `cosmos-reason2-32b` | 80 GB | May require allowlisting via build.nvidia.com. |
-| Cosmos Reason1 | `cosmos-reason1-7b` | 24 GB | Older release; preserved via release-notes walk. |
-| Nemotron | `nemotron-3-nano-omni-30b-a3b-reasoning` | 40 GB | Specialized container; release 1.7.0+. |
-| Nemotron | `nemotron-nano-12b-v2-vl` | 40 GB | Image+video; vLLM-style backend. |
+| Cosmos Reason2 | `cosmos-reason2-32b` | 80 GB | Preview/private: default NGC key saw `DENIED` on 2026-05-07; needs allowlist before self-serve smoke. |
+| Cosmos Reason1 | `cosmos-reason1-7b` | 24 GB | Older release; preserved via release-notes walk. Known native-`video_url` exception; frontends retry with frames. |
+| Nemotron | `nemotron-3-nano-omni-30b-a3b-reasoning` | 80 GB | H200 recommended; first boot can take ~25 min, so use 2400s wait. |
+| Nemotron | `nemotron-nano-12b-v2-vl` | 40 GB | Prefer native `video_url`; image-frame fallback hits 5-image prompt limit. Use container-internal cache. |
 | Mistral | `ministral-14b-instruct-2512` | 40 GB | Tool calling; 100k context on L40S. |
 | Qwen | `qwen3.5-35b-a3b` | 40 GB | MoE; high-concurrency video constraints. |
 | Qwen | `qwen3.5-122b-a10b` | 140 GB | MoE; KV cache saturation risk on long video. Multi-GPU. |
 | Qwen | `qwen3.5-397b-a17b` | 400 GB | Video not enabled by default — config flag required. Multi-node. |
-| Qwen | `qwen3.6-35b-a3b` | 40 GB | MoE; SGLang backend. |
-| Gemma | `gemma-4-31b-it` | 40 GB | Structured output not supported. |
+| Gemma | `gemma-4-31b-it` | 80 GB | Requires `NIM_MAX_MODEL_LEN=131072`; default 262144 over-allocates KV cache and exits. H200 recommended. |
 
 ### Image-only NIMs (filtered OUT of `/byo-video` by `list_video_nims()`)
 
-`mistral-medium-3.5-128b` · `mistral-small-4-119b-2603` · `mistral-small-3.2-24b-instruct-2506` · `mistral-large-3-675b-instruct-2512` · `kimi-k2.5` · `kimi-k2.6` · `qwen3.6-27b` · `llama-3.1-nemotron-nano-vl-8b-v1` · `llama-3.2-11b-vision-instruct` · `llama-3.2-90b-vision-instruct` · `llama-4-maverick-17b-128e-instruct` · `llama-4-scout-17b-16e-instruct` · `nemotron-parse-v1.2` · `nemotron-3-content-safety`
+`mistral-medium-3.5-128b` · `mistral-small-4-119b-2603` · `mistral-small-3.2-24b-instruct-2506` · `mistral-large-3-675b-instruct-2512` · `kimi-k2.5` · `kimi-k2.6` · `qwen3.6-27b` · `qwen3.6-35b-a3b` · `llama-3.1-nemotron-nano-vl-8b-v1` · `llama-3.2-11b-vision-instruct` · `llama-3.2-90b-vision-instruct` · `llama-4-maverick-17b-128e-instruct` · `llama-4-scout-17b-16e-instruct` · `nemotron-parse-v1.2` · `nemotron-3-content-safety`
 
 Adding a new NIM:
 
@@ -1343,14 +1342,14 @@ Write result to `/tmp/byo_video_reason2_results.json`. Delete the endpoint when 
 
 ## Gradio app script
 
-Canonical source: **`~/.claude/scripts/gradio_cr2_byo.py`** (versioned 2026-04-21).
+Canonical source: **`.agents/skills/byo-video/scripts/gradio_cr2_byo.py`**; mirror tracked legacy changes into `.claude/scripts/gradio_cr2_byo.py`.
 
 Features (as of 2026-04-21):
-- **Checkpoint selector** — Advanced Settings accordion has a preset dropdown (CR2-2B base, CR2-2B FP8, CR2-8B NVFP4, NIM 2B) plus a custom model ID field. Any HF model ID or local path is accepted.
+- **Checkpoint selector** — Advanced Settings accordion has a preset dropdown for Cosmos, Cosmos3, Nemotron, Qwen, and VLM NIMs plus a custom model ID field. Any HF model ID or local path is accepted.
 - **On-demand load/unload** — switching checkpoints does `del model → gc.collect() → cuda.empty_cache()` before loading the next variant. VRAM is confirmed free before loading.
 - **Run All Variants button** — sequential benchmark: FP8 → NVFP4 → NIM, each unloaded before the next. Results saved to `/tmp/byo_video_benchmark.json`.
 - **Right-side status panel** — replaces the grey loading box. Shows Step N/5 WIP tracker (resolve / load / preprocess / prefill / generate) with ✅/⟳/— per step, plus live token metrics: prefill count, generated count (running), TTFT, inference time.
-- **NIM mode** — calls NVCF API (`https://integrate.api.nvidia.com/v1/chat/completions`) via NGC_API_KEY (nvapi- prefix). Extracts up to 8 JPEG frames from the video and sends them as image content. No local model load needed.
+- **NIM mode** — local Docker NIMs use the OpenAI-compatible `/v1/chat/completions` path. Hosted NVCF is still supported for catalog entries. Both send base64 `video_url` first, omit `max_tokens`, and only retry image frames after a 400/422.
 - LOW_VRAM mode, PyAV backend, qwen_vl_utils pipeline, auto-cap, results JSON — all retained from 2026-04-20.
 
 Deploy to instances via base64 as shown in the deploy section.
@@ -1374,7 +1373,7 @@ For multi-variant benchmarking without the UI, click **Run All Variants** — ru
 |---|---|
 | NGC_API_KEY | `nvapi-...` prefix (set in env before setup, passed to Gradio) |
 | Model identifier | `nvidia/cosmos-reason2-2b` (NVCF catalog) |
-| Video input | Up to 8 JPEG frames extracted by PyAV at selected fps |
+| Video input | Base64 `data:` `video_url`; frame fallback only after service 400/422 |
 | Auth header | `Authorization: Bearer $NGC_API_KEY` |
 | Output | Streamed via SSE, same JSON results format as HF path |
 
@@ -1605,4 +1604,4 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 | vLLM Connection refused on first inference | `byo_video_setup.py` now auto-starts vLLM before Gradio (Step 9b). If running the Gradio script manually, start vLLM first: `nohup .venv/bin/vllm serve <model_dir> --port 8000 ... &` then poll `curl localhost:8000/v1/models`. |
 | Nemotron: `no module named 'mamba_ssm'` or `selective_scan_cuda` | vLLM PyPI build doesn't include mamba-ssm. Use vLLM nightly Docker: `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067` or `nvcr.io/nvidia/vllm:25.12.post1-py3`. |
 | Nemotron: `video_url not supported` or `unsupported content type` | vLLM version doesn't support `video_url` message type. Requires vLLM nightly; PyPI ≤0.11.0 unsupported. |
-| Nemotron: 400 error from vLLM on inference | Check that `--allowed-local-media-path /tmp` is in the vLLM serve command (set automatically by `byo_video_setup.py`). |
+| Nemotron/NIM: 400 error on inference | Confirm the deployed frontend is current and sends base64 `video_url`. If the service still rejects it, inspect the response body; runtime-agent/Gradio retry frame fallback only for 400/422. |
