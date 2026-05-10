@@ -67,6 +67,7 @@ class NimImage:
     served_model_id: str    # e.g. "nvidia/cosmos-reason2-8b" (best-effort)
     min_vram_mb: int = 0    # 0 if unknown
     supports_video: bool = True   # True = video frames; False = single image only
+    env: dict[str, str] = field(default_factory=dict)
     notes: str = ""
 
 
@@ -244,11 +245,12 @@ KNOWN_VLM_NIMS = [
              "nvcr.io/nim/qwen/qwen3.6-35b-a3b:latest",
              "Qwen3.6-35B-A3B", "Qwen3.6 35B A3B (NIM)",
              "qwen/qwen3.6-35b-a3b",
-             min_vram_mb=40000, supports_video=True,
+             min_vram_mb=40000, supports_video=False,
              notes="Smoke-validated 2026-05-07: same Blackwell silent-exit failure "
                    "as qwen3.6-27b. SGLang backend, MoE 35B/3B-active. Loads "
                    "weights + KV cache successfully then exits 0 without binding "
-                   "the HTTP server. DROP from Blackwell pickers."),
+                   "the HTTP server. DROP from /byo-video pickers until the "
+                   "serving profile is fixed."),
 
     # ── Moonshot Kimi family ─────────────────────────────────────────────
     NimImage("kimi-k2.5",
@@ -270,6 +272,7 @@ KNOWN_VLM_NIMS = [
              "Gemma 4 31B Instruct", "Gemma 4 31B Instruct (NIM)",
              "google/gemma-4-31b-it",
              min_vram_mb=80000, supports_video=True,
+             env={"NIM_MAX_MODEL_LEN": "131072"},
              notes="Smoke-validated 2026-05-07: default max_model_len=262144 (256K) "
                    "needs 27 GiB KV cache; 96 GB GPUs only have ~22.4 GiB free "
                    "after weight load. FIX: set NIM_MAX_MODEL_LEN=131072 (or "
