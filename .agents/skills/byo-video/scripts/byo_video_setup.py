@@ -14,7 +14,10 @@ Env vars:
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only; not needed for Cosmos3)
   MODEL_SIZE        — 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
   MODEL_DIR         — override local download path for primary model
+  BYO_VIDEO_FRONTEND — gradio | runtime_agent | fiftyone (default: gradio)
   GRADIO_PORT       — port for Gradio (default: 7860)
+  RUNTIME_AGENT_PORT — port for runtime-agent frontend (default: 7861)
+  RUNTIME_AGENT_DATASET — default public HF dataset for runtime-agent (default: pjramg/Safe_Unsafe_Test)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
@@ -215,6 +218,12 @@ REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
+FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "gradio").strip().lower()
+if FRONTEND == "agent":
+    FRONTEND = "runtime_agent"
+RUNTIME_AGENT_PORT = int(os.environ.get("RUNTIME_AGENT_PORT", "7861"))
+RUNTIME_AGENT_APP  = "/tmp/byo_video_runtime_agent.py"
+RUNTIME_AGENT_LOG_FILE = "/tmp/byo_video_runtime_agent.log"
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
@@ -276,9 +285,9 @@ STEP_LABELS = [
     "uv install",
     "cosmos-reason2 repo",
     "uv sync + CUDA libs",
-    "PyAV + Gradio + requests",
+    "PyAV + frontend deps",
     "Model weights download",
-    "Gradio launch",
+    "Frontend launch",
 ]
 STEPS_DONE = []
 
@@ -298,8 +307,9 @@ def print_dashboard():
 
 print_dashboard()
 
-# ── Pre-step: kill old Gradio so VRAM measurement is accurate ────────────────
+# ── Pre-step: kill old frontends so VRAM measurement is accurate ─────────────
 subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
+subprocess.run(["bash", "-c", f"fuser -k {RUNTIME_AGENT_PORT}/tcp 2>/dev/null || true"])
 time.sleep(2)
 
 # ── Step 1: GPU check ─────────────────────────────────────────────────────────
@@ -545,8 +555,8 @@ else:
         print("  ✗  av install failed:", out); sys.exit(1)
     ok(f"PyAV installed in {time.time()-t0:.0f}s")
 
-# ── Step 8: Gradio + requests ─────────────────────────────────────────────────
-header("Step 8 — Gradio + requests", eta="<5s if cached, ~30s first time")
+# ── Step 8: Frontend dependencies ─────────────────────────────────────────────
+header("Step 8 — Frontend dependencies", eta="<5s if cached, ~30-90s first time")
 rc, gr_check = run_cmd(
     ["uv", "run", "python", "-c", "import gradio; print(gradio.__version__)"],
     cwd=REASON2_DIR, env=ENV
@@ -574,6 +584,24 @@ else:
         warn(f"requests install failed — NIM API mode unavailable: {out}")
     else:
         ok("requests installed")
+
+if FRONTEND in ("runtime_agent", "fiftyone"):
+    rc, fo_check = run_cmd(
+        ["uv", "run", "python", "-c", "import fiftyone, huggingface_hub; print(fiftyone.__version__)"],
+        cwd=REASON2_DIR, env=ENV
+    )
+    if rc == 0:
+        ok(f"FiftyOne already installed ({fo_check.strip()})")
+    else:
+        run("Installing FiftyOne + huggingface_hub for dataset batch frontend  (~60-90s)")
+        rc, out = run_cmd(
+            ["uv", "pip", "install", "fiftyone", "huggingface_hub"],
+            cwd=REASON2_DIR, env=ENV, timeout=240
+        )
+        if rc != 0:
+            warn(f"FiftyOne install failed — runtime agent will fall back where possible: {out[-500:]}")
+        else:
+            ok("FiftyOne + huggingface_hub installed")
 
 STEPS_DONE.append(7)
 
@@ -653,7 +681,7 @@ else:
         elif not ok_:
             warn(f"{var_label} download failed — will fall back to HF on first Gradio use")
 
-STEPS_DONE.append(9)
+STEPS_DONE.append(8)
 print_dashboard()
 
 # ── Step 9-NIM: Launch NIM container (nim_local backend only) ────────────────
@@ -736,10 +764,10 @@ if INFERENCE_BACKEND == "vllm":
             sys.exit(1)
         ok(f"vLLM ready in {int(time.time() - t_vllm)}s")
 
-# ── Step 10: Launch Gradio ────────────────────────────────────────────────────
-header("Step 10 — Launch Gradio web demo", eta="~5-10s for model load")
+# ── Step 10: Launch frontend ──────────────────────────────────────────────────
+header(f"Step 10 — Launch {FRONTEND} frontend", eta="~5-10s")
 
-if not os.path.exists(GRADIO_APP):
+if FRONTEND not in ("runtime_agent", "fiftyone") and not os.path.exists(GRADIO_APP):
     print(f"  ✗  {GRADIO_APP} not found — deploy gradio_cr2_byo.py first"); sys.exit(1)
 
 if os.path.exists(URL_FILE):
@@ -769,6 +797,132 @@ launch_env = {
     # PRELOAD-001: skip HF preload when using vLLM backend
     "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND == "vllm" else "0",
 }
+
+if FRONTEND in ("runtime_agent", "fiftyone"):
+    if not os.path.exists(RUNTIME_AGENT_APP):
+        print(f"  ✗  {RUNTIME_AGENT_APP} not found — deploy byo_video_runtime_agent.py first"); sys.exit(1)
+
+    runtime_env = {
+        **launch_env,
+        "BYO_VIDEO_FRONTEND": FRONTEND,
+        "RUNTIME_AGENT_PORT": str(RUNTIME_AGENT_PORT),
+        "RUNTIME_AGENT_DATASET": os.environ.get("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test"),
+        "RUNTIME_AGENT_CONCURRENCY": os.environ.get("RUNTIME_AGENT_CONCURRENCY", "4"),
+        "RUNTIME_AGENT_MAX_VIDEOS": os.environ.get("RUNTIME_AGENT_MAX_VIDEOS", "20"),
+        "FIFTYONE_PORT": os.environ.get("FIFTYONE_PORT", "5151"),
+    }
+
+    run(f"Starting Cosmos BYO Video runtime agent on port {RUNTIME_AGENT_PORT}")
+    proc = subprocess.Popen(
+        ["uv", "run", "python", "-u", RUNTIME_AGENT_APP, "serve",
+         "--host", "0.0.0.0", "--port", str(RUNTIME_AGENT_PORT)],
+        cwd=REASON2_DIR,
+        env=runtime_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def _detect_runtime_host_ip():
+        env_ip = os.environ.get("BYO_VIDEO_LOCAL_HOST")
+        if env_ip:
+            return env_ip
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(2)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+            for tok in out.stdout.split():
+                if "." in tok and not tok.startswith("127."):
+                    return tok
+        except Exception:
+            pass
+        return None
+
+    url = None
+    url_pattern = re.compile(r'URL:\s+(https?://[^\s]+)')
+    with open(RUNTIME_AGENT_LOG_FILE, "w") as log:
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            stripped = line.rstrip()
+            if stripped:
+                print(f"     {DIM}{stripped}{RESET}", flush=True)
+            match = url_pattern.search(stripped)
+            if match:
+                url = match.group(1).rstrip("/")
+                break
+            if proc.poll() is not None:
+                break
+
+    if not url:
+        print(f"  ✗  Runtime agent printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
+        proc.terminate()
+        sys.exit(1)
+
+    host_ip = _detect_runtime_host_ip()
+    if host_ip:
+        url = url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
+
+    _probe_ok = False
+    for _probe_attempt in range(10):
+        try:
+            urllib.request.urlopen(f"http://localhost:{RUNTIME_AGENT_PORT}/api/state", timeout=3)
+            _probe_ok = True
+            break
+        except Exception:
+            time.sleep(2)
+
+    if not _probe_ok:
+        print("  ✗  Runtime agent launched but /api/state probe failed after 20s.")
+        print(f"     Check {RUNTIME_AGENT_LOG_FILE} for errors.")
+        sys.exit(1)
+
+    for _path in (URL_FILE, "/tmp/byo_video_runtime_agent_url.txt", "/tmp/byo_video_runtime_agent_live.flag"):
+        with open(_path, "w") as f:
+            f.write(url + "\n")
+
+    ok("Runtime agent frontend is live")
+    STEPS_DONE.append(9)
+    print_dashboard()
+
+    print(flush=True)
+    print(f"{BOLD}{'─'*62}{RESET}", flush=True)
+    print(f"{BOLD}  Cosmos BYO Video Runtime Agent — Ready{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(f"  {BOLD}URL:{RESET}  {hyperlink(url)}", flush=True)
+    print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
+    print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)
+    print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(flush=True)
+
+    import threading as _thr
+
+    def _drain_runtime_stdout(fh, path):
+        try:
+            with open(path, "a") as f:
+                for line in fh:
+                    f.write(line)
+                    f.flush()
+        except Exception:
+            pass
+
+    _thr.Thread(target=_drain_runtime_stdout, args=(proc.stdout, RUNTIME_AGENT_LOG_FILE), daemon=True).start()
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+    sys.exit(0)
 
 run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
 
