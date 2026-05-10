@@ -101,9 +101,10 @@ RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_a
 THUMBNAIL_DIR = Path(os.getenv("RUNTIME_AGENT_THUMBNAILS", "/tmp/byo_video_runtime_agent_thumbnails"))
 THUMBNAIL_SIZE = (220, 124)
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_AGENT_REQUEST_TIMEOUT_SECONDS", "180"))
+CONTEXT_PATCH_PIXELS = int(os.getenv("RUNTIME_AGENT_CONTEXT_PATCH_PIXELS", str(14 * 14)))
+CONTEXT_SAFETY_RESERVE = int(os.getenv("RUNTIME_AGENT_CONTEXT_SAFETY_RESERVE", "1024"))
+DEFAULT_MODEL_MAX_LEN = int(os.getenv("RUNTIME_AGENT_MODEL_MAX_LEN", "32768"))
 TEXT_TOKENS = 50
-EMPIRICAL_VISUAL_TOKENS_PER_FRAME = 128
-BASELINE_PIXELS = 524288
 INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "vllm").lower()
 MAX_PIXELS_MIN = 64 * (32 ** 2)
 MAX_PIXELS_MAX = 4096 * (32 ** 2)
@@ -240,6 +241,10 @@ STATE: Dict[str, Any] = {
         "slider_meta": SLIDER_META,
         "build_defaults": BUILD_NVIDIA_DEFAULTS,
         "use_build_defaults": INFERENCE_BACKEND == "nim_local",
+        "context_patch_pixels": CONTEXT_PATCH_PIXELS,
+        "context_safety_reserve": CONTEXT_SAFETY_RESERVE,
+        "context_text_tokens": TEXT_TOKENS,
+        "default_model_max_len": DEFAULT_MODEL_MAX_LEN,
     },
 }
 
@@ -260,6 +265,10 @@ def snapshot() -> Dict[str, Any]:
 def update_state(**items: Any) -> None:
     with STATE_LOCK:
         STATE.update(items)
+
+
+class ClientInputError(RuntimeError):
+    """Raised when the browser submitted settings that should be corrected."""
 
 
 def video_id(path: str) -> str:
@@ -313,6 +322,10 @@ def estimate_output_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, int(round(len(text) / 4)))
+
+
+def estimate_prompt_tokens(system_prompt: str, user_prompt: str) -> int:
+    return estimate_output_tokens(system_prompt) + estimate_output_tokens(user_prompt) + TEXT_TOKENS
 
 
 def json_safe(value: Any, depth: int = 4, max_text: int = 1200) -> Any:
@@ -441,7 +454,7 @@ def estimate_plan(meta: Dict[str, Any], fps: float, max_pixels: int, max_frames:
     frames_passed = requested if max_frames <= 0 else min(requested, max_frames)
     native_pixels = width * height
     effective_pixels = min(native_pixels, max_pixels) if native_pixels else max_pixels
-    visual_tokens = int(frames_passed * effective_pixels / BASELINE_PIXELS * EMPIRICAL_VISUAL_TOKENS_PER_FRAME)
+    visual_tokens = int(frames_passed * effective_pixels / CONTEXT_PATCH_PIXELS)
     return {
         "mode": "image_frames",
         "frames_passed": frames_passed,
@@ -636,6 +649,10 @@ def detect_server() -> Dict[str, Any]:
         "base_url": os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1"),
         "model": os.getenv("MODEL_NAME", ""),
         "backend": os.getenv("INFERENCE_BACKEND", "vllm"),
+        "model_max_len": DEFAULT_MODEL_MAX_LEN,
+        "model_max_len_source": "default",
+        "context_safety_reserve": CONTEXT_SAFETY_RESERVE,
+        "context_patch_pixels": CONTEXT_PATCH_PIXELS,
         **detect_instance_resources(),
     }
     if requests is None:
@@ -646,9 +663,26 @@ def detect_server() -> Dict[str, Any]:
         resp = requests.get(info["base_url"].rstrip("/") + "/models", timeout=5)
         resp.raise_for_status()
         models = resp.json().get("data", [])
-        if models and not info["model"]:
-            info["model"] = models[0].get("id") or models[0].get("root") or ""
-        info["models"] = [m.get("id") or m.get("root") for m in models]
+        if models:
+            configured_model = info["model"]
+            chosen_model = None
+            if configured_model:
+                chosen_model = next((m for m in models if configured_model in {m.get("id"), m.get("root")}), None)
+            chosen_model = chosen_model or models[0]
+            if not info["model"]:
+                info["model"] = chosen_model.get("id") or chosen_model.get("root") or ""
+            info["models"] = [m.get("id") or m.get("root") for m in models]
+            for key in ("max_model_len", "max_context_len", "context_length", "max_sequence_length"):
+                raw_value = chosen_model.get(key)
+                if raw_value is None:
+                    continue
+                try:
+                    info["model_max_len"] = int(float(raw_value))
+                    info["model_max_len_source"] = key
+                    break
+                except Exception:
+                    continue
+            info["model_info"] = json_safe(chosen_model, depth=2, max_text=300)
     except Exception as exc:
         info["error"] = str(exc)
     update_state(server=info)
@@ -741,6 +775,11 @@ def model_prefers_video_data(model: str) -> bool:
     return backend == "nim" or ("cosmos-reason" in lower and "nim" in lower)
 
 
+def model_uses_native_video(model: str, backend: str = "") -> bool:
+    backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
+    return "nim" in backend_lower or model_prefers_file_url(model) or model_prefers_video_data(model)
+
+
 def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta = get_video_meta(video_path)
     plan = estimate_plan(meta, fps, max_pixels, max_frames, model)
@@ -767,6 +806,119 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}})
     plan["frames_passed"] = len(frames)
     return content, plan
+
+
+def selected_videos_for_ids(ids: Iterable[str]) -> List[Dict[str, Any]]:
+    snap = snapshot()
+    videos_by_id = {v["id"]: v for v in snap["videos"]}
+    selected = [videos_by_id[i] for i in ids if i in videos_by_id]
+    return selected or list(videos_by_id.values())
+
+
+def context_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "fps": float(params.get("fps") if params.get("fps") is not None else STATE["defaults"]["fps"]),
+        "max_pixels": int(params.get("max_pixels") if params.get("max_pixels") is not None else STATE["defaults"]["max_pixels"]),
+        "max_tokens": int(params.get("max_tokens") if params.get("max_tokens") is not None else STATE["defaults"]["max_tokens"]),
+        "max_frames": int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"]),
+    }
+
+
+def context_budget_report(
+    videos: List[Dict[str, Any]],
+    params: Dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+) -> Dict[str, Any]:
+    server = detect_server()
+    model = str(server.get("model") or os.getenv("MODEL_NAME") or "")
+    backend = str(server.get("backend") or INFERENCE_BACKEND)
+    report: Dict[str, Any] = {
+        "enabled": False,
+        "reason": "native_video",
+        "model": model,
+        "backend": backend,
+        "model_max_len": int(server.get("model_max_len") or DEFAULT_MODEL_MAX_LEN),
+        "reserve_tokens": CONTEXT_SAFETY_RESERVE,
+        "patch_pixels": CONTEXT_PATCH_PIXELS,
+        "videos": [],
+        "violations": [],
+        "warnings": [],
+        "worst_video": None,
+    }
+    if model_uses_native_video(model, backend):
+        report["message"] = "Native video/NIM mode: context enforcement is delegated to the model service."
+        return report
+
+    p = context_params(params)
+    output_tokens = p["max_tokens"]
+    prompt_tokens = estimate_prompt_tokens(system_prompt, user_prompt)
+    allowed_input_tokens = max(1, report["model_max_len"] - output_tokens - CONTEXT_SAFETY_RESERVE)
+    report.update({
+        "enabled": True,
+        "reason": "oss_image_frames",
+        "prompt_tokens_est": prompt_tokens,
+        "max_output_tokens": output_tokens,
+        "allowed_input_tokens": allowed_input_tokens,
+        "budget_warning_ratio": 0.85,
+    })
+
+    for video in videos:
+        meta = video.get("meta") or get_video_meta(video["filepath"])
+        plan = estimate_plan(meta, p["fps"], p["max_pixels"], p["max_frames"], model)
+        visual_tokens = int(plan.get("visual_tokens_est") or 0)
+        input_tokens = visual_tokens + prompt_tokens
+        ratio = input_tokens / allowed_input_tokens if allowed_input_tokens else 999.0
+        item = {
+            "id": video.get("id"),
+            "name": video.get("name"),
+            "frames_passed": plan.get("frames_passed"),
+            "effective_pixels": plan.get("effective_pixels"),
+            "visual_tokens_est": visual_tokens,
+            "prompt_tokens_est": prompt_tokens,
+            "estimated_input_tokens": input_tokens,
+            "allowed_input_tokens": allowed_input_tokens,
+            "ratio": ratio,
+            "over": input_tokens > allowed_input_tokens,
+        }
+        report["videos"].append(item)
+
+    if report["videos"]:
+        report["worst_video"] = max(report["videos"], key=lambda item: item["estimated_input_tokens"])
+        report["violations"] = [item for item in report["videos"] if item["over"]]
+        report["warnings"] = [item for item in report["videos"] if not item["over"] and item["ratio"] >= report["budget_warning_ratio"]]
+    if report["violations"]:
+        worst = report["worst_video"] or report["violations"][0]
+        report["message"] = (
+            f"Estimated input context is over budget for {len(report['violations'])}/{len(report['videos'])} videos. "
+            f"Worst: {worst['name']} uses about {worst['estimated_input_tokens']:,} input tokens; "
+            f"budget is {allowed_input_tokens:,} after reserving output and safety tokens."
+        )
+    elif report["warnings"]:
+        report["message"] = "Settings are close to the OSS context limit; expect slower prefill and consider lowering frames or pixels."
+    else:
+        report["message"] = "Settings are inside the estimated OSS context budget."
+    return report
+
+
+def validate_context_budget(
+    ids: Iterable[str],
+    params: Dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    allow_over_context: bool = False,
+) -> Dict[str, Any]:
+    report = context_budget_report(selected_videos_for_ids(ids), params, system_prompt, user_prompt)
+    if allow_over_context:
+        if report.get("violations"):
+            log("Context guard override enabled; running over-budget OSS settings")
+        return report
+    if report.get("enabled") and report.get("violations"):
+        raise ClientInputError(
+            f"{report['message']} Use Fit to context, reduce max input frames/fps/max pixels, "
+            "or explicitly enable Allow over-budget OSS run for stress testing."
+        )
+    return report
 
 
 def parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
@@ -1200,6 +1352,9 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .toggle-row { display:flex; align-items:flex-start; gap:8px; color:var(--ink); margin:4px 0 10px; }
 .toggle-row span { display:block; color:var(--muted); font-size:11px; line-height:1.3; margin-top:2px; }
 .hint { color:var(--muted); font-size:12px; margin:6px 0 10px; }
+.budget-ok { color:var(--accent); }
+.budget-warn { color:var(--warn); }
+.budget-bad { color:var(--bad); }
 .guide { display:grid; gap:8px; }
 .step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
 .step strong { color:var(--ink); }
@@ -1265,6 +1420,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
     <label>Max input frames <span class="param-value" id="maxFramesValue"></span><input id="maxFramesSlider" type="range" min="0" max="128" step="1" /><span class="range-note" id="maxFramesHint"></span></label>
   </div>
   <p class="hint" id="paramSummary"></p>
+  <h3>Context guard</h3>
+  <div class="kv" id="contextKv"></div>
+  <p class="hint" id="contextHint"></p>
+  <div class="actions">
+    <button class="secondary" id="fitBudgetBtn">Fit to context</button>
+    <label class="toggle-row"><input id="allowOverContext" type="checkbox" /><span><strong>Allow over-budget OSS run</strong><br/>Only for stress testing. Over-budget OSS image-frame runs may produce model 400 errors; NIM/native-video backends are guarded by the service.</span></label>
+  </div>
   <div class="actions">
     <button id="runBtn">Run selected videos</button>
     <button class="secondary" id="allBtn">Select all</button>
@@ -1283,9 +1445,11 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 <script>
 let state = null;
 let initialized = false;
+let contextBlocked = false;
+const CONTEXT_WARNING_RATIO = 0.85;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
-function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; ['loadBtn','runBtn','smokeBtn','foBtn'].forEach(id=>document.getElementById(id).disabled=true); }
+function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn'].forEach(id=>document.getElementById(id).disabled=true); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
 function el(id){ return document.getElementById(id); }
 function num(id){ return Number(document.getElementById(id).value); }
@@ -1301,30 +1465,43 @@ function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; 
 function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' · '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
 function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
-function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const tokens=Math.round(frames * effectivePx / 524288 * 128); return {frames, tokens, note:''}; }
+function videoPlan(v){ const m=v.meta||{}; if(nativeVideoMode()) return {frames:'server', tokens:'server', note:'server-decoded'}; const p=params(); const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const frames=p.max_frames<=0 ? requested : Math.min(requested, p.max_frames); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const patchPixels=Number(state?.defaults?.context_patch_pixels||196); const tokens=Math.ceil(frames * effectivePx / patchPixels); return {frames, tokens, effectivePx, note:''}; }
 function sliderLabel(id, label, suffix=''){ document.getElementById(id+'Value').textContent = label + suffix; }
 function sliderHint(domId, key){ const m=(state.defaults.slider_meta||{})[key]||{}; const unit=m.unit ? ' '+m.unit : ''; const recommended = key === 'max_frames' && m.recommended === 0 ? 'disabled' : fmtMetaValue(m.recommended); document.getElementById(domId+'Hint').textContent = `min ${fmtMetaValue(m.min)}${unit} · max ${fmtMetaValue(m.max)}${unit} · recommended ${recommended}${unit}. ${m.note||''}`; }
 function renderParamLabels(){ const p=params(); sliderLabel('fps', p.fps, ' fps'); sliderLabel('maxPixels', fmt(p.max_pixels)); sliderLabel('maxTokens', fmt(p.max_tokens)); sliderLabel('temperature', p.temperature.toFixed(2)); sliderLabel('topP', p.top_p.toFixed(2)); sliderLabel('repPenalty', p.repetition_penalty.toFixed(2)); sliderLabel('maxFrames', p.max_frames === 0 ? 'disabled' : fmt(p.max_frames)); sliderHint('fps','fps'); sliderHint('maxPixels','max_pixels'); sliderHint('maxTokens','max_tokens'); sliderHint('temperature','temperature'); sliderHint('topP','top_p'); sliderHint('repPenalty','repetition_penalty'); sliderHint('maxFrames','max_frames'); const d=state.defaults; const buildOn=!!el('buildDefaultsToggle')?.checked; const mode=nativeVideoMode() ? 'native video_url; backend samples frames internally' : `image-frame mode; max input frames cap is ${p.max_frames === 0 ? 'disabled' : p.max_frames}`; const buildText=buildOn ? 'build.nvidia.com defaults are ON: temperature 0.6, top P 0.3, repetition 1.2. ' : ''; document.getElementById('paramSummary').textContent = `${buildText}Recommended: fps ${d.slider_meta.fps.recommended}, max pixels ${fmt(d.slider_meta.max_pixels.recommended)}, max tokens ${d.slider_meta.max_tokens.recommended}, temperature ${d.slider_meta.temperature.recommended}, top P ${d.slider_meta.top_p.recommended}, repetition ${d.slider_meta.repetition_penalty.recommended}, max frames ${d.slider_meta.max_frames.recommended}. Frame policy: ${mode}.`; }
+function modelMaxLen(){ return Number(state?.server?.model_max_len || state?.defaults?.default_model_max_len || 32768); }
+function reserveTokens(){ return Number(state?.server?.context_safety_reserve || state?.defaults?.context_safety_reserve || 1024); }
+function patchPixels(){ return Number(state?.server?.context_patch_pixels || state?.defaults?.context_patch_pixels || 196); }
+function promptTokensEst(){ const text=(el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||''); return Math.max(1, Math.round(text.length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
+function currentSelectionVideos(){ const videos=state?.videos||[]; const ids=new Set(checkedIds()); return ids.size ? videos.filter(v=>ids.has(v.id)) : videos; }
+function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const input=Number(plan.tokens||0)+prompt; const ratio=input/allowed; return {video:v, plan, input, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
+function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=state.running || !r.videos.length; allow.disabled=state.running; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
+function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); const prompt=promptTokensEst(); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
 function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
 function applyBuildDefaults(checked){ const d=state.defaults; const b=d.build_defaults||{}; const m=d.slider_meta||{}; el('temperatureSlider').value = checked ? b.temperature : m.temperature.recommended; el('topPSlider').value = checked ? b.top_p : m.top_p.recommended; el('repPenaltySlider').value = checked ? b.repetition_penalty : m.repetition_penalty.recommended; render(); }
 function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; const presets=d.prompt_presets||[]; document.getElementById('promptPreset').innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}</option>`).join(''); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
 function render(){ if(!state) return; initControls(); renderParamLabels();
- const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
+ const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
  const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`;
  const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['hazard accuracy',ev.evaluated ? `${ev.hazard_correct}/${ev.evaluated} (${percent(ev.hazard_accuracy)})` : 'no expected labels'],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
+ contextBlocked = renderContextGuard();
  document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const ev=r.evaluation||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const expected=ev.has_expected ? `${esc(ev.expected_class_id)} ${esc(ev.expected_label)}` : ''; const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' · ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${expected}</td><td>${pred}</td><td>${esc(match)}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
- document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running; document.getElementById('smokeBtn').disabled = state.running; document.getElementById('foBtn').disabled = state.running; }
+ document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running || contextBlocked; document.getElementById('smokeBtn').disabled = state.running || contextBlocked; document.getElementById('foBtn').disabled = state.running; }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); render(); }
-document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; };
+document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; render(); };
+['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=render);
 ['fpsSlider','maxPixelsSlider','maxTokensSlider','temperatureSlider','topPSlider','repPenaltySlider','maxFramesSlider'].forEach(id=>document.getElementById(id).oninput=render);
 document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults(el('buildDefaultsToggle').checked);
+document.getElementById('allowOverContext').onchange = render;
+document.getElementById('fitBudgetBtn').onclick = fitToContext;
+document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('runBtn').onclick = async()=>{ try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('smokeBtn').onclick = async()=>{ try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('allBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=true); };
 document.getElementById('noneBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=false); };
@@ -1363,20 +1540,25 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/run":
                 if snapshot().get("running"):
                     raise RuntimeError("A batch is already running")
+                ids = payload.get("ids") or []
+                system_prompt = str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM)
+                user_prompt = str(payload.get("user_prompt") or WORKER_SAFETY_USER)
+                params = params_from_payload(payload)
+                context_report = validate_context_budget(ids, params, system_prompt, user_prompt, bool(payload.get("allow_over_context")))
                 thread = threading.Thread(
                     target=run_batch,
                     args=(
-                        payload.get("ids") or [],
+                        ids,
                         int(payload.get("concurrency") or 4),
-                        str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM),
-                        str(payload.get("user_prompt") or WORKER_SAFETY_USER),
-                        params_from_payload(payload),
+                        system_prompt,
+                        user_prompt,
+                        params,
                         str(payload.get("prompt_label") or "Custom prompt"),
                     ),
                     daemon=True,
                 )
                 thread.start()
-                self.send_json({"ok": True})
+                self.send_json({"ok": True, "context_budget": context_report})
             elif self.path == "/api/smoke":
                 if snapshot().get("running"):
                     raise RuntimeError("A batch is already running")
@@ -1385,9 +1567,10 @@ class Handler(BaseHTTPRequestHandler):
                 load_dataset(DEFAULT_DATASET, max_videos)
                 ids = [v["id"] for v in snapshot()["videos"]]
                 params = params_from_payload(payload)
+                context_report = validate_context_budget(ids, params, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, bool(payload.get("allow_over_context")))
                 thread = threading.Thread(target=run_batch, args=(ids, concurrency, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, params, "Worker safety smoke"), daemon=True)
                 thread.start()
-                self.send_json({"ok": True, "dataset": DEFAULT_DATASET, "videos": len(ids)})
+                self.send_json({"ok": True, "dataset": DEFAULT_DATASET, "videos": len(ids), "context_budget": context_report})
             elif self.path == "/api/fiftyone":
                 url = launch_fiftyone(int(payload.get("port") or os.getenv("FIFTYONE_PORT", "5151")))
                 self.send_json({"url": url})
@@ -1395,7 +1578,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except Exception as exc:
             log(f"API error: {exc}")
-            self.send_json({"error": str(exc)}, status=500)
+            self.send_json({"error": str(exc)}, status=400 if isinstance(exc, ClientInputError) else 500)
 
     def read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("content-length", "0") or "0")
