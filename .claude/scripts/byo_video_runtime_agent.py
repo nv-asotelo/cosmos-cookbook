@@ -160,7 +160,7 @@ SLIDER_META = {
         "step": 64,
         "recommended": DEFAULT_MAX_TOKENS,
         "unit": "tokens",
-        "note": "Maximum generated text tokens.",
+        "note": "NIM-local ignores this; server max_model_len governs." if INFERENCE_BACKEND == "nim_local" else "Maximum generated text tokens.",
     },
     "temperature": {
         "min": 0.0,
@@ -842,12 +842,12 @@ def ensure_thumbnail(path: str) -> Optional[Path]:
     return None
 
 
-def estimate_plan(meta: Dict[str, Any], fps: float, max_pixels: int, max_frames: int, model: str = "") -> Dict[str, Any]:
+def estimate_plan(meta: Dict[str, Any], fps: float, max_pixels: int, max_frames: int, model: str = "", backend: str = "") -> Dict[str, Any]:
     width = int(meta.get("width") or 0)
     height = int(meta.get("height") or 0)
     duration_s = float(meta.get("duration_s") or 0)
     source_frames = int(meta.get("total_frames") or 0)
-    if model_prefers_file_url(model) or model_prefers_video_data(model):
+    if model_uses_native_video(model, backend):
         return {
             "mode": "native_video_url",
             "frames_passed": source_frames,
@@ -882,6 +882,7 @@ def attach_meta(video: Dict[str, Any]) -> Dict[str, Any]:
         STATE["defaults"]["max_pixels"],
         STATE["defaults"]["max_frames"],
         os.getenv("MODEL_NAME", ""),
+        os.getenv("INFERENCE_BACKEND", ""),
     )
     thumbnail = ensure_thumbnail(video["filepath"])
     if thumbnail:
@@ -1187,34 +1188,26 @@ def model_prefers_file_url(model: str) -> bool:
     return "qwen" in lower or "nemotron" in lower
 
 
-def model_prefers_video_data(model: str) -> bool:
+def model_prefers_video_data(model: str, backend: str = "") -> bool:
     lower = model.lower()
-    backend = os.getenv("INFERENCE_BACKEND", "").lower()
-    return backend == "nim" or ("cosmos-reason" in lower and "nim" in lower)
+    backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
+    return "nim" in backend_lower or ("cosmos-reason" in lower and "nim" in lower)
 
 
 def model_uses_native_video(model: str, backend: str = "") -> bool:
     backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
-    return "nim" in backend_lower or model_prefers_file_url(model) or model_prefers_video_data(model)
+    return "nim" in backend_lower or model_prefers_file_url(model) or model_prefers_video_data(model, backend)
 
 
-def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int, backend: str = "", force_frames: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta = get_video_meta(video_path)
-    plan = estimate_plan(meta, fps, max_pixels, max_frames, model)
-    if model_prefers_video_data(model):
+    plan = estimate_plan(meta, fps, max_pixels, max_frames, model if not force_frames else "", backend if not force_frames else "")
+    if not force_frames and model_uses_native_video(model, backend):
         mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
         data = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
         return [
-            {"type": "text", "text": prompt},
             {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{data}"}},
-        ], plan
-    if model_prefers_file_url(model):
-        tmp = Path("/tmp") / ("byo_agent_" + Path(video_path).name)
-        if Path(video_path).resolve() != tmp.resolve():
-            shutil.copy2(video_path, tmp)
-        return [
             {"type": "text", "text": prompt},
-            {"type": "video_url", "video_url": {"url": tmp.as_uri()}},
         ], plan
     frames = extract_frames_b64(video_path, fps=fps, max_frames=max_frames, max_pixels=max_pixels)
     if not frames:
@@ -1481,16 +1474,21 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
     server = detect_server()
     base_url = server.get("base_url") or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
     model = server.get("model") or os.getenv("MODEL_NAME") or "cosmos-reason"
+    backend = str(server.get("backend") or os.getenv("INFERENCE_BACKEND", "vllm")).lower()
     headers = {"Content-Type": "application/json"}
     if os.getenv("VLLM_API_KEY"):
         headers["Authorization"] = f"Bearer {os.getenv('VLLM_API_KEY')}"
+    fps = float(params.get("fps") or STATE["defaults"]["fps"])
+    max_pixels = int(params.get("max_pixels") or STATE["defaults"]["max_pixels"])
+    max_frames = int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"])
     content, plan = content_for_video(
         video["filepath"],
         user_prompt,
         model,
-        float(params.get("fps") or STATE["defaults"]["fps"]),
-        int(params.get("max_pixels") or STATE["defaults"]["max_pixels"]),
-        int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"]),
+        fps,
+        max_pixels,
+        max_frames,
+        backend=backend,
     )
     preprocessing_seconds = time.monotonic() - overall_started
     payload = {
@@ -1499,13 +1497,38 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
         ],
-        "max_tokens": int(params.get("max_tokens") or STATE["defaults"]["max_tokens"]),
         "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
         "top_p": float(params.get("top_p") if params.get("top_p") is not None else STATE["defaults"]["top_p"]),
-        "repetition_penalty": float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"]),
         "stream": False,
     }
-    completion = post_chat_completion(base_url, headers, payload)
+    rep_penalty = float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"])
+    if "nim" in backend:
+        payload["nvext"] = {"repetition_penalty": rep_penalty}
+    else:
+        payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
+        payload["repetition_penalty"] = rep_penalty
+    try:
+        completion = post_chat_completion(base_url, headers, payload)
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if "nim" in backend and status_code in (400, 422) and plan.get("mode") == "native_video_url":
+            fallback_content, fallback_plan = content_for_video(
+                video["filepath"],
+                user_prompt,
+                model,
+                fps,
+                max_pixels,
+                0,
+                backend=backend,
+                force_frames=True,
+            )
+            fallback_plan["fallback_from_video_url"] = status_code
+            payload["messages"][1]["content"] = fallback_content
+            completion = post_chat_completion(base_url, headers, payload)
+            plan = fallback_plan
+        else:
+            raise
     text = completion["text"]
     metrics = dict(completion["metrics"])
     metrics["preprocessing_seconds"] = preprocessing_seconds

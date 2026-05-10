@@ -11,8 +11,8 @@ URL is also written to /tmp/gradio_url.txt for agent capture.
 
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
-  NGC_API_KEY       — required for NIM mode (nvapi-... prefix, 8B only; not needed for Cosmos3)
-  MODEL_SIZE        — 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+  NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — gradio | runtime_agent | fiftyone (default: gradio)
   GRADIO_PORT       — port for Gradio (default: 7860)
@@ -106,6 +106,13 @@ _MODEL_CONFIGS = {
         # as a fallback — confirmed working on H200 at 2026-05-05 live run.
         "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
     },
+    # ── Cosmos Reason1 7B NIM (older generation; frame fallback at runtime) ───
+    "CR1-7B": {
+        "variants": [
+            ("CR1-7B BF16", "Cosmos-Reason1-7B", "nvidia/Cosmos-Reason1-7B", "~14 GB"),
+        ],
+        "nim": "nvidia/cosmos-reason1-7b",
+    },
     # ── Cosmos Reason2 ──
     "2B": {
         "variants": [
@@ -165,6 +172,23 @@ _MODEL_CONFIGS = {
         "nim": None,
         "vllm_extra_flags": ["--gpu-memory-utilization", "0.93", "--allowed-local-media-path", "/tmp"],
         "vllm_max_model_len": 16384,
+    },
+    # ── Nemotron-3 Nano Omni and Gemma NIM-only sprint targets ─────────────────
+    "OMNI-30B": {
+        "variants": [
+            ("Nem3-Omni-30B BF16", "Nemotron-3-Nano-Omni-30B-A3B-Reasoning",
+             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", "~60 GB"),
+        ],
+        "nim": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        "nim_max_wait": 2400,
+    },
+    "GM-4-31B": {
+        "variants": [
+            ("Gemma-4-31B IT", "gemma-4-31b-it", "google/gemma-4-31b-it", "~62 GB"),
+        ],
+        "nim": "google/gemma-4-31b-it",
+        "nim_env": {"NIM_MAX_MODEL_LEN": "131072"},
+        "nim_max_wait": 2400,
     },
     # ── Nemotron-Nano-12B-v2-VL (gated — HF_TOKEN with nvidia org required) ──────
     # Requires vLLM nightly or compatible build; PyPI vLLM ≤0.11.0 unsupported.
@@ -244,7 +268,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
