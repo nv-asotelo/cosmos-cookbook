@@ -102,6 +102,14 @@ WORKER_SAFETY_CLASSES = {
     6: {"label": "Closed Panel Cover", "slug": "closed_panel_cover", "hazardous": False},
     7: {"label": "Safe Carrying", "slug": "safe_carrying", "hazardous": False},
 }
+PRISM_CAPABILITY_DOMAINS = {
+    "ER": "Embodied Reasoning",
+    "CS": "Common Sense",
+    "SP": "Spatial Perception",
+    "IP": "Intuitive Physics",
+    "MCQ": "Evaluation",
+}
+TEXT_SCORE_THRESHOLD = float(os.getenv("RUNTIME_AGENT_TEXT_SCORE_THRESHOLD", "0.75"))
 DEFAULT_DATASET = os.getenv("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test")
 RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_agent_results.json"))
 THUMBNAIL_DIR = Path(os.getenv("RUNTIME_AGENT_THUMBNAILS", "/tmp/byo_video_runtime_agent_thumbnails"))
@@ -839,8 +847,151 @@ def class_from_label_text(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def capability_domain_for_task(task: Any) -> str:
+    text = str(task or "").upper()
+    if text.startswith("CS-"):
+        return PRISM_CAPABILITY_DOMAINS["CS"]
+    if text.startswith("ER-"):
+        return PRISM_CAPABILITY_DOMAINS["ER"]
+    if text.startswith("SP-"):
+        return PRISM_CAPABILITY_DOMAINS["SP"]
+    if text.startswith("IP-"):
+        return PRISM_CAPABILITY_DOMAINS["IP"]
+    if text.startswith("MCQ"):
+        return PRISM_CAPABILITY_DOMAINS["MCQ"]
+    return ""
+
+
+def strip_video_placeholder(text: str) -> str:
+    return re.sub(r"^\s*<video>\s*", "", str(text or ""), flags=re.IGNORECASE).strip()
+
+
+def strip_thinking(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"<think>.*?</think>", "", value, flags=re.IGNORECASE | re.DOTALL).strip()
+    if "</think>" in value.lower():
+        value = re.split(r"</think>", value, flags=re.IGNORECASE)[-1].strip()
+    return value
+
+
+def conversation_content(row: Dict[str, Any], role: str) -> str:
+    for message in row.get("conversations") or []:
+        if isinstance(message, dict) and str(message.get("role") or "").lower() == role:
+            return str(message.get("content") or "")
+    return ""
+
+
+def annotation_eval_type(row: Dict[str, Any], expected_answer: str) -> str:
+    sft_type = str(row.get("sft_type") or "").lower()
+    task = str(row.get("task") or "")
+    if sft_type == "mcq" or task.upper().startswith("MCQ"):
+        return "mcq"
+    if "<think>" in expected_answer.lower() or sft_type == "reasoning":
+        return "reasoning_text"
+    return "open_text"
+
+
+def compact_annotation_row(row: Dict[str, Any], taxonomy: Dict[str, Any]) -> Dict[str, Any]:
+    video_path = str(row.get("video") or row.get("filepath") or "")
+    task = str(row.get("task") or "")
+    tax = taxonomy.get(task) if isinstance(taxonomy.get(task), dict) else {}
+    system_prompt = conversation_content(row, "system") or GENERIC_SYSTEM
+    user_prompt = strip_video_placeholder(conversation_content(row, "user"))
+    expected_answer = conversation_content(row, "assistant")
+    expected_final = strip_thinking(expected_answer)
+    compact = {
+        "annotation_id": row.get("id"),
+        "task": task,
+        "capability_domain": capability_domain_for_task(task),
+        "domain": row.get("domain") or tax.get("domain") or (row.get("metadata") or {}).get("domain"),
+        "sft_type": row.get("sft_type") or tax.get("sft_type"),
+        "internal_name": tax.get("internal_name"),
+        "hf_path": video_path,
+        "video": video_path,
+        "fps": row.get("fps"),
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "expected_answer": expected_answer,
+        "expected_final_answer": expected_final,
+        "evaluation_type": annotation_eval_type(row, expected_answer),
+        "metadata": json_safe(row.get("metadata") or {}),
+    }
+    return {key: value for key, value in compact.items() if value not in (None, "")}
+
+
+def resolve_hf_video_path(video_path: str, files: Iterable[str]) -> Optional[str]:
+    file_set = files if isinstance(files, set) else set(files)
+    path = str(video_path or "").lstrip("/")
+    candidates = [
+        path,
+        f"videos/{path}",
+        str(Path("videos") / Path(path).name),
+    ]
+    parts = Path(path).parts
+    if len(parts) >= 2:
+        candidates.append(str(Path("videos") / parts[0] / parts[-1]))
+    for candidate in candidates:
+        if candidate in file_set:
+            return candidate
+    return None
+
+
+def load_hf_annotation_samples(repo_id: str, files: List[str]) -> Dict[str, Any]:
+    if "annotations/train.json" not in files:
+        return {"samples": [], "by_path": {}, "taxonomy": {}}
+    try:
+        from huggingface_hub import hf_hub_download
+
+        taxonomy: Dict[str, Any] = {}
+        if "annotations/task_taxonomy.json" in files:
+            update_load_progress("hf_metadata", "Loading PRISM task taxonomy")
+            taxonomy_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename="annotations/task_taxonomy.json")
+            taxonomy = json.loads(Path(taxonomy_path).read_text(encoding="utf-8"))
+        update_load_progress("hf_metadata", "Loading PRISM annotation samples from annotations/train.json")
+        annotations_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename="annotations/train.json")
+        rows = json.loads(Path(annotations_path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"Could not load HF annotations/train.json: {exc}")
+        return {"samples": [], "by_path": {}, "taxonomy": {}}
+    samples: List[Dict[str, Any]] = []
+    by_path: Dict[str, List[Dict[str, Any]]] = {}
+    total = len(rows) if isinstance(rows, list) else 0
+    file_set = set(files)
+    for index, row in enumerate(rows if isinstance(rows, list) else [], start=1):
+        if not isinstance(row, dict):
+            continue
+        compact = compact_annotation_row(row, taxonomy)
+        video_path = str(compact.get("hf_path") or "")
+        resolved_path = resolve_hf_video_path(video_path, file_set)
+        if not resolved_path or not is_video_path(resolved_path):
+            continue
+        compact["annotation_video"] = video_path
+        compact["hf_path"] = resolved_path
+        samples.append(compact)
+        by_path.setdefault(resolved_path, []).append(compact)
+        by_path.setdefault(video_path, []).append(compact)
+        by_path.setdefault(Path(resolved_path).name, []).append(compact)
+        if index % 10000 == 0:
+            update_load_progress("hf_metadata", f"Indexed {index:,}/{total:,} PRISM annotation rows")
+    log(f"Loaded {len(samples):,} PRISM annotation samples from annotations/train.json")
+    return {"samples": samples, "by_path": by_path, "taxonomy": taxonomy}
+
+
 def expected_from_video(video: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     row = video.get("dataset_row") or {}
+    if row.get("expected_answer"):
+        return {
+            "kind": "dataset_answer",
+            "answer": row.get("expected_answer"),
+            "final_answer": row.get("expected_final_answer") or strip_thinking(str(row.get("expected_answer") or "")),
+            "label": row.get("expected_final_answer") or strip_thinking(str(row.get("expected_answer") or "")),
+            "task": row.get("task"),
+            "domain": row.get("domain"),
+            "capability_domain": row.get("capability_domain"),
+            "sft_type": row.get("sft_type"),
+            "evaluation_type": row.get("evaluation_type") or "open_text",
+            "source": "dataset_row.conversations",
+        }
     candidates = [
         ("dataset_row.label", row.get("label")),
         ("video.label", video.get("label")),
@@ -851,6 +1002,7 @@ def expected_from_video(video: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     for source, value in candidates:
         expected = class_from_label_text(value)
         if expected:
+            expected["kind"] = "worker_safety"
             expected["source"] = source
             return expected
     return None
@@ -1038,16 +1190,35 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     repo_files = list_repo_files(repo_id, repo_type="dataset")
     update_load_progress("hf_metadata", f"Found {len(repo_files)} files; checking sidecar metadata")
     sidecar_rows = load_hf_sidecar_rows(repo_id, repo_files)
+    annotation_bundle = load_hf_annotation_samples(repo_id, repo_files)
+    annotation_samples = annotation_bundle.get("samples") or []
     files = [f for f in repo_files if is_video_path(f)]
     if not files:
         raise RuntimeError(f"No video files found in Hugging Face dataset {repo_id}")
     local_root = Path("/tmp/byo_video_datasets") / repo_id.replace("/", "_")
     local_root.mkdir(parents=True, exist_ok=True)
     videos: List[Dict[str, Any]] = []
-    selected_files = files if max_videos <= 0 else files[:max_videos]
-    total = len(selected_files)
-    update_load_progress("hf_download", f"Selected {total} videos from {len(files)} available video files", done=0, total=total)
-    for index, file_name in enumerate(selected_files, start=1):
+    if annotation_samples:
+        selected_items = annotation_samples if max_videos <= 0 else annotation_samples[:max_videos]
+        update_load_progress(
+            "hf_download",
+            f"Selected {len(selected_items)} annotated PRISM samples from {len(annotation_samples):,} available samples",
+            done=0,
+            total=len(selected_items),
+        )
+    else:
+        selected_items = [{"hf_path": file_name} for file_name in (files if max_videos <= 0 else files[:max_videos])]
+        update_load_progress(
+            "hf_download",
+            f"Selected {len(selected_items)} videos from {len(files)} available video files",
+            done=0,
+            total=len(selected_items),
+        )
+    total = len(selected_items)
+    for index, item in enumerate(selected_items, start=1):
+        file_name = str(item.get("hf_path") or item.get("video") or "")
+        if not file_name:
+            continue
         log(f"Downloading {index}/{total} from Hugging Face: {file_name}")
         update_load_progress(
             "hf_download",
@@ -1057,7 +1228,10 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             current_file=file_name,
         )
         local = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=file_name, local_dir=str(local_root))
-        row = dict(sidecar_rows.get(file_name) or sidecar_rows.get(Path(file_name).name) or {})
+        if annotation_samples:
+            row = dict(item)
+        else:
+            row = dict(sidecar_rows.get(file_name) or sidecar_rows.get(Path(file_name).name) or {})
         row.setdefault("hf_repo", repo_id)
         row.setdefault("hf_path", file_name)
         label = row.get("label")
@@ -1068,8 +1242,9 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             total=total,
             current_file=file_name,
         )
+        sample_key = str(row.get("annotation_id") or file_name)
         video = attach_meta({
-            "id": video_id(local),
+            "id": video_id(f"{local}::{sample_key}"),
             "name": file_name,
             "filepath": local,
             "sample_id": None,
@@ -1104,6 +1279,14 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             sample = fo.Sample(filepath=video["filepath"])
             sample["hf_repo"] = repo_id
             sample["hf_path"] = video["name"]
+            row = video.get("dataset_row") or {}
+            for field in ("annotation_id", "task", "capability_domain", "domain", "sft_type", "evaluation_type"):
+                if row.get(field) is not None:
+                    sample[f"hf_{field}"] = str(row.get(field))
+            if row.get("user_prompt"):
+                sample["hf_user_prompt"] = str(row.get("user_prompt"))
+            if row.get("expected_final_answer"):
+                sample["hf_expected_answer"] = str(row.get("expected_final_answer"))
             if video.get("label"):
                 sample["hf_label"] = str(video["label"])
             expected = video.get("expected") or {}
@@ -1111,6 +1294,8 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
                 sample["expected_class_id"] = expected.get("class_id")
                 sample["expected_label"] = expected.get("label")
                 sample["expected_is_hazardous"] = expected.get("hazardous")
+                if expected.get("final_answer"):
+                    sample["expected_answer"] = expected.get("final_answer")
             dataset.add_sample(sample)
             video["sample_id"] = str(sample.id)
             video["source"] = "fiftyone"
@@ -1380,6 +1565,15 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_
     return content, plan
 
 
+def prompts_for_video(video: Dict[str, Any], system_prompt: str, user_prompt: str) -> Tuple[str, str, str]:
+    row = video.get("dataset_row") or {}
+    row_system = str(row.get("system_prompt") or "").strip()
+    row_user = str(row.get("user_prompt") or "").strip()
+    if row_system and row_user:
+        return row_system, row_user, "dataset_row"
+    return system_prompt, user_prompt, "runtime_form"
+
+
 def selected_videos_for_ids(ids: Iterable[str]) -> List[Dict[str, Any]]:
     snap = snapshot()
     videos_by_id = {v["id"]: v for v in snap["videos"]}
@@ -1424,12 +1618,11 @@ def context_budget_report(
 
     p = context_params(params)
     output_tokens = p["max_tokens"]
-    prompt_tokens = estimate_prompt_tokens(system_prompt, user_prompt)
     allowed_input_tokens = max(1, report["model_max_len"] - output_tokens - CONTEXT_SAFETY_RESERVE)
     report.update({
         "enabled": True,
         "reason": "oss_image_frames",
-        "prompt_tokens_est": prompt_tokens,
+        "prompt_tokens_est": estimate_prompt_tokens(system_prompt, user_prompt),
         "max_output_tokens": output_tokens,
         "allowed_input_tokens": allowed_input_tokens,
         "budget_warning_ratio": 0.85,
@@ -1438,6 +1631,8 @@ def context_budget_report(
     for video in videos:
         meta = video.get("meta") or get_video_meta(video["filepath"])
         plan = estimate_plan(meta, p["fps"], p["max_pixels"], p["max_frames"], model)
+        effective_system, effective_user, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
+        prompt_tokens = estimate_prompt_tokens(effective_system, effective_user)
         visual_tokens = int(plan.get("visual_tokens_est") or 0)
         input_tokens = visual_tokens + prompt_tokens
         ratio = input_tokens / allowed_input_tokens if allowed_input_tokens else 999.0
@@ -1448,6 +1643,7 @@ def context_budget_report(
             "effective_pixels": plan.get("effective_pixels"),
             "visual_tokens_est": visual_tokens,
             "prompt_tokens_est": prompt_tokens,
+            "prompt_source": prompt_source,
             "estimated_input_tokens": input_tokens,
             "allowed_input_tokens": allowed_input_tokens,
             "ratio": ratio,
@@ -1598,10 +1794,81 @@ def post_chat_completion(base_url: str, headers: Dict[str, str], payload: Dict[s
     }
 
 
+def normalize_eval_text(text: Any) -> str:
+    value = strip_thinking(str(text or "")).lower()
+    value = re.sub(r"```.*?```", " ", value, flags=re.DOTALL)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def token_f1(expected: str, predicted: str) -> float:
+    expected_tokens = normalize_eval_text(expected).split()
+    predicted_tokens = normalize_eval_text(predicted).split()
+    if not expected_tokens or not predicted_tokens:
+        return 0.0
+    expected_counts = Counter(expected_tokens)
+    predicted_counts = Counter(predicted_tokens)
+    overlap = sum((expected_counts & predicted_counts).values())
+    if not overlap:
+        return 0.0
+    precision = overlap / len(predicted_tokens)
+    recall = overlap / len(expected_tokens)
+    return (2 * precision * recall) / (precision + recall) if precision + recall else 0.0
+
+
+def extract_mcq_choice(text: str) -> Optional[str]:
+    value = strip_thinking(text).strip()
+    match = re.search(r"\b([ABCD])\b", value, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def evaluate_text_result(expected: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    expected_answer = str(expected.get("final_answer") or expected.get("answer") or "")
+    predicted_answer = strip_thinking(result.get("response") or "")
+    eval_type = str(expected.get("evaluation_type") or "open_text")
+    expected_norm = normalize_eval_text(expected_answer)
+    predicted_norm = normalize_eval_text(predicted_answer)
+    exact_match = bool(expected_norm and predicted_norm and expected_norm == predicted_norm)
+    contains_match = bool(expected_norm and predicted_norm and (expected_norm in predicted_norm or predicted_norm in expected_norm))
+    if eval_type == "mcq":
+        expected_choice = extract_mcq_choice(expected_answer)
+        predicted_choice = extract_mcq_choice(predicted_answer)
+        is_correct = bool(expected_choice and predicted_choice and expected_choice == predicted_choice)
+        score = 1.0 if is_correct else 0.0
+        metric = "mcq_accuracy"
+    else:
+        score = token_f1(expected_answer, predicted_answer)
+        is_correct = bool(exact_match or contains_match or score >= TEXT_SCORE_THRESHOLD)
+        metric = "answer_token_f1"
+    return {
+        "has_expected": True,
+        "kind": "dataset_answer",
+        "metric": metric,
+        "evaluation_type": eval_type,
+        "task": expected.get("task"),
+        "domain": expected.get("domain"),
+        "capability_domain": expected.get("capability_domain"),
+        "sft_type": expected.get("sft_type"),
+        "expected_answer": expected_answer,
+        "predicted_answer": predicted_answer,
+        "expected_label": expected_answer,
+        "predicted_label": predicted_answer,
+        "answer_score": score,
+        "score_threshold": TEXT_SCORE_THRESHOLD if metric == "answer_token_f1" else 1.0,
+        "exact_match": exact_match,
+        "contains_match": contains_match,
+        "expected_choice": extract_mcq_choice(expected_answer),
+        "predicted_choice": extract_mcq_choice(predicted_answer),
+        "is_correct": is_correct,
+    }
+
+
 def evaluate_result(video: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
     expected = video.get("expected") or {}
     if not expected:
         return {"has_expected": False}
+    if expected.get("kind") == "dataset_answer":
+        return evaluate_text_result(expected, result)
     parsed = result.get("json") or {}
     pred_id = parsed.get("prediction_class_id")
     try:
@@ -1615,6 +1882,8 @@ def evaluate_result(video: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, 
     hazard_match = pred_hazard == expected.get("hazardous") if pred_hazard is not None else False
     return {
         "has_expected": True,
+        "kind": "worker_safety",
+        "metric": "class_label_accuracy",
         "expected_class_id": expected.get("class_id"),
         "expected_label": expected.get("label"),
         "expected_is_hazardous": expected.get("hazardous"),
@@ -1642,9 +1911,10 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
     fps = float(params.get("fps") or STATE["defaults"]["fps"])
     max_pixels = int(params.get("max_pixels") or STATE["defaults"]["max_pixels"])
     max_frames = int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"])
+    effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
     content, plan = content_for_video(
         video["filepath"],
-        user_prompt,
+        effective_user_prompt,
         model,
         fps,
         max_pixels,
@@ -1655,7 +1925,7 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": effective_system_prompt},
             {"role": "user", "content": content},
         ],
         "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
@@ -1676,7 +1946,7 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         if "nim" in backend and status_code in (400, 422) and plan.get("mode") == "native_video_url":
             fallback_content, fallback_plan = content_for_video(
                 video["filepath"],
-                user_prompt,
+                effective_user_prompt,
                 model,
                 fps,
                 max_pixels,
@@ -1706,6 +1976,9 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         "usage": completion.get("usage") or {},
         "metrics": metrics,
         "expected": video.get("expected"),
+        "prompt_source": prompt_source,
+        "system_prompt_used": effective_system_prompt,
+        "user_prompt_used": effective_user_prompt,
         "error": None,
     }
     result["evaluation"] = evaluate_result(video, result)
@@ -1762,15 +2035,39 @@ def batch_summary(
     evaluations = [r.get("evaluation") or {} for r in results if (r.get("evaluation") or {}).get("has_expected")]
     correct = sum(1 for e in evaluations if e.get("is_correct"))
     hazard_correct = sum(1 for e in evaluations if e.get("hazard_match"))
+    answer_scores = [float(e.get("answer_score")) for e in evaluations if e.get("answer_score") is not None]
     by_class: Dict[str, Dict[str, Any]] = {}
-    for evaluation in evaluations:
-        class_id = str(evaluation.get("expected_class_id"))
-        item = by_class.setdefault(class_id, {"total": 0, "correct": 0, "label": evaluation.get("expected_label")})
+    by_task: Dict[str, Dict[str, Any]] = {}
+    by_domain: Dict[str, Dict[str, Any]] = {}
+    by_capability_domain: Dict[str, Dict[str, Any]] = {}
+
+    def add_group(grouped: Dict[str, Dict[str, Any]], key: str, evaluation: Dict[str, Any]) -> None:
+        if not key:
+            return
+        item = grouped.setdefault(key, {"total": 0, "correct": 0, "score_sum": 0.0, "score_count": 0})
         item["total"] += 1
         if evaluation.get("is_correct"):
             item["correct"] += 1
+        if evaluation.get("answer_score") is not None:
+            item["score_sum"] += float(evaluation.get("answer_score") or 0.0)
+            item["score_count"] += 1
+
+    for evaluation in evaluations:
+        if evaluation.get("kind") == "worker_safety":
+            class_id = str(evaluation.get("expected_class_id"))
+            item = by_class.setdefault(class_id, {"total": 0, "correct": 0, "label": evaluation.get("expected_label")})
+            item["total"] += 1
+            if evaluation.get("is_correct"):
+                item["correct"] += 1
+        add_group(by_task, str(evaluation.get("task") or ""), evaluation)
+        add_group(by_domain, str(evaluation.get("domain") or ""), evaluation)
+        add_group(by_capability_domain, str(evaluation.get("capability_domain") or ""), evaluation)
     for item in by_class.values():
         item["accuracy"] = item["correct"] / item["total"] if item["total"] else None
+    for grouped in (by_task, by_domain, by_capability_domain):
+        for item in grouped.values():
+            item["accuracy"] = item["correct"] / item["total"] if item["total"] else None
+            item["average_score"] = item["score_sum"] / item["score_count"] if item["score_count"] else None
     ok = max(0, len(results) - errors)
     return {
         **(run_context or {}),
@@ -1790,9 +2087,13 @@ def batch_summary(
             "evaluated": len(evaluations),
             "correct": correct,
             "accuracy": correct / len(evaluations) if evaluations else None,
+            "answer_score_average": sum(answer_scores) / len(answer_scores) if answer_scores else None,
             "hazard_correct": hazard_correct,
             "hazard_accuracy": hazard_correct / len(evaluations) if evaluations else None,
             "by_expected_class": by_class,
+            "by_task": by_task,
+            "by_domain": by_domain,
+            "by_capability_domain": by_capability_domain,
         },
     }
 
@@ -1840,13 +2141,27 @@ def result_rows(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
         metrics = result.get("metrics") or {}
         hazard = parsed.get("hazard_detection") or {}
         plan = result.get("plan") or video.get("plan") or {}
+        row = video.get("dataset_row") or {}
+        expected_text = evaluation.get("expected_answer") or evaluation.get("expected_label")
+        prediction_text = evaluation.get("predicted_answer") or evaluation.get("predicted_label") or parsed.get("prediction_label")
         rows.append({
             "video": result.get("name") or video.get("name") or "",
+            "task": evaluation.get("task") or row.get("task") or "",
+            "domain": evaluation.get("domain") or row.get("domain") or "",
+            "capability_domain": evaluation.get("capability_domain") or row.get("capability_domain") or "",
+            "sft_type": evaluation.get("sft_type") or row.get("sft_type") or "",
+            "evaluation_type": evaluation.get("evaluation_type") or row.get("evaluation_type") or "",
+            "metric": evaluation.get("metric") or "",
+            "answer_score": evaluation.get("answer_score"),
+            "expected_answer": evaluation.get("expected_answer") or "",
+            "predicted_answer": evaluation.get("predicted_answer") or result.get("response") or "",
+            "prompt_source": result.get("prompt_source") or "",
+            "user_prompt": result.get("user_prompt_used") or row.get("user_prompt") or "",
             "expected_class_id": evaluation.get("expected_class_id"),
-            "expected_label": evaluation.get("expected_label"),
+            "expected_label": expected_text,
             "expected_hazard": evaluation.get("expected_is_hazardous"),
             "prediction_class_id": parsed.get("prediction_class_id"),
-            "prediction_label": parsed.get("prediction_label"),
+            "prediction_label": prediction_text,
             "prediction_hazard": hazard.get("is_hazardous"),
             "match": "correct" if evaluation.get("is_correct") else ("miss" if evaluation.get("has_expected") else ""),
             "hazard_match": evaluation.get("hazard_match"),
@@ -1869,10 +2184,22 @@ def result_rows(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
         meta = video.get("meta") or {}
         expected = video.get("expected") or {}
         plan = video.get("plan") or {}
+        row = video.get("dataset_row") or {}
         rows.append({
             "video": video.get("name") or "",
+            "task": expected.get("task") or row.get("task") or "",
+            "domain": expected.get("domain") or row.get("domain") or "",
+            "capability_domain": expected.get("capability_domain") or row.get("capability_domain") or "",
+            "sft_type": expected.get("sft_type") or row.get("sft_type") or "",
+            "evaluation_type": expected.get("evaluation_type") or row.get("evaluation_type") or "",
+            "metric": "",
+            "answer_score": None,
+            "expected_answer": expected.get("final_answer") or expected.get("label") or "",
+            "predicted_answer": "",
+            "prompt_source": "dataset_row" if row.get("user_prompt") else "",
+            "user_prompt": row.get("user_prompt") or "",
             "expected_class_id": expected.get("class_id"),
-            "expected_label": expected.get("label"),
+            "expected_label": expected.get("final_answer") or expected.get("label"),
             "expected_hazard": expected.get("hazardous"),
             "prediction_class_id": "",
             "prediction_label": "",
@@ -1898,7 +2225,7 @@ def result_rows(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
 def class_breakdown(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for row in rows:
-        label = row.get("expected_label") or row.get("hf_label") or "Unknown"
+        label = row.get("task") or row.get("expected_label") or row.get("hf_label") or "Unknown"
         item = grouped.setdefault(label, {"label": label, "total": 0, "correct": 0, "errors": 0, "predictions": Counter()})
         item["total"] += 1
         if row.get("match") == "correct":
@@ -1943,6 +2270,7 @@ def export_summary(snap: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str
         "correct": correct,
         "errors": int(bm.get("errors") if bm.get("errors") is not None else errors),
         "accuracy": accuracy,
+        "answer_score_average": evaluation.get("answer_score_average"),
         "hazard_accuracy": evaluation.get("hazard_accuracy"),
         "batch_e2e_seconds": bm.get("batch_wall_seconds"),
         "video_requests_per_second": bm.get("video_requests_per_second"),
@@ -1993,6 +2321,17 @@ def write_json_export(payload: Dict[str, Any], path: Path) -> None:
 def csv_headers() -> List[str]:
     return [
         "video",
+        "task",
+        "capability_domain",
+        "domain",
+        "sft_type",
+        "evaluation_type",
+        "metric",
+        "answer_score",
+        "prompt_source",
+        "user_prompt",
+        "expected_answer",
+        "predicted_answer",
         "expected_class_id",
         "expected_label",
         "prediction_class_id",
@@ -2115,7 +2454,7 @@ def write_html_report(payload: Dict[str, Any], path: Path) -> None:
         parts.append("</section>")
     if "evaluation" in sections:
         parts.append("<section><h2>Evaluation</h2>")
-        parts.append(html_table(["Metric", "Value"], [["Correct", summary["correct"]], ["Accuracy", percent_value(summary.get("accuracy"))], ["Hazard accuracy", percent_value(summary.get("hazard_accuracy"))], ["Evaluated rows", len([row for row in rows if row.get("match")])]]))
+        parts.append(html_table(["Metric", "Value"], [["Correct", summary["correct"]], ["Accuracy", percent_value(summary.get("accuracy"))], ["Average answer score", percent_value(summary.get("answer_score_average"))], ["Hazard accuracy", percent_value(summary.get("hazard_accuracy"))], ["Evaluated rows", len([row for row in rows if row.get("match")])]]))
         parts.append("</section>")
     if "class_breakdown" in sections:
         parts.append("<section><h2>Per-Class Breakdown</h2>")
@@ -2127,7 +2466,7 @@ def write_html_report(payload: Dict[str, Any], path: Path) -> None:
         parts.append("</section>")
     if "result_table" in sections:
         parts.append("<section><h2>Per-Video Results</h2>")
-        parts.append(html_table(["Video", "Expected", "Prediction", "Match", "Hazard match", "E2E", "Description / error"], [[row["video"], row["expected_label"], row["prediction_label"], row["match"], row["hazard_match"], seconds_value(row.get("e2e_seconds")), row["error"] or row["description"]] for row in rows[:200]]))
+        parts.append(html_table(["Video", "Task", "Domain", "Expected", "Model output", "Metric", "Score", "Match", "E2E", "Description / error"], [[row["video"], row.get("task"), row.get("capability_domain") or row.get("domain"), row["expected_label"], row["prediction_label"], row.get("metric"), percent_value(row.get("answer_score")) if row.get("answer_score") is not None else "", row["match"], seconds_value(row.get("e2e_seconds")), row["error"] or row["description"]] for row in rows[:200]]))
         parts.append("</section>")
     if "samples" in sections:
         sample_rows = (misses[:5] or rows[:5])
@@ -2215,7 +2554,8 @@ def write_pptx_export(payload: Dict[str, Any], path: Path) -> None:
         evaluated = len([row for row in rows if row.get("match")])
         lines = [
             f"Correct: {summary['correct']} / {evaluated or 'not evaluated'}",
-            f"Class accuracy: {percent_value(summary.get('accuracy')) or 'n/a'}",
+            f"Accuracy: {percent_value(summary.get('accuracy')) or 'n/a'}",
+            f"Average answer score: {percent_value(summary.get('answer_score_average')) or 'n/a'}",
             f"Hazard accuracy: {percent_value(summary.get('hazard_accuracy')) or 'n/a'}",
             f"Runtime errors: {summary['errors']}",
         ]
@@ -2240,7 +2580,7 @@ def write_pptx_export(payload: Dict[str, Any], path: Path) -> None:
         ])
     if "result_table" in sections:
         lines = [
-            f"{row['video']}: expected {row['expected_label'] or 'n/a'}; predicted {row['prediction_label'] or 'unrun'}; E2E {seconds_value(row.get('e2e_seconds')) or 'n/a'}"
+            f"{row['video']} [{row.get('task') or 'task n/a'}]: score {percent_value(row.get('answer_score')) or row.get('match') or 'n/a'}; E2E {seconds_value(row.get('e2e_seconds')) or 'n/a'}"
             for row in rows[:9]
         ]
         slides.append([
@@ -2335,8 +2675,12 @@ def compact_run_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         parsed = result.get("json") or {}
         compact.append({
             "name": result.get("name"),
-            "expected_label": evaluation.get("expected_label"),
-            "predicted_label": parsed.get("prediction_label"),
+            "task": evaluation.get("task"),
+            "domain": evaluation.get("capability_domain") or evaluation.get("domain"),
+            "metric": evaluation.get("metric"),
+            "answer_score": evaluation.get("answer_score"),
+            "expected_label": evaluation.get("expected_answer") or evaluation.get("expected_label"),
+            "predicted_label": evaluation.get("predicted_answer") or parsed.get("prediction_label"),
             "predicted_class_id": parsed.get("prediction_class_id"),
             "is_correct": evaluation.get("is_correct"),
             "error": result.get("error"),
@@ -2361,6 +2705,7 @@ def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str
     try:
         return run_one(video, system_prompt, user_prompt, params)
     except Exception as exc:
+        effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
         result = {
             "id": video["id"],
             "name": video["name"],
@@ -2371,6 +2716,9 @@ def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str
             "params": params,
             "metrics": {"e2e_seconds": time.monotonic() - started},
             "expected": video.get("expected"),
+            "prompt_source": prompt_source,
+            "system_prompt_used": effective_system_prompt,
+            "user_prompt_used": effective_user_prompt,
             "error": str(exc),
         }
         result["evaluation"] = evaluate_result(video, result)
@@ -2665,7 +3013,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <h3>Videos</h3>
   <div class="results"><table><thead><tr><th></th><th>Preview</th><th>Name</th><th>Expected</th><th>HF row</th><th>Resolution</th><th>Duration</th><th>Source frames</th><th>Frames to VLM</th><th>Est visual tokens</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
   <h3>Results</h3>
-  <div class="results"><table><thead><tr><th>Video</th><th>Expected</th><th>Prediction</th><th>Match</th><th>Hazard</th><th>TTFT</th><th>Output tok/s</th><th>E2E</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
+  <div class="results"><table><thead><tr><th>Video</th><th>Task</th><th>Domain</th><th>Expected</th><th>Model output</th><th>Metric</th><th>Score / match</th><th>TTFT</th><th>Output tok/s</th><th>E2E</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
   <h3>Batch history</h3>
   <div class="results"><table><thead><tr><th>Dataset</th><th>Prompt</th><th>Status</th><th>Videos</th><th>Errors</th><th>Accuracy</th><th>Batch E2E</th><th>Video req/s</th><th>Median video E2E</th><th>Prompt hash</th></tr></thead><tbody id="batchRows"></tbody></table></div>
   <h3>Runtime log</h3>
@@ -2707,8 +3055,8 @@ function serverNow(){ const received=Number(state?._receivedAt||Date.now()/1000)
 function span(v){ if(v === null || v === undefined || Number.isNaN(Number(v))) return ''; const s=Math.max(0, Math.round(Number(v))); if(s < 60) return `${s}s`; const m=Math.floor(s/60); const r=s%60; if(m < 60) return `${m}m ${r}s`; const h=Math.floor(m/60); return `${h}h ${m%60}m`; }
 function statText(s){ if(!s || !s.count) return 'no samples yet'; return `min ${sec(s.min)} | max ${sec(s.max)} | median ${sec(s.median)} | avg ${sec(s.average)}`; }
 function percent(v){ return v === null || v === undefined || Number.isNaN(Number(v)) ? '' : `${(Number(v)*100).toFixed(1)}%`; }
-function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; }
-function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
+function expectedText(x){ if(!x) return ''; if(x.kind==='dataset_answer') return esc(clipText(x.final_answer||x.label||'',120)); return `${esc(x.class_id ?? '')} ${esc(x.label ?? '')}`; }
+function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.task) parts.push(`task=${row.task}`); if(row.capability_domain) parts.push(`domain=${row.capability_domain}`); else if(row.domain) parts.push(`domain=${row.domain}`); if(row.sft_type) parts.push(`format=${row.sft_type}`); if(row.evaluation_type) parts.push(`metric=${row.evaluation_type}`); if(row.user_prompt) parts.push(`prompt=${clipText(row.user_prompt,80)}`); if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
 function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
 function autosizeTextarea(textarea){ if(!textarea) return; textarea.style.height='auto'; const styles=getComputedStyle(textarea); const min=parseFloat(styles.minHeight)||0; const max=parseFloat(styles.maxHeight)||window.innerHeight*.42; const next=Math.max(min, Math.min(textarea.scrollHeight + 2, max)); textarea.style.height=next+'px'; textarea.style.overflowY=textarea.scrollHeight > max ? 'auto' : 'hidden'; }
@@ -2726,10 +3074,11 @@ function modelMaxLen(){ return Number(state?.server?.model_max_len || state?.def
 function reserveTokens(){ return Number(state?.server?.context_safety_reserve || state?.defaults?.context_safety_reserve || 1024); }
 function patchPixels(){ return Number(state?.server?.context_patch_pixels || state?.defaults?.context_patch_pixels || 196); }
 function promptTokensEst(){ const text=(el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||''); return Math.max(1, Math.round(text.length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
+function promptTokensForVideo(v){ const row=v?.dataset_row||{}; const text=(row.system_prompt && row.user_prompt) ? `${row.system_prompt}\\n${row.user_prompt}` : ((el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||'')); return Math.max(1, Math.round(String(text).length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
 function currentSelectionVideos(){ const videos=state?.videos||[]; const ids=new Set(checkedIds()); return ids.size ? videos.filter(v=>ids.has(v.id)) : videos; }
-function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const input=Number(plan.tokens||0)+prompt; const ratio=input/allowed; return {video:v, plan, input, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
+function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const rowPrompt=promptTokensForVideo(v); const input=Number(plan.tokens||0)+rowPrompt; const ratio=input/allowed; return {video:v, plan, input, prompt:rowPrompt, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
 function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const busy=!!(state.running||state.loading_dataset); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=busy || !r.videos.length; allow.disabled=busy; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
-function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); const prompt=promptTokensEst(); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
+function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const prompt=promptTokensForVideo(v); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
 function latestRuntimeError(){ const p=state?.progress||{}; if(p.last_error) return String(p.last_error); const results=[...(state?.results||[])].reverse(); const failed=results.find(r=>r && r.error); return failed ? `${failed.name||'video'}: ${failed.error}` : ''; }
 function clipText(text, max=260){ const s=String(text||''); return s.length > max ? s.slice(0, max-1)+'...' : s; }
 function renderRuntimeStatus(){
@@ -2762,10 +3111,10 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
  const prog = state.progress || {done:0,total:0,errors:0}; const active=!!(state.running||state.loading_dataset); const pct = prog.total ? Math.round(100*prog.done/prog.total) : (active ? 5 : 0); document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.loading_dataset ? `${prog.last_event||'Loading dataset'}${prog.total ? ` (${prog.done}/${prog.total})` : ''}` : state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
- const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['hazard accuracy',ev.evaluated ? `${ev.hazard_correct}/${ev.evaluated} (${percent(ev.hazard_accuracy)})` : 'no expected labels'],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
+ const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const domainText=ev.by_capability_domain ? Object.entries(ev.by_capability_domain).map(([k,v])=>`${k}: ${v.correct}/${v.total}${v.average_score!==null&&v.average_score!==undefined ? ' score '+percent(v.average_score) : ''}`).join(' | ') : ''; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['avg answer score',ev.answer_score_average!==null&&ev.answer_score_average!==undefined ? percent(ev.answer_score_average) : 'n/a'],['by capability',domainText],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
  contextBlocked = renderContextGuard();
- document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const ev=r.evaluation||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const expected=ev.has_expected ? `${esc(ev.expected_class_id)} ${esc(ev.expected_label)}` : ''; const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${expected}</td><td>${pred}</td><td>${esc(match)}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage})}</td></tr>`; }).join('');
+ document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const ev=r.evaluation||{}; const expected=ev.has_expected ? clipText(ev.expected_answer||ev.expected_label||'',180) : ''; const pred=clipText(ev.predicted_answer||ev.predicted_label||(j.prediction_label ? `${j.prediction_class_id} ${j.prediction_label}` : r.response||''),180); const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const score=ev.answer_score!==null&&ev.answer_score!==undefined ? percent(ev.answer_score) : match; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||clipText(r.response||'',260))); const domain=ev.capability_domain||ev.domain||''; return `<tr><td>${esc(r.name)}</td><td>${esc(ev.task||'')}</td><td>${esc(domain)}<br>${esc(ev.sft_type||'')}</td><td>${esc(expected)}</td><td>${esc(pred)}</td><td>${esc(ev.metric||'')}</td><td>${esc(score)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage, prompt_source:r.prompt_source, user_prompt:r.user_prompt_used})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
  const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = state.running; requestAnimationFrame(autosizePrompts); }
