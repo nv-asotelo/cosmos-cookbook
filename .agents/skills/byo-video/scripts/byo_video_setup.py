@@ -6,8 +6,9 @@ Canonical source: .agents/skills/byo-video/scripts/byo_video_setup.py
 
 Runs on the GPU instance. Prints live progress with ETAs.
 MODEL_SIZE-driven: downloads all variants for the selected model size.
-At the end, prints a clickable OSC 8 hyperlink to the Gradio URL.
-URL is also written to /tmp/gradio_url.txt for agent capture.
+At the end, prints a clickable OSC 8 hyperlink to the Gradio URL and any
+selected companion frontend URL. Gradio is always written to
+/tmp/gradio_url.txt for agent capture.
 
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
@@ -853,7 +854,7 @@ if INFERENCE_BACKEND == "vllm":
 # ── Step 10: Launch frontend ──────────────────────────────────────────────────
 header(f"Step 10 — Launch {FRONTEND} frontend", eta="~5-10s")
 
-if FRONTEND not in ("runtime_agent", "fiftyone") and not os.path.exists(GRADIO_APP):
+if not os.path.exists(GRADIO_APP):
     print(f"  ✗  {GRADIO_APP} not found — deploy gradio_cr2_byo.py first"); sys.exit(1)
 
 if os.path.exists(URL_FILE):
@@ -884,180 +885,6 @@ launch_env = {
     "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local") else "0",
 }
 
-if FRONTEND in ("runtime_agent", "fiftyone"):
-    if not os.path.exists(RUNTIME_AGENT_APP):
-        print(f"  ✗  {RUNTIME_AGENT_APP} not found — deploy byo_video_runtime_agent.py first"); sys.exit(1)
-
-    runtime_env = {
-        **launch_env,
-        "BYO_VIDEO_FRONTEND": FRONTEND,
-        "RUNTIME_AGENT_PORT": str(RUNTIME_AGENT_PORT),
-        "RUNTIME_AGENT_DATASET": os.environ.get("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test"),
-        "RUNTIME_AGENT_CONCURRENCY": os.environ.get("RUNTIME_AGENT_CONCURRENCY", "4"),
-        "RUNTIME_AGENT_MAX_VIDEOS": os.environ.get("RUNTIME_AGENT_MAX_VIDEOS", "20"),
-        "FIFTYONE_PORT": os.environ.get("FIFTYONE_PORT", "5151"),
-    }
-
-    run(f"Starting Cosmos BYO Video runtime agent on port {RUNTIME_AGENT_PORT}")
-    proc = subprocess.Popen(
-        ["uv", "run", "python", "-u", RUNTIME_AGENT_APP, "serve",
-         "--host", "0.0.0.0", "--port", str(RUNTIME_AGENT_PORT)],
-        cwd=REASON2_DIR,
-        env=runtime_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    def _detect_runtime_host_ip():
-        env_ip = os.environ.get("BYO_VIDEO_LOCAL_HOST")
-        if env_ip:
-            return env_ip
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(2)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            if ip and not ip.startswith("127."):
-                return ip
-        except Exception:
-            pass
-        try:
-            out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
-            for tok in out.stdout.split():
-                if "." in tok and not tok.startswith("127."):
-                    return tok
-        except Exception:
-            pass
-        return None
-
-    url = None
-    url_pattern = re.compile(r'URL:\s+(https?://[^\s]+)')
-    with open(RUNTIME_AGENT_LOG_FILE, "w") as log:
-        for line in proc.stdout:
-            log.write(line)
-            log.flush()
-            stripped = line.rstrip()
-            if stripped:
-                print(f"     {DIM}{stripped}{RESET}", flush=True)
-            match = url_pattern.search(stripped)
-            if match:
-                url = match.group(1).rstrip("/")
-                break
-            if proc.poll() is not None:
-                break
-
-    if not url:
-        print(f"  ✗  Runtime agent printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
-        proc.terminate()
-        sys.exit(1)
-
-    host_ip = _detect_runtime_host_ip()
-    if host_ip:
-        url = url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
-
-    _probe_ok = False
-    for _probe_attempt in range(10):
-        try:
-            urllib.request.urlopen(f"http://localhost:{RUNTIME_AGENT_PORT}/api/state", timeout=3)
-            _probe_ok = True
-            break
-        except Exception:
-            time.sleep(2)
-
-    if not _probe_ok:
-        print("  ✗  Runtime agent launched but /api/state probe failed after 20s.")
-        print(f"     Check {RUNTIME_AGENT_LOG_FILE} for errors.")
-        sys.exit(1)
-
-    for _path in (URL_FILE, "/tmp/byo_video_runtime_agent_url.txt", "/tmp/byo_video_runtime_agent_live.flag"):
-        with open(_path, "w") as f:
-            f.write(url + "\n")
-
-    ok("Runtime agent frontend is live")
-    STEPS_DONE.append(9)
-    print_dashboard()
-
-    print(flush=True)
-    print(f"{BOLD}{'─'*62}{RESET}", flush=True)
-    print(f"{BOLD}  Cosmos BYO Video Runtime Agent — Ready{RESET}", flush=True)
-    print(f"{'─'*62}", flush=True)
-    print(f"  {BOLD}URL:{RESET}  {hyperlink(url)}", flush=True)
-    print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
-    print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)
-    print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
-    if os.path.exists("/tmp/byo_video_runtime_guide.py"):
-        print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
-    print(f"{'─'*62}", flush=True)
-    print(flush=True)
-
-    import threading as _thr
-
-    def _drain_runtime_stdout(fh, path):
-        try:
-            with open(path, "a") as f:
-                for line in fh:
-                    f.write(line)
-                    f.flush()
-        except Exception:
-            pass
-
-    _thr.Thread(target=_drain_runtime_stdout, args=(proc.stdout, RUNTIME_AGENT_LOG_FILE), daemon=True).start()
-    try:
-        proc.wait()
-    except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait()
-    sys.exit(0)
-
-run(f"Starting Cosmos Reason2 {MODEL_SIZE} demo on port {GRADIO_PORT}")
-
-proc = subprocess.Popen(
-    ["uv", "run", "python", "-u", "/tmp/gradio_cr2_byo.py"],
-    cwd=REASON2_DIR,
-    env=launch_env,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1,
-)
-
-# BUG-SHARE-TIMEOUT: When gradio.live is firewalled (Horde, locked-down Brev orgs,
-# air-gapped hosts), the share link never appears and the loop used to terminate
-# the child Gradio process after 300s — destroying a working local-only demo.
-# Fix: detect explicit "Could not create share link" or "Running on local URL"
-# signals and fall back to a host-reachable local URL instead of killing.
-url = None
-local_url = None
-share_failed = False
-url_pattern        = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
-local_url_pattern  = re.compile(r'Running on local URL:\s+(http://[^\s]+)')
-URL_CAPTURE_TIMEOUT = 300
-t_launch = time.time()
-with open(LOG_FILE, "w") as log:
-    for line in proc.stdout:
-        log.write(line)
-        log.flush()
-        stripped = line.rstrip()
-        if stripped:
-            print(f"     {DIM}{stripped}{RESET}", flush=True)
-        m = url_pattern.search(stripped)
-        if m:
-            url = m.group(1).rstrip(".")
-            break
-        ml = local_url_pattern.search(stripped)
-        if ml and not local_url:
-            local_url = ml.group(1).rstrip("/")
-        if "Could not create share link" in stripped:
-            share_failed = True
-            if local_url:
-                break
-        if time.time() - t_launch > URL_CAPTURE_TIMEOUT:
-            print(f"  ⚠  No gradio.live URL after {URL_CAPTURE_TIMEOUT}s — falling back to local URL.")
-            break
-
 def _detect_host_ip():
     env_ip = os.environ.get("BYO_VIDEO_LOCAL_HOST")
     if env_ip:
@@ -1087,45 +914,218 @@ def _detect_host_ip():
         pass
     return None
 
-if not url:
-    if not local_url:
-        print("  ✗  Gradio printed no URL (neither share nor local). Check /tmp/gradio_demo.log")
-        proc.terminate()
+def _drain_stdout(fh, path):
+    try:
+        with open(path, "a") as f:
+            for line in fh:
+                f.write(line)
+                f.flush()
+    except Exception:
+        pass
+
+def _launch_gradio(sidecar=False):
+    label = "Gradio sidecar" if sidecar else "Cosmos Reason2 demo"
+    run(f"Starting {label} on port {GRADIO_PORT}")
+    gradio_env = dict(launch_env)
+    if sidecar:
+        # Keep the mandatory Gradio link live without double-loading HF weights
+        # when the selected primary surface is runtime-agent or FiftyOne.
+        gradio_env["SKIP_HF_PRELOAD"] = "1"
+        gradio_env["BYO_VIDEO_FRONTEND"] = "gradio_sidecar"
+
+    proc = subprocess.Popen(
+        ["uv", "run", "python", "-u", GRADIO_APP],
+        cwd=REASON2_DIR,
+        env=gradio_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    url = None
+    local_url = None
+    share_failed = False
+    url_pattern        = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
+    local_url_pattern  = re.compile(r'Running on local URL:\s+(http://[^\s]+)')
+    launch_url_pattern = re.compile(r'\[launch\]\s+(https?://[^\s]+)')
+    URL_CAPTURE_TIMEOUT = 300
+    t_launch = time.time()
+    with open(LOG_FILE, "w") as log:
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            stripped = line.rstrip()
+            if stripped:
+                print(f"     {DIM}{stripped}{RESET}", flush=True)
+            m = url_pattern.search(stripped)
+            if m:
+                url = m.group(1).rstrip(".")
+                break
+            ml = local_url_pattern.search(stripped)
+            if ml and not local_url:
+                local_url = ml.group(1).rstrip("/")
+            mla = launch_url_pattern.search(stripped)
+            if mla:
+                candidate = mla.group(1).rstrip(".").rstrip("/")
+                if "gradio.live" in candidate:
+                    url = candidate
+                    break
+                if not local_url:
+                    local_url = candidate
+            if "Could not create share link" in stripped:
+                share_failed = True
+                if local_url:
+                    break
+            if time.time() - t_launch > URL_CAPTURE_TIMEOUT:
+                print(f"  ⚠  No gradio.live URL after {URL_CAPTURE_TIMEOUT}s — falling back to local URL.")
+                break
+
+    if not url:
+        if not local_url:
+            print("  ✗  Gradio printed no URL (neither share nor local). Check /tmp/gradio_demo.log")
+            proc.terminate()
+            sys.exit(1)
+        host_ip = _detect_host_ip()
+        if host_ip:
+            url = local_url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
+        else:
+            url = local_url
+        reason = "share link unavailable (host firewalled)" if share_failed else "share link timed out"
+        print(f"  ⚠  {reason}. Using local URL: {url}")
+        print(f"     {DIM}If your machine can't reach {url} directly, run on your client:{RESET}")
+        print(f"     {DIM}  ssh -L {GRADIO_PORT}:localhost:{GRADIO_PORT} <user@host>{RESET}")
+        print(f"     {DIM}then open http://localhost:{GRADIO_PORT}/ in your browser.{RESET}")
+
+    _probe_ok = False
+    for _probe_attempt in range(10):
+        try:
+            urllib.request.urlopen(f"http://localhost:{GRADIO_PORT}/", timeout=3)
+            _probe_ok = True
+            break
+        except Exception:
+            time.sleep(2)
+
+    if not _probe_ok:
+        print("  ✗  Gradio process launched but / probe failed after 20s — process may have crashed.")
+        print(f"     Check {LOG_FILE} for errors.")
         sys.exit(1)
+
+    with open(URL_FILE, "w") as f:
+        f.write(url + "\n")
+
+    with open("/tmp/gradio_live.flag", "w") as f:
+        f.write(url + "\n")
+
+    ok("Gradio frontend is live")
+    import threading as _thr
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, LOG_FILE), daemon=True).start()
+    return proc, url
+
+if FRONTEND in ("runtime_agent", "fiftyone"):
+    if not os.path.exists(RUNTIME_AGENT_APP):
+        print(f"  ✗  {RUNTIME_AGENT_APP} not found — deploy byo_video_runtime_agent.py first"); sys.exit(1)
+
+    runtime_env = {
+        **launch_env,
+        "BYO_VIDEO_FRONTEND": FRONTEND,
+        "RUNTIME_AGENT_PORT": str(RUNTIME_AGENT_PORT),
+        "RUNTIME_AGENT_DATASET": os.environ.get("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test"),
+        "RUNTIME_AGENT_CONCURRENCY": os.environ.get("RUNTIME_AGENT_CONCURRENCY", "4"),
+        "RUNTIME_AGENT_MAX_VIDEOS": os.environ.get("RUNTIME_AGENT_MAX_VIDEOS", "20"),
+        "FIFTYONE_PORT": os.environ.get("FIFTYONE_PORT", "5151"),
+    }
+
+    gradio_proc, gradio_url = _launch_gradio(sidecar=True)
+
+    run(f"Starting Cosmos BYO Video runtime agent on port {RUNTIME_AGENT_PORT}")
+    proc = subprocess.Popen(
+        ["uv", "run", "python", "-u", RUNTIME_AGENT_APP, "serve",
+         "--host", "0.0.0.0", "--port", str(RUNTIME_AGENT_PORT)],
+        cwd=REASON2_DIR,
+        env=runtime_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    url = None
+    url_pattern = re.compile(r'URL:\s+(https?://[^\s]+)')
+    with open(RUNTIME_AGENT_LOG_FILE, "w") as log:
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            stripped = line.rstrip()
+            if stripped:
+                print(f"     {DIM}{stripped}{RESET}", flush=True)
+            match = url_pattern.search(stripped)
+            if match:
+                url = match.group(1).rstrip("/")
+                break
+            if proc.poll() is not None:
+                break
+
+    if not url:
+        print(f"  ✗  Runtime agent printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
+        proc.terminate()
+        gradio_proc.terminate()
+        sys.exit(1)
+
     host_ip = _detect_host_ip()
     if host_ip:
-        url = local_url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
-    else:
-        url = local_url
-    reason = "share link unavailable (host firewalled)" if share_failed else "share link timed out"
-    print(f"  ⚠  {reason}. Using local URL: {url}")
-    print(f"     {DIM}If your machine can't reach {url} directly, run on your client:{RESET}")
-    print(f"     {DIM}  ssh -L {GRADIO_PORT}:localhost:{GRADIO_PORT} <user@host>{RESET}")
-    print(f"     {DIM}then open http://localhost:{GRADIO_PORT}/ in your browser.{RESET}")
+        url = url.replace("0.0.0.0", host_ip).replace("127.0.0.1", host_ip)
 
-# BUG-LIVENESS: probe Gradio /info before declaring live.
-# Writing URL_FILE before confirming the process survived causes stale live declarations.
-# We poll the local port (not the public URL) because frpc tunnel may lag by a few seconds.
-_live_flag = "/tmp/gradio_live.flag"
-_probe_ok = False
-for _probe_attempt in range(10):
+    _probe_ok = False
+    for _probe_attempt in range(10):
+        try:
+            urllib.request.urlopen(f"http://localhost:{RUNTIME_AGENT_PORT}/api/state", timeout=3)
+            _probe_ok = True
+            break
+        except Exception:
+            time.sleep(2)
+
+    if not _probe_ok:
+        print("  ✗  Runtime agent launched but /api/state probe failed after 20s.")
+        print(f"     Check {RUNTIME_AGENT_LOG_FILE} for errors.")
+        proc.terminate()
+        gradio_proc.terminate()
+        sys.exit(1)
+
+    for _path in ("/tmp/byo_video_runtime_agent_url.txt", "/tmp/byo_video_runtime_agent_live.flag"):
+        with open(_path, "w") as f:
+            f.write(url + "\n")
+
+    ok("Runtime agent frontend is live")
+    STEPS_DONE.append(9)
+    print_dashboard()
+
+    print(flush=True)
+    print(f"{BOLD}{'─'*62}{RESET}", flush=True)
+    print(f"{BOLD}  Cosmos BYO Video Runtime Agent — Ready{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(f"  {BOLD}Runtime Agent URL:{RESET}  {hyperlink(url)}", flush=True)
+    print(f"  {BOLD}Gradio URL:{RESET}         {hyperlink(gradio_url)}", flush=True)
+    print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
+    print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)
+    print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
+    if os.path.exists("/tmp/byo_video_runtime_guide.py"):
+        print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(flush=True)
+
+    import threading as _thr
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, RUNTIME_AGENT_LOG_FILE), daemon=True).start()
     try:
-        urllib.request.urlopen(f"http://localhost:{GRADIO_PORT}/", timeout=3)
-        _probe_ok = True
-        break
-    except Exception:
-        time.sleep(2)
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        gradio_proc.terminate()
+        proc.wait()
+        gradio_proc.wait()
+    sys.exit(0)
 
-if not _probe_ok:
-    print("  ✗  Gradio process launched but / probe failed after 20s — process may have crashed.")
-    print(f"     Check {LOG_FILE} for errors.")
-    sys.exit(1)
-
-with open(URL_FILE, "w") as f:
-    f.write(url + "\n")
-
-with open(_live_flag, "w") as f:
-    f.write(url + "\n")
+proc, url = _launch_gradio(sidecar=False)
 
 ok("Demo server up, public tunnel established")
 STEPS_DONE.append(9)
@@ -1148,23 +1148,6 @@ if _cfg["nim"] and not NGC_API_KEY:
     print(f"  {YELLOW}⚠  NIM-{MODEL_SIZE} mode requires NGC_API_KEY=nvapi-...{RESET}", flush=True)
 print(f"{'─'*62}", flush=True)
 print(flush=True)
-
-# BUG-STDOUT-PIPE: Keep stdout pipe alive so Gradio's print(flush=True) calls
-# don't get BrokenPipeError. Closing the read end here caused every inference
-# request to fail at Step 1 — the first yield fired, then the next print()
-# raised BrokenPipeError and the generator died. Drain thread keeps it open.
-import threading as _thr
-
-def _drain_gradio_stdout(fh, path):
-    try:
-        with open(path, "a") as f:
-            for line in fh:
-                f.write(line)
-                f.flush()
-    except Exception:
-        pass
-
-_thr.Thread(target=_drain_gradio_stdout, args=(proc.stdout, LOG_FILE), daemon=True).start()
 
 # Stay alive while Gradio runs — without this, the subprocess gets SIGHUP when
 # the screen session's controlling process exits.

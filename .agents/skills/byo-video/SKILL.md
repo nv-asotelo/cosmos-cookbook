@@ -17,12 +17,19 @@ descriptive labels and map the answer to the env var afterward:
 
 - **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent`
   for HF public dataset loading, concurrent video processing, worker-safety
-  smoke testing, and result export/writeback.
+  smoke testing, and result export/writeback. The setup script still starts a
+  live Gradio sidecar and prints its link.
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` for uploading one
   video or image and tuning the prompt/parameters interactively.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` when the
   user wants the guided batch UI with FiftyOne available for sample inspection
-  and result review.
+  and result review. The setup script still starts a live Gradio sidecar and
+  prints its link.
+
+Regardless of the selected mode, `byo_video_setup.py` must serve a live Gradio
+link on `GRADIO_PORT` and write it to `/tmp/gradio_url.txt` plus
+`/tmp/gradio_live.flag`. Runtime-agent and FiftyOne selections add their own UI
+on `RUNTIME_AGENT_PORT`; they do not replace Gradio.
 
 Default to `BYO_VIDEO_FRONTEND=runtime_agent` when the user asks for a guided
 inference flow, HF public dataset loading, concurrent batch processing, or the

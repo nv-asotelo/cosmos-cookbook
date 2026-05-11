@@ -6,13 +6,13 @@
 
 **Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of three frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
-- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available.
+- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — classic upload-one-video/image UI for prompt and parameter tuning.
-- **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review.
+- **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review. Gradio still launches as a live sidecar.
 
 For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
 
-Default output for dataset/batch work: **runtime-agent web UI** on `RUNTIME_AGENT_PORT` (default `7861`). Default output for the classic single-video flow: **Gradio web UI** on `GRADIO_PORT` (default `7860`).
+Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **runtime-agent web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
 - `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
@@ -47,7 +47,7 @@ BYO_VIDEO_FRONTEND=runtime_agent \
 RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test \
 python3 /tmp/byo_video_setup.py
 ```
-This script shows live step-by-step progress with ETAs for every install stage, then prints a clickable hyperlink to the selected frontend and the companion CLI guide command when deployed. The URL is written to `/tmp/gradio_url.txt` for compatibility and to `/tmp/byo_video_runtime_agent_url.txt` when using the runtime-agent frontend. Deploy it to the instance before running (see deploy section below).
+This script shows live step-by-step progress with ETAs for every install stage, then prints clickable hyperlinks for Gradio and any selected companion frontend plus the CLI guide command when deployed. The Gradio URL is always written to `/tmp/gradio_url.txt`; the runtime-agent URL is written to `/tmp/byo_video_runtime_agent_url.txt` when using the guided dataset batch UI or FiftyOne flow. Deploy it to the instance before running (see deploy section below).
 
 ### Runtime-Agent HF Dataset Batch Smoke
 
@@ -570,7 +570,7 @@ brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').w
   2. Otherwise: `docker login nvcr.io`, `docker pull` the image, `docker run -d` per official build.nvidia.com style (`--gpus all --ipc host --shm-size=32GB --ulimit memlock=-1 --ulimit stack=67108864 -e NGC_API_KEY -p 8000:8000`). It uses container-internal `/opt/nim/.cache` by default; set `NIM_CACHE_MODE=host` only when you intentionally want to bind-mount `$LOCAL_NIM_CACHE`.
   3. Forwards known per-NIM env overrides such as `NIM_MAX_MODEL_LEN`, `NIM_MODEL_PROFILE`, `NIM_MEDIA_IO_KWARGS`, and comma-separated `NIM_EXTRA_ENV=KEY=VALUE,...`.
   4. Waits up to 1800s for `GET /v1/models` by default; Omni and Gemma use 2400s because first boot can run 20-30 min.
-- Step 10 — the selected frontend launches with `VLLM_BASE_URL=http://localhost:8000/v1`. The Gradio and runtime-agent frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or runtime-agent `server.model` matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
+- Step 10 — Gradio always launches with `VLLM_BASE_URL=http://localhost:8000/v1`; runtime-agent/FiftyOne selections launch their companion UI after Gradio is live. The Gradio and runtime-agent frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or runtime-agent `server.model` matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
 
 **NIM image short-id resolution (in `byo_video_setup.py`):**
 ```
@@ -660,25 +660,25 @@ On error:
 
 ### OBSERVER PROTOCOL — PHASE 6: FRONTEND LIVE + URL CAPTURE
 
-Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Runtime-agent mode writes `/tmp/byo_video_runtime_agent_live.flag`; Gradio mode writes `/tmp/gradio_live.flag`. On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Every mode writes `/tmp/gradio_live.flag`; runtime-agent and FiftyOne modes also write `/tmp/byo_video_runtime_agent_live.flag`. On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
 ```json
 {"phase": 6, "status": "waiting_frontend", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "done", "weights": "done", "frontend": "active"}}
 ```
 
 ```bash
-brev exec <name> "cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null || cat /tmp/gradio_live.flag 2>/dev/null"
+brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null"
 ```
 
-When flag is present, read the URL:
+When the Gradio flag is present, read the URLs:
 ```bash
-brev exec <name> "cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || cat /tmp/gradio_url.txt 2>/dev/null"
+brev exec <name> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'runtime_agent='; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || true"
 ```
 
 **Compute total cost:** `(time.time() - PROVISION_START_TS) / 3600 * rate_per_hour`
 
 Write success result to `/tmp/byo_video_observer_result.json` on the **local machine**:
 ```json
-{"status":"live","url":"<frontend_url>","elapsed_s":<N>,"cost":<computed>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<runtime_agent|gradio|fiftyone>"}
+{"status":"live","url":"<primary_frontend_url>","gradio_url":"<gradio_url>","runtime_agent_url":"<runtime_agent_url_or_null>","elapsed_s":<N>,"cost":<computed>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<runtime_agent|gradio|fiftyone>"}
 ```
 Then exit. The main session reads this file on task completion and displays the final panel.
 
@@ -697,7 +697,8 @@ Then exit. The main session reads this file on task completion and displays the 
 ║  [✓] Setup complete                                          ║
 ║  [✓] Frontend live                                           ║
 ╠══════════════════════════════════════════════════════════════╣
-║  URL:  <frontend_url>                                        ║
+║  Gradio URL: <gradio_url>                                    ║
+║  Runtime URL: <runtime_agent_url_or_blank>                   ║
 ║  Total setup cost: ~$<computed>  |  Link valid 72h           ║
 ║  Kill the Brev instance when you're done to stop billing.    ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -880,8 +881,8 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "tail -60 /tmp/byo_video_setup.log 2>/dev/n
 
 URL capture:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null || cat /tmp/gradio_live.flag 2>/dev/null"
-ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || cat /tmp/gradio_url.txt 2>/dev/null"
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null"
+ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'runtime_agent='; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || true"
 ```
 
 ---
@@ -1291,7 +1292,7 @@ Horde instances are created via REST API, accessed via SSH.
 **Critical:** SSH username is `horde` — confirmed empirically 2026-04-17. Not `ubuntu`, `nvidia`, `root`, or `asotelo`.
 
 Agent steps:
-1. Create instance via Horde API v4 (`POST /api/v4/instances`) or use the explicit user-provided Horde host. The setup script is scratch-safe: it installs `uv`, clones `~/cosmos-reason2`, creates the venv, downloads weights, starts vLLM/NIM when requested, and launches the selected frontend.
+1. Create instance via Horde API v4 (`POST /api/v4/instances`) or use the explicit user-provided Horde host. The setup script is scratch-safe: it installs `uv`, clones `~/cosmos-reason2`, creates the venv, downloads weights, starts vLLM/NIM when requested, always launches Gradio, and launches the selected companion frontend when applicable.
 2. Poll `GET /api/v4/instances/<id>` until `status: running`
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
@@ -1307,7 +1308,7 @@ Agent steps:
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
      "export HF_TOKEN=hf_... INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B MODEL_SIZE=2B BYO_VIDEO_FRONTEND=runtime_agent RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URL prints at the end and is written to `/tmp/byo_video_runtime_agent_url.txt` and `/tmp/gradio_url.txt` — read it back with `cat /tmp/byo_video_runtime_agent_url.txt || cat /tmp/gradio_url.txt` via ssh.
+5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; runtime-agent/FiftyOne companion UI is written to `/tmp/byo_video_runtime_agent_url.txt` when selected. Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
