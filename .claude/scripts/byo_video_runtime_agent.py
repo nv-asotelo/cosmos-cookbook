@@ -278,6 +278,7 @@ STATE: Dict[str, Any] = {
     "results": [],
     "running": False,
     "loading_dataset": False,
+    "active_requests": {},
     "progress": {"done": 0, "total": 0, "errors": 0},
     "batch_metrics": None,
     "batch_history": [],
@@ -305,6 +306,7 @@ STATE: Dict[str, Any] = {
         "context_safety_reserve": CONTEXT_SAFETY_RESERVE,
         "context_text_tokens": TEXT_TOKENS,
         "default_model_max_len": DEFAULT_MODEL_MAX_LEN,
+        "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
         "export_sections": EXPORT_SECTIONS,
     },
 }
@@ -368,6 +370,55 @@ def update_load_progress(
         STATE["progress"] = progress
         if videos is not None:
             STATE["videos"] = videos
+
+
+def update_active_request(video: Dict[str, Any], stage: str, event: str, **items: Any) -> None:
+    now = time.time()
+    key = str(video.get("id") or video.get("filepath") or video.get("name") or f"request-{now}")
+    with STATE_LOCK:
+        active = dict(STATE.get("active_requests") or {})
+        current = dict(active.get(key) or {})
+        current.update({
+            "id": key,
+            "name": video.get("name") or Path(str(video.get("filepath") or key)).name,
+            "stage": stage,
+            "started_epoch": current.get("started_epoch") or now,
+            "updated_epoch": now,
+            "last_event": event,
+            "timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+        })
+        current.update({k: v for k, v in items.items() if v is not None})
+        active[key] = current
+        progress = dict(STATE.get("progress") or {})
+        progress.update({
+            "mode": "inference",
+            "phase": stage,
+            "updated_epoch": now,
+            "current_file": current["name"],
+            "last_event": event,
+            "active_count": len(active),
+            "active_requests": list(active.values()),
+        })
+        STATE["active_requests"] = active
+        STATE["progress"] = progress
+
+
+def clear_active_request(video: Dict[str, Any], event: Optional[str] = None) -> None:
+    now = time.time()
+    key = str(video.get("id") or video.get("filepath") or video.get("name") or "")
+    with STATE_LOCK:
+        active = dict(STATE.get("active_requests") or {})
+        active.pop(key, None)
+        progress = dict(STATE.get("progress") or {})
+        progress.update({
+            "updated_epoch": now,
+            "active_count": len(active),
+            "active_requests": list(active.values()),
+        })
+        if event:
+            progress["last_event"] = event
+        STATE["active_requests"] = active
+        STATE["progress"] = progress
 
 
 class ClientInputError(RuntimeError):
@@ -707,6 +758,15 @@ def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True)
     discovery = discover_paper_source(source)
     apply_paper_import(discovery)
     log(f"Imported paper metadata for {discovery.get('arxiv_id') or source}: dataset {discovery.get('selected_dataset')}")
+    with STATE_LOCK:
+        progress = dict(STATE.get("progress") or {})
+        if progress.get("mode") == "paper_import":
+            progress.update({
+                "phase": "dataset_selected" if discovery.get("selected_dataset") else "metadata_imported",
+                "updated_epoch": time.time(),
+                "last_event": f"Selected dataset {discovery.get('selected_dataset')}" if discovery.get("selected_dataset") else "Paper metadata imported; no dataset selected",
+            })
+            STATE["progress"] = progress
     if load_now and discovery.get("selected_dataset"):
         try:
             videos = load_dataset(str(discovery["selected_dataset"]), max_videos)
@@ -723,6 +783,68 @@ def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True)
                 })
                 STATE["progress"] = progress
     return discovery
+
+
+def import_paper_worker(source: str, max_videos: int, load_now: bool = True) -> None:
+    started_epoch = time.time()
+    update_state(
+        loading_dataset=True,
+        progress={
+            "mode": "paper_import",
+            "phase": "paper_fetch",
+            "done": 0,
+            "total": 0,
+            "errors": 0,
+            "started_epoch": started_epoch,
+            "updated_epoch": started_epoch,
+            "last_result_epoch": None,
+            "current_file": None,
+            "last_event": f"Importing paper metadata from {source}",
+            "last_error": None,
+        },
+    )
+    log(f"Importing paper metadata from {source}")
+    try:
+        discovery = import_paper_source(source, max_videos, load_now)
+        now = time.time()
+        with STATE_LOCK:
+            progress = dict(STATE.get("progress") or {})
+            if progress.get("mode") == "paper_import":
+                progress.update({
+                    "phase": "complete",
+                    "done": 1,
+                    "total": 1,
+                    "updated_epoch": now,
+                    "finished_epoch": now,
+                    "last_event": "Paper metadata imported",
+                    "last_error": None,
+                })
+                STATE["progress"] = progress
+                STATE["loading_dataset"] = False
+            STATE["paper_import"] = discovery
+    except Exception as exc:
+        now = time.time()
+        log(f"Paper import failed: {exc}")
+        update_state(
+            loading_dataset=False,
+            progress={
+                "mode": "paper_import",
+                "phase": "failed",
+                "done": 0,
+                "total": 0,
+                "errors": 1,
+                "started_epoch": started_epoch,
+                "updated_epoch": now,
+                "finished_epoch": now,
+                "last_event": "Paper import failed",
+                "last_error": str(exc),
+            },
+        )
+    finally:
+        try:
+            RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
 
 def video_id(path: str) -> str:
@@ -957,6 +1079,7 @@ def load_hf_annotation_samples(repo_id: str, files: List[str]) -> Dict[str, Any]
     by_path: Dict[str, List[Dict[str, Any]]] = {}
     total = len(rows) if isinstance(rows, list) else 0
     file_set = set(files)
+    update_load_progress("hf_metadata", f"Indexing {total:,} PRISM annotation rows", done=0, total=total)
     for index, row in enumerate(rows if isinstance(rows, list) else [], start=1):
         if not isinstance(row, dict):
             continue
@@ -972,7 +1095,8 @@ def load_hf_annotation_samples(repo_id: str, files: List[str]) -> Dict[str, Any]
         by_path.setdefault(video_path, []).append(compact)
         by_path.setdefault(Path(resolved_path).name, []).append(compact)
         if index % 10000 == 0:
-            update_load_progress("hf_metadata", f"Indexed {index:,}/{total:,} PRISM annotation rows")
+            update_load_progress("hf_metadata", f"Indexed {index:,}/{total:,} PRISM annotation rows", done=index, total=total)
+    update_load_progress("hf_metadata", f"Indexed {total:,}/{total:,} PRISM annotation rows", done=total, total=total)
     log(f"Loaded {len(samples):,} PRISM annotation samples from annotations/train.json")
     return {"samples": samples, "by_path": by_path, "taxonomy": taxonomy}
 
@@ -1325,6 +1449,7 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
         fo_dataset_name=None,
         videos=[],
         results=[],
+        active_requests={},
         progress={
             "mode": "dataset_load",
             "phase": "starting",
@@ -1912,6 +2037,14 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
     max_pixels = int(params.get("max_pixels") or STATE["defaults"]["max_pixels"])
     max_frames = int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"])
     effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
+    update_active_request(
+        video,
+        "preprocessing",
+        f"Preparing {video['name']} for the model server",
+        model=model,
+        backend=backend,
+        prompt_source=prompt_source,
+    )
     content, plan = content_for_video(
         video["filepath"],
         effective_user_prompt,
@@ -1939,11 +2072,29 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
         payload["repetition_penalty"] = rep_penalty
     try:
+        update_active_request(
+            video,
+            "model_wait",
+            f"Waiting for model server response: {video['name']}",
+            model=model,
+            backend=backend,
+            prompt_source=prompt_source,
+            frames=plan.get("frames_passed"),
+            visual_tokens=plan.get("visual_tokens_est"),
+        )
         completion = post_chat_completion(base_url, headers, payload)
     except requests.HTTPError as exc:
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
         if "nim" in backend and status_code in (400, 422) and plan.get("mode") == "native_video_url":
+            update_active_request(
+                video,
+                "model_retry",
+                f"Retrying with frame fallback after HTTP {status_code}: {video['name']}",
+                model=model,
+                backend=backend,
+                prompt_source=prompt_source,
+            )
             fallback_content, fallback_plan = content_for_video(
                 video["filepath"],
                 effective_user_prompt,
@@ -1956,6 +2107,16 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
             )
             fallback_plan["fallback_from_video_url"] = status_code
             payload["messages"][1]["content"] = fallback_content
+            update_active_request(
+                video,
+                "model_wait",
+                f"Waiting for fallback model response: {video['name']}",
+                model=model,
+                backend=backend,
+                prompt_source=prompt_source,
+                frames=fallback_plan.get("frames_passed"),
+                visual_tokens=fallback_plan.get("visual_tokens_est"),
+            )
             completion = post_chat_completion(base_url, headers, payload)
             plan = fallback_plan
         else:
@@ -2702,8 +2863,9 @@ def make_run_context(run_label: str, system_prompt: str, user_prompt: str, param
 
 def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> Dict[str, Any]:
     started = time.monotonic()
+    result: Optional[Dict[str, Any]] = None
     try:
-        return run_one(video, system_prompt, user_prompt, params)
+        result = run_one(video, system_prompt, user_prompt, params)
     except Exception as exc:
         effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
         result = {
@@ -2723,7 +2885,9 @@ def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str
         }
         result["evaluation"] = evaluate_result(video, result)
         write_fiftyone_result(video, result)
-        return result
+    finally:
+        clear_active_request(video, f"Finished {video.get('name') or 'video'}")
+    return result or {}
 
 
 def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_prompt: str, params: Dict[str, Any], run_label: str = "") -> None:
@@ -2737,8 +2901,11 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
     run_context = make_run_context(run_label, system_prompt, user_prompt, params)
     update_state(
         running=True,
+        active_requests={},
         results=[],
         progress={
+            "mode": "inference",
+            "phase": "starting",
             "done": 0,
             "total": len(selected),
             "errors": 0,
@@ -2750,6 +2917,8 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
             "prompt_hash": run_context["prompt_hash"],
             "last_event": f"Running {len(selected)} videos with concurrency={concurrency}",
             "last_error": None,
+            "active_count": 0,
+            "active_requests": [],
         },
         batch_metrics=batch_summary(dataset_repo, [], len(selected), 0, concurrency, batch_started, "running", run_context),
     )
@@ -2777,8 +2946,11 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
             last_result_epoch = time.time()
             last_event = f"Failed {video['name']}" if result.get("error") else f"Completed {video['name']}"
             with STATE_LOCK:
+                active = dict(STATE.get("active_requests") or {})
                 STATE["results"] = results
                 STATE["progress"] = {
+                    "mode": "inference",
+                    "phase": "collecting",
                     "done": len(results),
                     "total": len(selected),
                     "errors": errors,
@@ -2790,6 +2962,8 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
                     "prompt_hash": run_context["prompt_hash"],
                     "last_event": last_event,
                     "last_error": str(result.get("error") or "") or None,
+                    "active_count": len(active),
+                    "active_requests": list(active.values()),
                 }
                 STATE["batch_metrics"] = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "running", run_context)
             RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
@@ -2797,7 +2971,10 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
     finished_epoch = time.time()
     with STATE_LOCK:
         STATE["running"] = False
+        STATE["active_requests"] = {}
         STATE["progress"] = {
+            "mode": "inference",
+            "phase": "complete",
             "done": len(results),
             "total": len(selected),
             "errors": errors,
@@ -2810,6 +2987,8 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
             "prompt_hash": run_context["prompt_hash"],
             "last_event": f"Batch complete: {len(results) - errors} ok, {errors} errors",
             "last_error": None,
+            "active_count": 0,
+            "active_requests": [],
         }
         STATE["batch_metrics"] = final_summary
         STATE["batch_history"] = (STATE.get("batch_history") or [])[-19:] + [final_summary]
@@ -3081,24 +3260,36 @@ function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextH
 function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const prompt=promptTokensForVideo(v); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
 function latestRuntimeError(){ const p=state?.progress||{}; if(p.last_error) return String(p.last_error); const results=[...(state?.results||[])].reverse(); const failed=results.find(r=>r && r.error); return failed ? `${failed.name||'video'}: ${failed.error}` : ''; }
 function clipText(text, max=260){ const s=String(text||''); return s.length > max ? s.slice(0, max-1)+'...' : s; }
+function activeRequestList(){ const top=state?.active_requests||{}; if(Array.isArray(top)) return top; const vals=Object.values(top); if(vals.length) return vals; const p=state?.progress||{}; const nested=p.active_requests||{}; return Array.isArray(nested) ? nested : Object.values(nested); }
 function renderRuntimeStatus(){
- const p=state.progress||{}; const bm=state.batch_metrics||{}; const isLoad=!!(state.loading_dataset || p.mode==='dataset_load'); const active=!!(state.running || state.loading_dataset);
- const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : (active ? 5 : 0);
+ const p=state.progress||{}; const bm=state.batch_metrics||{}; const activeReqs=activeRequestList(); const isPaper=!!(state.loading_dataset && p.mode==='paper_import'); const isLoad=!!(state.loading_dataset || p.mode==='dataset_load' || p.mode==='paper_import'); const active=!!(state.running || state.loading_dataset);
+ const modelWait=!!(state.running && activeReqs.some(r=>['model_wait','model_retry'].includes(String(r.stage||''))));
+ const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : (active ? (isPaper ? 8 : 5) : 0);
  const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((active ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0);
- const eta=active && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastActivity=Number(p.updated_epoch||p.last_result_epoch||0); const waitSince=active ? now - (lastActivity || started || now) : null;
+ const lastActivity=Number(p.updated_epoch||p.last_result_epoch||0); const waitSince=active ? now - (lastActivity || started || now) : null;
+ const oldestActive=activeReqs.length ? activeReqs.reduce((a,b)=>Number(b.started_epoch||now)<Number(a.started_epoch||now)?b:a, activeReqs[0]) : null;
+ const requestElapsed=oldestActive ? now - Number(oldestActive.started_epoch||now) : null;
+ const requestTimeout=Number(oldestActive?.timeout_seconds || state?.defaults?.request_timeout_seconds || 0);
+ const requestRemaining=requestTimeout && requestElapsed !== null ? Math.max(0, requestTimeout-requestElapsed) : null;
+ let eta=null;
+ if(active && total && done > 0 && elapsed > 0) eta=((total-done) / (done / elapsed));
+ else if(state.running && total && activeReqs.length && requestTimeout){ const remaining=Math.max(0,total-done-activeReqs.length); const workers=Math.max(1, Number(p.concurrency||activeReqs.length||1)); eta=requestRemaining + (remaining * requestTimeout / workers); }
  const latestError=latestRuntimeError(); const delayed=active && waitSince !== null && waitSince > 90; const stalled=active && waitSince !== null && waitSince > 300;
- const title=latestError ? (active ? (isLoad ? 'Loading with errors' : 'Running with errors') : 'Attention') : active ? (isLoad ? (stalled ? 'Dataset load stalled' : delayed ? 'Dataset load slow' : 'Loading dataset') : (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running')) : total ? (errors ? 'Complete with errors' : (isLoad ? 'Dataset loaded' : 'Complete')) : 'Idle';
+ const title=latestError ? (active ? (isLoad ? 'Loading with errors' : 'Running with errors') : 'Attention') : modelWait ? 'Waiting for model' : active ? (isLoad ? (isPaper ? 'Importing paper' : (stalled ? 'Dataset load stalled' : delayed ? 'Dataset load slow' : 'Loading dataset')) : (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running')) : total ? (errors ? 'Complete with errors' : (isLoad ? 'Dataset loaded' : 'Complete')) : 'Idle';
  const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`;
- const etaText=active ? (eta === null ? (done ? 'calculating' : 'waiting for first item') : span(eta)) : '';
- const rows=[['task', isLoad ? 'dataset load' : (state.running ? 'inference batch' : '')],['phase', p.phase||''],['completed', total ? `${fmt(done)}/${fmt(total)}` : (done ? fmt(done) : 'pending')],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['quiet for', active && waitSince !== null ? span(waitSince) : ''],['current', p.current_file||''],['errors', fmt(errors)],['event', p.last_event||'']];
+ const etaText=active ? (eta === null ? (done ? 'calculating' : (state.running ? 'waiting for model' : 'waiting for first item')) : span(eta)) : '';
+ const activeNames=activeReqs.map(r=>r.name).filter(Boolean).slice(0,3).join(', ');
+ const rows=[['task', isPaper ? 'paper import' : (isLoad ? 'dataset load' : (state.running ? 'inference batch' : ''))],['phase', p.phase||''],['completed', total ? `${fmt(done)}/${fmt(total)}` : (done ? fmt(done) : 'pending')],['progress', `${pct}%`],['elapsed', elapsed ? span(elapsed) : '0s'],['remaining', etaText],['active', activeReqs.length ? `${activeReqs.length} request${activeReqs.length===1?'':'s'}` : ''],['model wait', oldestActive ? `${oldestActive.stage||''} ${activeNames ? 'for '+activeNames : ''}` : ''],['request elapsed', requestElapsed !== null ? span(requestElapsed) : ''],['timeout left', requestRemaining !== null ? span(requestRemaining) : ''],['quiet for', active && waitSince !== null ? span(waitSince) : ''],['current', p.current_file||''],['errors', fmt(errors)],['event', p.last_event||'']];
  el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
  const notice=el('runtimeNotice');
  if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); }
+ else if(modelWait && oldestActive){ notice.className='status-note'; notice.textContent=`Waiting for the terminal/model server response for ${oldestActive.name||'a video'}. Request open ${span(requestElapsed)}${requestRemaining!==null ? `; timeout in ${span(requestRemaining)}` : ''}.`; }
  else if(stalled){ notice.className='status-note bad'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Hugging Face may still be transferring a large file, but this is unusually quiet.` : `No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; }
  else if(delayed){ notice.className='status-note warn'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Still waiting for Hugging Face or local metadata extraction.` : `No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; }
+ else if(isPaper && active){ notice.className='status-note'; notice.textContent='Paper import is active. The runtime is fetching metadata/prompts first; dataset loading will start as soon as a dataset is selected.'; }
  else if(isLoad && active && total){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Rows and thumbnails will appear as each video finishes downloading and metadata extraction completes.'; }
  else if(isLoad && active){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Waiting for Hugging Face file listing or the first selected video.'; }
- else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; }
+ else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; preparing videos and waiting for the first model response.'; }
  else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; }
  else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Finished with errors. See Results and Runtime log for details.' : (isLoad ? 'Dataset is ready for selection and inference.' : 'Batch finished successfully.'); }
  else { notice.className='status-note'; notice.textContent='No batch is running.'; }
@@ -3110,14 +3301,14 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  syncPromptPresets(); renderPaperImport();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
- const prog = state.progress || {done:0,total:0,errors:0}; const active=!!(state.running||state.loading_dataset); const pct = prog.total ? Math.round(100*prog.done/prog.total) : (active ? 5 : 0); document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.loading_dataset ? `${prog.last_event||'Loading dataset'}${prog.total ? ` (${prog.done}/${prog.total})` : ''}` : state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
+ const prog = state.progress || {done:0,total:0,errors:0}; const active=!!(state.running||state.loading_dataset); const activeReqs=activeRequestList(); const pct = prog.total ? Math.round(100*prog.done/prog.total) : (active ? (prog.mode==='paper_import' ? 8 : 5) : 0); document.getElementById('bar').style.width = pct+'%'; const activeName=activeReqs[0]?.name ? `: ${activeReqs[0].name}` : ''; document.getElementById('progressText').textContent = state.loading_dataset ? `${prog.last_event||'Loading dataset'}${prog.total ? ` (${prog.done}/${prog.total})` : ''}` : state.running && activeReqs.length ? `${prog.done||0}/${prog.total||0} complete, ${activeReqs.length} waiting on model${activeName}, ${prog.errors||0} errors` : state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
  const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const domainText=ev.by_capability_domain ? Object.entries(ev.by_capability_domain).map(([k,v])=>`${k}: ${v.correct}/${v.total}${v.average_score!==null&&v.average_score!==undefined ? ' score '+percent(v.average_score) : ''}`).join(' | ') : ''; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['avg answer score',ev.answer_score_average!==null&&ev.answer_score_average!==undefined ? percent(ev.answer_score_average) : 'n/a'],['by capability',domainText],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
  contextBlocked = renderContextGuard();
  document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const ev=r.evaluation||{}; const expected=ev.has_expected ? clipText(ev.expected_answer||ev.expected_label||'',180) : ''; const pred=clipText(ev.predicted_answer||ev.predicted_label||(j.prediction_label ? `${j.prediction_class_id} ${j.prediction_label}` : r.response||''),180); const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const score=ev.answer_score!==null&&ev.answer_score!==undefined ? percent(ev.answer_score) : match; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||clipText(r.response||'',260))); const domain=ev.capability_domain||ev.domain||''; return `<tr><td>${esc(r.name)}</td><td>${esc(ev.task||'')}</td><td>${esc(domain)}<br>${esc(ev.sft_type||'')}</td><td>${esc(expected)}</td><td>${esc(pred)}</td><td>${esc(ev.metric||'')}</td><td>${esc(score)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage, prompt_source:r.prompt_source, user_prompt:r.user_prompt_used})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
- const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = state.running; requestAnimationFrame(autosizePrompts); }
+ const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; requestAnimationFrame(autosizePrompts); }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
 document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); render(); };
 ['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=()=>{ autosizeTextarea(el(id)); render(); });
@@ -3126,7 +3317,7 @@ document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults
 document.getElementById('allowOverContext').onchange = render;
 document.getElementById('fitBudgetBtn').onclick = fitToContext;
 document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
-document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.status==='importing') return; if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
@@ -3183,16 +3374,19 @@ class Handler(BaseHTTPRequestHandler):
                 thread.start()
                 self.send_json({"ok": True, "status": "loading", "repo_id": repo_id, "max_videos": max_videos})
             elif self.path == "/api/paper":
-                if bool(payload.get("load_dataset", True)):
+                load_now = bool(payload.get("load_dataset", True))
+                source = str(payload.get("source") or "")
+                max_videos = int_payload(payload, "max_videos", 20)
+                if load_now:
                     snap = snapshot()
                     if snap.get("running") or snap.get("loading_dataset"):
                         raise RuntimeError("A batch or dataset load is already running")
-                discovery = import_paper_source(
-                    str(payload.get("source") or ""),
-                    int_payload(payload, "max_videos", 20),
-                    bool(payload.get("load_dataset", True)),
-                )
-                self.send_json(discovery)
+                    thread = threading.Thread(target=import_paper_worker, args=(source, max_videos, load_now), daemon=True)
+                    thread.start()
+                    self.send_json({"ok": True, "status": "importing", "source": source, "max_videos": max_videos})
+                else:
+                    discovery = import_paper_source(source, max_videos, load_now)
+                    self.send_json(discovery)
             elif self.path == "/api/run":
                 snap = snapshot()
                 if snap.get("running") or snap.get("loading_dataset"):
