@@ -1,21 +1,34 @@
 ---
 name: byo-video
-description: Deploy the Cosmos BYO-Video runtime-agent, Gradio, or FiftyOne frontend on Brev, Horde, SSH, or a local GPU. Use for Cosmos Reason/Cosmos3/Nemotron/Qwen VLM video or image inference, HF public dataset batch inference, NIM-local mode, runtime monitoring, and NIM model switching.
+description: Deploy the Cosmos BYO-Video guided dataset batch UI, single-video upload UI, or dataset browser/result review flow on Brev, Horde, SSH, or a local GPU. Use for Cosmos Reason/Cosmos3/Nemotron/Qwen VLM video or image inference, HF public dataset batch inference, NIM-local mode, runtime monitoring, and NIM model switching.
 compatibility: Codex, Claude Code, and Kimi Code CLI. Translate legacy Claude tool names in the runbook to the current agent's native tools.
 ---
 
 # BYO-Video
 
-Use this skill to launch Cosmos BYO-Video with a runtime-agent, Gradio, or
-FiftyOne-assisted frontend. Read
+Use this skill to launch Cosmos BYO-Video with a guided dataset batch UI,
+single-video upload UI, or dataset browser/result review flow. Read
 `references/byo-video-runbook.md` before executing, but apply the compatibility
 adapter below first.
 
+When asking the user to choose a frontend, do not present raw implementation
+names like `runtime_agent`, `gradio`, or `fiftyone` as the option labels. Use
+descriptive labels and map the answer to the env var afterward:
+
+- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent`
+  for HF public dataset loading, concurrent video processing, worker-safety
+  smoke testing, and result export/writeback.
+- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` for uploading one
+  video or image and tuning the prompt/parameters interactively.
+- **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` when the
+  user wants the guided batch UI with FiftyOne available for sample inspection
+  and result review.
+
 Default to `BYO_VIDEO_FRONTEND=runtime_agent` when the user asks for a guided
 inference flow, HF public dataset loading, concurrent batch processing, or the
-worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio` for the classic
-single-upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when the user specifically
-wants the FiftyOne app available alongside runtime-agent result writeback.
+worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio` for the single-video
+upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when the user specifically wants
+FiftyOne available alongside result writeback.
 
 ## Codex Mode Note
 

@@ -4,11 +4,11 @@
 > `~/.claude/scripts` examples. Before executing, apply the adapter in
 > `../SKILL.md`; for shared use, prefer the bundled `../scripts/` directory.
 
-**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of three frontends:
+**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of three frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
-- `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, and FiftyOne result writeback.
-- `BYO_VIDEO_FRONTEND=gradio` — classic single-upload Gradio UI.
-- `BYO_VIDEO_FRONTEND=fiftyone` — runtime-agent UI with FiftyOne installed and available as the dataset browser/result viewer.
+- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available.
+- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — classic upload-one-video/image UI for prompt and parameter tuning.
+- **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review.
 
 For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
 
@@ -735,11 +735,12 @@ You are the BYO-video post-deployment guide for a casual Claude Code user.
 Use AskUserQuestion for one decision at a time. Never ask open-ended questions
 when a small menu will do.
 
-Start by asking which surface they want to use:
-1. Runtime Agent HTML
-2. Claude CLI guide
-3. Gradio single-video UI
-4. FiftyOne dataset viewer
+Start by asking which surface they want to use. Use descriptive labels rather
+than raw implementation names:
+1. Guided dataset batch UI — load HF datasets, select videos, run concurrent inference, and export/write back results
+2. CLI companion — walk through dataset loading, guarded runs, prompt shaping, and exports from the terminal
+3. Single-video upload UI — upload one MP4/image, tune prompt settings, and inspect the response
+4. Dataset browser + result viewer — inspect loaded samples and written predictions in FiftyOne
 
 Then ask what they want to accomplish:
 1. Worker-safety smoke test
