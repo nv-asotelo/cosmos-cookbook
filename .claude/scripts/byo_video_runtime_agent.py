@@ -269,6 +269,7 @@ STATE: Dict[str, Any] = {
     "videos": [],
     "results": [],
     "running": False,
+    "loading_dataset": False,
     "progress": {"done": 0, "total": 0, "errors": 0},
     "batch_metrics": None,
     "batch_history": [],
@@ -319,6 +320,46 @@ def snapshot() -> Dict[str, Any]:
 def update_state(**items: Any) -> None:
     with STATE_LOCK:
         STATE.update(items)
+
+
+def update_progress(**items: Any) -> None:
+    with STATE_LOCK:
+        progress = dict(STATE.get("progress") or {})
+        progress.update(items)
+        progress["updated_epoch"] = items.get("updated_epoch", time.time())
+        STATE["progress"] = progress
+
+
+def update_load_progress(
+    phase: str,
+    event: str,
+    *,
+    done: Optional[int] = None,
+    total: Optional[int] = None,
+    current_file: Optional[str] = None,
+    videos: Optional[List[Dict[str, Any]]] = None,
+    last_error: Optional[str] = None,
+) -> None:
+    now = time.time()
+    with STATE_LOCK:
+        progress = dict(STATE.get("progress") or {})
+        progress.update({
+            "mode": "dataset_load",
+            "phase": phase,
+            "updated_epoch": now,
+            "last_event": event,
+        })
+        if done is not None:
+            progress["done"] = done
+        if total is not None:
+            progress["total"] = total
+        if current_file is not None:
+            progress["current_file"] = current_file
+        if last_error is not None:
+            progress["last_error"] = last_error
+        STATE["progress"] = progress
+        if videos is not None:
+            STATE["videos"] = videos
 
 
 class ClientInputError(RuntimeError):
@@ -898,29 +939,36 @@ def load_with_fiftyone(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     import fiftyone as fo
     import fiftyone.utils.huggingface as fouh
 
-    name = repo_id.replace("/", "_")
-    if name in fo.list_datasets():
-        dataset = fo.load_dataset(name)
+    requested_name = repo_id.replace("/", "_")
+    update_load_progress("fiftyone", f"Checking local FiftyOne datasets for {repo_id}")
+    existing_names = set(fo.list_datasets())
+    if requested_name in existing_names:
+        dataset = fo.load_dataset(requested_name)
+    elif repo_id in existing_names:
+        dataset = fo.load_dataset(repo_id)
     else:
+        update_load_progress("fiftyone", f"Loading {repo_id} from the FiftyOne Hugging Face integration")
         try:
             if max_videos > 0:
-                dataset = fouh.load_from_hub(repo_id, dataset_name=name, max_samples=max_videos, persistent=True)
+                dataset = fouh.load_from_hub(repo_id, dataset_name=requested_name, max_samples=max_videos, persistent=True)
             else:
-                dataset = fouh.load_from_hub(repo_id, dataset_name=name, persistent=True)
+                dataset = fouh.load_from_hub(repo_id, dataset_name=requested_name, persistent=True)
         except TypeError:
             try:
-                dataset = fouh.load_from_hub(repo_id, dataset_name=name, persistent=True)
+                dataset = fouh.load_from_hub(repo_id, dataset_name=requested_name, persistent=True)
             except TypeError:
                 dataset = fouh.load_from_hub(repo_id, persistent=True)
 
     videos: List[Dict[str, Any]] = []
+    expected_total = max_videos if max_videos > 0 else 0
+    update_load_progress("fiftyone", f"Reading video samples from FiftyOne dataset {dataset.name}", done=0, total=expected_total)
     for sample in dataset:
         path = str(sample.filepath)
         if not is_video_path(path):
             continue
         row = sample_to_row(sample)
         label = row.get("label") or guess_label(sample)
-        videos.append(attach_meta({
+        video = attach_meta({
             "id": video_id(path),
             "name": Path(path).name,
             "filepath": path,
@@ -928,12 +976,21 @@ def load_with_fiftyone(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             "label": label,
             "dataset_row": row,
             "source": "fiftyone",
-        }))
+        })
+        videos.append(video)
+        update_load_progress(
+            "fiftyone",
+            f"Prepared {len(videos)} video samples from FiftyOne",
+            done=len(videos),
+            total=expected_total,
+            current_file=Path(path).name,
+            videos=list(videos),
+        )
         if max_videos > 0 and len(videos) >= max_videos:
             break
     if not videos:
         raise RuntimeError(f"FiftyOne loaded {repo_id}, but no video samples were found")
-    update_state(dataset_source="fiftyone", fo_dataset_name=name)
+    update_state(dataset_source="fiftyone", fo_dataset_name=dataset.name)
     return videos
 
 
@@ -977,7 +1034,9 @@ def load_hf_sidecar_rows(repo_id: str, files: List[str]) -> Dict[str, Dict[str, 
 def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     from huggingface_hub import hf_hub_download, list_repo_files
 
+    update_load_progress("hf_listing", f"Listing files in Hugging Face dataset {repo_id}")
     repo_files = list_repo_files(repo_id, repo_type="dataset")
+    update_load_progress("hf_metadata", f"Found {len(repo_files)} files; checking sidecar metadata")
     sidecar_rows = load_hf_sidecar_rows(repo_id, repo_files)
     files = [f for f in repo_files if is_video_path(f)]
     if not files:
@@ -986,13 +1045,30 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     local_root.mkdir(parents=True, exist_ok=True)
     videos: List[Dict[str, Any]] = []
     selected_files = files if max_videos <= 0 else files[:max_videos]
-    for file_name in selected_files:
+    total = len(selected_files)
+    update_load_progress("hf_download", f"Selected {total} videos from {len(files)} available video files", done=0, total=total)
+    for index, file_name in enumerate(selected_files, start=1):
+        log(f"Downloading {index}/{total} from Hugging Face: {file_name}")
+        update_load_progress(
+            "hf_download",
+            f"Downloading {index}/{total}: {file_name}",
+            done=index - 1,
+            total=total,
+            current_file=file_name,
+        )
         local = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=file_name, local_dir=str(local_root))
         row = dict(sidecar_rows.get(file_name) or sidecar_rows.get(Path(file_name).name) or {})
         row.setdefault("hf_repo", repo_id)
         row.setdefault("hf_path", file_name)
         label = row.get("label")
-        videos.append(attach_meta({
+        update_load_progress(
+            "metadata",
+            f"Extracting metadata and thumbnail for {index}/{total}: {file_name}",
+            done=index - 1,
+            total=total,
+            current_file=file_name,
+        )
+        video = attach_meta({
             "id": video_id(local),
             "name": file_name,
             "filepath": local,
@@ -1000,11 +1076,21 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             "label": label,
             "dataset_row": row,
             "source": "hf_hub",
-        }))
+        })
+        videos.append(video)
+        update_load_progress(
+            "metadata",
+            f"Prepared {index}/{total}: {file_name}",
+            done=index,
+            total=total,
+            current_file=file_name,
+            videos=list(videos),
+        )
     try:
         import fiftyone as fo
 
         name = repo_id.replace("/", "_") + "_runtime"
+        update_load_progress("fiftyone_wrap", f"Wrapping {len(videos)} downloaded videos in local FiftyOne dataset {name}", done=0, total=len(videos))
         if name in fo.list_datasets():
             dataset = fo.load_dataset(name)
             try:
@@ -1014,7 +1100,7 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
         else:
             dataset = fo.Dataset(name, persistent=True)
 
-        for video in videos:
+        for index, video in enumerate(videos, start=1):
             sample = fo.Sample(filepath=video["filepath"])
             sample["hf_repo"] = repo_id
             sample["hf_path"] = video["name"]
@@ -1028,6 +1114,14 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             dataset.add_sample(sample)
             video["sample_id"] = str(sample.id)
             video["source"] = "fiftyone"
+            update_load_progress(
+                "fiftyone_wrap",
+                f"Added {index}/{len(videos)} videos to FiftyOne",
+                done=index,
+                total=len(videos),
+                current_file=video["name"],
+                videos=list(videos),
+            )
         update_state(dataset_source="fiftyone", fo_dataset_name=name)
         log(f"Wrapped HF files in local FiftyOne dataset {name}")
     except Exception as exc:
@@ -1038,29 +1132,96 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
 
 def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     limit = "all" if max_videos <= 0 else str(max_videos)
+    started_epoch = time.time()
+    update_state(
+        loading_dataset=True,
+        dataset_repo=repo_id,
+        dataset_source=None,
+        fo_dataset_name=None,
+        videos=[],
+        results=[],
+        progress={
+            "mode": "dataset_load",
+            "phase": "starting",
+            "done": 0,
+            "total": 0,
+            "errors": 0,
+            "started_epoch": started_epoch,
+            "updated_epoch": started_epoch,
+            "last_result_epoch": None,
+            "current_file": None,
+            "last_event": f"Loading dataset {repo_id} (up to {limit} videos)",
+            "last_error": None,
+        },
+        batch_metrics=None,
+    )
     log(f"Loading dataset {repo_id} (up to {limit} videos)")
     try:
-        videos = load_with_fiftyone(repo_id, max_videos)
-        log(f"Loaded {len(videos)} videos with FiftyOne")
+        try:
+            videos = load_with_fiftyone(repo_id, max_videos)
+            log(f"Loaded {len(videos)} videos with FiftyOne")
+        except Exception as exc:
+            log(f"FiftyOne load failed; falling back to huggingface_hub: {exc}")
+            update_load_progress(
+                "hf_fallback",
+                f"FiftyOne load failed; falling back to Hugging Face Hub: {exc}",
+                done=0,
+                total=0,
+                current_file=None,
+            )
+            videos = load_with_hf_hub(repo_id, max_videos)
+            log(f"Loaded {len(videos)} videos with huggingface_hub")
     except Exception as exc:
-        log(f"FiftyOne load failed; falling back to huggingface_hub: {exc}")
-        videos = load_with_hf_hub(repo_id, max_videos)
-        log(f"Loaded {len(videos)} videos with huggingface_hub")
+        now = time.time()
+        update_state(
+            loading_dataset=False,
+            progress={
+                "mode": "dataset_load",
+                "phase": "failed",
+                "done": 0,
+                "total": 0,
+                "errors": 1,
+                "started_epoch": started_epoch,
+                "updated_epoch": now,
+                "finished_epoch": now,
+                "last_event": "Dataset load failed",
+                "last_error": str(exc),
+            },
+        )
+        raise
+    now = time.time()
     update_state(
         dataset_repo=repo_id,
         videos=videos,
         results=[],
+        loading_dataset=False,
         progress={
-            "done": 0,
-            "total": 0,
+            "mode": "dataset_load",
+            "phase": "complete",
+            "done": len(videos),
+            "total": len(videos),
             "errors": 0,
-            "updated_epoch": time.time(),
+            "started_epoch": started_epoch,
+            "updated_epoch": now,
+            "finished_epoch": now,
             "last_event": f"Loaded {len(videos)} videos",
             "last_error": None,
         },
         batch_metrics=None,
     )
     return videos
+
+
+def load_dataset_worker(repo_id: str, max_videos: int) -> None:
+    try:
+        load_dataset(repo_id, max_videos)
+    except Exception as exc:
+        log(f"Dataset load failed: {exc}")
+    finally:
+        try:
+            RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
 
 def detect_server() -> Dict[str, Any]:
@@ -1560,6 +1721,11 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
         import fiftyone as fo
 
         dataset = fo.load_dataset(snap["fo_dataset_name"])
+        schema = dataset.get_field_schema()
+        if "runtime_agent_correct" not in schema:
+            dataset.add_sample_field("runtime_agent_correct", fo.BooleanField)
+        if "runtime_agent_error" not in schema:
+            dataset.add_sample_field("runtime_agent_error", fo.StringField)
         sample = dataset[video["sample_id"]]
         sample["runtime_agent_response"] = result.get("response") or ""
         sample["runtime_agent_plan"] = result.get("plan") or {}
@@ -2341,24 +2507,29 @@ INDEX_HTML = """<!doctype html>
 <style>
 :root { color-scheme: light; --ink:#1f2937; --muted:#6b7280; --line:#d8dee8; --panel:#ffffff; --bg:#f5f7fb; --accent:#0f766e; --warn:#b45309; --bad:#b91c1c; }
 * { box-sizing: border-box; }
+html, body { max-width:100%; overflow-x:hidden; }
 body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
-header { padding:18px 28px; border-bottom:1px solid var(--line); background:#fff; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+header { padding:18px 28px; border-bottom:1px solid var(--line); background:#fff; display:flex; align-items:center; justify-content:space-between; gap:20px; min-width:0; }
 h1 { font-size:20px; margin:0; letter-spacing:0; }
-main { max-width:1280px; margin:0 auto; padding:20px; display:grid; grid-template-columns: 340px 1fr; gap:18px; }
-section, aside { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+main { width:min(100% - 32px, 1680px); margin:0 auto; padding:20px 0; display:grid; grid-template-columns:minmax(280px, clamp(300px, 24vw, 420px)) minmax(0, 1fr); gap:18px; align-items:start; }
+section, aside { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+aside { position:sticky; top:16px; max-height:calc(100vh - 104px); overflow:auto; }
+section { overflow:hidden; }
 label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-input, textarea, select { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+input, textarea, select { width:100%; min-width:0; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+select { overflow:hidden; text-overflow:ellipsis; }
 input[type=range] { padding:0; }
 input[type=checkbox] { width:auto; }
-textarea { min-height:220px; max-height:60vh; resize:vertical; overflow-y:auto; line-height:1.45; }
-#systemPrompt { height:clamp(240px, 28vh, 360px); }
-#userPrompt { height:clamp(360px, 42vh, 560px); }
+textarea { min-height:96px; max-height:min(42vh, 520px); resize:vertical; overflow-y:auto; line-height:1.45; }
+#systemPrompt { min-height:88px; }
+#userPrompt { min-height:120px; }
 button { border:0; border-radius:6px; padding:9px 12px; font-weight:650; color:#fff; background:var(--accent); cursor:pointer; }
 button.secondary { background:#334155; }
 button.warn { background:var(--warn); }
 button:disabled { opacity:.55; cursor:not-allowed; }
 .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
-.kv { display:grid; grid-template-columns:110px 1fr; gap:6px; font-size:13px; color:var(--muted); }
+.kv { display:grid; grid-template-columns:minmax(86px, max-content) minmax(0, 1fr); gap:6px 10px; font-size:13px; color:var(--muted); }
+.kv > div { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
 .params { display:grid; grid-template-columns:repeat(2, minmax(220px, 1fr)); gap:10px 18px; margin:12px 0; }
 .param-value { color:var(--ink); font-weight:650; float:right; }
 .range-note { display:block; color:var(--muted); font-size:11px; line-height:1.3; margin-top:4px; }
@@ -2386,19 +2557,30 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .export-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
 .export-link { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; color:var(--accent); background:#fff; text-decoration:none; }
 .paper-panel { margin-top:12px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; }
-.paper-panel .kv { grid-template-columns:82px 1fr; margin-top:8px; }
+.paper-panel .kv { grid-template-columns:minmax(72px, max-content) minmax(0, 1fr); margin-top:8px; max-height:260px; overflow:auto; padding-right:4px; }
 .guide { display:grid; gap:8px; }
-.step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; }
+.step { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
 .step strong { color:var(--ink); }
 table { width:100%; border-collapse:collapse; font-size:13px; }
-th, td { border-bottom:1px solid var(--line); padding:8px; vertical-align:top; text-align:left; }
+th, td { border-bottom:1px solid var(--line); padding:8px; vertical-align:top; text-align:left; overflow-wrap:anywhere; }
 th { color:var(--muted); font-size:12px; font-weight:650; }
 .results { max-height:420px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
 .log { height:150px; overflow:auto; background:#0f172a; color:#d1fae5; padding:10px; border-radius:6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; white-space:pre-wrap; }
-.pill { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:12px; color:var(--muted); background:#fff; }
+.pill { display:inline-flex; align-items:center; min-width:0; border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:12px; color:var(--muted); background:#fff; }
+#serverPill { max-width:min(52vw, 560px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .progress { height:8px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
 .progress div { height:100%; width:0; background:var(--accent); transition:width .2s ease; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; padding:14px; } header { padding:14px; } }
+@media (min-width: 1440px) { main { width:calc(100% - 40px); } }
+@media (max-width: 900px) {
+  header { padding:14px; align-items:flex-start; flex-direction:column; }
+  #serverPill { max-width:100%; }
+  main { display:block; width:calc(100% - 28px); max-width:none; margin:0 14px; padding:14px 0; }
+  section, aside { width:auto; max-width:100%; margin-right:14px; }
+  section { margin-top:14px; }
+  aside { position:static; max-height:none; overflow:visible; }
+  .actions button { flex:1 1 100%; }
+  .params, .export-sections { grid-template-columns:1fr; }
+}
 </style>
 </head>
 <body>
@@ -2529,6 +2711,8 @@ function expectedText(x){ return x ? `${esc(x.class_id)} ${esc(x.label)}` : ''; 
 function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
 function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
+function autosizeTextarea(textarea){ if(!textarea) return; textarea.style.height='auto'; const styles=getComputedStyle(textarea); const min=parseFloat(styles.minHeight)||0; const max=parseFloat(styles.maxHeight)||window.innerHeight*.42; const next=Math.max(min, Math.min(textarea.scrollHeight + 2, max)); textarea.style.height=next+'px'; textarea.style.overflowY=textarea.scrollHeight > max ? 'auto' : 'hidden'; }
+function autosizePrompts(){ ['systemPrompt','userPrompt'].forEach(id=>autosizeTextarea(el(id))); }
 function syncPromptPresets(){ const presets=state?.defaults?.prompt_presets||[]; const sig=presets.map(p=>`${p.label}|${p.user_prompt}`).join('||'); if(sig===promptPresetSig) return; const select=el('promptPreset'); const old=select.value; select.innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}${p.paper_import?' (paper)':''}</option>`).join(''); const importedIndex=presets.findIndex(p=>p.paper_import); if(importedIndex>=0 && (!old || old==='0')) select.value=String(importedIndex); else if(old && Number(old) < presets.length) select.value=old; promptPresetSig=sig; }
 function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if(p.arxiv_id) rows.push(['arXiv',p.arxiv_id]); if(p.title) rows.push(['title',clipText(p.title,90)]); if(p.selected_dataset) rows.push(['dataset',p.selected_dataset]); if(p.models?.length) rows.push(['model',p.models[0]]); if(p.prompt_presets?.length) rows.push(['prompts',p.prompt_presets.length]); if(p.load_error) rows.push(['load error',clipText(p.load_error,160)]); if(p.warnings?.length) rows.push(['warnings',clipText(p.warnings.join(' | '),180)]); el('paperKv').innerHTML = rows.length ? rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('') : '<div>paper</div><div>No paper imported yet.</div>'; }
 function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
@@ -2544,35 +2728,56 @@ function patchPixels(){ return Number(state?.server?.context_patch_pixels || sta
 function promptTokensEst(){ const text=(el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||''); return Math.max(1, Math.round(text.length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
 function currentSelectionVideos(){ const videos=state?.videos||[]; const ids=new Set(checkedIds()); return ids.size ? videos.filter(v=>ids.has(v.id)) : videos; }
 function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const input=Number(plan.tokens||0)+prompt; const ratio=input/allowed; return {video:v, plan, input, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
-function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=state.running || !r.videos.length; allow.disabled=state.running; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
+function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const busy=!!(state.running||state.loading_dataset); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=busy || !r.videos.length; allow.disabled=busy; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
 function fitToContext(){ const r=contextReport(); if(!r.enabled || !r.videos.length) return; const p=params(); const prompt=promptTokensEst(); const available=Math.max(1, modelMaxLen() - p.max_tokens - reserveTokens() - prompt); let safe=Number(el('maxFramesSlider').max || 128); for(const v of r.videos){ const m=v.meta||{}; const duration=Number(m.duration_s||0); const requested=Math.max(1, Math.round((duration || 1) * p.fps)); const nativePx=Number(m.width||0)*Number(m.height||0); const effectivePx=nativePx ? Math.min(nativePx, p.max_pixels) : p.max_pixels; const frames=Math.max(1, Math.floor(available * patchPixels() / Math.max(1, effectivePx))); safe=Math.min(safe, requested, frames); } el('maxFramesSlider').value = Math.max(1, Math.min(Number(el('maxFramesSlider').max||128), safe)); render(); }
 function latestRuntimeError(){ const p=state?.progress||{}; if(p.last_error) return String(p.last_error); const results=[...(state?.results||[])].reverse(); const failed=results.find(r=>r && r.error); return failed ? `${failed.name||'video'}: ${failed.error}` : ''; }
 function clipText(text, max=260){ const s=String(text||''); return s.length > max ? s.slice(0, max-1)+'...' : s; }
-function renderRuntimeStatus(){ const p=state.progress||{}; const bm=state.batch_metrics||{}; const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : 0; const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((state.running ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0); const eta=state.running && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastResult=Number(p.last_result_epoch||0); const waitSince=state.running ? now - (lastResult || started || now) : null; const latestError=latestRuntimeError(); const delayed=state.running && waitSince !== null && waitSince > 90; const stalled=state.running && waitSince !== null && waitSince > 300; const title=latestError ? (state.running ? 'Running with errors' : 'Attention') : state.running ? (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running') : total ? (errors ? 'Complete with errors' : 'Complete') : 'Idle'; const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`; const etaText=state.running ? (eta === null ? 'waiting for first completion' : span(eta)) : ''; const rows=[['completed', total ? `${fmt(done)}/${fmt(total)}` : 'none'],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['delay', state.running && waitSince !== null ? span(waitSince) : ''],['errors', fmt(errors)],['event', p.last_event||'']]; el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); const notice=el('runtimeNotice'); if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); } else if(stalled){ notice.className='status-note bad'; notice.textContent=`No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; } else if(delayed){ notice.className='status-note warn'; notice.textContent=`No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; } else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; } else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; } else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Batch finished with errors. See Results and Runtime log for details.' : 'Batch finished successfully.'; } else { notice.className='status-note'; notice.textContent='No batch is running.'; } }
+function renderRuntimeStatus(){
+ const p=state.progress||{}; const bm=state.batch_metrics||{}; const isLoad=!!(state.loading_dataset || p.mode==='dataset_load'); const active=!!(state.running || state.loading_dataset);
+ const total=Number(p.total ?? bm.total ?? 0); const done=Number(p.done ?? bm.completed ?? 0); const errors=Number(p.errors ?? bm.errors ?? 0); const pct=total ? Math.min(100, Math.round(100*done/total)) : (active ? 5 : 0);
+ const now=serverNow(); const started=Number(p.started_epoch||0); const finished=Number(p.finished_epoch||0); const elapsed=started ? ((active ? now : (finished || Number(p.updated_epoch||now))) - started) : Number(bm.batch_wall_seconds||0);
+ const eta=active && total && done > 0 && elapsed > 0 ? ((total-done) / (done / elapsed)) : null; const lastActivity=Number(p.updated_epoch||p.last_result_epoch||0); const waitSince=active ? now - (lastActivity || started || now) : null;
+ const latestError=latestRuntimeError(); const delayed=active && waitSince !== null && waitSince > 90; const stalled=active && waitSince !== null && waitSince > 300;
+ const title=latestError ? (active ? (isLoad ? 'Loading with errors' : 'Running with errors') : 'Attention') : active ? (isLoad ? (stalled ? 'Dataset load stalled' : delayed ? 'Dataset load slow' : 'Loading dataset') : (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running')) : total ? (errors ? 'Complete with errors' : (isLoad ? 'Dataset loaded' : 'Complete')) : 'Idle';
+ const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`;
+ const etaText=active ? (eta === null ? (done ? 'calculating' : 'waiting for first item') : span(eta)) : '';
+ const rows=[['task', isLoad ? 'dataset load' : (state.running ? 'inference batch' : '')],['phase', p.phase||''],['completed', total ? `${fmt(done)}/${fmt(total)}` : (done ? fmt(done) : 'pending')],['elapsed', elapsed ? span(elapsed) : '0s'],['ETA', etaText],['quiet for', active && waitSince !== null ? span(waitSince) : ''],['current', p.current_file||''],['errors', fmt(errors)],['event', p.last_event||'']];
+ el('runtimeKv').innerHTML=rows.filter(([_,v])=>v!==''&&v!==null&&v!==undefined).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
+ const notice=el('runtimeNotice');
+ if(latestError){ notice.className='status-note bad'; notice.textContent='Latest runtime issue: '+clipText(latestError); }
+ else if(stalled){ notice.className='status-note bad'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Hugging Face may still be transferring a large file, but this is unusually quiet.` : `No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; }
+ else if(delayed){ notice.className='status-note warn'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Still waiting for Hugging Face or local metadata extraction.` : `No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; }
+ else if(isLoad && active && total){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Rows and thumbnails will appear as each video finishes downloading and metadata extraction completes.'; }
+ else if(isLoad && active){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Waiting for Hugging Face file listing or the first selected video.'; }
+ else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; waiting for the first video to complete.'; }
+ else if(state.running){ notice.className='status-note'; notice.textContent='Batch is making progress.'; }
+ else if(total){ notice.className=errors ? 'status-note warn' : 'status-note'; notice.textContent=errors ? 'Finished with errors. See Results and Runtime log for details.' : (isLoad ? 'Dataset is ready for selection and inference.' : 'Batch finished successfully.'); }
+ else { notice.className='status-note'; notice.textContent='No batch is running.'; }
+}
 function applySliderMeta(){ const map=[['fpsSlider','fps'],['maxPixelsSlider','max_pixels'],['maxTokensSlider','max_tokens'],['temperatureSlider','temperature'],['topPSlider','top_p'],['repPenaltySlider','repetition_penalty'],['maxFramesSlider','max_frames']]; for(const [id,key] of map){ const m=(state.defaults.slider_meta||{})[key]||{}; const el=document.getElementById(id); if(m.min !== undefined) el.min=m.min; if(m.max !== undefined) el.max=m.max; if(m.step !== undefined) el.step=m.step; } }
 function applyBuildDefaults(checked){ const d=state.defaults; const b=d.build_defaults||{}; const m=d.slider_meta||{}; el('temperatureSlider').value = checked ? b.temperature : m.temperature.recommended; el('topPSlider').value = checked ? b.top_p : m.top_p.recommended; el('repPenaltySlider').value = checked ? b.repetition_penalty : m.repetition_penalty.recommended; render(); }
-function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; syncPromptPresets(); renderExportSections(); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
+function initControls(){ if(initialized || !state) return; const d=state.defaults; applySliderMeta(); document.getElementById('repo').value = state.dataset_repo; document.getElementById('maxVideos').value = d.max_videos; document.getElementById('concurrency').value = d.concurrency; document.getElementById('systemPrompt').value = d.system_prompt; document.getElementById('userPrompt').value = d.user_prompt; autosizePrompts(); document.getElementById('fpsSlider').value = d.fps; document.getElementById('maxPixelsSlider').value = d.max_pixels; document.getElementById('maxTokensSlider').value = d.max_tokens; document.getElementById('temperatureSlider').value = d.temperature; document.getElementById('topPSlider').value = d.top_p; document.getElementById('repPenaltySlider').value = d.repetition_penalty; document.getElementById('maxFramesSlider').value = d.max_frames; document.getElementById('buildDefaultsToggle').checked = !!d.use_build_defaults; syncPromptPresets(); renderExportSections(); initialized = true; if(d.use_build_defaults) applyBuildDefaults(true); }
 function render(){ if(!state) return; initControls(); renderParamLabels();
  syncPromptPresets(); renderPaperImport();
  const srv = state.server || {}; document.getElementById('serverPill').textContent = srv.error ? 'backend unavailable' : (srv.model ? 'model: '+srv.model : 'backend ready'); const rows=[['instance', srv.instance],['host_ip', srv.host_ip],['backend', srv.backend],['model', srv.model],['model context', srv.model_max_len ? `${fmt(srv.model_max_len)} tokens (${srv.model_max_len_source||'default'})` : ''],['base_url', srv.base_url],['gpu', srv.gpu],['vram', srv.vram_total_mib ? `${fmt(srv.vram_free_mib)} MiB free / ${fmt(srv.vram_total_mib)} MiB total` : srv.gpu_error],['ssd', srv.ssd_total_gb ? `${fmt(srv.ssd_free_gb,1)} GB free / ${fmt(srv.ssd_total_gb,1)} GB total (${srv.storage_path})` : srv.storage_error]]; document.getElementById('serverKv').innerHTML = rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  document.getElementById('framePolicy').textContent = nativeVideoMode() ? 'This backend receives a video_url; frame count and visual tokens are sampled by the model server.' : 'This backend receives sampled image frames; the runtime agent controls fps, max pixels, and max input frames.';
- const prog = state.progress || {done:0,total:0,errors:0}; const pct = prog.total ? Math.round(100*prog.done/prog.total) : 0; document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
+ const prog = state.progress || {done:0,total:0,errors:0}; const active=!!(state.running||state.loading_dataset); const pct = prog.total ? Math.round(100*prog.done/prog.total) : (active ? 5 : 0); document.getElementById('bar').style.width = pct+'%'; document.getElementById('progressText').textContent = state.loading_dataset ? `${prog.last_event||'Loading dataset'}${prog.total ? ` (${prog.done}/${prog.total})` : ''}` : state.running ? `${prog.done}/${prog.total} running, ${prog.errors} errors` : `${prog.done}/${prog.total} complete, ${prog.errors} errors`; renderRuntimeStatus();
  const bm=state.batch_metrics||{}; const ev=bm.evaluation||{}; const bmRows=bm.total ? [['dataset',bm.dataset_repo],['prompt',`${bm.run_label||''} (${bm.prompt_hash||''})`],['status',bm.status],['completed',`${bm.completed}/${bm.total} (${bm.errors} errors)`],['accuracy',ev.evaluated ? `${ev.correct}/${ev.evaluated} (${percent(ev.accuracy)})` : 'no expected labels'],['hazard accuracy',ev.evaluated ? `${ev.hazard_correct}/${ev.evaluated} (${percent(ev.hazard_accuracy)})` : 'no expected labels'],['batch E2E',sec(bm.batch_wall_seconds)],['video requests/sec',rate(bm.video_requests_per_second)],['video E2E stats',statText(bm.e2e_seconds)],['TTFT stats',statText(bm.ttft_seconds)],['output tok/s stats',statText(bm.output_tokens_per_second)]] : [['batch','No batch has run yet']]; document.getElementById('batchKv').innerHTML = bmRows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v||'')}</div>`).join('');
  const selected = new Set(checkedIds()); document.getElementById('videoRows').innerHTML = (state.videos||[]).map(v=>{ const m=v.meta||{}; const plan=videoPlan(v); const thumb=v.thumbnail_url ? `<img class="thumb" src="${esc(v.thumbnail_url)}" alt="">` : ''; const row=v.dataset_row||{}; return `<tr><td><input class="pick" type="checkbox" value="${esc(v.id)}" ${selected.size===0||selected.has(v.id)?'checked':''}></td><td>${thumb}</td><td>${esc(v.name)}</td><td>${expectedText(v.expected)}</td><td>${esc(rowSummary(row))}${detailsJson('row',row)}</td><td>${fmt(m.width)}x${fmt(m.height)}</td><td>${fmt(m.duration_s,1)}s</td><td>${fmt(m.total_frames)}</td><td>${esc(plan.frames)}</td><td>${esc(plan.tokens)}</td><td>${esc(v.filepath)}</td></tr>`; }).join('');
  contextBlocked = renderContextGuard();
  document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const hz=j.hazard_detection||{}; const ev=r.evaluation||{}; const pred=j.prediction_label ? `${esc(j.prediction_class_id)} ${esc(j.prediction_label)}` : ''; const expected=ev.has_expected ? `${esc(ev.expected_class_id)} ${esc(ev.expected_label)}` : ''; const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||r.response||'')); return `<tr><td>${esc(r.name)}</td><td>${expected}</td><td>${pred}</td><td>${esc(match)}</td><td>${esc(hz.is_hazardous)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
- document.getElementById('loadBtn').disabled = state.running; document.getElementById('runBtn').disabled = state.running || contextBlocked; document.getElementById('smokeBtn').disabled = state.running || contextBlocked; document.getElementById('foBtn').disabled = state.running; }
+ const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = state.running; requestAnimationFrame(autosizePrompts); }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
-document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; render(); };
-['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=render);
+document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); render(); };
+['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=()=>{ autosizeTextarea(el(id)); render(); });
 ['fpsSlider','maxPixelsSlider','maxTokensSlider','temperatureSlider','topPSlider','repPenaltySlider','maxFramesSlider'].forEach(id=>document.getElementById(id).oninput=render);
 document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults(el('buildDefaultsToggle').checked);
 document.getElementById('allowOverContext').onchange = render;
 document.getElementById('fitBudgetBtn').onclick = fitToContext;
 document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
-document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; } await poll(); if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
@@ -2620,9 +2825,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if self.path == "/api/load":
-                videos = load_dataset(str(payload.get("repo_id") or DEFAULT_DATASET), int_payload(payload, "max_videos", 20))
-                self.send_json({"videos": videos})
+                snap = snapshot()
+                if snap.get("running") or snap.get("loading_dataset"):
+                    raise RuntimeError("A batch or dataset load is already running")
+                repo_id = str(payload.get("repo_id") or DEFAULT_DATASET)
+                max_videos = int_payload(payload, "max_videos", 20)
+                thread = threading.Thread(target=load_dataset_worker, args=(repo_id, max_videos), daemon=True)
+                thread.start()
+                self.send_json({"ok": True, "status": "loading", "repo_id": repo_id, "max_videos": max_videos})
             elif self.path == "/api/paper":
+                if bool(payload.get("load_dataset", True)):
+                    snap = snapshot()
+                    if snap.get("running") or snap.get("loading_dataset"):
+                        raise RuntimeError("A batch or dataset load is already running")
                 discovery = import_paper_source(
                     str(payload.get("source") or ""),
                     int_payload(payload, "max_videos", 20),
@@ -2630,8 +2845,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.send_json(discovery)
             elif self.path == "/api/run":
-                if snapshot().get("running"):
-                    raise RuntimeError("A batch is already running")
+                snap = snapshot()
+                if snap.get("running") or snap.get("loading_dataset"):
+                    raise RuntimeError("A batch or dataset load is already running")
                 ids = payload.get("ids") or []
                 system_prompt = str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM)
                 user_prompt = str(payload.get("user_prompt") or WORKER_SAFETY_USER)
@@ -2652,8 +2868,9 @@ class Handler(BaseHTTPRequestHandler):
                 thread.start()
                 self.send_json({"ok": True, "context_budget": context_report})
             elif self.path == "/api/smoke":
-                if snapshot().get("running"):
-                    raise RuntimeError("A batch is already running")
+                snap = snapshot()
+                if snap.get("running") or snap.get("loading_dataset"):
+                    raise RuntimeError("A batch or dataset load is already running")
                 max_videos = int_payload(payload, "max_videos", 2)
                 concurrency = int_payload(payload, "concurrency", 2)
                 load_dataset(DEFAULT_DATASET, max_videos)
