@@ -229,6 +229,11 @@ PROMPT_PRESETS = [
     {"label": "Robot arm: 2D trajectory (JSON)", "user_prompt": "You are given the task \"Move the tape into the basket\". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {\"point_2d\": [x, y], \"label\": \"gripper trajectory\"}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
     {"label": "SDG critic: approve / reject", "user_prompt": "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection.\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag. Answer with Approve or Reject only.", "system_prompt": GENERIC_SYSTEM, "reasoning": True},
 ]
+PROMPT_SOURCE_CACHE_DIR = Path("/tmp/byo_video_prompt_sources")
+PROMPT_SCAN_TEXT_EXTENSIONS = {".md", ".txt", ".rst", ".py", ".json", ".jsonl", ".ipynb", ".yaml", ".yml"}
+PROMPT_SCAN_PDF_EXTENSIONS = {".pdf"}
+PROMPT_SCAN_DIR_LIMIT = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_DIR_LIMIT", "80"))
+PROMPT_SCAN_MAX_TEXT_BYTES = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_MAX_TEXT_BYTES", str(2 * 1024 * 1024)))
 PAPER_FALLBACKS = {
     "2603.29281": {
         "title": "PRISM: A Multi-View Multi-Capability Retail Video Dataset for Embodied Vision-Language Models",
@@ -454,6 +459,41 @@ def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
         raise RuntimeError(f"HTTP {exc.code} for {url}: {body[:400]}")
 
 
+def http_get_bytes(url: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> bytes:
+    headers = hf_auth_headers()
+    if requests is not None:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            body = (resp.text or "").strip()
+            raise RuntimeError(f"HTTP {resp.status_code} for {url}: {body[:400]}")
+        return resp.content
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as handle:
+            return handle.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code} for {url}: {body[:400]}")
+
+
+def http_get_bytes_prefix(url: str, max_bytes: int, timeout: float = HTTP_TIMEOUT_SECONDS) -> bytes:
+    headers = hf_auth_headers()
+    headers["Range"] = f"bytes=0-{max(0, max_bytes - 1)}"
+    if requests is not None:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            body = (resp.text or "").strip()
+            raise RuntimeError(f"HTTP {resp.status_code} for {url}: {body[:400]}")
+        return resp.content[:max_bytes]
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as handle:
+            return handle.read(max_bytes)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code} for {url}: {body[:400]}")
+
+
 def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> Any:
     return json.loads(http_get_text(url, timeout=timeout))
 
@@ -496,15 +536,150 @@ def clean_imported_prompt(text: Any) -> str:
     prompt = html.unescape(str(text or ""))
     prompt = prompt.replace("\\n", "\n")
     prompt = prompt.replace("<video>", "").replace("<image>", "")
+    prompt = prompt.replace("⟨think⟩", "<think>").replace("⟨/think⟩", "</think>")
+    prompt = re.sub(r"[ \t]+\n", "\n", prompt)
     return prompt.strip()
 
 
-def prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[Dict[str, Any]]:
-    readable = plain_text_from_html(text)
-    systems = re.findall(r'"role"\s*:\s*"system"\s*,\s*"content"\s*:\s*"([^"]+)"', readable)
-    users = re.findall(r'"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"([^"]+)"', readable)
+def prompt_source_label(source: str) -> str:
+    value = str(source or "").strip()
+    if not value:
+        return "Prompt source"
+    if value.startswith("http"):
+        arxiv_id = extract_arxiv_id(value)
+        if arxiv_id:
+            return f"arXiv {arxiv_id}"
+        repo = extract_hf_repo_from_url(value, "dataset") or extract_hf_repo_from_url(value, "model")
+        if repo:
+            return Path(repo).name
+        return urllib.parse.urlparse(value).netloc or value
+    return Path(value).stem or Path(value).name or value
+
+
+def prompt_text_excerpt(text: str, limit: int = 64) -> str:
+    clean = re.sub(r"\s+", " ", clean_imported_prompt(text)).strip(" \"'")
+    return clean[: limit - 1] + "..." if len(clean) > limit else clean
+
+
+def normalize_source_text(text: str) -> str:
+    value = str(text or "").replace("\r", "\n").replace("\f", "\n")
+    value = value.replace("⟨think⟩", "<think>").replace("⟨/think⟩", "</think>")
+    value = value.replace("“", '"').replace("”", '"').replace("’", "'")
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def source_kind_from_name(source: str) -> str:
+    lower = str(source or "").lower()
+    if "huggingface.co/datasets" in lower or "dataset" in lower:
+        return "hf"
+    if "arxiv" in lower or lower.endswith(".pdf") or "paper" in lower:
+        return "paper"
+    if any(part in lower for part in ("/recipes/", ".agents/skills", ".claude/skills", "skill")):
+        return "recipe"
+    return "import"
+
+
+def looks_like_prompt_heading(line: str) -> bool:
+    clean = prompt_text_excerpt(line, 120)
+    if not clean:
+        return False
+    return bool(
+        re.match(r"^(?:[A-Z]\.\d+|[A-Z]\s{1,3}\b|Appendix\b|Table\s+\d+|Figure\s+\d+)", clean)
+        or re.search(r"\b(?:[A-Z]{2}(?:-[A-Z]+)?-\d+|ER-\d+|CS-[A-Z]-\d+|SP-\d+|IP-\d+)\b|\bMCQ\b|Video QA|Event Verification|Temporal Grounding|Dense Video Captioning|Object Detection|Pointing|Referring Exp|Single[- ]Object Tracking", clean, re.I)
+    )
+
+
+def qa_evaluation_type(question: str, answer: str) -> str:
+    if re.search(r"(?m)^\s*[A-D][\.\)]\s+\S", question) and re.match(r"^\s*[A-D]\b", answer.strip(), re.I):
+        return "mcq"
+    if "<think>" in answer.lower():
+        return "reasoning_text"
+    if re.search(r'\{\s*"(?:start|end|bbox|point_2d)', answer, re.I):
+        return "structured_json"
+    if re.match(r"^\s*(yes|no)\b", answer.strip(), re.I):
+        return "yes_no"
+    return "open_text"
+
+
+def qa_pair_looks_garbled(question: str, answer: str) -> bool:
+    joined = f"{question}\n{answer}"
+    if "Timestamp:" in joined or "Event Description:" in joined:
+        return True
+    if re.search(r"\b[A-D][\)\.]\s+", joined) and len(answer) > 160 and re.search(r"\d{2}:\d{2}|–|-", answer):
+        return True
+    if len(re.findall(r'["]?\s*[QA]:', joined)) > 2:
+        return True
+    return False
+
+
+def prompt_presets_from_data(value: Any, label_prefix: str, source: str, limit: int = 24) -> List[Dict[str, Any]]:
+    presets: List[Dict[str, Any]] = []
+
+    def visit(current: Any, path: str = "") -> None:
+        if len(presets) >= limit:
+            return
+        if isinstance(current, dict):
+            if isinstance(current.get("conversations") or current.get("messages"), list):
+                preset = conversation_prompt_preset(current, f"{label_prefix}: conversation prompt {len(presets) + 1}", source)
+                if preset:
+                    presets.append(preset)
+                return
+            user_prompt = current.get("user_prompt") or current.get("prompt") or current.get("question") or current.get("query")
+            system_prompt = current.get("system_prompt") or current.get("system") or current.get("instruction") or GENERIC_SYSTEM
+            expected_answer = current.get("expected_answer") or current.get("answer") or current.get("label")
+            if user_prompt and not isinstance(user_prompt, (dict, list)):
+                label = current.get("label") or current.get("task") or current.get("name") or f"{label_prefix}: prompt {len(presets) + 1}"
+                item = {
+                    "label": prompt_text_excerpt(label, 92),
+                    "system_prompt": clean_imported_prompt(system_prompt) or GENERIC_SYSTEM,
+                    "user_prompt": clean_imported_prompt(user_prompt),
+                    "reasoning": "<think>" in str(user_prompt).lower() or "<think>" in str(system_prompt).lower(),
+                    "source": source,
+                    "source_type": source_kind_from_name(source),
+                    "paper_import": True,
+                }
+                if expected_answer and not isinstance(expected_answer, (dict, list)):
+                    item.update({
+                        "qa_pair": True,
+                        "expected_answer": clean_imported_prompt(expected_answer),
+                        "evaluation_type": qa_evaluation_type(str(user_prompt), str(expected_answer)),
+                    })
+                presets.append(item)
+                return
+            for child in current.values():
+                visit(child, path)
+        elif isinstance(current, list):
+            for child in current[:200]:
+                visit(child, path)
+                if len(presets) >= limit:
+                    break
+
+    visit(value)
+    return presets
+
+
+def role_prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[Dict[str, Any]]:
+    readable = normalize_source_text(plain_text_from_html(text) if "<" in text and ">" in text else text)
+    patterns = [
+        r'"role"\s*:\s*"system"\s*,\s*"content"\s*:\s*"((?:\\"|[^"])*)"',
+        r"'role'\s*:\s*'system'\s*,\s*'content'\s*:\s*'((?:\\'|[^'])*)'",
+    ]
+    systems: List[str] = []
+    for pattern in patterns:
+        systems.extend(re.findall(pattern, readable, flags=re.DOTALL))
+    user_patterns = [
+        r'"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"((?:\\"|[^"])*)"',
+        r"'role'\s*:\s*'user'\s*,\s*'content'\s*:\s*'((?:\\'|[^'])*)'",
+        r'"user_prompt"\s*:\s*"((?:\\"|[^"])*)"',
+        r'"prompt"\s*:\s*"((?:\\"|[^"])*)"',
+    ]
+    users: List[str] = []
+    for pattern in user_patterns:
+        users.extend(re.findall(pattern, readable, flags=re.DOTALL))
     presets = []
-    for index, user_prompt in enumerate(users[:6]):
+    for index, user_prompt in enumerate(users[:8]):
         system_prompt = systems[min(index, len(systems) - 1)] if systems else GENERIC_SYSTEM
         user_prompt = clean_imported_prompt(user_prompt)
         system_prompt = clean_imported_prompt(system_prompt) or GENERIC_SYSTEM
@@ -514,11 +689,173 @@ def prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[
             "label": f"{label_prefix}: sample prompt {index + 1}",
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
-            "reasoning": "<think>" in user_prompt.lower(),
+            "reasoning": "<think>" in user_prompt.lower() or "<think>" in system_prompt.lower(),
             "source": source,
+            "source_type": source_kind_from_name(source),
             "paper_import": True,
         })
     return presets
+
+
+def qa_prompt_presets_from_text(text: str, label_prefix: str, source: str, limit: int = 24) -> List[Dict[str, Any]]:
+    readable = normalize_source_text(plain_text_from_html(text) if "<" in text and ">" in text else text)
+    readable = re.sub(r'\s+(["]?\s*Q:)', r"\n\1", readable)
+    readable = re.sub(r'\s+(["]?\s*A:)', r"\n\1", readable)
+    presets: List[Dict[str, Any]] = []
+    current_heading = ""
+    current_example = ""
+    mode: Optional[str] = None
+    question_lines: List[str] = []
+    answer_lines: List[str] = []
+    question_heading = ""
+    question_example = ""
+
+    def flush() -> None:
+        nonlocal mode, question_lines, answer_lines, question_heading, question_example
+        if len(presets) >= limit:
+            mode = None
+            question_lines = []
+            answer_lines = []
+            return
+        question = clean_imported_prompt("\n".join(question_lines))
+        answer = clean_imported_prompt("\n".join(answer_lines))
+        if not question or not answer:
+            mode = None
+            question_lines = []
+            answer_lines = []
+            return
+        if len(question) > 3000 or len(answer) > 3000:
+            mode = None
+            question_lines = []
+            answer_lines = []
+            return
+        if qa_pair_looks_garbled(question, answer):
+            mode = None
+            question_lines = []
+            answer_lines = []
+            return
+        heading_label = prompt_text_excerpt(question_heading, 48)
+        example = prompt_text_excerpt(question_example or "", 36)
+        question_label = prompt_text_excerpt(question, 50)
+        if heading_label and example:
+            label = f"{label_prefix}: {heading_label} {example}"
+        elif heading_label:
+            label = f"{label_prefix}: {heading_label}"
+        else:
+            label = f"{label_prefix}: QA {len(presets) + 1}"
+        if question_label and question_label.lower() not in label.lower():
+            label = f"{label} - {question_label}"
+        presets.append({
+            "label": prompt_text_excerpt(label, 110),
+            "system_prompt": GENERIC_SYSTEM,
+            "user_prompt": question,
+            "reasoning": "<think>" in question.lower() or "<think>" in answer.lower(),
+            "source": source,
+            "source_type": source_kind_from_name(source),
+            "paper_import": True,
+            "qa_pair": True,
+            "expected_answer": answer,
+            "evaluation_type": qa_evaluation_type(question, answer),
+        })
+        mode = None
+        question_lines = []
+        answer_lines = []
+        question_heading = ""
+        question_example = ""
+
+    for raw_line in readable.splitlines():
+        line = clean_imported_prompt(raw_line)
+        if not line:
+            continue
+        if re.match(r"^(?:Figure|Table)\s+\d+\b", line) or re.match(r"^(?:Appendix|References)\b", line):
+            if mode == "answer":
+                flush()
+            current_heading = line if looks_like_prompt_heading(line) else current_heading
+            continue
+        example_match = re.match(r"^Example\s+(.+)$", line, flags=re.I)
+        if example_match:
+            if mode == "answer":
+                flush()
+            current_example = example_match.group(1)
+            continue
+        question_match = re.match(r'^"?\s*Q:\s*(.*)$', line, flags=re.I)
+        if question_match:
+            if mode == "answer":
+                flush()
+            mode = "question"
+            question_lines = [question_match.group(1).strip()]
+            answer_lines = []
+            question_heading = current_heading
+            question_example = current_example
+            continue
+        answer_match = re.match(r'^"?\s*A:\s*(.*)$', line, flags=re.I)
+        if answer_match and mode in {"question", "answer"}:
+            mode = "answer"
+            answer_lines.append(answer_match.group(1).strip())
+            continue
+        if mode == "question":
+            question_lines.append(line)
+            continue
+        if mode == "answer":
+            if looks_like_prompt_heading(line):
+                flush()
+                current_heading = line
+                current_example = ""
+            else:
+                answer_lines.append(line)
+            continue
+        if looks_like_prompt_heading(line):
+            current_heading = line
+            current_example = ""
+        if len(presets) >= limit:
+            break
+    if mode == "answer":
+        flush()
+    return presets
+
+
+def benchmark_task_prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[Dict[str, Any]]:
+    readable = normalize_source_text(text)
+    lower = readable.lower()
+    presets: List[Dict[str, Any]] = []
+    if "vantage-bench" in lower or "vantage bench" in lower:
+        specs = [
+            ("VANTAGE Event Verification", "Verify the operational hypothesis in the video. Answer Yes or No, then give one concise sentence of evidence.\n\nHypothesis: <replace with event hypothesis>", "yes_no"),
+            ("VANTAGE Video QA (MCQ)", "Answer the multiple-choice video question. Return the option letter first, then a concise explanation.\n\nQuestion: <replace with question>\nA. <option A>\nB. <option B>\nC. <option C>\nD. <option D>", "mcq"),
+            ("VANTAGE Temporal Grounding", "Locate when the queried event occurs in the video. Return JSON only with this schema: {\"start\": \"MM:SS.ss\", \"end\": \"MM:SS.ss\", \"evidence\": \"short visual cue\"}.\n\nQuery: <replace with temporal query>", "structured_json"),
+            ("VANTAGE Dense Video Captioning", "Segment the video into chronological events. Return a JSON array of objects with start, end, and caption fields.", "structured_json"),
+            ("VANTAGE Referring Expression", "Locate every instance described by the expression. Return JSON only as a list of bounding boxes [x1, y1, x2, y2].\n\nExpression: <replace with referring expression>", "structured_json"),
+            ("VANTAGE Spatial Pointing", "Answer the spatial pointing multiple-choice question. Return only the option letter and the selected coordinate.\n\nQuestion: <replace with question and coordinate options>", "mcq"),
+            ("VANTAGE Object Localization", "Locate every instance that belongs to the requested category. Return JSON only with class names and bbox coordinates [x1, y1, x2, y2].\n\nCategory: <replace with category>", "structured_json"),
+            ("VANTAGE Single Object Tracking", "Given the initial object anchor, identify and track the object across the video. Return JSON with frame or timestamp keys and bbox coordinates [x1, y1, x2, y2].", "structured_json"),
+        ]
+        for label, user_prompt, eval_type in specs:
+            presets.append({
+                "label": f"{label_prefix}: {label}",
+                "system_prompt": "You are an expert infrastructure video evaluator. Follow the requested output format exactly.",
+                "user_prompt": user_prompt,
+                "reasoning": False,
+                "source": source,
+                "source_type": "paper",
+                "paper_import": True,
+                "evaluation_type": eval_type,
+            })
+    return presets
+
+
+def prompt_presets_from_text(text: str, label_prefix: str, source: str) -> List[Dict[str, Any]]:
+    raw = str(text or "")
+    presets: List[Dict[str, Any]] = []
+    stripped = raw.strip()
+    if stripped and stripped[0] in "[{":
+        try:
+            presets.extend(prompt_presets_from_data(json.loads(stripped), label_prefix, source))
+        except Exception:
+            pass
+    presets.extend(role_prompt_presets_from_text(raw, label_prefix, source))
+    presets.extend(qa_prompt_presets_from_text(raw, label_prefix, source))
+    presets.extend(benchmark_task_prompt_presets_from_text(raw, label_prefix, source))
+    return dedupe_prompt_presets(presets)
 
 
 def conversation_prompt_preset(row: Dict[str, Any], label: str, source: str) -> Optional[Dict[str, Any]]:
@@ -563,6 +900,83 @@ def iter_conversation_rows(value: Any, limit: int = 8) -> Iterable[Dict[str, Any
             stack.extend(current.values())
         elif isinstance(current, list):
             stack.extend(current[:50])
+
+
+def iter_json_array_prefix(raw: str, limit: int = 8) -> Iterable[Dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(raw)
+    while index < length and raw[index].isspace():
+        index += 1
+    if index >= length or raw[index] != "[":
+        return
+    index += 1
+    yielded = 0
+    while index < length and yielded < limit:
+        while index < length and raw[index].isspace():
+            index += 1
+        if index < length and raw[index] == ",":
+            index += 1
+            continue
+        if index < length and raw[index] == "]":
+            break
+        try:
+            value, index = decoder.raw_decode(raw, index)
+        except json.JSONDecodeError:
+            break
+        if isinstance(value, dict):
+            yielded += 1
+            yield value
+
+
+def prompt_presets_from_hf_annotation_prefix(repo_id: str, annotation_path: str, limit: int = 8) -> List[Dict[str, Any]]:
+    taxonomy: Dict[str, Any] = {}
+    try:
+        from huggingface_hub import hf_hub_download
+        taxonomy_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename="annotations/task_taxonomy.json")
+        taxonomy = json.loads(Path(taxonomy_path).read_text(encoding="utf-8"))
+    except Exception:
+        taxonomy = {}
+
+    prefix_bytes = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_ANNOTATION_PREFIX_BYTES", str(12 * 1024 * 1024)))
+    try:
+        from huggingface_hub import hf_hub_download
+        local = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=annotation_path)
+        raw = Path(local).read_bytes()[:prefix_bytes].decode("utf-8", "replace")
+    except Exception:
+        encoded_repo = urllib.parse.quote(repo_id, safe="/")
+        encoded_path = urllib.parse.quote(annotation_path, safe="/")
+        raw = http_get_bytes_prefix(
+            f"https://huggingface.co/datasets/{encoded_repo}/resolve/main/{encoded_path}",
+            prefix_bytes,
+            timeout=max(HTTP_TIMEOUT_SECONDS, 60),
+        ).decode("utf-8", "replace")
+    presets: List[Dict[str, Any]] = []
+    for row in iter_json_array_prefix(raw, limit=limit * 10):
+        try:
+            compact = compact_annotation_row(row, taxonomy)
+        except Exception:
+            continue
+        user_prompt = clean_imported_prompt(compact.get("user_prompt") or "")
+        expected_answer = clean_imported_prompt(compact.get("expected_final_answer") or compact.get("expected_answer") or "")
+        if not user_prompt or not expected_answer:
+            continue
+        task = compact.get("task") or f"annotation {len(presets) + 1}"
+        presets.append({
+            "label": f"{Path(repo_id).name}: {task} QA sample {len(presets) + 1}",
+            "system_prompt": clean_imported_prompt(compact.get("system_prompt") or GENERIC_SYSTEM) or GENERIC_SYSTEM,
+            "user_prompt": user_prompt,
+            "reasoning": "<think>" in user_prompt.lower() or "<think>" in str(compact.get("expected_answer") or "").lower(),
+            "source": f"{repo_id}/{annotation_path}",
+            "source_type": "hf",
+            "paper_import": True,
+            "qa_pair": True,
+            "expected_answer": expected_answer,
+            "evaluation_type": compact.get("evaluation_type") or qa_evaluation_type(user_prompt, expected_answer),
+        })
+        if len(presets) >= limit:
+            break
+    return presets
 
 
 def dedupe_prompt_presets(presets: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -612,7 +1026,15 @@ def inspect_hf_dataset_for_prompts(repo_id: str) -> Dict[str, Any]:
             if not path.endswith((".json", ".jsonl")):
                 continue
             if size > max_bytes:
-                info["warnings"].append(f"Skipped {path} prompt scan because it is {size:,} bytes; limit is {max_bytes:,}.")
+                if path.endswith(".json") and path.startswith("annotations/") and "train" in Path(path).name:
+                    try:
+                        sampled = prompt_presets_from_hf_annotation_prefix(repo_id, path, limit=8)
+                        info["prompt_presets"].extend(sampled)
+                        info["warnings"].append(f"Sampled {len(sampled)} prompt/answer rows from large {path} instead of scanning all {size:,} bytes.")
+                    except Exception as exc:
+                        info["warnings"].append(f"Skipped {path} prompt scan because it is {size:,} bytes; limit is {max_bytes:,}; large annotation sampling failed: {exc}")
+                else:
+                    info["warnings"].append(f"Skipped {path} prompt scan because it is {size:,} bytes; limit is {max_bytes:,}.")
                 continue
             try:
                 raw = http_get_text(f"https://huggingface.co/datasets/{repo_id}/resolve/main/{path}")
@@ -667,10 +1089,141 @@ def title_from_paper_markdown(arxiv_id: str) -> str:
     return ""
 
 
-def discover_paper_source(source: str) -> Dict[str, Any]:
+def resolve_local_prompt_source(source: str) -> Optional[Path]:
+    value = os.path.expanduser(str(source or "").strip())
+    if not value or re.match(r"^https?://", value):
+        return None
+    path = Path(value)
+    if path.exists():
+        return path
+    cwd_path = Path.cwd() / value
+    if cwd_path.exists():
+        return cwd_path
+    return None
+
+
+def read_text_file_limited(path: Path) -> str:
+    data = path.read_bytes()[:PROMPT_SCAN_MAX_TEXT_BYTES]
+    return data.decode("utf-8", "replace")
+
+
+def pdf_text_from_path(path: Path) -> str:
+    exe = shutil.which("pdftotext")
+    if not exe:
+        raise RuntimeError("pdftotext is not installed, so PDF prompt extraction is unavailable on this host.")
+    PROMPT_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PROMPT_SOURCE_CACHE_DIR / f"{video_id(str(path))}.txt"
+    subprocess.run([exe, "-layout", str(path), str(out_path)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return read_text_file_limited(out_path)
+
+
+def download_prompt_source(url: str) -> Path:
+    PROMPT_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(urllib.parse.urlparse(url).path).suffix or ".bin"
+    target = PROMPT_SOURCE_CACHE_DIR / f"{video_id(url)}{suffix}"
+    if not target.exists():
+        target.write_bytes(http_get_bytes(url, timeout=max(HTTP_TIMEOUT_SECONDS, 60)))
+    return target
+
+
+def iter_prompt_scan_files(path: Path) -> Iterable[Path]:
+    if path.is_file():
+        yield path
+        return
+    skipped = {".git", ".venv", "venv", "node_modules", "__pycache__", "outputs", "runs", ".cache"}
+    count = 0
+    for child in path.rglob("*"):
+        if count >= PROMPT_SCAN_DIR_LIMIT:
+            break
+        if not child.is_file():
+            continue
+        if any(part in skipped for part in child.parts):
+            continue
+        suffix = child.suffix.lower()
+        if suffix not in PROMPT_SCAN_TEXT_EXTENSIONS and suffix not in PROMPT_SCAN_PDF_EXTENSIONS:
+            continue
+        if suffix in PROMPT_SCAN_TEXT_EXTENSIONS:
+            try:
+                if child.stat().st_size > PROMPT_SCAN_MAX_TEXT_BYTES:
+                    continue
+            except Exception:
+                continue
+        count += 1
+        yield child
+
+
+def read_prompt_file(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in PROMPT_SCAN_PDF_EXTENSIONS:
+        return pdf_text_from_path(path)
+    return read_text_file_limited(path)
+
+
+def default_recipe_prompt_paths() -> List[Path]:
+    root = Path.cwd()
+    return [
+        root / ".agents" / "skills" / "byo-video",
+        root / ".claude" / "skills",
+        root / "docs" / "recipes",
+        root / "docs" / "gallery" / "assets",
+    ]
+
+
+def prompt_text_sources(source: str, arxiv_id: Optional[str] = None) -> Tuple[List[Dict[str, str]], List[str]]:
+    texts: List[Dict[str, str]] = []
+    warnings: List[str] = []
+    value = str(source or "").strip()
+    local = resolve_local_prompt_source(value)
+    if local:
+        for path in iter_prompt_scan_files(local):
+            try:
+                texts.append({"source": str(path), "label": prompt_source_label(str(path)), "text": read_prompt_file(path)})
+            except Exception as exc:
+                warnings.append(f"Could not read {path}: {exc}")
+        return texts, warnings
+
+    if value.lower() in {"recipes", "recipe", "cookbook recipes"}:
+        for path in default_recipe_prompt_paths():
+            if not path.exists():
+                continue
+            for file_path in iter_prompt_scan_files(path):
+                try:
+                    texts.append({"source": str(file_path), "label": prompt_source_label(str(file_path)), "text": read_prompt_file(file_path)})
+                except Exception as exc:
+                    warnings.append(f"Could not read {file_path}: {exc}")
+        return texts, warnings
+
+    if arxiv_id:
+        try:
+            markdown = http_get_text(f"https://huggingface.co/papers/{arxiv_id}.md")
+            texts.append({"source": f"https://huggingface.co/papers/{arxiv_id}", "label": f"arXiv {arxiv_id}", "text": markdown})
+        except Exception as exc:
+            warnings.append(f"Could not read Hugging Face paper markdown: {exc}")
+        try:
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+            pdf_path = download_prompt_source(pdf_url)
+            texts.append({"source": pdf_url, "label": f"PRISM paper {arxiv_id}" if arxiv_id == "2603.29281" else f"arXiv {arxiv_id}", "text": pdf_text_from_path(pdf_path)})
+        except Exception as exc:
+            warnings.append(f"Could not extract arXiv PDF prompts: {exc}")
+        return texts, warnings
+
+    if re.match(r"^https?://", value):
+        try:
+            if urllib.parse.urlparse(value).path.lower().endswith(".pdf"):
+                path = download_prompt_source(value)
+                texts.append({"source": value, "label": prompt_source_label(value), "text": pdf_text_from_path(path)})
+            else:
+                page = http_get_text(value)
+                texts.append({"source": value, "label": prompt_source_label(value), "text": page})
+        except Exception as exc:
+            warnings.append(f"Could not read prompt source {value}: {exc}")
+    return texts, warnings
+
+
+def discover_paper_source(source: str, require_dataset: bool = True) -> Dict[str, Any]:
     source = str(source or "").strip()
     if not source:
-        raise ClientInputError("Enter an arXiv ID, arXiv URL, Hugging Face paper URL, or Hugging Face dataset URL.")
+        raise ClientInputError("Enter an arXiv ID, arXiv URL, Hugging Face source, local PDF, or recipe path.")
     arxiv_id = extract_arxiv_id(source)
     datasets = []
     models = []
@@ -680,6 +1233,8 @@ def discover_paper_source(source: str) -> Dict[str, Any]:
 
     dataset_repo = extract_hf_repo_from_url(source, "dataset")
     model_repo = extract_hf_repo_from_url(source, "model")
+    if not dataset_repo and re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", source):
+        dataset_repo = source
     if dataset_repo:
         datasets.append(dataset_repo)
     if model_repo and model_repo != dataset_repo:
@@ -696,6 +1251,14 @@ def discover_paper_source(source: str) -> Dict[str, Any]:
             datasets.extend(fallback.get("datasets", []))
             models.extend(fallback.get("models", []))
             prompt_presets.extend(fallback.get("prompt_presets", []))
+
+    text_sources, text_warnings = prompt_text_sources(source, arxiv_id)
+    warnings.extend(text_warnings)
+    for text_source in text_sources:
+        text = text_source.get("text") or ""
+        label = text_source.get("label") or prompt_source_label(text_source.get("source") or source)
+        extracted = prompt_presets_from_text(text, label, text_source.get("source") or source)
+        prompt_presets.extend(extracted)
 
     datasets = ordered_unique(datasets)
     models = ordered_unique(models)
@@ -717,15 +1280,15 @@ def discover_paper_source(source: str) -> Dict[str, Any]:
             "paper_import": True,
         }]
         warnings.append("No exact prompt examples were found; using the generic video QA prompt.")
-    if not datasets:
-        raise ClientInputError("No Hugging Face dataset link was found for this paper/source.")
+    if require_dataset and not datasets:
+        raise ClientInputError("No Hugging Face dataset link was found for this paper/source. Use Import prompts to load prompt examples without loading a dataset.")
 
     return {
         "source": source,
         "arxiv_id": arxiv_id,
         "title": title,
         "datasets": datasets,
-        "selected_dataset": datasets[0],
+        "selected_dataset": datasets[0] if datasets else None,
         "models": models,
         "prompt_presets": prompt_presets,
         "dataset_details": dataset_details,
@@ -737,10 +1300,16 @@ def apply_paper_import(discovery: Dict[str, Any]) -> None:
     imported = dedupe_prompt_presets(discovery.get("prompt_presets") or [])
     primary = imported[0] if imported else {"system_prompt": GENERIC_SYSTEM, "user_prompt": DEFAULT_PROMPT}
     with STATE_LOCK:
-        saved_custom = [dict(p) for p in (STATE.get("defaults", {}).get("prompt_presets") or []) if p.get("custom")]
+        current_presets = [dict(p) for p in (STATE.get("defaults", {}).get("prompt_presets") or [])]
+        saved_custom = [dict(p) for p in current_presets if p.get("custom")]
+        imported_sources = {str(p.get("source") or "") for p in imported}
+        previous_imports = [
+            dict(p) for p in current_presets
+            if p.get("paper_import") and str(p.get("source") or "") not in imported_sources
+        ]
     merged = list(PROMPT_PRESETS) + saved_custom
     existing_labels = {preset["label"] for preset in merged}
-    for preset in imported:
+    for preset in list(imported) + previous_imports:
         item = dict(preset)
         label = str(item.get("label") or "Paper import")
         if label in existing_labels:
@@ -756,7 +1325,8 @@ def apply_paper_import(discovery: Dict[str, Any]) -> None:
             "prompt_presets": merged,
         })
         STATE["defaults"] = defaults
-        STATE["dataset_repo"] = discovery.get("selected_dataset") or STATE["dataset_repo"]
+        if discovery.get("selected_dataset"):
+            STATE["dataset_repo"] = discovery.get("selected_dataset") or STATE["dataset_repo"]
         STATE["paper_import"] = discovery
 
 
@@ -800,9 +1370,10 @@ def add_prompt_preset(label: str, system_prompt: str, user_prompt: str, source: 
 
 
 def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True) -> Dict[str, Any]:
-    discovery = discover_paper_source(source)
+    discovery = discover_paper_source(source, require_dataset=load_now)
     apply_paper_import(discovery)
-    log(f"Imported paper metadata for {discovery.get('arxiv_id') or source}: dataset {discovery.get('selected_dataset')}")
+    selected = discovery.get("selected_dataset") or "no dataset selected"
+    log(f"Imported prompt metadata for {discovery.get('arxiv_id') or source}: {selected}, {len(discovery.get('prompt_presets') or [])} prompt presets")
     with STATE_LOCK:
         progress = dict(STATE.get("progress") or {})
         if progress.get("mode") == "paper_import":
@@ -832,6 +1403,7 @@ def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True)
 
 def import_paper_worker(source: str, max_videos: int, load_now: bool = True) -> None:
     started_epoch = time.time()
+    import_label = "paper metadata and dataset links" if load_now else "prompt examples"
     update_state(
         loading_dataset=True,
         progress={
@@ -844,11 +1416,11 @@ def import_paper_worker(source: str, max_videos: int, load_now: bool = True) -> 
             "updated_epoch": started_epoch,
             "last_result_epoch": None,
             "current_file": None,
-            "last_event": f"Importing paper metadata from {source}",
+            "last_event": f"Importing {import_label} from {source}",
             "last_error": None,
         },
     )
-    log(f"Importing paper metadata from {source}")
+    log(f"Importing {import_label} from {source}")
     try:
         discovery = import_paper_source(source, max_videos, load_now)
         now = time.time()
@@ -3059,11 +3631,25 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
 def launch_fiftyone(port: int) -> str:
     global FIFTYONE_SESSION
     snap = snapshot()
-    if snap.get("dataset_source") != "fiftyone" or not snap.get("fo_dataset_name"):
-        raise RuntimeError("Load the dataset with FiftyOne before launching the FiftyOne app")
     import fiftyone as fo
 
-    dataset = fo.load_dataset(snap["fo_dataset_name"])
+    dataset_name = snap.get("fo_dataset_name")
+    if not dataset_name:
+        names = set(fo.list_datasets())
+        repo_name = str(snap.get("dataset_repo") or DEFAULT_DATASET).replace("/", "_")
+        candidates = [
+            f"{repo_name}_runtime",
+            repo_name,
+            DEFAULT_DATASET.replace("/", "_") + "_runtime",
+            DEFAULT_DATASET.replace("/", "_"),
+        ]
+        dataset_name = next((name for name in candidates if name in names), None)
+        if dataset_name:
+            update_state(dataset_source="fiftyone", fo_dataset_name=dataset_name)
+            log(f"Reattached to existing FiftyOne dataset {dataset_name}")
+    if not dataset_name:
+        raise RuntimeError("Load a dataset before launching the FiftyOne app; no existing FiftyOne runtime dataset was found")
+    dataset = fo.load_dataset(dataset_name)
     FIFTYONE_SESSION = fo.launch_app(dataset, address="0.0.0.0", port=port, auto=False)
     url = f"http://{os.getenv('HOST_IP') or detect_host_ip() or 'localhost'}:{port}/"
     log(f"FiftyOne app is available at {url}")
@@ -3185,10 +3771,11 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <label>Hugging Face dataset</label>
   <input id="repo" value="pjramg/Safe_Unsafe_Test" />
   <div class="paper-panel">
-    <label>Paper, arXiv, or HF dataset</label>
+    <label>Prompt / dataset source</label>
     <input id="paperSource" value="https://huggingface.co/papers/2603.29281" />
-    <p class="hint">Imports linked HF datasets and prompt examples from paper pages or dataset cards, then tries to load the selected dataset.</p>
+    <p class="hint">Use an arXiv/HF URL, local PDF, recipe path, or HF dataset. Import prompts updates the dropdown; import + load also loads the linked dataset when one is discovered.</p>
     <div class="actions">
+      <button class="secondary" id="promptImportBtn">Import prompts</button>
       <button class="secondary" id="paperBtn">Import paper + load</button>
     </div>
     <div class="kv" id="paperKv"></div>
@@ -3288,7 +3875,7 @@ let promptUserSelected = false;
 const CONTEXT_WARNING_RATIO = 0.85;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
-function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn','paperBtn'].forEach(id=>document.getElementById(id).disabled=true); }
+function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn','paperBtn','promptImportBtn'].forEach(id=>document.getElementById(id).disabled=true); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
 function el(id){ return document.getElementById(id); }
 function num(id){ return Number(document.getElementById(id).value); }
@@ -3313,15 +3900,16 @@ function allPromptPresets(includeUnsaved=true){ const out=[]; const datasetPrese
 function findPromptByKey(key){ return allPromptPresets(true).find(p=>p.key===key) || null; }
 function promptLabel(){ const p=findPromptByKey(el('promptPreset')?.value); return p ? p.label : 'Custom prompt'; }
 function promptMode(){ const p=findPromptByKey(el('promptPreset')?.value); return p?.mode || 'runtime_form'; }
-function updatePromptStatus(){ const p=findPromptByKey(el('promptPreset')?.value); const status=el('promptStatus'); if(!status) return; if(promptDirty){ status.textContent='Custom edits are active. Save them to keep this prompt in the dropdown, or run them directly.'; return; } if(p?.dataset_row){ status.textContent='Using Hugging Face dataset row prompts. Each selected PRISM video keeps its own benchmark question/answer prompt.'; return; } if(p){ const flags=[p.paper_import?'paper import':null,p.custom?'saved custom':null,p.source?`source: ${p.source}`:null].filter(Boolean).join(' | '); status.textContent=flags || 'Using a built-in prompt preset.'; return; } status.textContent='Choose a preset, import a paper, or edit and save a custom prompt.'; }
+function promptSuffix(p){ const tags=[]; if(p.dataset_row) tags.push('dataset rows'); if(p.qa_pair) tags.push('QA'); if(p.source_type==='recipe') tags.push('recipe'); else if(p.source_type==='hf') tags.push('HF'); else if(p.paper_import) tags.push('import'); if(p.custom) tags.push('custom'); if(p.reasoning) tags.push('reasoning'); return tags.length ? ` (${tags.join(', ')})` : ''; }
+function updatePromptStatus(){ const p=findPromptByKey(el('promptPreset')?.value); const status=el('promptStatus'); if(!status) return; if(promptDirty){ status.textContent='Custom edits are active. Save them to keep this prompt in the dropdown, or run them directly.'; return; } if(p?.dataset_row){ status.textContent='Using Hugging Face dataset row prompts. Each selected video keeps its own benchmark question and expected answer when available.'; return; } if(p){ const flags=[p.qa_pair?'QA example':null,p.evaluation_type?`metric: ${p.evaluation_type}`:null,p.paper_import?'imported':null,p.custom?'saved custom':null,p.source?`source: ${p.source}`:null].filter(Boolean); const expected=p.expected_answer ? ` | expected: ${clipText(p.expected_answer,160)}` : ''; status.textContent=(flags.join(' | ') || 'Using a built-in prompt preset.') + expected; return; } status.textContent='Choose a preset, import prompts from a source, or edit and save a custom prompt.'; }
 function setPromptFields(p){ if(!p) return; promptSyncing=true; el('systemPrompt').value=p.system_prompt||''; el('userPrompt').value=p.user_prompt||''; promptSyncing=false; promptDirty=false; lastAppliedPromptKey=p.key; autosizePrompts(); updatePromptStatus(); }
-function syncPromptPresets(){ const prompts=allPromptPresets(true); const sig=prompts.map(p=>`${p.key}|${p.label}|${p.user_prompt}`).join('||'); const select=el('promptPreset'); const old=select.value || lastAppliedPromptKey; if(sig!==promptPresetSig){ select.innerHTML = prompts.map(p=>`<option value="${esc(p.key)}">${esc(p.label)}${p.dataset_row?' (dataset rows)':p.reasoning?' (reasoning)':p.paper_import?' (paper)':p.custom?' (custom)':''}</option>`).join(''); promptPresetSig=sig; } let next=old; const dataset=prompts.find(p=>p.dataset_row); const imported=prompts.find(p=>p.paper_import); if(promptDirty){ const currentKey=`custom:${promptFingerprint(el('systemPrompt').value,el('userPrompt').value)}`; next=prompts.some(p=>p.key===currentKey) ? currentKey : next; } else if(!promptUserSelected && (dataset || imported)){ next=(dataset||imported).key; } else if(!next || !prompts.some(p=>p.key===next)){ next=(dataset||imported||prompts[0]||{}).key || ''; } select.value=next; const selected=findPromptByKey(next); if(selected && !promptDirty && lastAppliedPromptKey!==next) setPromptFields(selected); updatePromptStatus(); }
+function syncPromptPresets(){ const prompts=allPromptPresets(true); const sig=prompts.map(p=>`${p.key}|${p.label}|${p.user_prompt}|${p.expected_answer||''}`).join('||'); const select=el('promptPreset'); const old=select.value || lastAppliedPromptKey; if(sig!==promptPresetSig){ select.innerHTML = prompts.map(p=>`<option value="${esc(p.key)}">${esc(p.label)}${promptSuffix(p)}</option>`).join(''); promptPresetSig=sig; } let next=old; const dataset=prompts.find(p=>p.dataset_row); const imported=prompts.find(p=>p.paper_import); if(promptDirty){ const currentKey=`custom:${promptFingerprint(el('systemPrompt').value,el('userPrompt').value)}`; next=prompts.some(p=>p.key===currentKey) ? currentKey : next; } else if(!promptUserSelected && (dataset || imported)){ next=(dataset||imported).key; } else if(!next || !prompts.some(p=>p.key===next)){ next=(dataset||imported||prompts[0]||{}).key || ''; } select.value=next; const selected=findPromptByKey(next); if(selected && !promptDirty && lastAppliedPromptKey!==next) setPromptFields(selected); updatePromptStatus(); }
 function applySelectedPrompt(){ promptUserSelected=true; const selected=findPromptByKey(el('promptPreset').value); if(selected){ setPromptFields(selected); render(); } }
 function markPromptDirty(){ if(promptSyncing) return; promptUserSelected=true; promptDirty=true; syncPromptPresets(); render(); }
 async function saveCurrentPrompt(){ const system_prompt=el('systemPrompt').value; const user_prompt=el('userPrompt').value; if(!user_prompt.trim()){ alert('Enter a user prompt before saving.'); return; } const fallback=`Custom prompt ${new Date().toLocaleString()}`; const label=window.prompt('Name this prompt', fallback) || fallback; const saved=await api('/api/prompt',{label,system_prompt,user_prompt,source:'runtime form'}); lastAppliedPromptKey=promptKey(saved.preset,'preset'); promptUserSelected=true; promptDirty=false; await poll(); el('promptPreset').value=lastAppliedPromptKey; updatePromptStatus(); }
 function autosizeTextarea(textarea){ if(!textarea) return; textarea.style.height='auto'; const styles=getComputedStyle(textarea); const min=parseFloat(styles.minHeight)||0; const max=parseFloat(styles.maxHeight)||window.innerHeight*.42; const next=Math.max(min, Math.min(textarea.scrollHeight + 2, max)); textarea.style.height=next+'px'; textarea.style.overflowY=textarea.scrollHeight > max ? 'auto' : 'hidden'; }
 function autosizePrompts(){ ['systemPrompt','userPrompt'].forEach(id=>autosizeTextarea(el(id))); }
-function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if(p.arxiv_id) rows.push(['arXiv',p.arxiv_id]); if(p.title) rows.push(['title',clipText(p.title,90)]); if(p.selected_dataset) rows.push(['dataset',p.selected_dataset]); if(p.models?.length) rows.push(['model',p.models[0]]); if(p.prompt_presets?.length) rows.push(['prompts',p.prompt_presets.length]); if(p.load_error) rows.push(['load error',clipText(p.load_error,160)]); if(p.warnings?.length) rows.push(['warnings',clipText(p.warnings.join(' | '),180)]); el('paperKv').innerHTML = rows.length ? rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('') : '<div>paper</div><div>No paper imported yet.</div>'; }
+function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if(p.source) rows.push(['source',clipText(p.source,90)]); if(p.arxiv_id) rows.push(['arXiv',p.arxiv_id]); if(p.title) rows.push(['title',clipText(p.title,90)]); if(p.selected_dataset) rows.push(['dataset',p.selected_dataset]); else if(p.source) rows.push(['dataset','none selected']); if(p.models?.length) rows.push(['model',p.models[0]]); if(p.prompt_presets?.length){ const qa=(p.prompt_presets||[]).filter(x=>x.qa_pair).length; rows.push(['prompts',`${p.prompt_presets.length}${qa ? ` (${qa} QA examples)` : ''}`]); } if(p.load_error) rows.push(['load error',clipText(p.load_error,160)]); if(p.warnings?.length) rows.push(['warnings',clipText(p.warnings.join(' | '),180)]); el('paperKv').innerHTML = rows.length ? rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('') : '<div>source</div><div>No prompts imported yet.</div>'; }
 function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
 function renderExportSections(){ const sections=state?.defaults?.export_sections||[]; const target=el('exportSections'); if(!target || target.dataset.ready) return; target.innerHTML = sections.map(s=>`<label class="toggle-row"><input class="exportSection" type="checkbox" value="${esc(s.id)}" ${s.default?'checked':''}/><span><strong>${esc(s.label)}</strong></span></label>`).join(''); target.dataset.ready='1'; }
 function addExportLink(item){ const box=el('exportLinks'); const a=document.createElement('a'); a.className='export-link'; a.href=item.url; a.target='_blank'; a.textContent=`${item.format.toUpperCase()} | ${item.filename}`; box.prepend(a); }
@@ -3361,7 +3949,7 @@ function renderRuntimeStatus(){
  if(active && total && done > 0 && elapsed > 0) eta=((total-done) / (done / elapsed));
  else if(state.running && total && activeReqs.length && requestTimeout){ const remaining=Math.max(0,total-done-activeReqs.length); const workers=Math.max(1, Number(p.concurrency||activeReqs.length||1)); eta=requestRemaining + (remaining * requestTimeout / workers); }
  const latestError=latestRuntimeError(); const delayed=active && waitSince !== null && waitSince > 90; const stalled=active && waitSince !== null && waitSince > 300;
- const title=latestError ? (active ? (isLoad ? 'Loading with errors' : 'Running with errors') : 'Attention') : modelWait ? 'Waiting for model' : active ? (isLoad ? (isPaper ? 'Importing paper' : (stalled ? 'Dataset load stalled' : delayed ? 'Dataset load slow' : 'Loading dataset')) : (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running')) : total ? (errors ? 'Complete with errors' : (isLoad ? 'Dataset loaded' : 'Complete')) : 'Idle';
+ const title=latestError ? (active ? (isLoad ? 'Loading with errors' : 'Running with errors') : 'Attention') : modelWait ? 'Waiting for model' : active ? (isLoad ? (isPaper ? 'Importing source' : (stalled ? 'Dataset load stalled' : delayed ? 'Dataset load slow' : 'Loading dataset')) : (stalled ? 'Possibly stalled' : delayed ? 'Running slowly' : 'Running')) : total ? (errors ? 'Complete with errors' : (isLoad ? 'Dataset loaded' : 'Complete')) : 'Idle';
  const bar=el('sideBar'); bar.style.width=pct+'%'; bar.style.background=latestError||stalled ? 'var(--bad)' : delayed||errors ? 'var(--warn)' : 'var(--accent)'; el('statusTitle').textContent=title; el('statusPct').textContent=`${pct}%`;
  const etaText=active ? (eta === null ? (done ? 'calculating' : (state.running ? 'waiting for model' : 'waiting for first item')) : span(eta)) : '';
  const activeNames=activeReqs.map(r=>r.name).filter(Boolean).slice(0,3).join(', ');
@@ -3372,7 +3960,7 @@ function renderRuntimeStatus(){
  else if(modelWait && oldestActive){ notice.className='status-note'; notice.textContent=`Waiting for the terminal/model server response for ${oldestActive.name||'a video'}. Request open ${span(requestElapsed)}${requestRemaining!==null ? `; timeout in ${span(requestRemaining)}` : ''}.`; }
  else if(stalled){ notice.className='status-note bad'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Hugging Face may still be transferring a large file, but this is unusually quiet.` : `No video has completed for ${span(waitSince)}. The backend may still be in long prefill/generation, but this is now unusually quiet.`; }
  else if(delayed){ notice.className='status-note warn'; notice.textContent=isLoad ? `No dataset-load update for ${span(waitSince)}. Still waiting for Hugging Face or local metadata extraction.` : `No video has completed for ${span(waitSince)}. Still waiting for the VLM backend to return a result.`; }
- else if(isPaper && active){ notice.className='status-note'; notice.textContent='Paper import is active. The runtime is fetching metadata/prompts first; dataset loading will start as soon as a dataset is selected.'; }
+ else if(isPaper && active){ notice.className='status-note'; notice.textContent='Source import is active. The runtime is fetching prompt examples and dataset links; dataset loading starts only when import + load is selected and a dataset is found.'; }
  else if(isLoad && active && total){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Rows and thumbnails will appear as each video finishes downloading and metadata extraction completes.'; }
  else if(isLoad && active){ notice.className='status-note'; notice.textContent='Dataset retrieval is active. Waiting for Hugging Face file listing or the first selected video.'; }
  else if(state.running && done === 0){ notice.className='status-note'; notice.textContent='Batch accepted; preparing videos and waiting for the first model response.'; }
@@ -3394,7 +3982,7 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const ev=r.evaluation||{}; const expected=ev.has_expected ? clipText(ev.expected_answer||ev.expected_label||'',180) : ''; const pred=clipText(ev.predicted_answer||ev.predicted_label||(j.prediction_label ? `${j.prediction_class_id} ${j.prediction_label}` : r.response||''),180); const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const score=ev.answer_score!==null&&ev.answer_score!==undefined ? percent(ev.answer_score) : match; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||clipText(r.response||'',260))); const domain=ev.capability_domain||ev.domain||''; return `<tr><td>${esc(r.name)}</td><td>${esc(ev.task||'')}</td><td>${esc(domain)}<br>${esc(ev.sft_type||'')}</td><td>${esc(expected)}</td><td>${esc(pred)}</td><td>${esc(ev.metric||'')}</td><td>${esc(score)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage, prompt_source:r.prompt_source, user_prompt:r.user_prompt_used})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
- const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; requestAnimationFrame(autosizePrompts); }
+ const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('promptImportBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; requestAnimationFrame(autosizePrompts); }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
 document.getElementById('promptPreset').onchange = applySelectedPrompt;
 document.getElementById('savePromptBtn').onclick = async()=>{ try{ await saveCurrentPrompt(); }catch(e){ alert(e.message); await poll(); } };
@@ -3405,6 +3993,7 @@ document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults
 document.getElementById('allowOverContext').onchange = render;
 document.getElementById('fitBudgetBtn').onclick = fitToModel;
 document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
+document.getElementById('promptImportBtn').onclick = async()=>{ try{ if(!promptDirty) promptUserSelected=false; setBusy('Importing prompt examples...'); await api('/api/prompts/import',{source:el('paperSource').value}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('paperBtn').onclick = async()=>{ try{ if(!promptDirty) promptUserSelected=false; setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p && !promptDirty){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.status==='importing') return; if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to model or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),prompt_mode:promptMode(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
@@ -3475,6 +4064,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     discovery = import_paper_source(source, max_videos, load_now)
                     self.send_json(discovery)
+            elif self.path == "/api/prompts/import":
+                snap = snapshot()
+                if snap.get("running") or snap.get("loading_dataset"):
+                    raise RuntimeError("A batch, dataset load, or prompt import is already running")
+                source = str(payload.get("source") or "")
+                thread = threading.Thread(target=import_paper_worker, args=(source, 0, False), daemon=True)
+                thread.start()
+                self.send_json({"ok": True, "status": "importing", "source": source})
             elif self.path == "/api/prompt":
                 saved = add_prompt_preset(
                     str(payload.get("label") or ""),
