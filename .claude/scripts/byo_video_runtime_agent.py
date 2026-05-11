@@ -732,7 +732,9 @@ def discover_paper_source(source: str) -> Dict[str, Any]:
 def apply_paper_import(discovery: Dict[str, Any]) -> None:
     imported = dedupe_prompt_presets(discovery.get("prompt_presets") or [])
     primary = imported[0] if imported else {"system_prompt": GENERIC_SYSTEM, "user_prompt": DEFAULT_PROMPT}
-    merged = list(PROMPT_PRESETS)
+    with STATE_LOCK:
+        saved_custom = [dict(p) for p in (STATE.get("defaults", {}).get("prompt_presets") or []) if p.get("custom")]
+    merged = list(PROMPT_PRESETS) + saved_custom
     existing_labels = {preset["label"] for preset in merged}
     for preset in imported:
         item = dict(preset)
@@ -752,6 +754,45 @@ def apply_paper_import(discovery: Dict[str, Any]) -> None:
         STATE["defaults"] = defaults
         STATE["dataset_repo"] = discovery.get("selected_dataset") or STATE["dataset_repo"]
         STATE["paper_import"] = discovery
+
+
+def add_prompt_preset(label: str, system_prompt: str, user_prompt: str, source: str = "runtime") -> Dict[str, Any]:
+    system_prompt = clean_imported_prompt(system_prompt) or GENERIC_SYSTEM
+    user_prompt = clean_imported_prompt(user_prompt)
+    if not user_prompt:
+        raise ClientInputError("Enter a user prompt before saving it.")
+    label = clean_imported_prompt(label) or "Custom prompt"
+    item = {
+        "label": label,
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "reasoning": "<think>" in user_prompt.lower() or "<think>" in system_prompt.lower(),
+        "source": source,
+        "custom": True,
+    }
+    with STATE_LOCK:
+        defaults = dict(STATE["defaults"])
+        presets = list(defaults.get("prompt_presets") or [])
+        for existing in presets:
+            if (
+                clean_imported_prompt(existing.get("system_prompt") or GENERIC_SYSTEM) == system_prompt
+                and clean_imported_prompt(existing.get("user_prompt") or "") == user_prompt
+            ):
+                return {"preset": existing, "duplicate": True, "count": len(presets)}
+        labels = {str(p.get("label") or "") for p in presets}
+        base_label = label
+        suffix = 2
+        while label in labels:
+            label = f"{base_label} {suffix}"
+            suffix += 1
+        item["label"] = label
+        presets.append(item)
+        defaults["prompt_presets"] = presets
+        defaults["system_prompt"] = system_prompt
+        defaults["user_prompt"] = user_prompt
+        STATE["defaults"] = defaults
+    log(f"Saved prompt preset {label}")
+    return {"preset": item, "duplicate": False, "count": len(presets)}
 
 
 def import_paper_source(source: str, max_videos: int = 0, load_now: bool = True) -> Dict[str, Any]:
@@ -1690,11 +1731,11 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_
     return content, plan
 
 
-def prompts_for_video(video: Dict[str, Any], system_prompt: str, user_prompt: str) -> Tuple[str, str, str]:
+def prompts_for_video(video: Dict[str, Any], system_prompt: str, user_prompt: str, prompt_mode: str = "auto") -> Tuple[str, str, str]:
     row = video.get("dataset_row") or {}
     row_system = str(row.get("system_prompt") or "").strip()
     row_user = str(row.get("user_prompt") or "").strip()
-    if row_system and row_user:
+    if prompt_mode in {"auto", "dataset_row"} and row_system and row_user:
         return row_system, row_user, "dataset_row"
     return system_prompt, user_prompt, "runtime_form"
 
@@ -1712,6 +1753,7 @@ def context_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "max_pixels": int(params.get("max_pixels") if params.get("max_pixels") is not None else STATE["defaults"]["max_pixels"]),
         "max_tokens": int(params.get("max_tokens") if params.get("max_tokens") is not None else STATE["defaults"]["max_tokens"]),
         "max_frames": int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"]),
+        "prompt_mode": str(params.get("prompt_mode") or "auto"),
     }
 
 
@@ -1742,6 +1784,7 @@ def context_budget_report(
         return report
 
     p = context_params(params)
+    prompt_mode = str(params.get("prompt_mode") or "auto")
     output_tokens = p["max_tokens"]
     allowed_input_tokens = max(1, report["model_max_len"] - output_tokens - CONTEXT_SAFETY_RESERVE)
     report.update({
@@ -1756,7 +1799,7 @@ def context_budget_report(
     for video in videos:
         meta = video.get("meta") or get_video_meta(video["filepath"])
         plan = estimate_plan(meta, p["fps"], p["max_pixels"], p["max_frames"], model)
-        effective_system, effective_user, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
+        effective_system, effective_user, prompt_source = prompts_for_video(video, system_prompt, user_prompt, prompt_mode)
         prompt_tokens = estimate_prompt_tokens(effective_system, effective_user)
         visual_tokens = int(plan.get("visual_tokens_est") or 0)
         input_tokens = visual_tokens + prompt_tokens
@@ -2036,7 +2079,12 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
     fps = float(params.get("fps") or STATE["defaults"]["fps"])
     max_pixels = int(params.get("max_pixels") or STATE["defaults"]["max_pixels"])
     max_frames = int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"])
-    effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
+    effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(
+        video,
+        system_prompt,
+        user_prompt,
+        str(params.get("prompt_mode") or "auto"),
+    )
     update_active_request(
         video,
         "preprocessing",
@@ -2851,11 +2899,13 @@ def compact_run_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def make_run_context(run_label: str, system_prompt: str, user_prompt: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    prompt_hash = hashlib.sha1((system_prompt + "\n---\n" + user_prompt).encode("utf-8", "ignore")).hexdigest()[:10]
+    prompt_mode = str(params.get("prompt_mode") or "auto")
+    prompt_hash = hashlib.sha1((system_prompt + "\n---\n" + user_prompt + "\n---\n" + prompt_mode).encode("utf-8", "ignore")).hexdigest()[:10]
     return {
         "run_id": time.strftime("%Y%m%d-%H%M%S") + "-" + prompt_hash,
         "run_label": run_label or "Custom prompt",
         "prompt_hash": prompt_hash,
+        "prompt_mode": prompt_mode,
         "reasoning_prompt": "<think>" in user_prompt.lower() or "reasoning" in run_label.lower(),
         "params": params,
     }
@@ -2867,7 +2917,12 @@ def run_one_recorded(video: Dict[str, Any], system_prompt: str, user_prompt: str
     try:
         result = run_one(video, system_prompt, user_prompt, params)
     except Exception as exc:
-        effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(video, system_prompt, user_prompt)
+        effective_system_prompt, effective_user_prompt, prompt_source = prompts_for_video(
+            video,
+            system_prompt,
+            user_prompt,
+            str(params.get("prompt_mode") or "auto"),
+        )
         result = {
             "id": video["id"],
             "name": video["name"],
@@ -3159,8 +3214,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <p id="progressText" class="pill">idle</p>
   <h3>Batch metrics</h3>
   <div class="kv" id="batchKv"></div>
-  <label>Demo prompt</label>
+  <label>Prompt preset</label>
   <select id="promptPreset"></select>
+  <div class="actions prompt-actions">
+    <button class="secondary" id="savePromptBtn">Save current prompt</button>
+    <button class="secondary" id="reloadPromptBtn">Reload selected prompt</button>
+  </div>
+  <p class="hint" id="promptStatus"></p>
   <label>System instructions</label>
   <textarea id="systemPrompt"></textarea>
   <label>User prompt</label>
@@ -3217,6 +3277,10 @@ let state = null;
 let initialized = false;
 let contextBlocked = false;
 let promptPresetSig = '';
+let promptDirty = false;
+let lastAppliedPromptKey = '';
+let promptSyncing = false;
+let promptUserSelected = false;
 const CONTEXT_WARNING_RATIO = 0.85;
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
@@ -3237,10 +3301,22 @@ function percent(v){ return v === null || v === undefined || Number.isNaN(Number
 function expectedText(x){ if(!x) return ''; if(x.kind==='dataset_answer') return esc(clipText(x.final_answer||x.label||'',120)); return `${esc(x.class_id ?? '')} ${esc(x.label ?? '')}`; }
 function rowSummary(row){ if(!row) return ''; const parts=[]; if(row.task) parts.push(`task=${row.task}`); if(row.capability_domain) parts.push(`domain=${row.capability_domain}`); else if(row.domain) parts.push(`domain=${row.domain}`); if(row.sft_type) parts.push(`format=${row.sft_type}`); if(row.evaluation_type) parts.push(`metric=${row.evaluation_type}`); if(row.user_prompt) parts.push(`prompt=${clipText(row.user_prompt,80)}`); if(row.label) parts.push(`label=${row.label}`); if(row.tags) parts.push(`tags=${Array.isArray(row.tags) ? row.tags.join(',') : row.tags}`); if(row.hf_path) parts.push(`path=${row.hf_path}`); return parts.join(' | '); }
 function detailsJson(label,obj){ if(!obj || Object.keys(obj).length===0) return ''; return `<details class="meta-details"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`; }
-function promptLabel(){ const s=el('promptPreset'); const opt=s && s.options ? s.options[s.selectedIndex] : null; return opt ? opt.textContent : 'Custom prompt'; }
+function simpleHash(text){ let h=0; const s=String(text||''); for(let i=0;i<s.length;i++){ h=((h<<5)-h+s.charCodeAt(i))|0; } return Math.abs(h).toString(36); }
+function promptFingerprint(system,user){ return simpleHash(`${system||''}\\n---\\n${user||''}`); }
+function promptKey(p, source='preset'){ if(p.key) return p.key; return `${source}:${promptFingerprint(p.system_prompt,p.user_prompt)}`; }
+function selectedDatasetPromptPreset(){ const prompted=currentSelectionVideos().filter(v=>v?.dataset_row?.system_prompt && v?.dataset_row?.user_prompt); if(!prompted.length) return null; const row=prompted[0].dataset_row||{}; const uniq=new Set(prompted.map(v=>`${v.dataset_row.system_prompt}\\n---\\n${v.dataset_row.user_prompt}`)); const label=uniq.size>1 ? `Dataset row prompts (${prompted.length} videos)` : `Dataset row prompt: ${clipText(row.task||row.user_prompt,54)}`; return {key:'dataset-row', label, system_prompt:row.system_prompt, user_prompt:row.user_prompt, mode:'dataset_row', dataset_row:true, source:'Hugging Face dataset rows'}; }
+function allPromptPresets(includeUnsaved=true){ const out=[]; const datasetPreset=selectedDatasetPromptPreset(); if(datasetPreset) out.push(datasetPreset); for(const p of (state?.defaults?.prompt_presets||[])){ out.push({...p, key:promptKey(p,'preset'), mode:'runtime_form'}); } const current={system_prompt:el('systemPrompt')?.value||'', user_prompt:el('userPrompt')?.value||''}; if(includeUnsaved && current.user_prompt.trim()){ const key=`custom:${promptFingerprint(current.system_prompt,current.user_prompt)}`; const exists=out.some(p=>promptFingerprint(p.system_prompt,p.user_prompt)===promptFingerprint(current.system_prompt,current.user_prompt)); if(!exists) out.push({key, label:'Custom prompt (unsaved)', ...current, mode:'runtime_form', custom:true, source:'Current form'}); } return out; }
+function findPromptByKey(key){ return allPromptPresets(true).find(p=>p.key===key) || null; }
+function promptLabel(){ const p=findPromptByKey(el('promptPreset')?.value); return p ? p.label : 'Custom prompt'; }
+function promptMode(){ const p=findPromptByKey(el('promptPreset')?.value); return p?.mode || 'runtime_form'; }
+function updatePromptStatus(){ const p=findPromptByKey(el('promptPreset')?.value); const status=el('promptStatus'); if(!status) return; if(promptDirty){ status.textContent='Custom edits are active. Save them to keep this prompt in the dropdown, or run them directly.'; return; } if(p?.dataset_row){ status.textContent='Using Hugging Face dataset row prompts. Each selected PRISM video keeps its own benchmark question/answer prompt.'; return; } if(p){ const flags=[p.paper_import?'paper import':null,p.custom?'saved custom':null,p.source?`source: ${p.source}`:null].filter(Boolean).join(' | '); status.textContent=flags || 'Using a built-in prompt preset.'; return; } status.textContent='Choose a preset, import a paper, or edit and save a custom prompt.'; }
+function setPromptFields(p){ if(!p) return; promptSyncing=true; el('systemPrompt').value=p.system_prompt||''; el('userPrompt').value=p.user_prompt||''; promptSyncing=false; promptDirty=false; lastAppliedPromptKey=p.key; autosizePrompts(); updatePromptStatus(); }
+function syncPromptPresets(){ const prompts=allPromptPresets(true); const sig=prompts.map(p=>`${p.key}|${p.label}|${p.user_prompt}`).join('||'); const select=el('promptPreset'); const old=select.value || lastAppliedPromptKey; if(sig!==promptPresetSig){ select.innerHTML = prompts.map(p=>`<option value="${esc(p.key)}">${esc(p.label)}${p.dataset_row?' (dataset rows)':p.reasoning?' (reasoning)':p.paper_import?' (paper)':p.custom?' (custom)':''}</option>`).join(''); promptPresetSig=sig; } let next=old; const dataset=prompts.find(p=>p.dataset_row); const imported=prompts.find(p=>p.paper_import); if(promptDirty){ const currentKey=`custom:${promptFingerprint(el('systemPrompt').value,el('userPrompt').value)}`; next=prompts.some(p=>p.key===currentKey) ? currentKey : next; } else if(!promptUserSelected && (dataset || imported)){ next=(dataset||imported).key; } else if(!next || !prompts.some(p=>p.key===next)){ next=(dataset||imported||prompts[0]||{}).key || ''; } select.value=next; const selected=findPromptByKey(next); if(selected && !promptDirty && lastAppliedPromptKey!==next) setPromptFields(selected); updatePromptStatus(); }
+function applySelectedPrompt(){ promptUserSelected=true; const selected=findPromptByKey(el('promptPreset').value); if(selected){ setPromptFields(selected); render(); } }
+function markPromptDirty(){ if(promptSyncing) return; promptUserSelected=true; promptDirty=true; syncPromptPresets(); render(); }
+async function saveCurrentPrompt(){ const system_prompt=el('systemPrompt').value; const user_prompt=el('userPrompt').value; if(!user_prompt.trim()){ alert('Enter a user prompt before saving.'); return; } const fallback=`Custom prompt ${new Date().toLocaleString()}`; const label=window.prompt('Name this prompt', fallback) || fallback; const saved=await api('/api/prompt',{label,system_prompt,user_prompt,source:'runtime form'}); lastAppliedPromptKey=promptKey(saved.preset,'preset'); promptUserSelected=true; promptDirty=false; await poll(); el('promptPreset').value=lastAppliedPromptKey; updatePromptStatus(); }
 function autosizeTextarea(textarea){ if(!textarea) return; textarea.style.height='auto'; const styles=getComputedStyle(textarea); const min=parseFloat(styles.minHeight)||0; const max=parseFloat(styles.maxHeight)||window.innerHeight*.42; const next=Math.max(min, Math.min(textarea.scrollHeight + 2, max)); textarea.style.height=next+'px'; textarea.style.overflowY=textarea.scrollHeight > max ? 'auto' : 'hidden'; }
 function autosizePrompts(){ ['systemPrompt','userPrompt'].forEach(id=>autosizeTextarea(el(id))); }
-function syncPromptPresets(){ const presets=state?.defaults?.prompt_presets||[]; const sig=presets.map(p=>`${p.label}|${p.user_prompt}`).join('||'); if(sig===promptPresetSig) return; const select=el('promptPreset'); const old=select.value; select.innerHTML = presets.map((p,i)=>`<option value="${i}">${esc(p.label)}${p.reasoning?' (reasoning)':''}${p.paper_import?' (paper)':''}</option>`).join(''); const importedIndex=presets.findIndex(p=>p.paper_import); if(importedIndex>=0 && (!old || old==='0')) select.value=String(importedIndex); else if(old && Number(old) < presets.length) select.value=old; promptPresetSig=sig; }
 function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if(p.arxiv_id) rows.push(['arXiv',p.arxiv_id]); if(p.title) rows.push(['title',clipText(p.title,90)]); if(p.selected_dataset) rows.push(['dataset',p.selected_dataset]); if(p.models?.length) rows.push(['model',p.models[0]]); if(p.prompt_presets?.length) rows.push(['prompts',p.prompt_presets.length]); if(p.load_error) rows.push(['load error',clipText(p.load_error,160)]); if(p.warnings?.length) rows.push(['warnings',clipText(p.warnings.join(' | '),180)]); el('paperKv').innerHTML = rows.length ? rows.map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('') : '<div>paper</div><div>No paper imported yet.</div>'; }
 function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
 function renderExportSections(){ const sections=state?.defaults?.export_sections||[]; const target=el('exportSections'); if(!target || target.dataset.ready) return; target.innerHTML = sections.map(s=>`<label class="toggle-row"><input class="exportSection" type="checkbox" value="${esc(s.id)}" ${s.default?'checked':''}/><span><strong>${esc(s.label)}</strong></span></label>`).join(''); target.dataset.ready='1'; }
@@ -3253,7 +3329,7 @@ function modelMaxLen(){ return Number(state?.server?.model_max_len || state?.def
 function reserveTokens(){ return Number(state?.server?.context_safety_reserve || state?.defaults?.context_safety_reserve || 1024); }
 function patchPixels(){ return Number(state?.server?.context_patch_pixels || state?.defaults?.context_patch_pixels || 196); }
 function promptTokensEst(){ const text=(el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||''); return Math.max(1, Math.round(text.length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
-function promptTokensForVideo(v){ const row=v?.dataset_row||{}; const text=(row.system_prompt && row.user_prompt) ? `${row.system_prompt}\\n${row.user_prompt}` : ((el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||'')); return Math.max(1, Math.round(String(text).length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
+function promptTokensForVideo(v){ const row=v?.dataset_row||{}; const useDataset=promptMode()==='dataset_row' && row.system_prompt && row.user_prompt; const text=useDataset ? `${row.system_prompt}\\n${row.user_prompt}` : ((el('systemPrompt').value||'') + '\\n' + (el('userPrompt').value||'')); return Math.max(1, Math.round(String(text).length / 4)) + Number(state?.defaults?.context_text_tokens||50); }
 function currentSelectionVideos(){ const videos=state?.videos||[]; const ids=new Set(checkedIds()); return ids.size ? videos.filter(v=>ids.has(v.id)) : videos; }
 function contextReport(){ const p=params(); const videos=currentSelectionVideos(); const maxLen=modelMaxLen(); const reserve=reserveTokens(); const allowed=Math.max(1, maxLen - p.max_tokens - reserve); if(nativeVideoMode()) return {enabled:false, reason:'native', videos, maxLen, reserve, allowed}; const prompt=promptTokensEst(); const rows=videos.map(v=>{ const plan=videoPlan(v); const rowPrompt=promptTokensForVideo(v); const input=Number(plan.tokens||0)+rowPrompt; const ratio=input/allowed; return {video:v, plan, input, prompt:rowPrompt, ratio, over:input>allowed, warn:input<=allowed && ratio>=CONTEXT_WARNING_RATIO}; }); const worst=rows.length ? rows.reduce((a,b)=>b.input>a.input?b:a, rows[0]) : null; return {enabled:true, videos, rows, worst, maxLen, reserve, allowed, prompt, over:rows.some(r=>r.over), warn:rows.some(r=>r.warn)}; }
 function renderContextGuard(){ const kv=el('contextKv'); const hint=el('contextHint'); const fit=el('fitBudgetBtn'); const allow=el('allowOverContext'); const busy=!!(state.running||state.loading_dataset); const r=contextReport(); if(!r.enabled){ kv.innerHTML = [['mode','native video / NIM'],['model context',fmt(r.maxLen)+' tokens'],['guard','delegated to model service']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); hint.className='hint'; hint.textContent='This backend receives video_url/native video input, so the microservice owns frame sampling and context validation.'; fit.disabled=true; allow.disabled=true; return false; } fit.disabled=busy || !r.videos.length; allow.disabled=busy; const worst=r.worst; kv.innerHTML = [['mode','OSS image frames'],['model context',fmt(r.maxLen)+' tokens'],['input budget',fmt(r.allowed)+' tokens'],['prompt estimate',fmt(r.prompt)+' tokens'],['selected videos',fmt(r.videos.length)],['worst video',worst ? `${worst.video.name}: ${fmt(worst.input)} input tokens (${fmt(worst.plan.frames)} frames)` : '']].map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join(''); if(!r.videos.length){ hint.className='hint'; hint.textContent='Load a dataset to see whether the current frame and pixel settings fit the model context.'; return false; } if(r.over){ hint.className='hint budget-bad'; hint.textContent = allow.checked ? 'Over-budget override is enabled. This is useful for stress testing, but the OSS backend may still return 400 errors.' : 'These settings are likely to exceed the OSS model context and cause a 400. Use Fit to context, lower fps/max pixels/max frames, or explicitly allow an over-budget stress test.'; return !allow.checked; } if(r.warn){ hint.className='hint budget-warn'; hint.textContent='These settings are close to the context limit; they should run, but prefill may be slow.'; return false; } hint.className='hint budget-ok'; hint.textContent='These settings fit within the estimated OSS context budget.'; return false; }
@@ -3310,17 +3386,19 @@ function render(){ if(!state) return; initControls(); renderParamLabels();
  document.getElementById('log').textContent = (state.logs||[]).join('\\n');
  const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; requestAnimationFrame(autosizePrompts); }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
-document.getElementById('promptPreset').onchange = ()=>{ const p=(state.defaults.prompt_presets||[])[Number(el('promptPreset').value)]; if(!p) return; el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); render(); };
-['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=()=>{ autosizeTextarea(el(id)); render(); });
+document.getElementById('promptPreset').onchange = applySelectedPrompt;
+document.getElementById('savePromptBtn').onclick = async()=>{ try{ await saveCurrentPrompt(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('reloadPromptBtn').onclick = applySelectedPrompt;
+['systemPrompt','userPrompt'].forEach(id=>document.getElementById(id).oninput=()=>{ autosizeTextarea(el(id)); markPromptDirty(); });
 ['fpsSlider','maxPixelsSlider','maxTokensSlider','temperatureSlider','topPSlider','repPenaltySlider','maxFramesSlider'].forEach(id=>document.getElementById(id).oninput=render);
 document.getElementById('buildDefaultsToggle').onchange = ()=>applyBuildDefaults(el('buildDefaultsToggle').checked);
 document.getElementById('allowOverContext').onchange = render;
 document.getElementById('fitBudgetBtn').onclick = fitToContext;
 document.getElementById('videoRows').addEventListener('change', e=>{ if(e.target.classList.contains('pick')) render(); });
-document.getElementById('paperBtn').onclick = async()=>{ try{ setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.status==='importing') return; if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('paperBtn').onclick = async()=>{ try{ if(!promptDirty) promptUserSelected=false; setBusy('Importing paper metadata and prompts...'); const j=await api('/api/paper',{source:el('paperSource').value,max_videos:Number(el('maxVideos').value),load_dataset:true}); if(j.selected_dataset) el('repo').value=j.selected_dataset; const p=(j.prompt_presets||[])[0]; if(p && !promptDirty){ el('systemPrompt').value=p.system_prompt; el('userPrompt').value=p.user_prompt; autosizePrompts(); } await poll(); if(j.status==='importing') return; if(j.load_error) alert('Imported prompts, but dataset load failed: '+j.load_error); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading dataset from Hugging Face...'); await api('/api/load',{repo_id:el('repo').value,max_videos:Number(el('maxVideos').value)}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
-document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),prompt_mode:promptMode(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to context or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),prompt_mode:'runtime_form',allow_over_context:el('allowOverContext').checked,...params()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
 async function exportArtifact(format){ const buttons=[...document.querySelectorAll('.exportBtn')]; let status=null; try{ buttons.forEach(b=>b.disabled=true); status=document.createElement('span'); status.className='export-link'; status.textContent=`Creating ${format.toUpperCase()}...`; el('exportLinks').prepend(status); const j=await api('/api/export',{format,sections:checkedExportSections()}); status.remove(); status=null; addExportLink(j); await poll(); }catch(e){ if(status) status.remove(); alert(e.message); await poll(); } finally{ buttons.forEach(b=>b.disabled=false); } }
 document.querySelectorAll('.exportBtn').forEach(btn=>{ btn.onclick = ()=>exportArtifact(btn.dataset.format); });
@@ -3387,6 +3465,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     discovery = import_paper_source(source, max_videos, load_now)
                     self.send_json(discovery)
+            elif self.path == "/api/prompt":
+                saved = add_prompt_preset(
+                    str(payload.get("label") or ""),
+                    str(payload.get("system_prompt") or ""),
+                    str(payload.get("user_prompt") or ""),
+                    str(payload.get("source") or "runtime"),
+                )
+                self.send_json({"ok": True, **saved})
             elif self.path == "/api/run":
                 snap = snapshot()
                 if snap.get("running") or snap.get("loading_dataset"):
@@ -3504,6 +3590,7 @@ def params_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "top_p": float(payload.get("top_p") if payload.get("top_p") is not None else defaults["top_p"]),
         "repetition_penalty": float(payload.get("repetition_penalty") if payload.get("repetition_penalty") is not None else defaults["repetition_penalty"]),
         "max_frames": int(payload.get("max_frames") if payload.get("max_frames") is not None else defaults["max_frames"]),
+        "prompt_mode": str(payload.get("prompt_mode") or "auto"),
     }
 
 
