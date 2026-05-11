@@ -17,6 +17,20 @@ worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio` for the classic
 single-upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when the user specifically
 wants the FiftyOne app available alongside runtime-agent result writeback.
 
+## Codex Mode Note
+
+This skill has an interactive picker flow. In Codex, the button-style picker
+uses `request_user_input`, which is only available in Plan mode.
+
+If `request_user_input` is unavailable, tell the user:
+
+> Codex's interactive picker for this skill is available in Plan mode. You can
+> switch to Plan mode and invoke this skill again for button-style choices, or
+> reply here with backend, model, and target and I will continue in chat.
+
+Do not fail the workflow just because Plan mode is unavailable; fall back to
+plain chat choices.
+
 ## Agent Harness Adapter
 
 The runbook was originally written for Claude Code. Translate these names to the
