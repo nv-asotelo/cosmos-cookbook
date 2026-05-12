@@ -4,18 +4,24 @@
 > `~/.claude/scripts` examples. Before executing, apply the adapter in
 > `../SKILL.md`; for shared use, prefer the bundled `../scripts/` directory.
 
-**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of three frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
+**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of four frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
-- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
-- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — classic upload-one-video/image UI for prompt and parameter tuning.
+- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
+- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — default NVIDIA Build-style Gradio skin for upload-one-video/image workflows, prompt presets, reasoning on/off indicators, backend controls, and parameter tuning.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review. Gradio still launches as a live sidecar.
+- **NVIDIA Build-style model playground (Default)** -> `BYO_VIDEO_FRONTEND=nvidia_build` — model-specific Gradio surface that follows the corresponding build.nvidia.com playground for Cosmos / Cosmos3 / Cosmos Predict / Cosmos Reason selections.
+
+Default to `BYO_VIDEO_FRONTEND=nvidia_build` for shareable model-page demos or
+unspecified frontend requests. Select `runtime_agent` only when the user asks for
+guided dataset loading, concurrent batch inference, worker-safety smoke testing,
+or result writeback.
 
 For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
 
 Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **runtime-agent web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
-- `~/.claude/scripts/gradio_cr2_byo.py`  — Gradio app (all supported models)
+- `~/.claude/scripts/gradio_cr2_byo.py`  — default Build-style Gradio app (all supported models)
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 - `~/.claude/scripts/byo_video_runtime_agent.py` — Runtime-agent frontend for HF dataset batch inference and FiftyOne support
 - `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
@@ -482,7 +488,7 @@ SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 **Step 1** — Deploy required Python scripts:
 
 ```bash
-for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -623,7 +629,7 @@ If `free_vram_mb >= min_vram_mb`: proceed with the user's requested model — do
 
 Launch setup (one Bash call — nohup so brev exec returns immediately). Pass `MODEL_NAME` and `MODEL_SIZE` explicitly so the setup script does not auto-select a different model:
 ```bash
-brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 **Log tail loop (every 30s):** Tail the log, print a compact status line (not a full panel —
@@ -862,7 +868,7 @@ The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 Deploy scripts:
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -871,7 +877,7 @@ done
 
 Launch setup:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Tail logs:
@@ -1297,7 +1303,7 @@ Agent steps:
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
    SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-   for script in byo_video_setup gradio_cr2_byo byo_video_runtime_agent byo_video_runtime_guide; do
+   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
      B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""

@@ -15,27 +15,35 @@ When asking the user to choose a frontend, do not present raw implementation
 names like `runtime_agent`, `gradio`, or `fiftyone` as the option labels. Use
 descriptive labels and map the answer to the env var afterward:
 
-- **Guided dataset batch UI (Recommended)** -> `BYO_VIDEO_FRONTEND=runtime_agent`
+- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=runtime_agent`
   for HF public dataset loading, concurrent video processing, worker-safety
   smoke testing, and result export/writeback. The setup script still starts a
   live Gradio sidecar and prints its link.
-- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` for uploading one
-  video or image and tuning the prompt/parameters interactively.
+- **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` for the default
+  NVIDIA Build-style Gradio skin with one-video/image upload, prompt presets,
+  reasoning on/off indicators, backend controls, and parameter tuning.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` when the
   user wants the guided batch UI with FiftyOne available for sample inspection
   and result review. The setup script still starts a live Gradio sidecar and
   prints its link.
+- **NVIDIA Build-style model playground (Default)** -> `BYO_VIDEO_FRONTEND=nvidia_build`
+  for a model-specific Gradio surface that mirrors the corresponding
+  build.nvidia.com playground when the selected model is from the Cosmos,
+  Cosmos3, Cosmos Predict, or Cosmos Reason collections. The setup script
+  chooses the closest bundled app for the selected model.
 
 Regardless of the selected mode, `byo_video_setup.py` must serve a live Gradio
 link on `GRADIO_PORT` and write it to `/tmp/gradio_url.txt` plus
 `/tmp/gradio_live.flag`. Runtime-agent and FiftyOne selections add their own UI
 on `RUNTIME_AGENT_PORT`; they do not replace Gradio.
 
-Default to `BYO_VIDEO_FRONTEND=runtime_agent` when the user asks for a guided
-inference flow, HF public dataset loading, concurrent batch processing, or the
-worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio` for the single-video
-upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when the user specifically wants
-FiftyOne available alongside result writeback.
+Default to `BYO_VIDEO_FRONTEND=nvidia_build` when the user asks to serve a
+shareable model playground, compare model-page frontends, or does not specify a
+dataset/batch workflow. Use `BYO_VIDEO_FRONTEND=runtime_agent` when the user
+asks for a guided inference flow, HF public dataset loading, concurrent batch
+processing, or the worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio`
+for the generic single-video upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when
+the user specifically wants FiftyOne available alongside result writeback.
 
 ## Codex Mode Note
 
@@ -96,7 +104,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `scripts/byo_video_runtime_guide.py`: friendly CLI companion for Claude Code
   or terminal users to load datasets, import papers, run guarded batches, shape
   structured prompts, and export artifacts through the runtime-agent API.
-- `scripts/gradio_cr2_byo.py`: Gradio app for video/image inference.
+- `scripts/gradio_cr2_byo.py`: default Build-style Gradio app for video/image
+  inference across supported BYO-video models.
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
 - `scripts/nim_runtime_monitor.py` and `scripts/nim_param_table.json`: NIM boot/readiness monitor and launch-parameter notes from the smoke sprints.
 - `scripts/gradio_cosmos_predict.py` and `scripts/gradio_cosmos_transfer.py`: generation frontends for the Cosmos Predict/Transfer BYO-video variants.

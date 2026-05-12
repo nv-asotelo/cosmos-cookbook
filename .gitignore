@@ -191,3 +191,10 @@ core.*
 /dataset/
 /downloaded_data/
 .gstack/
+
+# Frontend app build artifacts
+apps/**/node_modules/
+apps/**/.next/
+apps/**/dist/
+apps/**/.npm-cache/
+apps/**/*.tsbuildinfo

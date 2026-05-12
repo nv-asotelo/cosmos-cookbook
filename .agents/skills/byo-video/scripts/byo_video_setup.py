@@ -13,9 +13,9 @@ selected companion frontend URL. Gradio is always written to
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
-  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
   MODEL_DIR         — override local download path for primary model
-  BYO_VIDEO_FRONTEND — gradio | runtime_agent | fiftyone (default: gradio)
+  BYO_VIDEO_FRONTEND — nvidia_build | gradio | runtime_agent | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
   RUNTIME_AGENT_PORT — port for runtime-agent frontend (default: 7861)
   RUNTIME_AGENT_DATASET — default public HF dataset for runtime-agent (default: pjramg/Safe_Unsafe_Test)
@@ -113,6 +113,35 @@ _MODEL_CONFIGS = {
             ("CR1-7B BF16", "Cosmos-Reason1-7B", "nvidia/Cosmos-Reason1-7B", "~14 GB"),
         ],
         "nim": "nvidia/cosmos-reason1-7b",
+    },
+    # ── Cosmos Predict / Video2World NIMs (Build-style Gradio surface) ───
+    "PREDICT1-5B": {
+        "variants": [
+            ("Cosmos Predict1 5B Video2World", "Cosmos-Predict1-5B-Video2World",
+             "nvidia/Cosmos-Predict1-5B-Video2World", "~10 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict1-5b",
+    },
+    "PREDICT1-7B": {
+        "variants": [
+            ("Cosmos Predict1 7B Video2World", "Cosmos-Predict1-7B-Video2World",
+             "nvidia/Cosmos-Predict1-7B-Video2World", "~14 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict1-7b-video2world",
+    },
+    "PREDICT25-2B": {
+        "variants": [
+            ("Cosmos Predict2.5 2B", "Cosmos-Predict2.5-2B",
+             "nvidia/Cosmos-Predict2.5-2B", "~4 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict2-5-2b",
+    },
+    "PREDICT25-14B": {
+        "variants": [
+            ("Cosmos Predict2.5 14B", "Cosmos-Predict2.5-14B",
+             "nvidia/Cosmos-Predict2.5-14B", "~28 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict2-5-14b",
     },
     # ── Cosmos Reason2 ──
     "2B": {
@@ -242,10 +271,11 @@ MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
-GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
-FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "gradio").strip().lower()
+FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "nvidia_build").strip().lower()
 if FRONTEND == "agent":
     FRONTEND = "runtime_agent"
+if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playground"):
+    FRONTEND = "nvidia_build"
 RUNTIME_AGENT_PORT = int(os.environ.get("RUNTIME_AGENT_PORT", "7861"))
 RUNTIME_AGENT_APP  = "/tmp/byo_video_runtime_agent.py"
 RUNTIME_AGENT_LOG_FILE = "/tmp/byo_video_runtime_agent.log"
@@ -269,7 +299,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -407,8 +437,27 @@ if not MODEL_ID:
 else:
     _variant_labels = MODEL_ID
 
+def _build_playground_app(model_size, *names):
+    tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
+    if "predict" in tokens or "video2world" in tokens or "text2world" in tokens:
+        return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
+    if "reason" in tokens or "cosmos3" in tokens or model_size in {
+        "CR1-7B", "2B", "8B", "32B", "C3-2B", "C3-8B", "C3-32B", "C3-super",
+    }:
+        return "/tmp/gradio_cosmos_reason_build.py", "Cosmos Reason Build-style playground"
+    return "/tmp/gradio_cr2_byo.py", "Cosmos Build-style BYO-video Gradio"
+
+if FRONTEND == "nvidia_build":
+    GRADIO_APP, _GRADIO_APP_LABEL = _build_playground_app(
+        MODEL_SIZE, MODEL_ID, MODEL_NAME, _variant_labels
+    )
+else:
+    GRADIO_APP = os.environ.get("GRADIO_APP", "/tmp/gradio_cr2_byo.py")
+    _GRADIO_APP_LABEL = "Cosmos Build-style BYO-video Gradio"
+
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
+ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
 ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
 STEPS_DONE.append(1)
 print_dashboard()
@@ -718,6 +767,17 @@ def _resolve_nim_launch_config(model_id, model_size, cfg):
         or (cfg["variants"][0][2] if cfg.get("variants") else "")
     )
     requested_l = requested.lower()
+    _predict_nim_aliases = {
+        "nvidia/cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
+        "cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
+        "nvidia/cosmos-predict1-7b-video2world": "nvidia/cosmos-predict1-7b-video2world",
+        "cosmos-predict1-7b-video2world": "nvidia/cosmos-predict1-7b-video2world",
+        "nvidia/cosmos-predict2.5-2b": "nvidia/cosmos-predict2-5-2b",
+        "cosmos-predict2.5-2b": "nvidia/cosmos-predict2-5-2b",
+        "nvidia/cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
+        "cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
+    }
+    requested_l = _predict_nim_aliases.get(requested_l, requested_l)
     if requested_l.startswith("nvcr.io/nim/"):
         requested_l = requested_l[len("nvcr.io/nim/"):]
     if requested_l.endswith(":latest"):
@@ -924,7 +984,7 @@ def _drain_stdout(fh, path):
         pass
 
 def _launch_gradio(sidecar=False):
-    label = "Gradio sidecar" if sidecar else "Cosmos Reason2 demo"
+    label = "Gradio sidecar" if sidecar else _GRADIO_APP_LABEL
     run(f"Starting {label} on port {GRADIO_PORT}")
     gradio_env = dict(launch_env)
     if sidecar:
