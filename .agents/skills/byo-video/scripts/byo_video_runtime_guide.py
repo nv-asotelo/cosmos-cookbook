@@ -5,7 +5,7 @@ The HTML Batch Inference UI remains the expert surface. This guide is
 intentionally a small, dependency-free wrapper around the same HTTP API so
 Claude Code can walk casual users through dataset loading, paper import,
 guarded batch runs, and exports without bypassing the Batch Inference UI's
-safety checks. (Internal identifiers `runtime_agent` / `RUNTIME_AGENT_PORT` /
+safety checks. (Internal identifiers `batch_inference` / `BATCH_INFERENCE_PORT` /
 file basenames are retained for backward compat.)
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 DEFAULT_URL_FILES = [
-    Path("/tmp/byo_video_runtime_agent_url.txt"),
+    Path("/tmp/byo_video_batch_inference_url.txt"),
     Path("/tmp/gradio_url.txt"),
 ]
 
@@ -467,7 +467,7 @@ def wizard(url: str) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Friendly CLI guide for the BYO-video Batch Inference UI")
-    parser.add_argument("--url", default="", help="Batch Inference URL (file path retained for back-compat: reads /tmp/byo_video_runtime_agent_url.txt)")
+    parser.add_argument("--url", default="", help="Batch Inference URL (file path retained for back-compat: reads /tmp/byo_video_batch_inference_url.txt)")
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("wizard", help="Interactive guided flow")

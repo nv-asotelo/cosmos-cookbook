@@ -1,25 +1,39 @@
-"""Wrapper for cosmos3.ray.gradio that adds a real upload widget for i2v.
+"""Cosmos3 Omni Generator (with upload + telemetry).
 
-Upstream (`cosmos3.ray.gradio`) drives i2v via a `vision_path` field in the
-"Extra Arguments" JSON — no drag-and-drop widget. This wrapper rebuilds the
-same UI but adds a `gr.Image(type="filepath")` component to the left column.
-When the user uploads an image, the saved filepath is written into the
-extra_input JSON as `vision_path`. Everything else (generate(), examples,
-components, COMPONENTS, EXCLUDE_FIELDS) is reused unchanged from upstream.
+A wrapper for `cosmos3.ray.gradio` that:
+  * adds a real image upload widget (drag-and-drop) for i2v / i2i,
+  * adds a real video upload widget for v2v / robotics-policy modes,
+  * surfaces a top status bar with VRAM free / SSD free / backend name,
+  * keeps everything else (generate(), components, examples) reused unchanged
+    from the upstream cosmos3 Gradio.
 
-This module lives in this repo (not in nvidia-cosmos/cosmos3-internal). To get
-the widget merged upstream, open a PR against that repo — only after Alex
-gives an explicit go (Upstream PR Policy).
+Upload routing into `vision_path`:
+  - If a video is uploaded, its path goes into `vision_path` (takes precedence).
+  - Otherwise, if an image is uploaded, its path goes into `vision_path`.
+  - If both are cleared, `vision_path` is removed and the example's default
+    is restored on the next preset reload.
+
+Telemetry source-of-truth:
+  - GPU/VRAM: `nvidia-smi --query-gpu` shelled out locally (this script runs
+    on the same host as Ray Serve, so local probes describe the inference box).
+  - SSD: `shutil.disk_usage("/")`.
+  - Backend: detected from listening ports + process command lines.
+    Priority: cosmos3_native (Ray Serve on :8000) > vLLM > NIM > Gradio-only.
+
+Telemetry refresh: 5s tick via gr.Timer.
 
 Run on the same host as Ray Serve, with the cosmos3 venv:
     cd ~/cosmos3
-    uv run --no-sync python /tmp/cosmos3_upload_gradio.py \
+    uv run --no-sync python ~/cosmos3_upload_gradio.py \
         --host 0.0.0.0 --port 8080 \
         --server-host localhost --server-port 8000 \
         --server-output-dir outputs/ray_serve
 """
 
 import json
+import re
+import shutil
+import subprocess
 from functools import partial
 from pathlib import Path
 
@@ -38,18 +52,130 @@ from cosmos3.ray.gradio import (
     load_input,
 )
 
+NVIDIA_GREEN = "#76B900"
+NVIDIA_DARK = "#1A1A1A"
 
-def update_extra_with_vision(image_path, current_json):
-    """When the user uploads an image, inject its path into extra_input.vision_path.
 
-    Leaves all other extra-arg keys alone. Clearing the upload removes vision_path.
+def _gpu_probe() -> dict:
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.used,memory.free,memory.total,utilization.gpu,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=5,
+        ).strip().splitlines()
+        if not out:
+            return {}
+        # first GPU only — the cosmos3 deployment is single-GPU
+        parts = [x.strip() for x in out[0].split(",")]
+        name, used, free, total, util, temp, power = parts[:7]
+        return {
+            "name": name,
+            "mem_used_gib": round(int(used) / 1024, 1),
+            "mem_free_gib": round(int(free) / 1024, 1),
+            "mem_total_gib": round(int(total) / 1024, 1),
+            "util_pct": int(util),
+            "temp_c": int(temp),
+            "power_w": float(power),
+        }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _disk_probe(path: str = "/") -> dict:
+    try:
+        u = shutil.disk_usage(path)
+        return {
+            "path": path,
+            "total_gib": round(u.total / 2**30, 1),
+            "used_gib": round(u.used / 2**30, 1),
+            "free_gib": round(u.free / 2**30, 1),
+        }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+_CHECKPOINT_RE = re.compile(r"--checkpoint-path[=\s]+([^\s]+)")
+
+
+def _backend_probe() -> dict:
+    """Detect which model-serving backend is bound on this host plus the
+    actually loaded checkpoint name (standing order: never hardcode model id).
+
+    Order: Ray Serve (cosmos3_native) > vLLM > NIM (Triton) > unknown.
+    """
+    try:
+        ps = subprocess.check_output(
+            ["ps", "-Ao", "args"], text=True, timeout=4, errors="replace"
+        )
+    except Exception as exc:
+        return {"name": "unknown", "checkpoint": None, "error": f"{type(exc).__name__}: {exc}"}
+    ps_l = ps.lower()
+    checkpoint = None
+    for line in ps.splitlines():
+        if "cosmos3.ray.serve" in line:
+            m = _CHECKPOINT_RE.search(line)
+            if m:
+                checkpoint = m.group(1)
+                break
+    if "cosmos3.ray.serve" in ps_l or "ray::proxyactor" in ps_l:
+        return {
+            "name": "Ray Serve (cosmos3_native)",
+            "port": 8000,
+            "framework": "cosmos3",
+            "checkpoint": checkpoint,
+        }
+    if "vllm" in ps_l:
+        return {"name": "vLLM", "port": 8000, "framework": "vllm", "checkpoint": checkpoint}
+    if "triton" in ps_l or "nim_llm" in ps_l or "/opt/nim" in ps_l:
+        return {"name": "NIM (Triton)", "port": 8000, "framework": "nim", "checkpoint": checkpoint}
+    return {"name": "unknown / not detected", "port": None, "framework": "unknown", "checkpoint": checkpoint}
+
+
+def _telemetry_markdown() -> str:
+    gpu = _gpu_probe()
+    disk = _disk_probe("/")
+    backend = _backend_probe()
+    gpu_str = (
+        f"**{gpu.get('name','?')}** · VRAM **{gpu.get('mem_free_gib','?')} GB free** / "
+        f"{gpu.get('mem_total_gib','?')} GB · util {gpu.get('util_pct','?')}% · "
+        f"{gpu.get('temp_c','?')}°C · {gpu.get('power_w','?')} W"
+        if "error" not in gpu else f"GPU probe error: {gpu['error']}"
+    )
+    disk_str = (
+        f"SSD **{disk.get('free_gib','?')} GB free** / {disk.get('total_gib','?')} GB on `{disk.get('path','/')}`"
+        if "error" not in disk else f"Disk probe error: {disk['error']}"
+    )
+    backend_str = f"Backend: **{backend['name']}**"
+    checkpoint_str = (
+        f"Model: <b style='color:{NVIDIA_GREEN}'>{backend.get('checkpoint')}</b>"
+        if backend.get("checkpoint")
+        else "Model: <i style='color:#aaa'>detecting…</i>"
+    )
+    return (
+        f"<div style='padding:8px 12px;background:{NVIDIA_DARK};color:#fff;"
+        f"border-left:4px solid {NVIDIA_GREEN};font-size:13px;line-height:1.6'>"
+        f"<b style='color:{NVIDIA_GREEN}'>HOST TELEMETRY</b> &nbsp;&nbsp; "
+        f"{checkpoint_str} &nbsp;·&nbsp; {backend_str} &nbsp;·&nbsp; {gpu_str} &nbsp;·&nbsp; {disk_str}"
+        f"</div>"
+    )
+
+
+def update_extra_with_vision(image_path, video_path, current_json):
+    """Inject the uploaded media path into extra_input.vision_path.
+
+    Video takes precedence over image. Clearing both removes vision_path.
     """
     try:
         data = json.loads(current_json) if current_json else {}
     except json.JSONDecodeError:
         data = {}
-    if image_path:
-        data["vision_path"] = str(image_path)
+    media_path = video_path or image_path
+    if media_path:
+        data["vision_path"] = str(media_path)
     else:
         data.pop("vision_path", None)
     return json.dumps(data, indent=2)
@@ -72,12 +198,20 @@ def ui_builder(args: Args) -> gr.Blocks:
     if default_example not in examples:
         default_example = next(iter(sorted(examples.keys())), "")
 
-    with gr.Blocks(title="Cosmos3 Omni Generator (with upload)") as ui:
+    with gr.Blocks(
+        title="Cosmos3 Omni Generator (with upload + telemetry)",
+        css=f"""
+        .telemetry-strip {{ margin-bottom: 8px; }}
+        .gradio-container .gr-button.primary {{ background: {NVIDIA_GREEN} !important; }}
+        """,
+    ) as ui:
+        telemetry_md = gr.Markdown(_telemetry_markdown(), elem_classes=["telemetry-strip"])
         gr.Markdown("# Cosmos3 Omni Generator")
         gr.Markdown(
-            "Upload an image to drive image-to-video. The uploaded file's path "
-            "is injected into **Extra Arguments → `vision_path`** automatically. "
-            "Clear the upload to revert to the example's default `vision_path`."
+            "Upload an **image** (i2v / i2i) or a **video** (v2v / robotics policy) "
+            "to drive vision-conditioned generation. The uploaded file path is "
+            "injected into **Extra Arguments → `vision_path`** automatically. "
+            "Video uploads take precedence; clear both to revert to the example default."
         )
         with gr.Accordion("Environment", open=False):
             gr.JSON(value=info["environment"])
@@ -101,7 +235,12 @@ def ui_builder(args: Args) -> gr.Blocks:
                     type="filepath",
                     label="Conditioning image (drag-and-drop or click to upload)",
                     sources=["upload", "clipboard"],
-                    height=240,
+                    height=200,
+                )
+                video_upload = gr.Video(
+                    label="Conditioning video (drag-and-drop or click to upload, for v2v / robotics-policy)",
+                    sources=["upload"],
+                    height=200,
                 )
 
                 components = build_components(OmniSampleOverrides, COMPONENTS)
@@ -136,7 +275,12 @@ def ui_builder(args: Args) -> gr.Blocks:
 
         image_upload.change(
             fn=update_extra_with_vision,
-            inputs=[image_upload, extra_input],
+            inputs=[image_upload, video_upload, extra_input],
+            outputs=[extra_input],
+        )
+        video_upload.change(
+            fn=update_extra_with_vision,
+            inputs=[image_upload, video_upload, extra_input],
             outputs=[extra_input],
         )
 
@@ -146,20 +290,16 @@ def ui_builder(args: Args) -> gr.Blocks:
             outputs=[media_output, request_output, response_output],
         )
 
+        telemetry_tick = gr.Timer(5.0)
+        telemetry_tick.tick(fn=_telemetry_markdown, outputs=[telemetry_md])
+
     return ui
 
 
 def main():
     args = tyro_cli(Args, description=__doc__)
     ui = ui_builder(args)
-    # queue(): keep the generated result on the server until the client picks it up,
-    # so a transient browser disconnect (VPN flap mid-inference) doesn't lose the run.
-    # default_concurrency_limit=1 because we have one GPU; max_size buffers a few
-    # browser refreshes without dropping in-flight work.
     ui.queue(default_concurrency_limit=1, max_size=8)
-    # share=True publishes a *.gradio.live tunnel — its long-poll reconnect tolerates
-    # short VPN drops far better than a direct LAN IP. The LAN URL still works for
-    # anyone on the same network.
     ui.launch(
         server_name=args.host,
         server_port=args.port,

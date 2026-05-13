@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Friendly CLI companion for the BYO-video runtime-agent.
+"""Friendly CLI companion for the BYO-video batch-inference.
 
-The HTML runtime-agent remains the expert UI. This guide is intentionally a
+The HTML batch-inference remains the expert UI. This guide is intentionally a
 small, dependency-free wrapper around the same HTTP API so Claude Code can walk
 casual users through dataset loading, paper import, guarded batch runs, and
-exports without bypassing the runtime-agent's safety checks.
+exports without bypassing the batch-inference's safety checks.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 DEFAULT_URL_FILES = [
-    Path("/tmp/byo_video_runtime_agent_url.txt"),
+    Path("/tmp/byo_video_batch_inference_url.txt"),
     Path("/tmp/gradio_url.txt"),
 ]
 
@@ -111,7 +111,7 @@ def request_json(url: str, path: str, payload: Optional[Dict[str, Any]] = None, 
             detail = body
         raise GuideError(f"{exc.code} from {path}: {str(detail).strip()}")
     except Exception as exc:
-        raise GuideError(f"Could not reach runtime-agent at {full_url}: {exc}")
+        raise GuideError(f"Could not reach batch-inference at {full_url}: {exc}")
 
 
 def state(url: str) -> Dict[str, Any]:
@@ -377,7 +377,7 @@ def shape_prompt() -> Dict[str, str]:
 
 
 def gradio_guide(url: str) -> None:
-    print("\nThis looks like a Gradio URL rather than the runtime-agent API.")
+    print("\nThis looks like a Gradio URL rather than the batch-inference API.")
     print("Casual-user path:")
     print(f"  1. Open {url}")
     print("  2. Upload one MP4.")
@@ -394,7 +394,7 @@ def wizard(url: str) -> None:
     except GuideError:
         gradio_guide(url)
         return
-    print("\nThis companion uses the same runtime-agent API as the browser UI.")
+    print("\nThis companion uses the same batch-inference API as the browser UI.")
     print("It keeps the context-budget guard on by default and shows progress, errors, ETA, and exports from the current session.")
     print_status(snap)
     while True:
@@ -460,12 +460,12 @@ def wizard(url: str) -> None:
                 return
         except GuideError as exc:
             print(f"\nProblem: {exc}")
-            print("The runtime-agent kept the run from proceeding or surfaced the backend error. Adjust settings, load fewer videos, or ask Claude to inspect the logs.")
+            print("The batch-inference kept the run from proceeding or surfaced the backend error. Adjust settings, load fewer videos, or ask Claude to inspect the logs.")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Friendly CLI guide for the BYO-video runtime-agent")
-    parser.add_argument("--url", default="", help="Runtime-agent URL, default reads /tmp/byo_video_runtime_agent_url.txt")
+    parser = argparse.ArgumentParser(description="Friendly CLI guide for the BYO-video batch-inference")
+    parser.add_argument("--url", default="", help="Runtime-agent URL, default reads /tmp/byo_video_batch_inference_url.txt")
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("wizard", help="Interactive guided flow")
@@ -481,7 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     paper_p.add_argument("--max-videos", type=int, default=2)
     paper_p.add_argument("--no-load", action="store_true")
 
-    run_p = sub.add_parser("run", help="Run loaded videos through the guarded runtime-agent API")
+    run_p = sub.add_parser("run", help="Run loaded videos through the guarded batch-inference API")
     run_p.add_argument("--first", type=int, default=1)
     run_p.add_argument("--all", action="store_true")
     run_p.add_argument("--concurrency", type=int, default=1)

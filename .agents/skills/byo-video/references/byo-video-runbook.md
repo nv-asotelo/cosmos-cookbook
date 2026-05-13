@@ -6,22 +6,22 @@
 
 **Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of four frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
-- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=runtime_agent` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
+- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=batch_inference` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — default NVIDIA Build-style Gradio skin for upload-one-video/image workflows, prompt presets, reasoning on/off indicators, backend controls, and parameter tuning.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review. Gradio still launches as a live sidecar.
 - **NVIDIA Build-style model playground (Default)** -> `BYO_VIDEO_FRONTEND=nvidia_build` — model-specific Gradio surface that follows the corresponding build.nvidia.com playground for Cosmos / Cosmos3 / Cosmos Predict / Cosmos Reason selections.
 
 Default to `BYO_VIDEO_FRONTEND=nvidia_build` for shareable model-page demos or
-unspecified frontend requests. Select `runtime_agent` only when the user asks for
+unspecified frontend requests. Select `batch_inference` only when the user asks for
 guided dataset loading, concurrent batch inference, worker-safety smoke testing,
 or result writeback.
 
-Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **Batch Inference web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`. (Internal identifiers `runtime_agent` / `RUNTIME_AGENT_PORT` are retained; user-visible prose says "batch inference".)
+Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **Batch Inference web UI** on `BATCH_INFERENCE_PORT` (default `7861`) and write `/tmp/byo_video_batch_inference_url.txt`. (Internal identifiers `batch_inference` / `BATCH_INFERENCE_PORT` are retained; user-visible prose says "batch inference".)
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
 - `~/.claude/scripts/gradio_cr2_byo.py`  — default Build-style Gradio app (all supported models)
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
-- `~/.claude/scripts/byo_video_runtime_agent.py` — Batch Inference frontend for HF dataset batch inference and FiftyOne support (filename retains `runtime_agent` for backward compat)
+- `~/.claude/scripts/byo_video_batch_inference.py` — Batch Inference frontend for HF dataset batch inference and FiftyOne support (filename retains `batch_inference` for backward compat)
 - `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
 
 ---
@@ -47,11 +47,11 @@ This works on hosted (`integrate.api.nvidia.com`), local NIM (`nvcr.io/nim/...` 
 
 **Primary launch command (all environments):**
 ```bash
-BYO_VIDEO_FRONTEND=runtime_agent \
-RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test \
+BYO_VIDEO_FRONTEND=batch_inference \
+BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test \
 python3 /tmp/byo_video_setup.py
 ```
-This script shows live step-by-step progress with ETAs for every install stage, then prints clickable hyperlinks for Gradio and any selected companion frontend plus the CLI guide command when deployed. The Gradio URL is always written to `/tmp/gradio_url.txt`; the runtime-agent URL is written to `/tmp/byo_video_runtime_agent_url.txt` when using the guided dataset batch UI or FiftyOne flow. Deploy it to the instance before running (see deploy section below).
+This script shows live step-by-step progress with ETAs for every install stage, then prints clickable hyperlinks for Gradio and any selected companion frontend plus the CLI guide command when deployed. The Gradio URL is always written to `/tmp/gradio_url.txt`; the batch-inference URL is written to `/tmp/byo_video_batch_inference_url.txt` when using the guided dataset batch UI or FiftyOne flow. Deploy it to the instance before running (see deploy section below).
 
 ### Batch Inference HF Dataset Smoke
 
@@ -71,7 +71,7 @@ Headless smoke command after setup and vLLM/NIM are live:
 ```bash
 cd ~/cosmos-reason2
 VLLM_BASE_URL=http://localhost:8000/v1 \
-uv run python /tmp/byo_video_runtime_agent.py smoke \
+uv run python /tmp/byo_video_batch_inference.py smoke \
   --dataset pjramg/Safe_Unsafe_Test \
   --max-videos 2 \
   --concurrency 2
@@ -488,7 +488,7 @@ Inherited state (fill in actual values):
   PROVISION_START_TS:  <epoch_seconds>
 
 On success write to /tmp/byo_video_observer_result.json on the LOCAL machine:
-  {"status":"live","url":"<frontend_url>","elapsed_s":<N>,"cost":<N>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<runtime_agent|gradio|fiftyone>"}
+  {"status":"live","url":"<frontend_url>","elapsed_s":<N>,"cost":<N>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<batch_inference|gradio|fiftyone>"}
 
 On unrecoverable failure write:
   {"status":"failed","phase":<N>,"error":"<one-line error>","instance":"<name>"}
@@ -639,7 +639,7 @@ SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 **Step 1** — Deploy required Python scripts:
 
 ```bash
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -679,7 +679,7 @@ The `~/.claude/scripts/nim_catalog.py` helper does this automatically (and is al
 
 1. **In the Phase 1 picker (main session)** — when the user selects "NIM (local Docker)" as the backend, run `python3 ~/.claude/scripts/nim_catalog.py upstream` to refresh the canonical model list from the URL above. If a model name appears upstream that is NOT in `KNOWN_VLM_NIMS` (the slug map inside `nim_catalog.py`), surface a one-line note to the user (e.g., *"Heads-up: docs added `Foo VLM`; the byo-video skill doesn't know its nvcr.io short-id yet — file a one-line PR adding it to KNOWN_VLM_NIMS, or use Custom Checkpoint ID."*).
 2. **In observer Phase 4 (script deploy)** — deploy `nim_catalog.py` alongside the other scripts (see deploy block below).
-3. **In runtime debug (the morning runtime-agent loop)** — re-run `nim_catalog.py upstream` each session start to detect upstream catalog changes (deprecations, new models, version bumps).
+3. **In runtime debug (the morning batch-inference loop)** — re-run `nim_catalog.py upstream` each session start to detect upstream catalog changes (deprecations, new models, version bumps).
 
 **Runtime NIM swap — out-of-band (not via a Gradio button):**
 
@@ -713,7 +713,7 @@ A previous version (commit `4ed5951`) wired a "Switch to selected NIM" button in
 # nim_launch.sh
 brev exec <name> "python3 -c \"import base64; open('/tmp/nim_launch.sh','wb').write(base64.b64decode('<B64_NIM_SH>'))\""
 brev exec <name> "chmod +x /tmp/nim_launch.sh"
-# nim_catalog.py — used by Gradio at startup AND by the runtime agent
+# nim_catalog.py — used by Gradio at startup AND by the batch inference
 brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').write(base64.b64decode('<B64_NIM_CATALOG>'))\""
 ```
 (For SSH targets: replace `brev exec <name>` with `ssh -i ~/.ssh/id_ed25519 <user@host>`.)
@@ -780,7 +780,7 @@ If `free_vram_mb >= min_vram_mb`: proceed with the user's requested model — do
 
 Launch setup (one Bash call — nohup so brev exec returns immediately). Pass `MODEL_NAME` and `MODEL_SIZE` explicitly so the setup script does not auto-select a different model:
 ```bash
-brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+brev exec <name> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|batch_inference|gradio|fiftyone> BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test BREV_RATE_PER_HOUR=<rate> PATH=~/.local/bin:~/.cargo/bin:$PATH && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 **Log tail loop (every 30s):** Tail the log, print a compact status line (not a full panel —
@@ -817,25 +817,25 @@ On error:
 
 ### OBSERVER PROTOCOL — PHASE 6: FRONTEND LIVE + URL CAPTURE
 
-Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Every mode writes `/tmp/gradio_live.flag`; Batch Inference and FiftyOne modes also write `/tmp/byo_video_runtime_agent_live.flag` (filename retains the `runtime_agent` token for backward compat). On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Every mode writes `/tmp/gradio_live.flag`; Batch Inference and FiftyOne modes also write `/tmp/byo_video_batch_inference_live.flag` (filename retains the `batch_inference` token for backward compat). On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
 ```json
 {"phase": 6, "status": "waiting_frontend", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "done", "weights": "done", "frontend": "active"}}
 ```
 
 ```bash
-brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null"
+brev exec <name> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_batch_inference_live.flag 2>/dev/null"
 ```
 
 When the Gradio flag is present, read the URLs:
 ```bash
-brev exec <name> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'runtime_agent='; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || true"
+brev exec <name> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
 ```
 
 **Compute total cost:** `(time.time() - PROVISION_START_TS) / 3600 * rate_per_hour`
 
 Write success result to `/tmp/byo_video_observer_result.json` on the **local machine**:
 ```json
-{"status":"live","url":"<primary_frontend_url>","gradio_url":"<gradio_url>","runtime_agent_url":"<runtime_agent_url_or_null>","elapsed_s":<N>,"cost":<computed>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<runtime_agent|gradio|fiftyone>"}
+{"status":"live","url":"<primary_frontend_url>","gradio_url":"<gradio_url>","runtime_agent_url":"<runtime_agent_url_or_null>","elapsed_s":<N>,"cost":<computed>,"instance":"<name>","rate":<rate>,"gpu":"<gpu_label>","model_id":"<model_id>","model_size":"<model_size>","backend":"<backend>","frontend":"<batch_inference|gradio|fiftyone>"}
 ```
 Then exit. The main session reads this file on task completion and displays the final panel.
 
@@ -939,7 +939,7 @@ recent runtime error. End by helping the user export the artifact they need.
 The companion CLI is also safe to run manually from the instance:
 
 ```bash
-python3 /tmp/byo_video_runtime_guide.py --url "$(cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || cat /tmp/gradio_url.txt)" wizard
+python3 /tmp/byo_video_runtime_guide.py --url "$(cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || cat /tmp/gradio_url.txt)" wizard
 python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> status
 python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> export --format html --sections overview,run_metrics,evaluation,recommendations
 ```
@@ -951,7 +951,7 @@ python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> export --format htm
 Even with the guided companion, keep the monitor available because Gradio and some
 backend paths can swallow server-side errors as a generic browser toast. Errors
 at preprocess, prefill, or generate stages are fully visible in `/tmp/gradio_demo.log`
-or `/tmp/byo_video_runtime_agent.log` on the remote, but may be invisible in the browser.
+or `/tmp/byo_video_batch_inference.log` on the remote, but may be invisible in the browser.
 
 The **runtime monitor** is a lightweight polling daemon (`~/.claude/scripts/byo_video_runtime_monitor.py`)
 that watches the remote Gradio process, GPU stats, and log tail; pattern-matches errors
@@ -1019,7 +1019,7 @@ The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 Deploy scripts:
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1028,7 +1028,7 @@ done
 
 Launch setup:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|runtime_agent|gradio|fiftyone> RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|batch_inference|gradio|fiftyone> BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Tail logs:
@@ -1038,8 +1038,8 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "tail -60 /tmp/byo_video_setup.log 2>/dev/n
 
 URL capture:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_runtime_agent_live.flag 2>/dev/null"
-ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'runtime_agent='; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null || true"
+ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_batch_inference_live.flag 2>/dev/null"
+ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
 ```
 
 ---
@@ -1432,13 +1432,13 @@ For public HF dataset batch smoke, use the Batch Inference UI instead:
 ```bash
 cd ~/cosmos-reason2
 VLLM_BASE_URL=http://localhost:8000/v1 \
-uv run python /tmp/byo_video_runtime_agent.py smoke \
+uv run python /tmp/byo_video_batch_inference.py smoke \
   --dataset pjramg/Safe_Unsafe_Test \
   --max-videos 2 \
   --concurrency 2
 ```
 
-Results at `/tmp/byo_video_runtime_agent_results.json`.
+Results at `/tmp/byo_video_batch_inference_results.json`.
 
 ---
 
@@ -1454,7 +1454,7 @@ Agent steps:
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
    SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_runtime_agent byo_video_runtime_guide; do
+   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
      B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1463,13 +1463,13 @@ Agent steps:
 4. Run setup (streams live output here):
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-     "export HF_TOKEN=hf_... INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B MODEL_SIZE=2B BYO_VIDEO_FRONTEND=runtime_agent RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
+     "export HF_TOKEN=hf_... INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B MODEL_SIZE=2B BYO_VIDEO_FRONTEND=batch_inference BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_runtime_agent_url.txt` when selected (filename retains `runtime_agent` for backward compat). Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null` via ssh.
+5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected (filename retains `batch_inference` for backward compat). Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-     "cd ~/cosmos-reason2 && VLLM_BASE_URL=http://localhost:8000/v1 uv run python /tmp/byo_video_runtime_agent.py smoke --dataset pjramg/Safe_Unsafe_Test --max-videos 2 --concurrency 2"
+     "cd ~/cosmos-reason2 && VLLM_BASE_URL=http://localhost:8000/v1 uv run python /tmp/byo_video_batch_inference.py smoke --dataset pjramg/Safe_Unsafe_Test --max-videos 2 --concurrency 2"
    ```
 
 **HOME on Horde is `/home/horde/`** — setup script uses `os.path.expanduser("~")` so it adapts automatically.

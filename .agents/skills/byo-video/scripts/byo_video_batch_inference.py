@@ -109,27 +109,27 @@ PRISM_CAPABILITY_DOMAINS = {
     "IP": "Intuitive Physics",
     "MCQ": "Evaluation",
 }
-TEXT_SCORE_THRESHOLD = float(os.getenv("RUNTIME_AGENT_TEXT_SCORE_THRESHOLD", "0.75"))
-DEFAULT_DATASET = os.getenv("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test")
-RESULTS_FILE = Path(os.getenv("RUNTIME_AGENT_RESULTS", "/tmp/byo_video_runtime_agent_results.json"))
-THUMBNAIL_DIR = Path(os.getenv("RUNTIME_AGENT_THUMBNAILS", "/tmp/byo_video_runtime_agent_thumbnails"))
+TEXT_SCORE_THRESHOLD = float(os.getenv("BATCH_INFERENCE_TEXT_SCORE_THRESHOLD", "0.75"))
+DEFAULT_DATASET = os.getenv("BATCH_INFERENCE_DATASET", "pjramg/Safe_Unsafe_Test")
+RESULTS_FILE = Path(os.getenv("BATCH_INFERENCE_RESULTS", "/tmp/byo_video_batch_inference_results.json"))
+THUMBNAIL_DIR = Path(os.getenv("BATCH_INFERENCE_THUMBNAILS", "/tmp/byo_video_batch_inference_thumbnails"))
 THUMBNAIL_SIZE = (220, 124)
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_AGENT_REQUEST_TIMEOUT_SECONDS", "180"))
-EXPORT_DIR = Path(os.getenv("RUNTIME_AGENT_EXPORTS", "/tmp/byo_video_runtime_agent_exports"))
-CONTEXT_PATCH_PIXELS = int(os.getenv("RUNTIME_AGENT_CONTEXT_PATCH_PIXELS", str(14 * 14)))
-CONTEXT_SAFETY_RESERVE = int(os.getenv("RUNTIME_AGENT_CONTEXT_SAFETY_RESERVE", "1024"))
-DEFAULT_MODEL_MAX_LEN = int(os.getenv("RUNTIME_AGENT_MODEL_MAX_LEN", "32768"))
-MODEL_FIT_VISUAL_TOKENS = int(os.getenv("RUNTIME_AGENT_MODEL_FIT_VISUAL_TOKENS", "6144"))
-MODEL_FIT_TARGET_FRAMES = int(os.getenv("RUNTIME_AGENT_MODEL_FIT_TARGET_FRAMES", "4"))
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("BATCH_INFERENCE_REQUEST_TIMEOUT_SECONDS", "180"))
+EXPORT_DIR = Path(os.getenv("BATCH_INFERENCE_EXPORTS", "/tmp/byo_video_batch_inference_exports"))
+CONTEXT_PATCH_PIXELS = int(os.getenv("BATCH_INFERENCE_CONTEXT_PATCH_PIXELS", str(14 * 14)))
+CONTEXT_SAFETY_RESERVE = int(os.getenv("BATCH_INFERENCE_CONTEXT_SAFETY_RESERVE", "1024"))
+DEFAULT_MODEL_MAX_LEN = int(os.getenv("BATCH_INFERENCE_MODEL_MAX_LEN", "32768"))
+MODEL_FIT_VISUAL_TOKENS = int(os.getenv("BATCH_INFERENCE_MODEL_FIT_VISUAL_TOKENS", "6144"))
+MODEL_FIT_TARGET_FRAMES = int(os.getenv("BATCH_INFERENCE_MODEL_FIT_TARGET_FRAMES", "4"))
 TEXT_TOKENS = 50
 INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "vllm").lower()
 MAX_PIXELS_MIN = 64 * (32 ** 2)
 MAX_PIXELS_MAX = 4096 * (32 ** 2)
-RECOMMENDED_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_RECOMMENDED_MAX_PIXELS", os.getenv("GRADIO_MAX_PIXELS", str(512 * (32 ** 2)))))
-DEFAULT_MAX_PIXELS = int(os.getenv("RUNTIME_AGENT_MAX_PIXELS", str(RECOMMENDED_MAX_PIXELS)))
-DEFAULT_FPS = float(os.getenv("RUNTIME_AGENT_FPS", os.getenv("GRADIO_FPS", "2")))
-DEFAULT_MAX_TOKENS = int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", os.getenv("GRADIO_MAX_TOKENS", "512")))
-DEFAULT_MAX_FRAMES = int(os.getenv("RUNTIME_AGENT_MAX_FRAMES", "8"))
+RECOMMENDED_MAX_PIXELS = int(os.getenv("BATCH_INFERENCE_RECOMMENDED_MAX_PIXELS", os.getenv("GRADIO_MAX_PIXELS", str(512 * (32 ** 2)))))
+DEFAULT_MAX_PIXELS = int(os.getenv("BATCH_INFERENCE_MAX_PIXELS", str(RECOMMENDED_MAX_PIXELS)))
+DEFAULT_FPS = float(os.getenv("BATCH_INFERENCE_FPS", os.getenv("GRADIO_FPS", "2")))
+DEFAULT_MAX_TOKENS = int(os.getenv("BATCH_INFERENCE_MAX_TOKENS", os.getenv("GRADIO_MAX_TOKENS", "512")))
+DEFAULT_MAX_FRAMES = int(os.getenv("BATCH_INFERENCE_MAX_FRAMES", "8"))
 if INFERENCE_BACKEND == "nim_local":
     RECOMMENDED_TEMPERATURE = 0.6
     RECOMMENDED_TOP_P = 0.3
@@ -138,10 +138,10 @@ else:
     RECOMMENDED_TEMPERATURE = 0.0
     RECOMMENDED_TOP_P = 1.0
     RECOMMENDED_REPETITION_PENALTY = 1.05
-DEFAULT_TEMPERATURE = float(os.getenv("RUNTIME_AGENT_TEMPERATURE", str(RECOMMENDED_TEMPERATURE)))
-DEFAULT_TOP_P = float(os.getenv("RUNTIME_AGENT_TOP_P", str(RECOMMENDED_TOP_P)))
-DEFAULT_REPETITION_PENALTY = float(os.getenv("RUNTIME_AGENT_REPETITION_PENALTY", str(RECOMMENDED_REPETITION_PENALTY)))
-HTTP_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_AGENT_HTTP_TIMEOUT_SECONDS", "20"))
+DEFAULT_TEMPERATURE = float(os.getenv("BATCH_INFERENCE_TEMPERATURE", str(RECOMMENDED_TEMPERATURE)))
+DEFAULT_TOP_P = float(os.getenv("BATCH_INFERENCE_TOP_P", str(RECOMMENDED_TOP_P)))
+DEFAULT_REPETITION_PENALTY = float(os.getenv("BATCH_INFERENCE_REPETITION_PENALTY", str(RECOMMENDED_REPETITION_PENALTY)))
+HTTP_TIMEOUT_SECONDS = float(os.getenv("BATCH_INFERENCE_HTTP_TIMEOUT_SECONDS", "20"))
 BUILD_NVIDIA_DEFAULTS = {
     "temperature": 0.6,
     "top_p": 0.3,
@@ -232,8 +232,8 @@ PROMPT_PRESETS = [
 PROMPT_SOURCE_CACHE_DIR = Path("/tmp/byo_video_prompt_sources")
 PROMPT_SCAN_TEXT_EXTENSIONS = {".md", ".txt", ".rst", ".py", ".json", ".jsonl", ".ipynb", ".yaml", ".yml"}
 PROMPT_SCAN_PDF_EXTENSIONS = {".pdf"}
-PROMPT_SCAN_DIR_LIMIT = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_DIR_LIMIT", "80"))
-PROMPT_SCAN_MAX_TEXT_BYTES = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_MAX_TEXT_BYTES", str(2 * 1024 * 1024)))
+PROMPT_SCAN_DIR_LIMIT = int(os.getenv("BATCH_INFERENCE_PROMPT_SCAN_DIR_LIMIT", "80"))
+PROMPT_SCAN_MAX_TEXT_BYTES = int(os.getenv("BATCH_INFERENCE_PROMPT_SCAN_MAX_TEXT_BYTES", str(2 * 1024 * 1024)))
 REASONING_PROFILES = {
     "cosmos_think_answer": {
         "id": "cosmos_think_answer",
@@ -333,8 +333,8 @@ STATE: Dict[str, Any] = {
     "defaults": {
         "system_prompt": WORKER_SAFETY_SYSTEM,
         "user_prompt": WORKER_SAFETY_USER,
-        "concurrency": int(os.getenv("RUNTIME_AGENT_CONCURRENCY", "4")),
-        "max_videos": int(os.getenv("RUNTIME_AGENT_MAX_VIDEOS", "20")),
+        "concurrency": int(os.getenv("BATCH_INFERENCE_CONCURRENCY", "4")),
+        "max_videos": int(os.getenv("BATCH_INFERENCE_MAX_VIDEOS", "20")),
         "fps": DEFAULT_FPS,
         "max_pixels": DEFAULT_MAX_PIXELS,
         "max_tokens": DEFAULT_MAX_TOKENS,
@@ -364,7 +364,7 @@ def log(message: str) -> None:
     with STATE_LOCK:
         STATE["logs"].append(line)
         STATE["logs"] = STATE["logs"][-200:]
-    print("[runtime-agent]", message, flush=True)
+    print("[batch-inference]", message, flush=True)
 
 
 def snapshot() -> Dict[str, Any]:
@@ -473,7 +473,7 @@ class ClientInputError(RuntimeError):
 
 
 def hf_auth_headers() -> Dict[str, str]:
-    headers = {"User-Agent": "cosmos-byo-video-runtime-agent"}
+    headers = {"User-Agent": "cosmos-byo-video-batch-inference"}
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -976,7 +976,7 @@ def prompt_presets_from_hf_annotation_prefix(repo_id: str, annotation_path: str,
     except Exception:
         taxonomy = {}
 
-    prefix_bytes = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_ANNOTATION_PREFIX_BYTES", str(12 * 1024 * 1024)))
+    prefix_bytes = int(os.getenv("BATCH_INFERENCE_PROMPT_SCAN_ANNOTATION_PREFIX_BYTES", str(12 * 1024 * 1024)))
     try:
         from huggingface_hub import hf_hub_download
         local = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=annotation_path)
@@ -1055,7 +1055,7 @@ def inspect_hf_dataset_for_prompts(repo_id: str) -> Dict[str, Any]:
     except Exception as exc:
         info["warnings"].append(f"Could not scrape dataset card prompts: {exc}")
 
-    max_bytes = int(os.getenv("RUNTIME_AGENT_PROMPT_SCAN_MAX_BYTES", str(5 * 1024 * 1024)))
+    max_bytes = int(os.getenv("BATCH_INFERENCE_PROMPT_SCAN_MAX_BYTES", str(5 * 1024 * 1024)))
     try:
         tree = http_get_json(f"https://huggingface.co/api/datasets/{encoded_repo}/tree/main/annotations?expand=1")
         for item in tree if isinstance(tree, list) else []:
@@ -2190,9 +2190,24 @@ def load_dataset_worker(repo_id: str, max_videos: int) -> None:
 
 
 def detect_server() -> Dict[str, Any]:
+    configured_backend = os.getenv("INFERENCE_BACKEND", "vllm").lower()
+    is_cosmos3 = configured_backend == "cosmos3_native" or configured_backend.startswith("cosmos3")
+    if is_cosmos3:
+        # Cosmos3 Ray Serve does not expose /v1/models; it serves /generate
+        # at the root. Do not append /v1 and probe the active-model endpoint
+        # for a friendlier display name.
+        default_base = (
+            os.getenv("COSMOS3_BASE_URL")
+            or os.getenv("RAY_SERVE_BASE_URL")
+            or "http://localhost:8000"
+        )
+        default_model = os.getenv("MODEL_NAME") or "Cosmos3-Nano"
+    else:
+        default_base = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        default_model = os.getenv("MODEL_NAME", "")
     info = {
-        "base_url": os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1"),
-        "model": os.getenv("MODEL_NAME", ""),
+        "base_url": default_base,
+        "model": default_model,
         "backend": os.getenv("INFERENCE_BACKEND", "vllm"),
         "model_max_len": DEFAULT_MODEL_MAX_LEN,
         "model_max_len_source": "default",
@@ -2202,6 +2217,21 @@ def detect_server() -> Dict[str, Any]:
     }
     if requests is None:
         info["error"] = f"requests import failed: {REQUESTS_IMPORT_ERROR}"
+        update_state(server=info)
+        return info
+    if is_cosmos3:
+        # Best-effort probe of the Cosmos3 active-model sidecar; fall back to
+        # the env-provided MODEL_NAME if it isn't reachable.
+        try:
+            probe = requests.get("http://localhost:8088/active-model", timeout=2)
+            if probe.status_code < 400:
+                probe_json = probe.json() or {}
+                checkpoint = probe_json.get("checkpoint") or probe_json.get("model")
+                if checkpoint:
+                    info["model"] = str(checkpoint)
+                info["model_info"] = json_safe(probe_json, depth=2, max_text=300)
+        except Exception as exc:
+            info["model_probe_error"] = str(exc)
         update_state(server=info)
         return info
     try:
@@ -2580,6 +2610,104 @@ def raise_for_status_with_body(resp: Any) -> None:
     raise requests.HTTPError(detail, response=resp)
 
 
+def post_cosmos3_generate(
+    base_url: str,
+    headers: Dict[str, str],
+    vision_path: str,
+    prompt: str,
+    params: Dict[str, Any],
+    run_name: str,
+) -> Dict[str, Any]:
+    """POST to Cosmos3 Ray Serve /generate (diffusion path).
+
+    Returns a dict shaped like post_chat_completion's return so downstream
+    code in run_one() does not have to special-case the diffusion branch.
+    """
+    url = base_url.rstrip("/") + "/generate"
+    body = {
+        "name": run_name,
+        "model": "",
+        "prompt": prompt or "",
+        "negative_prompt": str(params.get("negative_prompt") or ""),
+        "vision_path": str(vision_path),
+        "num_frames": int(params.get("num_frames") if params.get("num_frames") is not None else 17),
+        # CRITICAL: resolution must be a string literal ('256'|'480'|'720'|'1080').
+        # Integer 256 -> 422. Always coerce via str().
+        "resolution": str(params.get("resolution") if params.get("resolution") is not None else "256"),
+        "aspect_ratio": str(params.get("aspect_ratio") or "1,1"),
+        "fps": int(params.get("fps") if params.get("fps") is not None else 12),
+        "num_steps": int(params.get("num_steps") if params.get("num_steps") is not None else 20),
+        "guidance": float(params.get("guidance") if params.get("guidance") is not None else 6.0),
+        "seed": int(params.get("seed") if params.get("seed") is not None else 42),
+    }
+    request_started = time.monotonic()
+    resp = requests.post(url, headers=headers, json=body, timeout=600)
+    raise_for_status_with_body(resp)
+    elapsed_seconds = time.monotonic() - request_started
+    try:
+        response_json = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"Cosmos3 /generate returned non-JSON: {exc}: {resp.text[:400]}") from exc
+
+    status = str(response_json.get("status") or "").lower()
+    if status != "success":
+        message = response_json.get("message") or "unknown error"
+        stack_trace = response_json.get("stack_trace") or ""
+        detail = f"Cosmos3 /generate status={status}: {message}"
+        if stack_trace:
+            detail += f"\n{stack_trace}"
+        raise RuntimeError(detail)
+
+    outputs = response_json.get("outputs") or []
+    source_files: List[str] = []
+    for out in outputs:
+        for fp in (out.get("files") or []):
+            if fp:
+                source_files.append(str(fp))
+
+    # Copy each file from Ray Serve's output dir into our exports area so
+    # downstream UI code can serve them from a stable location.
+    copied_files: List[str] = []
+    dest_dir = EXPORT_DIR / "runs" / run_name
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    for src in source_files:
+        try:
+            src_path = Path(src)
+            if src_path.is_file():
+                dest_path = dest_dir / src_path.name
+                shutil.copy2(str(src_path), str(dest_path))
+                copied_files.append(str(dest_path))
+            else:
+                copied_files.append(src)
+        except Exception:
+            copied_files.append(src)
+
+    files_for_metrics = copied_files or source_files
+    text_payload = json.dumps({
+        "output_files": files_for_metrics,
+        "status": "success",
+        "model_mode": "image2video",
+    })
+    return {
+        "text": text_payload,
+        "metrics": {
+            "ttft_seconds": None,
+            "decode_seconds": elapsed_seconds,
+            "request_total_seconds": elapsed_seconds,
+            "output_tokens": 0,
+            "output_tokens_estimated": True,
+            "output_tps": 0.0,
+            "total_tps": 0.0,
+            "files": files_for_metrics,
+            "frames": int(body["num_frames"]),
+            "resolution": str(body["resolution"]),
+        },
+    }
+
+
 def post_chat_completion(base_url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
     url = base_url.rstrip("/") + "/chat/completions"
     request_started = time.monotonic()
@@ -2786,72 +2914,100 @@ def run_one(video: Dict[str, Any], system_prompt: str, user_prompt: str, params:
         backend=backend,
     )
     preprocessing_seconds = time.monotonic() - overall_started
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": effective_system_prompt},
-            {"role": "user", "content": content},
-        ],
-        "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
-        "top_p": float(params.get("top_p") if params.get("top_p") is not None else STATE["defaults"]["top_p"]),
-        "stream": False,
-    }
-    rep_penalty = float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"])
-    if "nim" in backend:
-        payload["nvext"] = {"repetition_penalty": rep_penalty}
-    else:
-        payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
-        payload["repetition_penalty"] = rep_penalty
-    try:
+    if backend == "cosmos3_native" or backend.startswith("cosmos3"):
+        # Diffusion path: bypass chat/completions and call Ray Serve /generate
+        # directly. Cosmos3 expects an OmniSampleOverrides body keyed on
+        # `vision_path` (an absolute path readable by the Ray Serve worker
+        # which co-runs on this host).
+        cosmos3_base_url = (
+            os.getenv("COSMOS3_BASE_URL")
+            or os.getenv("RAY_SERVE_BASE_URL")
+            or "http://localhost:8000"
+        )
         update_active_request(
             video,
             "model_wait",
-            f"Waiting for model server response: {video['name']}",
+            f"Cosmos3 diffusion: {video['name']}",
             model=model,
             backend=backend,
             prompt_source=prompt_source,
-            frames=plan.get("frames_passed"),
-            visual_tokens=plan.get("visual_tokens_est"),
         )
-        completion = post_chat_completion(base_url, headers, payload)
-    except requests.HTTPError as exc:
-        response = getattr(exc, "response", None)
-        status_code = getattr(response, "status_code", None)
-        if "nim" in backend and status_code in (400, 422) and plan.get("mode") == "native_video_url":
-            update_active_request(
-                video,
-                "model_retry",
-                f"Retrying with frame fallback after HTTP {status_code}: {video['name']}",
-                model=model,
-                backend=backend,
-                prompt_source=prompt_source,
-            )
-            fallback_content, fallback_plan = content_for_video(
-                video["filepath"],
-                effective_user_prompt,
-                model,
-                fps,
-                max_pixels,
-                0,
-                backend=backend,
-                force_frames=True,
-            )
-            fallback_plan["fallback_from_video_url"] = status_code
-            payload["messages"][1]["content"] = fallback_content
+        run_name = f"req-{int(time.time() * 1000)}-{str(video.get('name', 'x')).replace('/', '_')}"
+        completion = post_cosmos3_generate(
+            cosmos3_base_url,
+            headers,
+            vision_path=video["filepath"],
+            prompt=effective_user_prompt,
+            params=params,
+            run_name=run_name,
+        )
+    else:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": effective_system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
+            "top_p": float(params.get("top_p") if params.get("top_p") is not None else STATE["defaults"]["top_p"]),
+            "stream": False,
+        }
+        rep_penalty = float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"])
+        if "nim" in backend:
+            payload["nvext"] = {"repetition_penalty": rep_penalty}
+        else:
+            payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
+            payload["repetition_penalty"] = rep_penalty
+        try:
             update_active_request(
                 video,
                 "model_wait",
-                f"Waiting for fallback model response: {video['name']}",
+                f"Waiting for model server response: {video['name']}",
                 model=model,
                 backend=backend,
                 prompt_source=prompt_source,
-                frames=fallback_plan.get("frames_passed"),
-                visual_tokens=fallback_plan.get("visual_tokens_est"),
+                frames=plan.get("frames_passed"),
+                visual_tokens=plan.get("visual_tokens_est"),
             )
             completion = post_chat_completion(base_url, headers, payload)
-            plan = fallback_plan
-        else:
-            raise
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if "nim" in backend and status_code in (400, 422) and plan.get("mode") == "native_video_url":
+                update_active_request(
+                    video,
+                    "model_retry",
+                    f"Retrying with frame fallback after HTTP {status_code}: {video['name']}",
+                    model=model,
+                    backend=backend,
+                    prompt_source=prompt_source,
+                )
+                fallback_content, fallback_plan = content_for_video(
+                    video["filepath"],
+                    effective_user_prompt,
+                    model,
+                    fps,
+                    max_pixels,
+                    0,
+                    backend=backend,
+                    force_frames=True,
+                )
+                fallback_plan["fallback_from_video_url"] = status_code
+                payload["messages"][1]["content"] = fallback_content
+                update_active_request(
+                    video,
+                    "model_wait",
+                    f"Waiting for fallback model response: {video['name']}",
+                    model=model,
+                    backend=backend,
+                    prompt_source=prompt_source,
+                    frames=fallback_plan.get("frames_passed"),
+                    visual_tokens=fallback_plan.get("visual_tokens_est"),
+                )
+                completion = post_chat_completion(base_url, headers, payload)
+                plan = fallback_plan
+            else:
+                raise
     text = completion["text"]
     metrics = dict(completion["metrics"])
     metrics["preprocessing_seconds"] = preprocessing_seconds
@@ -4377,7 +4533,7 @@ def params_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 def serve(host: str, port: int) -> None:
     detect_server()
     url = f"http://{host}:{port}/"
-    Path(os.getenv("RUNTIME_AGENT_URL_FILE", "/tmp/byo_video_runtime_agent_url.txt")).write_text(url, encoding="utf-8")
+    Path(os.getenv("BATCH_INFERENCE_URL_FILE", "/tmp/byo_video_batch_inference_url.txt")).write_text(url, encoding="utf-8")
     Path("/tmp/gradio_url.txt").write_text(url, encoding="utf-8")
     log(f"URL: {url}")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
@@ -4407,17 +4563,17 @@ def smoke(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Cosmos BYO-video runtime-agent frontend")
+    parser = argparse.ArgumentParser(description="Cosmos BYO-video batch-inference frontend")
     sub = parser.add_subparsers(dest="cmd")
     serve_p = sub.add_parser("serve")
-    serve_p.add_argument("--host", default=os.getenv("RUNTIME_AGENT_HOST", "0.0.0.0"))
-    serve_p.add_argument("--port", type=int, default=int(os.getenv("RUNTIME_AGENT_PORT", "7861")))
+    serve_p.add_argument("--host", default=os.getenv("BATCH_INFERENCE_HOST", "0.0.0.0"))
+    serve_p.add_argument("--port", type=int, default=int(os.getenv("BATCH_INFERENCE_PORT", "7861")))
     smoke_p = sub.add_parser("smoke")
     smoke_p.add_argument("--dataset", default=DEFAULT_DATASET)
-    smoke_p.add_argument("--max-videos", type=int, default=int(os.getenv("RUNTIME_AGENT_SMOKE_VIDEOS", "2")))
-    smoke_p.add_argument("--concurrency", type=int, default=int(os.getenv("RUNTIME_AGENT_CONCURRENCY", "2")))
-    smoke_p.add_argument("--fps", type=float, default=float(os.getenv("RUNTIME_AGENT_FPS", "1")))
-    smoke_p.add_argument("--max-tokens", type=int, default=int(os.getenv("RUNTIME_AGENT_MAX_TOKENS", "1024")))
+    smoke_p.add_argument("--max-videos", type=int, default=int(os.getenv("BATCH_INFERENCE_SMOKE_VIDEOS", "2")))
+    smoke_p.add_argument("--concurrency", type=int, default=int(os.getenv("BATCH_INFERENCE_CONCURRENCY", "2")))
+    smoke_p.add_argument("--fps", type=float, default=float(os.getenv("BATCH_INFERENCE_FPS", "1")))
+    smoke_p.add_argument("--max-tokens", type=int, default=int(os.getenv("BATCH_INFERENCE_MAX_TOKENS", "1024")))
     args = parser.parse_args()
     if args.cmd == "smoke":
         return smoke(args)

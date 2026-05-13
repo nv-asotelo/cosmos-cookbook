@@ -1,0 +1,10 @@
+{
+  "name": "@cosmos-cookbook/shared",
+  "version": "0.1.0",
+  "description": "Shared server-side Cosmos3 Ray Serve client for the Build-style Predict + Reason frontends.",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "undici": "^6.21.0"
+  }
+}

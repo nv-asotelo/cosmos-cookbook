@@ -375,14 +375,19 @@ def poll_once(remote, rate, session_id, model_id):
     # with log_size and last_offset we slice the actual NEW bytes locally —
     # avoids the duplicate-metric bug where detect_inferences re-fired on every
     # [done] line in the tail each time log_size grew.
+    # Cosmos3-UI-cleanup-20260513: extended to also watch cosmos3.ray.serve
+    # (port 8000 + Gradio sidecar on 8080), and tolerate pgrep no-match (rc=1)
+    # which previously poisoned the whole compound shell.
     bundle = (
-        "echo '---PROCS---'; pgrep -af gradio_cr2_byo | head -3; "
-        "echo '---PORT---'; ss -tlnp 2>/dev/null | grep 7860 | head -1; "
+        "echo '---PROCS---'; { pgrep -af 'gradio_cr2_byo|cosmos3.ray.serve|ray::ProxyActor' | head -5; } 2>/dev/null || true; "
+        "echo '---PORT---'; ss -tlnp 2>/dev/null | grep -E ':(7860|8000|8080|3000|5173)\\s' | head -5; "
         "echo '---GPU---'; nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.free,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>&1 | head -1; "
+        "echo '---DISK---'; df -B1 / 2>/dev/null | awk 'NR==2{print $3\",\"$4\",\"$2}'; "
         "echo '---LOGSIZE---'; stat -c %s /tmp/gradio_demo.log 2>/dev/null || echo 0; "
-        f"echo '---LOGTAIL---'; tail -c {LOG_BYTE_CAP} /tmp/gradio_demo.log 2>/dev/null; "
+        f"echo '---LOGTAIL---'; tail -c {LOG_BYTE_CAP} /tmp/gradio_demo.log 2>/dev/null || true; "
         f"echo '---RESULT_MTIME---'; stat -c %Y {RESULT_JSON_PATH} 2>/dev/null || echo 0; "
-        f"echo '---RESULT---'; cat {RESULT_JSON_PATH} 2>/dev/null"
+        f"echo '---RESULT---'; cat {RESULT_JSON_PATH} 2>/dev/null || true; "
+        "exit 0"
     )
     rc, out = ssh_exec(remote, bundle)
     state = {

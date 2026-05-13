@@ -18,10 +18,10 @@ Env vars:
                       upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
                       C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
-  BYO_VIDEO_FRONTEND — nvidia_build | gradio | runtime_agent | fiftyone (default: nvidia_build)
+  BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
-  RUNTIME_AGENT_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
-  RUNTIME_AGENT_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
+  BATCH_INFERENCE_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
+  BATCH_INFERENCE_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
@@ -307,12 +307,12 @@ MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "nvidia_build").strip().lower()
 if FRONTEND == "agent":
-    FRONTEND = "runtime_agent"
+    FRONTEND = "batch_inference"
 if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playground"):
     FRONTEND = "nvidia_build"
-RUNTIME_AGENT_PORT = int(os.environ.get("RUNTIME_AGENT_PORT", "7861"))
-RUNTIME_AGENT_APP  = "/tmp/byo_video_runtime_agent.py"
-RUNTIME_AGENT_LOG_FILE = "/tmp/byo_video_runtime_agent.log"
+BATCH_INFERENCE_PORT = int(os.environ.get("BATCH_INFERENCE_PORT", "7861"))
+BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
+BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
@@ -398,7 +398,7 @@ print_dashboard()
 
 # ── Pre-step: kill old frontends so VRAM measurement is accurate ─────────────
 subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
-subprocess.run(["bash", "-c", f"fuser -k {RUNTIME_AGENT_PORT}/tcp 2>/dev/null || true"])
+subprocess.run(["bash", "-c", f"fuser -k {BATCH_INFERENCE_PORT}/tcp 2>/dev/null || true"])
 time.sleep(2)
 
 # ── Step 1: GPU check ─────────────────────────────────────────────────────────
@@ -693,7 +693,7 @@ else:
     else:
         ok("requests installed")
 
-if FRONTEND in ("runtime_agent", "fiftyone"):
+if FRONTEND in ("batch_inference", "fiftyone"):
     rc, fo_check = run_cmd(
         ["uv", "run", "python", "-c", "import fiftyone, huggingface_hub; print(fiftyone.__version__)"],
         cwd=REASON2_DIR, env=ENV
@@ -1023,7 +1023,7 @@ def _launch_gradio(sidecar=False):
     gradio_env = dict(launch_env)
     if sidecar:
         # Keep the mandatory Gradio link live without double-loading HF weights
-        # when the selected primary surface is runtime-agent or FiftyOne.
+        # when the selected primary surface is batch-inference or FiftyOne.
         gradio_env["SKIP_HF_PRELOAD"] = "1"
         gradio_env["BYO_VIDEO_FRONTEND"] = "gradio_sidecar"
 
@@ -1116,26 +1116,26 @@ def _launch_gradio(sidecar=False):
     _thr.Thread(target=_drain_stdout, args=(proc.stdout, LOG_FILE), daemon=True).start()
     return proc, url
 
-if FRONTEND in ("runtime_agent", "fiftyone"):
-    if not os.path.exists(RUNTIME_AGENT_APP):
-        print(f"  ✗  {RUNTIME_AGENT_APP} not found — deploy byo_video_runtime_agent.py first"); sys.exit(1)
+if FRONTEND in ("batch_inference", "fiftyone"):
+    if not os.path.exists(BATCH_INFERENCE_APP):
+        print(f"  ✗  {BATCH_INFERENCE_APP} not found — deploy byo_video_batch_inference.py first"); sys.exit(1)
 
     runtime_env = {
         **launch_env,
         "BYO_VIDEO_FRONTEND": FRONTEND,
-        "RUNTIME_AGENT_PORT": str(RUNTIME_AGENT_PORT),
-        "RUNTIME_AGENT_DATASET": os.environ.get("RUNTIME_AGENT_DATASET", "pjramg/Safe_Unsafe_Test"),
-        "RUNTIME_AGENT_CONCURRENCY": os.environ.get("RUNTIME_AGENT_CONCURRENCY", "4"),
-        "RUNTIME_AGENT_MAX_VIDEOS": os.environ.get("RUNTIME_AGENT_MAX_VIDEOS", "20"),
+        "BATCH_INFERENCE_PORT": str(BATCH_INFERENCE_PORT),
+        "BATCH_INFERENCE_DATASET": os.environ.get("BATCH_INFERENCE_DATASET", "pjramg/Safe_Unsafe_Test"),
+        "BATCH_INFERENCE_CONCURRENCY": os.environ.get("BATCH_INFERENCE_CONCURRENCY", "4"),
+        "BATCH_INFERENCE_MAX_VIDEOS": os.environ.get("BATCH_INFERENCE_MAX_VIDEOS", "20"),
         "FIFTYONE_PORT": os.environ.get("FIFTYONE_PORT", "5151"),
     }
 
     gradio_proc, gradio_url = _launch_gradio(sidecar=True)
 
-    run(f"Starting Cosmos BYO Video Batch Inference on port {RUNTIME_AGENT_PORT}")
+    run(f"Starting Cosmos BYO Video Batch Inference on port {BATCH_INFERENCE_PORT}")
     proc = subprocess.Popen(
-        ["uv", "run", "python", "-u", RUNTIME_AGENT_APP, "serve",
-         "--host", "0.0.0.0", "--port", str(RUNTIME_AGENT_PORT)],
+        ["uv", "run", "python", "-u", BATCH_INFERENCE_APP, "serve",
+         "--host", "0.0.0.0", "--port", str(BATCH_INFERENCE_PORT)],
         cwd=REASON2_DIR,
         env=runtime_env,
         stdout=subprocess.PIPE,
@@ -1146,7 +1146,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
 
     url = None
     url_pattern = re.compile(r'URL:\s+(https?://[^\s]+)')
-    with open(RUNTIME_AGENT_LOG_FILE, "w") as log:
+    with open(BATCH_INFERENCE_LOG_FILE, "w") as log:
         for line in proc.stdout:
             log.write(line)
             log.flush()
@@ -1161,7 +1161,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
                 break
 
     if not url:
-        print(f"  ✗  Batch Inference printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
+        print(f"  ✗  Batch Inference printed no URL. Check {BATCH_INFERENCE_LOG_FILE}")
         proc.terminate()
         gradio_proc.terminate()
         sys.exit(1)
@@ -1173,7 +1173,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
     _probe_ok = False
     for _probe_attempt in range(10):
         try:
-            urllib.request.urlopen(f"http://localhost:{RUNTIME_AGENT_PORT}/api/state", timeout=3)
+            urllib.request.urlopen(f"http://localhost:{BATCH_INFERENCE_PORT}/api/state", timeout=3)
             _probe_ok = True
             break
         except Exception:
@@ -1181,12 +1181,12 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
 
     if not _probe_ok:
         print("  ✗  Batch Inference launched but /api/state probe failed after 20s.")
-        print(f"     Check {RUNTIME_AGENT_LOG_FILE} for errors.")
+        print(f"     Check {BATCH_INFERENCE_LOG_FILE} for errors.")
         proc.terminate()
         gradio_proc.terminate()
         sys.exit(1)
 
-    for _path in ("/tmp/byo_video_runtime_agent_url.txt", "/tmp/byo_video_runtime_agent_live.flag"):
+    for _path in ("/tmp/byo_video_batch_inference_url.txt", "/tmp/byo_video_batch_inference_live.flag"):
         with open(_path, "w") as f:
             f.write(url + "\n")
 
@@ -1201,7 +1201,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
     print(f"  {BOLD}Batch Inference URL:{RESET}  {hyperlink(url)}", flush=True)
     print(f"  {BOLD}Gradio URL:{RESET}         {hyperlink(gradio_url)}", flush=True)
     print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
-    print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)
+    print(f"  {DIM}Results: /tmp/byo_video_batch_inference_results.json{RESET}", flush=True)
     print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
     if os.path.exists("/tmp/byo_video_runtime_guide.py"):
         print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
@@ -1209,7 +1209,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
     print(flush=True)
 
     import threading as _thr
-    _thr.Thread(target=_drain_stdout, args=(proc.stdout, RUNTIME_AGENT_LOG_FILE), daemon=True).start()
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, BATCH_INFERENCE_LOG_FILE), daemon=True).start()
     try:
         proc.wait()
     except KeyboardInterrupt:

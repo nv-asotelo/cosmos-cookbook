@@ -17,7 +17,11 @@ import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
 const SAMPLE_VIDEO = "/examples/race-car.mp4";
-const DEFAULT_MODEL = "nvidia/cosmos-predict1-5b";
+// Standing order: header model name is auto-detected from the live backend on
+// page load; env vars are fallbacks only. See cosmos3_info_server.py.
+const COSMOS3_INFO_URL =
+  process.env.NEXT_PUBLIC_COSMOS3_INFO_URL || "http://10.57.233.111:8088/active-model";
+const DEFAULT_MODEL = process.env.NEXT_PUBLIC_MODEL_NAME || "Detecting model…";
 const DEFAULT_PROMPT = "A first person view from a robot working in a chemical plant.";
 const HERO_TAGS = [
   "physical ai",
@@ -163,6 +167,34 @@ export default function Page() {
   const [collection, setCollection] = useState("cosmos-predict1");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>(MODEL_CHOICES);
+  const [backendInfo, setBackendInfo] = useState<{
+    checkpoint?: string;
+    display_name?: string;
+    cosmos3_version?: string;
+    backend?: string;
+    gpu_name?: string;
+    vram_free_gib?: number;
+    vram_total_gib?: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(COSMOS3_INFO_URL, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return;
+        const name = (d.checkpoint as string | undefined) || (d.display_name as string | undefined);
+        if (name) {
+          setModel(name);
+          setModels((prev) => (prev.includes(name) ? prev : [name, ...prev]));
+        }
+        setBackendInfo(d);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [worldMode, setWorldMode] = useState<WorldMode>("Video-to-World");
   const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -179,13 +211,15 @@ export default function Page() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    // Standing order: never override the model name from /api/models — the
+    // live-backend probe in the earlier useEffect is the source of truth.
+    // This effect only enriches the dropdown choices.
     fetch("/api/models")
       .then((response) => response.json())
       .then((data) => {
         if (Array.isArray(data.models) && data.models.length > 0) {
           const merged = Array.from(new Set([...data.models, ...MODEL_CHOICES]));
           setModels(merged);
-          setModel(data.models[0]);
         }
       })
       .catch(() => undefined);
@@ -243,18 +277,21 @@ export default function Page() {
       };
     }
     return {
-      endpoint: "POST /v1/infer",
+      endpoint: "POST /generate",
       collection,
       model,
       payload: {
+        name: "ui-<auto>",
         model,
         prompt,
-        [worldMode === "Image-to-World" ? "image" : "video"]: media ? "<base64 media>" : "<upload required>",
-        guidance_scale: guidanceScale,
-        steps,
-        seed: seed >= 0 ? seed : "random",
-        input_image_index: inputImageIndex,
-        video_params: VIDEO_PARAMS
+        vision_path: media ? "<written to /tmp/uploads/...>" : "<upload required>",
+        num_frames: VIDEO_PARAMS.frames_count,
+        resolution: 720,
+        aspect_ratio: "16,9",
+        fps: VIDEO_PARAMS.frames_per_sec,
+        num_steps: steps,
+        guidance: guidanceScale,
+        seed: seed >= 0 ? seed : "random"
       }
     };
   }, [collection, guidanceScale, inputImageIndex, media, model, prompt, schemaMode, seed, steps, worldMode]);
@@ -561,7 +598,7 @@ export default function Page() {
             <label>
               Contract
               <select value={schemaMode} onChange={(event) => setSchemaMode(event.target.value as SchemaMode)}>
-                <option value="local_nim">Local self-hosted NIM /v1/infer</option>
+                <option value="local_nim">Cosmos3 Ray Serve /generate</option>
                 <option value="build_openapi">NVIDIA Build OpenAPI preview</option>
               </select>
             </label>

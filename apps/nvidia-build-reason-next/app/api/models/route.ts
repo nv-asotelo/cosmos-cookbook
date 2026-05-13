@@ -1,34 +1,20 @@
-const DEFAULT_BASE_URL = "http://localhost:8000/v1";
-const DEFAULT_MODEL = "nvidia/Cosmos3-Nano-Reasoner";
+// Env var priority: COSMOS3_BASE_URL > RAY_SERVE_BASE_URL > VLLM_BASE_URL > default.
+const DEFAULT_BASE_URL = "http://localhost:8000";
+const DEFAULT_MODEL = "Cosmos3-Nano";
+
+function resolveBaseUrl() {
+  return (
+    process.env.COSMOS3_BASE_URL ||
+    process.env.RAY_SERVE_BASE_URL ||
+    process.env.VLLM_BASE_URL ||
+    DEFAULT_BASE_URL
+  ).replace(/\/$/, "");
+}
 
 export async function GET() {
-  const baseUrl = process.env.VLLM_BASE_URL ?? DEFAULT_BASE_URL;
-  const apiKey = process.env.VLLM_API_KEY ?? "EMPTY";
-
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      cache: "no-store"
-    });
-
-    if (!response.ok) {
-      throw new Error(`Model probe failed with HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    const ids = Array.isArray(data?.data)
-      ? data.data.map((model: { id?: string }) => model.id).filter(Boolean)
-      : [];
-
-    return Response.json({
-      baseUrl,
-      models: ids.length > 0 ? ids : [process.env.MODEL_NAME ?? DEFAULT_MODEL]
-    });
-  } catch (error) {
-    return Response.json({
-      baseUrl,
-      models: [process.env.MODEL_NAME ?? DEFAULT_MODEL],
-      warning: error instanceof Error ? error.message : "Unable to reach model endpoint"
-    });
-  }
+  const baseUrl = resolveBaseUrl();
+  const configured = process.env.MODEL_NAME || DEFAULT_MODEL;
+  // Ray Serve does not expose an OpenAI /models listing — surface the
+  // configured model name as the single available option.
+  return Response.json({ baseUrl, models: [configured] });
 }

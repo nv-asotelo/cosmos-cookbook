@@ -15,7 +15,14 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-reason2-8b.jpg";
 const SAMPLE_VIDEO = "/examples/race-car.mp4";
-const DEFAULT_MODEL = "nvidia/Cosmos3-Nano-Reasoner";
+// Standing order: header model name is auto-detected from the live backend on
+// page load; env vars are fallbacks only. See cosmos3_info_server.py.
+const COSMOS3_INFO_URL =
+  (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_COSMOS3_INFO_URL) ||
+  "http://10.57.233.111:8088/active-model";
+const DEFAULT_MODEL =
+  (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_MODEL_NAME) ||
+  "Detecting model…";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
 const HERO_TAGS = [
@@ -48,7 +55,19 @@ type MediaState = {
   dataUrl: string;
 };
 
+type ApiFile = {
+  path: string;
+  b64: string | null;
+  mime: string;
+  error?: string;
+};
+
 type ApiResult = {
+  status?: "success" | "error" | "skip";
+  message?: string;
+  stack_trace?: string | null;
+  files?: ApiFile[];
+  // Legacy fields some older code paths may still send.
   content?: string;
   error?: string;
   payload?: unknown;
@@ -82,6 +101,34 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>([DEFAULT_MODEL]);
+  const [backendInfo, setBackendInfo] = useState<{
+    checkpoint?: string;
+    display_name?: string;
+    cosmos3_version?: string;
+    backend?: string;
+    gpu_name?: string;
+    vram_free_gib?: number;
+    vram_total_gib?: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(COSMOS3_INFO_URL, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return;
+        const name = (d.checkpoint as string | undefined) || (d.display_name as string | undefined);
+        if (name) {
+          setModel(name);
+          setModels((prev) => (prev.includes(name) ? prev : [name, ...prev]));
+        }
+        setBackendInfo(d);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [temperature, setTemperature] = useState(0.6);
   const [topP, setTopP] = useState(0.9);
   const [maxTokens, setMaxTokens] = useState(4096);
@@ -107,28 +154,23 @@ export default function App() {
 
   const requestPreview = useMemo(
     () => ({
+      name: "req-<timestamp>",
       model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: [
-            media?.kind === "image"
-              ? { type: "image_url", image_url: { url: "data:image/..." } }
-              : { type: "video_url", video_url: { url: "data:video/..." } },
-            { type: "text", text: userPrompt }
-          ]
-        }
-      ],
-      media_io_kwargs: media?.kind === "video" || !media ? { video: { fps: framesPerSecond } } : undefined,
-      temperature,
-      top_p: topP,
-      max_tokens: maxTokens,
-      repetition_penalty: repetitionPenalty,
-      seed,
-      stream: false
+      prompt: userPrompt,
+      negative_prompt: "",
+      vision_path: media
+        ? media.kind === "image"
+          ? "/tmp/uploads/<sha1>.jpg"
+          : "/tmp/uploads/<sha1>.mp4"
+        : null,
+      num_frames: 121,
+      resolution: 480,
+      aspect_ratio: "16,9",
+      num_steps: 35,
+      guidance: 6.0,
+      seed
     }),
-    [framesPerSecond, maxTokens, media, model, repetitionPenalty, seed, systemPrompt, temperature, topP, userPrompt]
+    [media, model, seed, userPrompt]
   );
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
@@ -178,17 +220,12 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mediaDataUrl: media?.dataUrl,
-          mediaKind: media?.kind,
-          userPrompt,
-          systemPrompt,
-          model,
-          temperature,
-          topP,
-          maxTokens,
-          framesPerSecond,
-          repetitionPenalty,
-          seed
+          prompt: userPrompt,
+          video: media?.kind === "video" ? media.dataUrl : undefined,
+          image: media?.kind === "image" ? media.dataUrl : undefined,
+          params: {
+            seed
+          }
         })
       });
       const data = (await response.json()) as ApiResult;
@@ -249,7 +286,7 @@ export default function App() {
             nvidia
           </a>
           <div className="titleLine">
-            <h1>cosmos-reason2-8b</h1>
+            <h1>{model}</h1>
             <div className="heroMeta">
               <span>Downloadable</span>
             </div>
@@ -377,8 +414,21 @@ export default function App() {
               </div>
             </div>
             <div className="outputBody">
-              {result?.error ? (
-                <pre className="errorBox">{result.error}</pre>
+              {result?.status === "error" || result?.error ? (
+                <pre className="errorBox">{result.message || result.error}</pre>
+              ) : result?.files && result.files.length > 0 ? (
+                <div className="resultFiles">
+                  {result.files.map((file) => {
+                    const src = file.b64 ? `data:${file.mime};base64,${file.b64}` : null;
+                    if (src && file.mime.startsWith("video/")) {
+                      return <video key={file.path} controls src={src} style={{ width: "100%" }} />;
+                    }
+                    if (src && file.mime.startsWith("image/")) {
+                      return <img key={file.path} src={src} alt={file.path} style={{ width: "100%" }} />;
+                    }
+                    return <pre key={file.path} className="filePath">{file.path}</pre>;
+                  })}
+                </div>
               ) : result?.content ? (
                 <article className="answer">{result.content}</article>
               ) : (

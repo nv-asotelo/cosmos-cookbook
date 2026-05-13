@@ -12,10 +12,10 @@ single-video upload UI, or dataset browser/result review flow. Read
 adapter below first.
 
 When asking the user to choose a frontend, do not present raw implementation
-names like `runtime_agent`, `gradio`, or `fiftyone` as the option labels. Use
+names like `batch_inference`, `gradio`, or `fiftyone` as the option labels. Use
 descriptive labels and map the answer to the env var afterward:
 
-- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=runtime_agent`
+- **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=batch_inference`
   for HF public dataset loading, concurrent video processing, worker-safety
   smoke testing, and result export/writeback. The setup script still starts a
   live Gradio sidecar and prints its link.
@@ -35,11 +35,11 @@ descriptive labels and map the answer to the env var afterward:
 Regardless of the selected mode, `byo_video_setup.py` must serve a live Gradio
 link on `GRADIO_PORT` and write it to `/tmp/gradio_url.txt` plus
 `/tmp/gradio_live.flag`. Batch-inference and FiftyOne selections add their own UI
-on `RUNTIME_AGENT_PORT`; they do not replace Gradio.
+on `BATCH_INFERENCE_PORT`; they do not replace Gradio.
 
 Default to `BYO_VIDEO_FRONTEND=nvidia_build` when the user asks to serve a
 shareable model playground, compare model-page frontends, or does not specify a
-dataset/batch workflow. Use `BYO_VIDEO_FRONTEND=runtime_agent` when the user
+dataset/batch workflow. Use `BYO_VIDEO_FRONTEND=batch_inference` when the user
 asks for a guided inference flow, HF public dataset loading, concurrent batch
 processing, or the worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio`
 for the generic single-video upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when
@@ -98,7 +98,7 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `references/byo-video-runbook.md`: complete deployment protocol, model picker,
   NIM-local operations, runtime monitor, and recovery rules.
 - `scripts/byo_video_setup.py`: remote setup and launch script.
-- `scripts/byo_video_runtime_agent.py`: browser batch-inference frontend for HF
+- `scripts/byo_video_batch_inference.py`: browser batch-inference frontend for HF
   dataset selection, concurrent inference, FiftyOne launch/result writeback,
   and `pjramg/Safe_Unsafe_Test` smoke testing with the worker-safety prompt.
 - `scripts/byo_video_runtime_guide.py`: friendly CLI companion for Claude Code

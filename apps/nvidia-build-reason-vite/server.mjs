@@ -1,87 +1,61 @@
 import express from "express";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { submitGeneration } from "../_shared/cosmos3Client.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 5173);
-const baseUrl = process.env.VLLM_BASE_URL || "http://localhost:8000/v1";
-const apiKey = process.env.VLLM_API_KEY || "EMPTY";
-const defaultModel = process.env.MODEL_NAME || "nvidia/Cosmos3-Nano-Reasoner";
+
+// Env var priority: COSMOS3_BASE_URL > RAY_SERVE_BASE_URL > VLLM_BASE_URL > default.
+const baseUrl =
+  process.env.COSMOS3_BASE_URL ||
+  process.env.RAY_SERVE_BASE_URL ||
+  process.env.VLLM_BASE_URL ||
+  "http://localhost:8000";
+const defaultModel = process.env.MODEL_NAME || "Cosmos3-Nano";
 
 const app = express();
 app.use(express.json({ limit: "128mb" }));
 
-app.get("/api/models", async (_request, response) => {
-  try {
-    const upstream = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` }
-    });
-    if (!upstream.ok) throw new Error(`Model probe failed with HTTP ${upstream.status}`);
-    const data = await upstream.json();
-    const models = Array.isArray(data?.data) ? data.data.map((model) => model.id).filter(Boolean) : [];
-    response.json({ baseUrl, models: models.length > 0 ? models : [defaultModel] });
-  } catch (error) {
-    response.json({
-      baseUrl,
-      models: [defaultModel],
-      warning: error instanceof Error ? error.message : "Unable to reach model endpoint"
-    });
-  }
+app.get("/api/models", (_request, response) => {
+  // Ray Serve does not expose an OpenAI /models listing — surface the
+  // configured model name as the single available option.
+  response.json({ baseUrl, models: [defaultModel] });
 });
 
 app.post("/api/reason", async (request, response) => {
-  const body = request.body;
+  const body = request.body || {};
+  const prompt = body.prompt || body.userPrompt || "";
 
-  if (!body.mediaDataUrl) {
-    response.status(400).json({ error: "Upload media or load the sample before running." });
-    return;
+  let mediaDataUrl;
+  let mediaKind = null;
+  if (body.video) {
+    mediaDataUrl = body.video;
+    mediaKind = "video";
+  } else if (body.image) {
+    mediaDataUrl = body.image;
+    mediaKind = "image";
+  } else if (body.mediaDataUrl) {
+    mediaDataUrl = body.mediaDataUrl;
+    mediaKind = body.mediaKind || null;
   }
 
-  const mediaPart =
-    body.mediaKind === "image"
-      ? { type: "image_url", image_url: { url: body.mediaDataUrl } }
-      : { type: "video_url", video_url: { url: body.mediaDataUrl } };
-
-  const payload = {
-    model: body.model || defaultModel,
-    messages: [
-      { role: "system", content: body.systemPrompt },
-      {
-        role: "user",
-        content: [mediaPart, { type: "text", text: body.userPrompt }]
-      }
-    ],
-    media_io_kwargs: body.mediaKind === "video" ? { video: { fps: body.framesPerSecond } } : undefined,
-    temperature: body.temperature,
-    top_p: body.topP,
-    max_tokens: body.maxTokens,
-    repetition_penalty: body.repetitionPenalty,
-    seed: body.seed,
-    stream: false
-  };
-
   try {
-    const upstream = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(payload)
+    const result = await submitGeneration({
+      prompt,
+      mediaDataUrl,
+      mediaKind,
+      params: body.params || {}
     });
-    const data = await upstream.json().catch(() => null);
-    if (!upstream.ok) {
-      response.status(upstream.status).json({
-        error: data?.error?.message || data?.message || `Backend returned HTTP ${upstream.status}`,
-        payload
-      });
-      return;
-    }
-    response.json({ content: data?.choices?.[0]?.message?.content || "", raw: data, payload });
+    const httpStatus = result.status === "error" ? 502 : 200;
+    response.status(httpStatus).json(result);
   } catch (error) {
-    response.status(502).json({ error: error instanceof Error ? error.message : "Backend request failed", payload });
+    response.status(502).json({
+      status: "error",
+      message: error instanceof Error ? error.message : "Backend request failed",
+      files: []
+    });
   }
 });
 
