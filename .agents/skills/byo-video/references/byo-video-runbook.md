@@ -18,12 +18,12 @@ or result writeback.
 
 For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
 
-Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **runtime-agent web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`.
+Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **Batch Inference web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`. (Internal identifiers `runtime_agent` / `RUNTIME_AGENT_PORT` are retained; user-visible prose says "batch inference".)
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
 - `~/.claude/scripts/gradio_cr2_byo.py`  — default Build-style Gradio app (all supported models)
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
-- `~/.claude/scripts/byo_video_runtime_agent.py` — Runtime-agent frontend for HF dataset batch inference and FiftyOne support
+- `~/.claude/scripts/byo_video_runtime_agent.py` — Batch Inference frontend for HF dataset batch inference and FiftyOne support (filename retains `runtime_agent` for backward compat)
 - `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
 
 ---
@@ -55,13 +55,13 @@ python3 /tmp/byo_video_setup.py
 ```
 This script shows live step-by-step progress with ETAs for every install stage, then prints clickable hyperlinks for Gradio and any selected companion frontend plus the CLI guide command when deployed. The Gradio URL is always written to `/tmp/gradio_url.txt`; the runtime-agent URL is written to `/tmp/byo_video_runtime_agent_url.txt` when using the guided dataset batch UI or FiftyOne flow. Deploy it to the instance before running (see deploy section below).
 
-### Runtime-Agent HF Dataset Batch Smoke
+### Batch Inference HF Dataset Smoke
 
 Use this mode whenever the user asks for a guided alternative to Gradio, HF public dataset input, concurrent video processing, or FiftyOne support.
 
 Required smoke dataset: `pjramg/Safe_Unsafe_Test`.
 
-The runtime-agent frontend preloads the worker-safety system/user prompt from the recipe, lets the user change the HF dataset id and max videos, select any number of loaded videos, choose concurrency, and run all selected videos concurrently against the local vLLM/NIM OpenAI-compatible endpoint. When FiftyOne loaded the dataset, each result is written back to the sample as:
+The Batch Inference frontend preloads the worker-safety system/user prompt from the recipe, lets the user change the HF dataset id and max videos, select any number of loaded videos, choose concurrency, and run all selected videos concurrently against the local vLLM/NIM OpenAI-compatible endpoint. When FiftyOne loaded the dataset, each result is written back to the sample as:
 
 - `runtime_agent_response`
 - `runtime_agent_json`
@@ -81,10 +81,10 @@ uv run python /tmp/byo_video_runtime_agent.py smoke \
 
 Browser smoke path:
 
-1. Open the runtime-agent URL.
+1. Open the Batch Inference URL.
 2. Confirm `pjramg/Safe_Unsafe_Test` is in the dataset field.
 3. Click **Run smoke** or load the dataset, select videos, then click **Run selected videos**.
-4. Use **Open FiftyOne** after the dataset loads to inspect samples and runtime-agent prediction fields.
+4. Use **Open FiftyOne** after the dataset loads to inspect samples and batch-inference prediction fields (FiftyOne sample fields retain the `runtime_agent_*` field names for backward compat with existing writers).
 
 ---
 
@@ -125,7 +125,93 @@ The helper starts `python -m cosmos3.ray.serve` on `:8000` and `python -m cosmos
 **Open integration items** (follow-up):
 
 - `byo_video_setup.py` Step 9 / Step 10 currently branch only on `vllm`, `hf`, and `nim_local`. The `cosmos3_native` path is wired into `_MODEL_CONFIGS` and the runbook here, but Step 10 still calls into the legacy Gradio app. Until the setup script branches on `INFERENCE_BACKEND=cosmos3_native`, invoke the helper manually on the target after the install lands.
-- `cosmos3.ray.gradio` exposes no `--share` flag. Off-box access uses the host LAN IP (worked: `http://10.57.233.111:8080`) or SSH port-forward (`ssh -L 8080:localhost:8080 horde@10.57.233.111`). A frpc/cloudflared share is left for a future hardening pass.
+- `cosmos3.ray.gradio` exposes no `--share` flag, but `scripts/cosmos3_upload_gradio.py` (our wrapper) does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:8080`) and SSH port-forward (`ssh -L 8080:localhost:8080 <user@host>`) is the most VPN-tolerant fallback.
+
+---
+
+## CUDA wheel gotcha (cu130 vs cu128 — 2026-05-12 learning)
+
+`uv sync --all-extras --group=cu130-train` is the README-recommended install. On a host whose NVIDIA driver reports CUDA runtime ≤ 12.9 (`nvidia-smi` shows `CUDA Version: 12.9` even on driver 575.x), the Ray Serve workers will crash on first inference with:
+
+```
+RuntimeError: The NVIDIA driver on your system is too old (found version 12090).
+```
+
+Switching the install group to `--group=cu128-train` is necessary but **not sufficient** — uv's group system swaps CUDA sidecar packages (torchvision, torchao, torchcodec) but does not re-pin PyTorch itself. After the group swap you get a torch+cu130 / torchvision+cu128 mismatch, producing:
+
+```
+RuntimeError: Detected that PyTorch and torchvision were compiled with different CUDA major versions.
+PyTorch has CUDA Version=13.0 and torchvision has CUDA Version=12.8.
+```
+
+The fix is documented in `docs/setup.md` under "Advanced: custom torch/cuda versions" but easy to miss. Force-install both with an explicit backend pin:
+
+```bash
+cd ~/cosmos3
+uv pip install 'torch==2.10.0' 'torchvision==0.25.0' --reinstall --torch-backend=cu128
+```
+
+Then verify it stuck — `torch.version.cuda` lies (it returns the package-metadata version, which is set in Python), so call the native check directly:
+
+```bash
+uv run --no-sync python -c \
+  'import torch, torchvision; torchvision.extension._check_cuda_version(); print("OK")'
+```
+
+Finally, **the launcher must use `uv run --no-sync python -m ...`** when invoking `cosmos3.ray.serve` / `cosmos3.ray.gradio`. Without `--no-sync`, `uv run` auto-resolves dependencies on every invocation and re-installs the cu130 wheel from its cache, silently undoing the manual pin. The bundled `scripts/cosmos3_native_launch.sh` already passes `--no-sync`.
+
+---
+
+## i2v defaults + ETA (single-GPU horde @ RTX PRO 6000 Blackwell)
+
+Source: internal benchmark `Cosmos 3 vs Cosmos Predict 2.5.xlsx` (pivot table) — wall-clock seconds to generate one video clip, CUDA Graph disabled, single-GPU configurations. Use these as your operator defaults when standing up a basic UI on horde.
+
+### Recommended i2v defaults
+
+| Field | Value | Why |
+|---|---|---|
+| Input preset | `i2v` | Loads prompt + a known-good `vision_path` from `inputs/omni/i2v.json` |
+| Model | `Cosmos3-Nano` (only served checkpoint) | The Generator EA1 checkpoint |
+| Resolution | `480p` | The PDF benchmark anchor for this GPU |
+| Aspect ratio | `16:9` (default) | Form default; covered in the chart |
+| FPS | `24` | Cinematic, inside the 10–30 supported range; doesn't move ETA much |
+| Num frames | Form default (model default 189) | Lower this to halve diffusion time at the cost of clip duration |
+| Seed | `0` | Pin for reproducibility; leave blank for random |
+| Sampler | `unipc` | Default in `OmniSetupArgs` |
+| Num steps | 35 (default) | What the live `cosmos3.ray.serve` uses |
+| Vision path | URL or `/path/on/server` | The upload wrapper sets this automatically when you drop an image |
+
+### ETA table (1× GPU, 480p i2v, steady-state)
+
+From the internal Diffusion Speed leaderboard:
+
+| GPU | C3-Nano (s) | Predict 2.5-2B (s) | Speedup |
+|---|---|---|---|
+| B300 | 12.84 | 83.59 | 6.51× |
+| B200 | 13.69 | 25.60 | 1.87× |
+| H200 141GB HBM3 | 25.41 | 43.89 | 1.73× |
+| H100 80GB HBM3 | 25.51 | 44.81 | 1.76× |
+| H200 NVL | 28.20 | 46.54 | 1.65× |
+| H100 NVL | 35.15 | 58.92 | 1.68× |
+| **RTX PRO 6000 Blackwell** | **68.80** | **74.30** | **1.08×** |
+| H20 | 112.17 | 167.11 | 1.49× |
+
+### Wall-clock expectations on RTX PRO 6000 Blackwell
+
+| Scenario | Wall-clock | Notes |
+|---|---|---|
+| **First call** after server boot (cold) | 3 – 4 min | `torch.compile=True` JIT warmup. Cosmos3-Nano live run on 2026-05-12 took 3 min 51 s end-to-end. |
+| **Steady-state** (compile cached) | ~70 s | The 68.8 s benchmark + ~2 s decode/I/O. |
+| 720p instead of 480p (extrapolated) | ~140–180 s | Not in the chart for this GPU; ~2–2.5× the 480p time on other Blackwell rows. |
+| `num_frames` halved (189 → 96) | ~½ of above | Diffusion is per-frame; cuts time roughly linearly. |
+
+### Operator checklist for a basic UI demo
+
+1. Confirm Ray Serve is warm before the demo — issue one disposable generation ≥ 5 min beforehand so `torch.compile` lands and the next click runs at steady-state.
+2. Pin Resolution=480p, FPS=24, Seed=0 in the form. Reproducible + ~70 s per clip.
+3. Pre-upload the conditioning image (the upload widget writes to `/tmp` and updates `vision_path` automatically; first-fetch from a remote URL adds 1–3 s).
+4. If demo audience is on VPN: use the gradio.live URL when available (`ui.launch(share=True)` in `cosmos3_upload_gradio.py`) — long-poll reconnect tolerates short network drops mid-inference. If frpc is blocked, fall back to SSH port-forward.
+5. The mp4 lands in `~/cosmos3/outputs/ray_serve/generate_<timestamp>_<short>/vision.mp4` on the server; the Gradio gallery streams it from `allowed_paths`.
 
 ---
 
@@ -643,7 +729,7 @@ brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').w
   2. Otherwise: `docker login nvcr.io`, `docker pull` the image, `docker run -d` per official build.nvidia.com style (`--gpus all --ipc host --shm-size=32GB --ulimit memlock=-1 --ulimit stack=67108864 -e NGC_API_KEY -p 8000:8000`). It uses container-internal `/opt/nim/.cache` by default; set `NIM_CACHE_MODE=host` only when you intentionally want to bind-mount `$LOCAL_NIM_CACHE`.
   3. Forwards known per-NIM env overrides such as `NIM_MAX_MODEL_LEN`, `NIM_MODEL_PROFILE`, `NIM_MEDIA_IO_KWARGS`, and comma-separated `NIM_EXTRA_ENV=KEY=VALUE,...`.
   4. Waits up to 1800s for `GET /v1/models` by default; Omni and Gemma use 2400s because first boot can run 20-30 min.
-- Step 10 — Gradio always launches with `VLLM_BASE_URL=http://localhost:8000/v1`; runtime-agent/FiftyOne selections launch their companion UI after Gradio is live. The Gradio and runtime-agent frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or runtime-agent `server.model` matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
+- Step 10 — Gradio always launches with `VLLM_BASE_URL=http://localhost:8000/v1`; Batch Inference / FiftyOne selections launch their companion UI after Gradio is live. The Gradio and Batch Inference frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or the Batch Inference `server.model` field matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
 
 **NIM image short-id resolution (in `byo_video_setup.py`):**
 ```
@@ -658,7 +744,7 @@ MODEL_ID=google/gemma-4-31b-it      →  short=gemma-4-31b-it      →  nvcr.io/
 - Send base64 `data:` `video_url` first for every video-capable NIM. No `file://`.
 - Do not send `max_tokens` to NIM `/v1/chat/completions`; server `max_model_len` governs.
 - Do not enforce client-side caps on frames, tokens, fps, pixels, or resolution. If a NIM cannot handle the request, let it return the service-owned 4xx.
-- Cosmos Reason1 7B is the known exception: it rejects native `video_url`, so Gradio/runtime-agent retry with image-frame fallback after a 400/422.
+- Cosmos Reason1 7B is the known exception: it rejects native `video_url`, so Gradio / Batch Inference retry with image-frame fallback after a 400/422.
 - Nemotron Nano frame mode has a 5-image prompt limit, which is why the default path must be native `video_url`.
 
 **NIM-8B-FP8-THINK-EOS bug (greedy decode):** the FP8-quantized cosmos-reason2-8b NIM emits a bare `<think>` opener then an EOS-like token at `temperature=0`, finishing in 2-3 tokens with no reasoning trace and no final answer. Visible symptom in Gradio: response shows only `<think>` (or appears empty) and the run completes in <1s with `tok=2` or `tok=3` in `gradio_demo.log`. Workaround: keep temperature ≥ 0.3. The Gradio app defaults the slider to 0.6 in `nim_local` mode and clamps server-side calls to ≥0.3 as a safety net. Runtime monitor rule `nim_local_think_eos_truncation` flags any `[vllm done] X.Xs · 1|2|3 tok` line.
@@ -733,7 +819,7 @@ On error:
 
 ### OBSERVER PROTOCOL — PHASE 6: FRONTEND LIVE + URL CAPTURE
 
-Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Every mode writes `/tmp/gradio_live.flag`; runtime-agent and FiftyOne modes also write `/tmp/byo_video_runtime_agent_live.flag`. On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
+Update checklist: `[→] Starting frontend`. Poll every 30s for the live flag. Every mode writes `/tmp/gradio_live.flag`; Batch Inference and FiftyOne modes also write `/tmp/byo_video_runtime_agent_live.flag` (filename retains the `runtime_agent` token for backward compat). On each poll, write progress to local machine `/tmp/byo_video_progress.json`:
 ```json
 {"phase": 6, "status": "waiting_frontend", "elapsed_s": <N>, "instance": "<name>", "checklist": {"provision": "done", "shell": "done", "scripts": "done", "deps": "done", "weights": "done", "frontend": "active"}}
 ```
@@ -785,7 +871,7 @@ Do NOT auto-terminate the instance.
 
 After the LIVE panel, offer a friendlier post-deployment helper before handing
 the user the expert browser UI. This helper is for users who want Claude Code to
-talk them through the same capabilities as the runtime-agent HTML screen:
+talk them through the same capabilities as the Batch Inference HTML screen:
 dataset load, paper import, prompt selection, context guard, guarded batch run,
 progress, result review, and export.
 
@@ -823,7 +909,7 @@ Then ask what they want to accomplish:
 4. Shape structured JSON output for an inference run
 5. Export a report, raw file, spreadsheet, or PowerPoint
 
-For runtime-agent work, prefer:
+For Batch Inference work, prefer:
   python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> wizard
 or specific commands:
   python3 /tmp/byo_video_runtime_guide.py --url <frontend_url> status
@@ -1343,7 +1429,7 @@ uv run python /tmp/smoke_cr2_byo.py
 
 Results at `/tmp/byo_video_reason2_results.json`.
 
-For public HF dataset batch smoke, use the runtime agent instead:
+For public HF dataset batch smoke, use the Batch Inference UI instead:
 
 ```bash
 cd ~/cosmos-reason2
@@ -1381,7 +1467,7 @@ Agent steps:
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
      "export HF_TOKEN=hf_... INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B MODEL_SIZE=2B BYO_VIDEO_FRONTEND=runtime_agent RUNTIME_AGENT_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; runtime-agent/FiftyOne companion UI is written to `/tmp/byo_video_runtime_agent_url.txt` when selected. Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null` via ssh.
+5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_runtime_agent_url.txt` when selected (filename retains `runtime_agent` for backward compat). Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_runtime_agent_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
@@ -1678,4 +1764,4 @@ HF_TOKEN required for gated models. `Cosmos-Reason2-8B-FP8` is public.
 | vLLM Connection refused on first inference | `byo_video_setup.py` now auto-starts vLLM before Gradio (Step 9b). If running the Gradio script manually, start vLLM first: `nohup .venv/bin/vllm serve <model_dir> --port 8000 ... &` then poll `curl localhost:8000/v1/models`. |
 | Nemotron: `no module named 'mamba_ssm'` or `selective_scan_cuda` | vLLM PyPI build doesn't include mamba-ssm. Use vLLM nightly Docker: `vllm/vllm-openai:nightly-8bff831f0aa239006f34b721e63e1340e3472067` or `nvcr.io/nvidia/vllm:25.12.post1-py3`. |
 | Nemotron: `video_url not supported` or `unsupported content type` | vLLM version doesn't support `video_url` message type. Requires vLLM nightly; PyPI ≤0.11.0 unsupported. |
-| Nemotron/NIM: 400 error on inference | Confirm the deployed frontend is current and sends base64 `video_url`. If the service still rejects it, inspect the response body; runtime-agent/Gradio retry frame fallback only for 400/422. |
+| Nemotron/NIM: 400 error on inference | Confirm the deployed frontend is current and sends base64 `video_url`. If the service still rejects it, inspect the response body; Batch Inference / Gradio retry frame fallback only for 400/422. |

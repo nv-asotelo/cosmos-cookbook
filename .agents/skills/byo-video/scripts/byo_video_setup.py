@@ -20,8 +20,8 @@ Env vars:
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | runtime_agent | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
-  RUNTIME_AGENT_PORT — port for runtime-agent frontend (default: 7861)
-  RUNTIME_AGENT_DATASET — default public HF dataset for runtime-agent (default: pjramg/Safe_Unsafe_Test)
+  RUNTIME_AGENT_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
+  RUNTIME_AGENT_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
@@ -707,7 +707,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
             cwd=REASON2_DIR, env=ENV, timeout=240
         )
         if rc != 0:
-            warn(f"FiftyOne install failed — runtime agent will fall back where possible: {out[-500:]}")
+            warn(f"FiftyOne install failed — Batch Inference UI will fall back where possible: {out[-500:]}")
         else:
             ok("FiftyOne + huggingface_hub installed")
 
@@ -1132,7 +1132,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
 
     gradio_proc, gradio_url = _launch_gradio(sidecar=True)
 
-    run(f"Starting Cosmos BYO Video runtime agent on port {RUNTIME_AGENT_PORT}")
+    run(f"Starting Cosmos BYO Video Batch Inference on port {RUNTIME_AGENT_PORT}")
     proc = subprocess.Popen(
         ["uv", "run", "python", "-u", RUNTIME_AGENT_APP, "serve",
          "--host", "0.0.0.0", "--port", str(RUNTIME_AGENT_PORT)],
@@ -1161,7 +1161,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
                 break
 
     if not url:
-        print(f"  ✗  Runtime agent printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
+        print(f"  ✗  Batch Inference printed no URL. Check {RUNTIME_AGENT_LOG_FILE}")
         proc.terminate()
         gradio_proc.terminate()
         sys.exit(1)
@@ -1180,7 +1180,7 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
             time.sleep(2)
 
     if not _probe_ok:
-        print("  ✗  Runtime agent launched but /api/state probe failed after 20s.")
+        print("  ✗  Batch Inference launched but /api/state probe failed after 20s.")
         print(f"     Check {RUNTIME_AGENT_LOG_FILE} for errors.")
         proc.terminate()
         gradio_proc.terminate()
@@ -1190,15 +1190,15 @@ if FRONTEND in ("runtime_agent", "fiftyone"):
         with open(_path, "w") as f:
             f.write(url + "\n")
 
-    ok("Runtime agent frontend is live")
+    ok("Batch Inference frontend is live")
     STEPS_DONE.append(9)
     print_dashboard()
 
     print(flush=True)
     print(f"{BOLD}{'─'*62}{RESET}", flush=True)
-    print(f"{BOLD}  Cosmos BYO Video Runtime Agent — Ready{RESET}", flush=True)
+    print(f"{BOLD}  Cosmos BYO Video Batch Inference — Ready{RESET}", flush=True)
     print(f"{'─'*62}", flush=True)
-    print(f"  {BOLD}Runtime Agent URL:{RESET}  {hyperlink(url)}", flush=True)
+    print(f"  {BOLD}Batch Inference URL:{RESET}  {hyperlink(url)}", flush=True)
     print(f"  {BOLD}Gradio URL:{RESET}         {hyperlink(gradio_url)}", flush=True)
     print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
     print(f"  {DIM}Results: /tmp/byo_video_runtime_agent_results.json{RESET}", flush=True)

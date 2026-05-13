@@ -61,7 +61,7 @@ mkdir -p "$COSMOS3_OUTPUT_DIR"
 rm -f /tmp/gradio_live.flag /tmp/gradio_url.txt
 
 echo "→ Starting Ray Serve (cosmos3.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
-nohup uv run python -m cosmos3.ray.serve \
+nohup uv run --no-sync python -m cosmos3.ray.serve \
     --parallelism-preset="$COSMOS3_PARALLELISM" \
     --keep-going \
     -o "$COSMOS3_OUTPUT_DIR" \
@@ -85,7 +85,7 @@ if ! ss -ltn 2>/dev/null | grep -q ":${COSMOS3_SERVE_PORT}\b"; then
 fi
 
 echo "→ Starting Gradio (cosmos3.ray.gradio) on $COSMOS3_HOST:$COSMOS3_GRADIO_PORT"
-nohup uv run python -m cosmos3.ray.gradio \
+nohup uv run --no-sync python -m cosmos3.ray.gradio \
     --host "$COSMOS3_HOST" \
     --port "$COSMOS3_GRADIO_PORT" \
     --server-host localhost \

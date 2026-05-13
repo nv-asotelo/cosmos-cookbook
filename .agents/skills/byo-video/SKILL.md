@@ -34,7 +34,7 @@ descriptive labels and map the answer to the env var afterward:
 
 Regardless of the selected mode, `byo_video_setup.py` must serve a live Gradio
 link on `GRADIO_PORT` and write it to `/tmp/gradio_url.txt` plus
-`/tmp/gradio_live.flag`. Runtime-agent and FiftyOne selections add their own UI
+`/tmp/gradio_live.flag`. Batch-inference and FiftyOne selections add their own UI
 on `RUNTIME_AGENT_PORT`; they do not replace Gradio.
 
 Default to `BYO_VIDEO_FRONTEND=nvidia_build` when the user asks to serve a
@@ -98,12 +98,12 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `references/byo-video-runbook.md`: complete deployment protocol, model picker,
   NIM-local operations, runtime monitor, and recovery rules.
 - `scripts/byo_video_setup.py`: remote setup and launch script.
-- `scripts/byo_video_runtime_agent.py`: browser runtime-agent frontend for HF
+- `scripts/byo_video_runtime_agent.py`: browser batch-inference frontend for HF
   dataset selection, concurrent inference, FiftyOne launch/result writeback,
   and `pjramg/Safe_Unsafe_Test` smoke testing with the worker-safety prompt.
 - `scripts/byo_video_runtime_guide.py`: friendly CLI companion for Claude Code
   or terminal users to load datasets, import papers, run guarded batches, shape
-  structured prompts, and export artifacts through the runtime-agent API.
+  structured prompts, and export artifacts through the batch-inference API.
 - `scripts/gradio_cr2_byo.py`: default Build-style Gradio app for video/image
   inference across supported BYO-video models.
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
