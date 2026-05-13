@@ -28,8 +28,6 @@ wrappers, and `.claude/commands/` remains as the legacy slash-command surface.
   `CLAUDE.md` agent guides.
 - `cosmos-brev-deploy`: Deploy a recipe to a Brev GPU instance.
 - `byo-video`: Launch the single-model Cosmos/VLM Gradio demo.
-- `vlm-race`: Run the multi-model VLM comparison workflow when its helper
-  scripts are available.
 
 ## Shared Rules
 

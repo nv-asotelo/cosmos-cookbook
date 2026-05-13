@@ -16,8 +16,6 @@ unspecified frontend requests. Select `runtime_agent` only when the user asks fo
 guided dataset loading, concurrent batch inference, worker-safety smoke testing,
 or result writeback.
 
-For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
-
 Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **Batch Inference web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`. (Internal identifiers `runtime_agent` / `RUNTIME_AGENT_PORT` are retained; user-visible prose says "batch inference".)
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**

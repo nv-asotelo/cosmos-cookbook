@@ -12,7 +12,6 @@ Seven agent skills for running, deploying, authoring, and demoing Cosmos recipes
 | `/cosmos-add-recipe <name> <type>` | `$cosmos-add-recipe` / `/skill:cosmos-add-recipe` | Scaffold a new recipe from templates | Creating a new recipe |
 | `/cosmos-brev-deploy <path>` | `$cosmos-brev-deploy` / `/skill:cosmos-brev-deploy` | Deploy any recipe to a Brev GPU instance | Cloud execution |
 | `/byo-video` | `$byo-video` / `/skill:byo-video` | Launch a single-model Gradio VLM demo | BYO video/image demos |
-| `/vlm-race` | `$vlm-race` / `/skill:vlm-race` | Compare multiple VLMs when helper scripts are present | Side-by-side model evaluation |
 
 ---
 

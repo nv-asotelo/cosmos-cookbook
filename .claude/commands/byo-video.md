@@ -11,8 +11,6 @@
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — classic upload-one-video/image UI for prompt and parameter tuning.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review. Gradio still launches as a live sidecar.
 
-For multi-model side-by-side comparison, use `/vlm-race` (separate skill, separate instance required).
-
 Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **runtime-agent web UI** on `RUNTIME_AGENT_PORT` (default `7861`) and write `/tmp/byo_video_runtime_agent_url.txt`.
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
