@@ -88,6 +88,47 @@ Browser smoke path:
 
 ---
 
+## Cosmos3 OSS Backend Routing
+
+Cosmos3 ships **two distinct architectures** under one family, served by **different stacks**:
+
+| Cosmos3 model | Class | HF library | Backend | Picker `MODEL_SIZE` |
+|---|---|---|---|---|
+| `nvidia/Cosmos3-Nano-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-8B` |
+| `nvidia/Cosmos3-Super-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-super` |
+| `nvidia/Cosmos3-Nano` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-NANO-GEN` |
+| `nvidia/Cosmos3-Super` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-SUPER-GEN` |
+
+**Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`, paired with `gradio_cosmos_reason_build.py` (the auto-routed `nvidia_build` Gradio for the Reason collection).
+
+**Generators** require the upstream `nvidia-cosmos/cosmos3` package and a different runtime:
+
+```
+git clone https://github.com/nvidia-cosmos/cosmos3.git ~/cosmos3
+cd ~/cosmos3 && uv sync --all-extras --group=cu130-train
+```
+
+Then launch via the bundled helper `scripts/cosmos3_native_launch.sh` (deployed to `/tmp/cosmos3_native_launch.sh` on the target):
+
+```bash
+COSMOS3_CHECKPOINT=Cosmos3-Nano  bash /tmp/cosmos3_native_launch.sh   # or Cosmos3-Super
+```
+
+The helper starts `python -m cosmos3.ray.serve` on `:8000` and `python -m cosmos3.ray.gradio --host 0.0.0.0 --port 8080`, writes `/tmp/gradio_url.txt` (`http://<host>:8080`) and `/tmp/gradio_live.flag`, and leaves PIDs in `/tmp/cosmos3_serve.pid` and `/tmp/cosmos3_gradio.pid` for clean teardown.
+
+**Smoke trace (horde@10.57.233.111, RTX PRO 6000 Blackwell, driver 575, 2026-05-12):**
+- `uv sync --all-extras --group=cu130-train` completed (~5 min, +11 GB venv).
+- `cosmos3.scripts.inference --help` and `cosmos3.ray.gradio --help` return clean.
+- `import cosmos3` resolves to `/home/horde/cosmos3/cosmos3/__init__.py`.
+- Full weight-download + Ray Serve boot deferred to follow-up commit (Cosmos3-Nano ~30 GB; Cosmos3-Super ~60 GB).
+
+**Open integration items** (follow-up):
+
+- `byo_video_setup.py` Step 9 / Step 10 currently branch only on `vllm`, `hf`, and `nim_local`. The `cosmos3_native` path is wired into `_MODEL_CONFIGS` and the runbook here, but Step 10 still calls into the legacy Gradio app. Until the setup script branches on `INFERENCE_BACKEND=cosmos3_native`, invoke the helper manually on the target after the install lands.
+- `cosmos3.ray.gradio` exposes no `--share` flag. Off-box access uses the host LAN IP (worked: `http://10.57.233.111:8080`) or SSH port-forward (`ssh -L 8080:localhost:8080 horde@10.57.233.111`). A frpc/cloudflared share is left for a future hardening pass.
+
+---
+
 ## SKILL PROTOCOL — Hybrid: main session + observer
 
 The main session owns **PHASE 0–1** (pre-checks + picker). These phases are interactive;
@@ -114,22 +155,17 @@ happens in the Claude Code UI — panels, `AskUserQuestion`, and completion text
    rm -f /tmp/byo_video_observer_result.json /tmp/byo_video_progress.json
    ```
    These files persist across Claude Code sessions. If not cleared, the progress cron will
-   read a prior session's result and report a false success or failure. This step is mandatory
-   and must run before `brev ls`.
+   read a prior session's result and report a false success or failure. This step is mandatory.
 
-1. Run `brev ls` via Bash. Capture the full output.
-2. Note stopped H100/H200 instances — these become options in the PHASE 1 picker (Q3).
-3. Note any RUNNING instances (may be reusable).
+That is the entire PHASE 0. **There is no `brev ls` probe** — the picker presents Brev as one of three target options statically, and the observer handles `brev start`/`brev create` only after the user explicitly picks Brev. Skipping the probe (and the dynamic restart slot it enabled) trades one nice-to-have for: no Brev auth dependency at skill open, no false-start on logged-out brev CLI, and a clean code path for SSH-only / local-only users.
 
-Display initial panel:
+Display the initial panel without an instance list (the picker has every option anyway):
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
 ║  Cosmos BYO-Video  ·  Pre-checks                             ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Existing instances:                                         ║
-║    [list each: name | status | GPU | type]                   ║
-║    (or "None found")                                         ║
+║  Stale-artifact cleanup: ✓                                   ║
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
@@ -138,18 +174,13 @@ Display initial panel:
 Load `AskUserQuestion` via ToolSearch: `query: "select:AskUserQuestion"`, then fire all 3
 questions in a single call (see PICKER section below for the full call).
 
-**Q3 always offers four options.** The first slot is dynamic; the remaining three are fixed:
+**Q3 offers three options, always the same set (no dynamic slot):**
 
-- **Slot 1 (dynamic):** If PHASE 0 found exactly one stopped instance with a compatible GPU for
-  the selected model, use: `{ label: "Restart <name> (<GPU>)", description: "Resume stopped — faster to SHELL READY" }`
-  mapping to `DEPLOY_TARGET=brev:<name>`. If multiple stopped instances match, pick the one
-  whose GPU tier best fits MODEL_SIZE (prefer H200 for 32B/C3-32B, H100 for all others).
-  If no stopped instances match, use `{ label: "New Brev instance", description: "Agent provisions appropriate GPU tier" }`.
-- **Slot 2 (fixed):** `{ label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" }` — always present unless Slot 1 is already "New Brev".
-- **Slot 3 (fixed):** `{ label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" }` → follow-up AskUserQuestion for host.
-- **Slot 4 (fixed):** `{ label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally first" }` → `DEPLOY_TARGET=local`.
+- `{ label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model — requires brev CLI login" }` → `DEPLOY_TARGET=brev:new`.
+- `{ label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" }` → follow-up AskUserQuestion for host.
+- `{ label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally first" }` → `DEPLOY_TARGET=local`.
 
-This ensures SSH and Local are always reachable regardless of how many Brev instances exist.
+If the user wants to restart a specific stopped Brev instance, they pick **New Brev instance** and the observer's brev path probes `brev ls` itself at PHASE 2 — moving the brev dependency out of pre-checks and into the path that actually uses it.
 
 Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`,
 `DEPLOY_TARGET` per the answer→env var mapping table.
@@ -197,15 +228,8 @@ AskUserQuestion({
       header: "Environment",
       multiSelect: false,
       options: [
-        // Slot 1: best stopped Brev instance for selected model, OR "New Brev instance" if none
-        { label: "Restart <name> (<GPU>)", description: "Resume stopped instance — faster to SHELL READY" },
-        // OR if no stopped instance matches:
-        // { label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" },
-
-        // Slot 2: always present (unless Slot 1 is already "New Brev instance")
-        { label: "New Brev instance", description: "Agent provisions appropriate GPU tier for your model" },
-
-        // Slots 3 & 4: always present — never omit these
+        // Static 3-slot set — no Phase 0 brev probe.
+        { label: "New Brev instance", description: "Agent provisions appropriate GPU tier — requires brev CLI login" },
         { label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" },
         { label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally" }
       ]
@@ -221,6 +245,7 @@ AskUserQuestion({
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
 | Q1 Backend | NIM (local Docker) | `INFERENCE_BACKEND=nim_local` · `NIM_IMAGE=nvcr.io/nim/nvidia/<model-short-id>:latest` (resolved from MODEL_ID) · requires `NGC_API_KEY` |
+| Q1 Backend | Cosmos3 native (auto) | `INFERENCE_BACKEND=cosmos3_native` — auto-selected when `MODEL_SIZE ∈ {C3-NANO-GEN, C3-SUPER-GEN}`; wraps the upstream `nvidia-cosmos/cosmos3` Ray Serve + Gradio stack. See "Cosmos3 OSS Backend Routing" below. |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
@@ -230,7 +255,53 @@ AskUserQuestion({
 | Q3 Env | SSH target | Follow-up AskUserQuestion: "user@host or IP?" → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
 
-**SOMETHING ELSE sub-picker** — fire immediately when user selects "Something else" for Q2:
+**SOMETHING ELSE sub-picker** — fire immediately when user selects "Something else" for Q2. Because `AskUserQuestion` caps at 4 options per question, fan out by family:
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Which family?",
+      header: "Family",
+      multiSelect: false,
+      options: [
+        { label: "Cosmos 3 (OSS)", description: "Public Cosmos3 — Reasoners (chat VLM) or Generators (diffusion video)" },
+        { label: "Cosmos Transfer / Nemotron", description: "Generation + multimodal — Cosmos Transfer 2.5, Nemotron-Nano-12B-v2-VL" },
+        { label: "Non-NVIDIA models", description: "Best-effort only, not officially supported" }
+      ]
+    }
+  ]
+})
+```
+
+**If "Cosmos 3 (OSS)" → fire the Cosmos3 family picker:**
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Which Cosmos3 OSS model?",
+      header: "Cosmos3",
+      multiSelect: false,
+      options: [
+        { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — chat VLM, ~16 GB BF16, vLLM-served" },
+        { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — chat VLM, ~60 GB BF16, vLLM-served" },
+        { label: "Cosmos3-Nano (Generator)",  description: "nvidia/Cosmos3-Nano — diffusion video gen (t2i/t2v/i2v), ~30 GB; needs cosmos3 upstream package" },
+        { label: "Cosmos3-Super (Generator)", description: "nvidia/Cosmos3-Super — diffusion video gen (t2i/t2v/i2v), ~60 GB; needs cosmos3 upstream package" }
+      ]
+    }
+  ]
+})
+```
+
+| Selection | Sets |
+|---|---|
+| Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `INFERENCE_BACKEND=vllm` |
+| Cosmos3-Super-Reasoner | `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `INFERENCE_BACKEND=vllm` |
+| Cosmos3-Nano (Generator) | `MODEL_ID=nvidia/Cosmos3-Nano` · `MODEL_SIZE=C3-NANO-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
+| Cosmos3-Super (Generator) | `MODEL_ID=nvidia/Cosmos3-Super` · `MODEL_SIZE=C3-SUPER-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
+
+**If "Cosmos Transfer / Nemotron" → fire:**
 
 ```
 AskUserQuestion({
@@ -240,11 +311,8 @@ AskUserQuestion({
       header: "Model",
       multiSelect: false,
       options: [
-        { label: "Cosmos3-Nano-Reasoner", description: "nvidia/Cosmos3-Nano-Reasoner (8B, private, ≥40GB VRAM, HF_TOKEN required)" },
-        { label: "Cosmos3-Reasoner-32B", description: "nvidia/Cosmos3-Reasoner-32B (32B, gated, nvidia org + HF_TOKEN required)" },
         { label: "Cosmos Transfer 2.5", description: "nvidia/Cosmos-Transfer2.5 (generation model, ≥80GB VRAM)" },
-        { label: "Nemotron-Nano-12B-v2-VL", description: "nvidia/Nemotron-Nano-12B-v2-VL-BF16 (12B, gated, vLLM only, ≥40GB VRAM)" },
-        { label: "Non-NVIDIA models", description: "Best-effort only, not officially supported" }
+        { label: "Nemotron-Nano-12B-v2-VL", description: "nvidia/Nemotron-Nano-12B-v2-VL-BF16 (12B, gated, vLLM only, ≥40GB VRAM)" }
       ]
     }
   ]
@@ -253,11 +321,10 @@ AskUserQuestion({
 
 | Selection | Sets |
 |---|---|
-| Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` |
-| Cosmos3-Reasoner-32B | `MODEL_ID=nvidia/Cosmos3-Reasoner-32B` · `MODEL_SIZE=C3-32B` |
 | Cosmos Transfer 2.5 | `MODEL_ID=nvidia/Cosmos-Transfer2.5` · `MODEL_SIZE=32B` |
 | Nemotron-Nano-12B-v2-VL | `MODEL_ID=nvidia/Nemotron-Nano-12B-v2-VL-BF16` · `MODEL_SIZE=NEM-12B` |
-| Non-NVIDIA models | Show disclaimer inline, then fire Qwen sub-picker |
+
+**If "Non-NVIDIA models":** show disclaimer inline, then fire Qwen sub-picker.
 
 **Non-NVIDIA disclaimer (display inline before sub-picker):**
 > ⚠️ Non-NVIDIA models: NVIDIA does not officially support or guarantee setup for third-party models. This is best-effort only.

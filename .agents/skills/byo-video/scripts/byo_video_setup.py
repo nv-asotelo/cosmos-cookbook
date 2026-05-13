@@ -13,7 +13,10 @@ selected companion frontend URL. Gradio is always written to
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
-  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+                      C3-NANO-GEN / C3-SUPER-GEN are Cosmos3 OSS *Generators* (diffusion video gen via the
+                      upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
+                      C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | runtime_agent | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
@@ -79,7 +82,9 @@ _MODEL_CONFIGS = {
     },
     "C3-8B": {
         "variants": [
-            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~TBD"),
+            # OSS public Reasoner (chat VLM) — qwen3_vl architecture, ~16 GB BF16, vLLM-served.
+            # Smoke-verified on horde RTX PRO 6000 Blackwell 2026-05-12 (~3m boot, warm cache).
+            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~16 GB"),
         ],
         "nim": None,
     },
@@ -97,15 +102,44 @@ _MODEL_CONFIGS = {
     },
     "C3-super": {
         "variants": [
-            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~TBD"),
+            # OSS public Reasoner (chat VLM) — qwen3_vl architecture, ~30B params (13 safetensor
+            # shards observed on HF). BF16 footprint ~60 GB; fits an H200 SXM (141 GB) cleanly and
+            # an RTX PRO 6000 Blackwell (95 GB) with gpu-memory-utilization 0.85.
+            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~60 GB"),
         ],
         "nim": None,
-        # 32B model — requires H200 SXM 141GB (confirmed from live deployment 2026-05-05).
-        "disk_gb": 1024,
-        # Architecture: NemotronVLForConditionCausalLM. vLLM may raise "Unsupported architecture"
-        # if this arch is not registered in the installed vLLM build. Use INFERENCE_BACKEND=hf
-        # as a fallback — confirmed working on H200 at 2026-05-05 live run.
-        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
+        # ~60 GB weights + venv + HF cache → 256 GB minimum is plenty; keep 1 TB recommendation for safety on multi-model hosts.
+        "disk_gb": 256,
+        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.85"],
+    },
+    # ── Cosmos3 OSS Generators (diffusion video generation via upstream cosmos3 package) ──
+    # These models use the nvidia-cosmos/cosmos3 Python package (NOT vLLM / NOT NIM).
+    # Setup path:
+    #   git clone https://github.com/nvidia-cosmos/cosmos3.git ~/cosmos3
+    #   cd ~/cosmos3 && uv sync --all-extras --group=cu130-train
+    # Serve path:
+    #   python -m cosmos3.ray.serve --checkpoint-path Cosmos3-Nano|Cosmos3-Super   # port 8000
+    #   python -m cosmos3.ray.gradio --host 0.0.0.0 --port 8080                    # UI
+    # See scripts/cosmos3_native_launch.sh for the wrapped launcher used by INFERENCE_BACKEND=cosmos3_native.
+    "C3-NANO-GEN": {
+        "variants": [
+            # nvidia/Cosmos3-Nano — public diffusers Cosmos3OmniDiffusersPipeline (t2i/t2v/i2v).
+            # Driven by --checkpoint-path Cosmos3-Nano in cosmos3.scripts.inference.
+            ("Cosmos3-Nano Generator", "Cosmos3-Nano", "nvidia/Cosmos3-Nano", "~30 GB"),
+        ],
+        "nim": None,
+        "disk_gb": 128,
+        "backend_required": "cosmos3_native",
+    },
+    "C3-SUPER-GEN": {
+        "variants": [
+            # nvidia/Cosmos3-Super — public diffusers Cosmos3OmniDiffusersPipeline (t2i/t2v/i2v).
+            # Larger checkpoint than Nano (53 sibling files vs 35).
+            ("Cosmos3-Super Generator", "Cosmos3-Super", "nvidia/Cosmos3-Super", "~60 GB"),
+        ],
+        "nim": None,
+        "disk_gb": 256,
+        "backend_required": "cosmos3_native",
     },
     # ── Cosmos Reason1 7B NIM (older generation; frame fallback at runtime) ───
     "CR1-7B": {
@@ -299,7 +333,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
