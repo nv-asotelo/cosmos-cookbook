@@ -66,6 +66,7 @@ const RAY_SERVE_AGENT = Agent
   : null;
 
 const UPLOAD_DIR = "/tmp/uploads";
+const OUTPUT_DIR_CACHE = new Map();
 
 const MIME_TO_EXT = {
   "video/mp4": "mp4",
@@ -126,48 +127,222 @@ function mimeForFile(filepath) {
   return EXT_TO_MIME[ext] || "application/octet-stream";
 }
 
-async function encodeOutputFile(filepath) {
+// ---------------------------------------------------------------------------
+// Ray Serve server-side budget guard
+//
+// `cosmos3/ray/serve.py:178` hardcodes `asyncio.wait_for(..., timeout=300.0)`
+// (5 min) around the generation. The cosmos3 install on horde is early-access
+// read-only — we cannot patch the server. Instead we reject any client request
+// whose predicted wall time exceeds an 80%-of-budget safety bar (240 s).
+//
+// Empirical three-point anchor on horde@10.57.233.111 (RTX PRO 6000 Blackwell):
+//   256×256 ×  17 ×  20 →   3.5 s   (= 22.3 M ops)
+//   720p   × 121 ×  35 → 376    s   (= 3.91 B ops) — avg of three Predict OK calls
+//   720p   × 189 ×  35 → ~590  s   (= 6.10 B ops) — Gradio run hit the 600s cap
+// Three-point fit: wall ≈ 5 s baseline + ops / 10 M ops/s. The earlier 2 s +
+// ops/13 M model under-estimated by ~25% at HD frame counts; the new fit is
+// conservative on small jobs (over-estimates 256² by ~4 s, harmless) and
+// tight on HD jobs where the budget guard actually matters.
+// Verified against the suggestion grid:
+//   480p × 121 × 35 (1.74 B) → ~134 s  (allowed)
+//   720p × 121 × 20 (2.23 B) → ~173 s  (allowed)
+//   720p × 60  × 35 (1.93 B) → ~150 s  (allowed)
+//   1080p × 121 × 35 (8.78 B) → ~677 s (blocked — far over the 300 s cap)
+//
+// Override:  RAY_SERVE_MAX_WALL_SECONDS  (defaults to 240, ~80 % of the 300 s cap)
+//            RAY_SERVE_BUDGET_DISABLED=1 (skip the gate entirely; for vLLM-only backends)
+
+const RAY_SERVE_PIXELS_BY_RESOLUTION = {
+  "256": 256 * 256,
+  "480": 854 * 480,
+  "720": 1280 * 720,
+  "1080": 1920 * 1080
+};
+
+const RAY_SERVE_BASELINE_SECONDS = 5;
+const RAY_SERVE_OPS_PER_SECOND = 10_000_000;
+const RAY_SERVE_MAX_WALL_SECONDS_DEFAULT = 240;
+const RAY_SERVE_SERVER_TIMEOUT_SECONDS = 300; // cosmos3.ray.serve:178 hardcoded
+
+export function estimateRayServeWallSeconds({ resolution, num_frames, num_steps } = {}) {
+  const px = RAY_SERVE_PIXELS_BY_RESOLUTION[String(resolution ?? 480)] || RAY_SERVE_PIXELS_BY_RESOLUTION["480"];
+  const f = Math.max(1, Number(num_frames ?? 121));
+  const s = Math.max(1, Number(num_steps ?? 35));
+  return Math.ceil(RAY_SERVE_BASELINE_SECONDS + (px * f * s) / RAY_SERVE_OPS_PER_SECOND);
+}
+
+function suggestSafeParams(current) {
+  const candidates = [
+    { resolution: "480", num_frames: 121, num_steps: 35 },
+    { resolution: "480", num_frames: 60, num_steps: 35 },
+    { resolution: "720", num_frames: 60, num_steps: 20 },
+    { resolution: "720", num_frames: 33, num_steps: 35 },
+    { resolution: "256", num_frames: 121, num_steps: 50 }
+  ];
+  const max = Number(process.env.RAY_SERVE_MAX_WALL_SECONDS) || RAY_SERVE_MAX_WALL_SECONDS_DEFAULT;
+  return candidates
+    .map((c) => ({ ...c, est_seconds: estimateRayServeWallSeconds(c) }))
+    .filter((c) => c.est_seconds <= max)
+    .slice(0, 3);
+}
+
+function checkRayServeBudget(params) {
+  if (process.env.RAY_SERVE_BUDGET_DISABLED === "1") return null;
+  const est = estimateRayServeWallSeconds(params);
+  const cap = Number(process.env.RAY_SERVE_MAX_WALL_SECONDS) || RAY_SERVE_MAX_WALL_SECONDS_DEFAULT;
+  if (est <= cap) return null;
+  return {
+    estimate_seconds: est,
+    safe_cap_seconds: cap,
+    server_timeout_seconds: RAY_SERVE_SERVER_TIMEOUT_SECONDS,
+    requested: {
+      resolution: String(params.resolution ?? 480),
+      num_frames: Number(params.num_frames ?? 121),
+      num_steps: Number(params.num_steps ?? 35)
+    },
+    suggestions: suggestSafeParams(params)
+  };
+}
+
+async function resolveRayOutputDir(baseUrl) {
+  const envOutputDir = process.env.COSMOS3_OUTPUT_DIR || process.env.RAY_SERVE_OUTPUT_DIR || process.env.COSMOS3_RAY_OUTPUT_DIR;
+  if (envOutputDir) return envOutputDir;
+  if (OUTPUT_DIR_CACHE.has(baseUrl)) return OUTPUT_DIR_CACHE.get(baseUrl);
   try {
-    const buf = await readFile(filepath);
-    return {
-      path: filepath,
-      b64: buf.toString("base64"),
-      mime: mimeForFile(filepath)
-    };
-  } catch (error) {
-    return {
-      path: filepath,
-      b64: null,
-      mime: mimeForFile(filepath),
-      error: error instanceof Error ? error.message : "Failed to read output file"
-    };
+    const response = await undiciFetch(`${baseUrl}/info`, {
+      ...(RAY_SERVE_AGENT ? { dispatcher: RAY_SERVE_AGENT } : {})
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const outputDir = typeof data?.output_dir === "string" ? data.output_dir : null;
+    OUTPUT_DIR_CACHE.set(baseUrl, outputDir);
+    return outputDir;
+  } catch {
+    OUTPUT_DIR_CACHE.set(baseUrl, null);
+    return null;
   }
 }
 
-export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params } = {}) {
+function outputRoots(extraOutputDir) {
+  const roots = [
+    extraOutputDir,
+    process.env.COSMOS3_OUTPUT_DIR,
+    process.env.RAY_SERVE_OUTPUT_DIR,
+    process.env.COSMOS3_RAY_OUTPUT_DIR,
+    process.env.COSMOS3_DIR ? path.join(process.env.COSMOS3_DIR, "outputs/ray_serve") : null,
+    path.resolve("outputs/ray_serve")
+  ].filter(Boolean);
+  return Array.from(new Set(roots));
+}
+
+function outputUrlFor(baseUrl, filepath) {
+  if (!baseUrl || path.isAbsolute(filepath) || /^https?:\/\//i.test(filepath)) return undefined;
+  const relative = String(filepath)
+    .replace(/^\/+/, "")
+    .split(/[\\/]/)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `${baseUrl}/outputs/${relative}`;
+}
+
+async function encodeOutputFile(filepath, { baseUrl, outputDir } = {}) {
+  const originalPath = String(filepath);
+  const candidates = [originalPath];
+  if (!path.isAbsolute(originalPath) && !/^https?:\/\//i.test(originalPath)) {
+    for (const root of outputRoots(outputDir)) {
+      candidates.push(path.join(root, originalPath));
+    }
+  }
+  let lastError = null;
+  try {
+    for (const candidate of candidates) {
+      try {
+        const buf = await readFile(candidate);
+        return {
+          path: originalPath,
+          b64: buf.toString("base64"),
+          mime: mimeForFile(originalPath)
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  } catch (error) {
+    lastError = error;
+  }
+  return {
+    path: originalPath,
+    b64: null,
+    mime: mimeForFile(originalPath),
+    url: outputUrlFor(baseUrl, originalPath),
+    error: lastError instanceof Error ? lastError.message : "Failed to read output file"
+  };
+}
+
+export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath } = {}) {
   const baseUrl = resolveBaseUrl();
   const p = params || {};
+  void mediaKind;
+  void model;
 
-  let visionPath = null;
-  if (mediaDataUrl) {
-    visionPath = await persistUpload(mediaDataUrl);
+  // Ray Serve has a hardcoded 300 s asyncio timeout — reject up-front so the
+  // user gets actionable guidance instead of a 5-minute wait + 500.
+  const budget = checkRayServeBudget(p);
+  if (budget) {
+    const suggestionLines = budget.suggestions.length
+      ? budget.suggestions
+          .map(
+            (s) =>
+              `  • resolution=${s.resolution}, num_frames=${s.num_frames}, num_steps=${s.num_steps} (~${s.est_seconds}s)`
+          )
+          .join("\n")
+      : "  • Use the 256/480 resolution tiers with fewer frames or steps.";
+    return {
+      status: "error",
+      message:
+        `Request would exceed the Cosmos3 Ray Serve 300 s server-side timeout ` +
+        `(estimated ~${budget.estimate_seconds}s; safe budget ${budget.safe_cap_seconds}s).\n` +
+        `Reduce one of resolution / num_frames / num_steps. Suggested combinations:\n` +
+        suggestionLines,
+      files: [],
+      budget,
+      payload: {
+        resolution: String(p.resolution ?? 480),
+        num_frames: p.num_frames,
+        num_steps: p.num_steps
+      }
+    };
   }
+
+  let uploadedVisionPath = null;
+  if (mediaDataUrl) {
+    uploadedVisionPath = await persistUpload(mediaDataUrl);
+  }
+  const resolvedVisionPath = uploadedVisionPath || p.vision_path || visionPath || null;
 
   const body = {
     name: `req-${Date.now()}`,
-    model: process.env.MODEL_NAME || "",
+    model: process.env.MODEL_NAME || p.model || "",
     prompt: prompt || "",
     negative_prompt: p.negative_prompt || "",
-    vision_path: visionPath || null,
+    vision_path: resolvedVisionPath,
     num_frames: p.num_frames ?? 121,
     // Ray Serve OmniSampleOverrides requires resolution as a literal string ('256' | '480' | '720' | '1080').
     resolution: String(p.resolution ?? 480),
     aspect_ratio: p.aspect_ratio ?? "16,9",
+    fps: p.fps,
     num_steps: p.num_steps ?? 35,
     guidance: p.guidance ?? 6.0,
     seed: p.seed ?? null,
     model_mode: p.model_mode,
-    action_path: p.action_path
+    action_path: p.action_path,
+    action_mode: p.action_mode,
+    domain_name: p.domain_name,
+    image_size: p.image_size,
+    action_chunk_size: p.action_chunk_size,
+    raw_action_dim: p.raw_action_dim,
+    shift: p.shift,
+    condition_frame_indexes_vision: p.condition_frame_indexes_vision
   };
 
   let response;
@@ -211,13 +386,17 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
   const filePaths = outputs.flatMap((entry) =>
     Array.isArray(entry?.files) ? entry.files : []
   );
-  const files = await Promise.all(filePaths.map(encodeOutputFile));
+  const outputDir = await resolveRayOutputDir(baseUrl);
+  const files = await Promise.all(filePaths.map((filepath) => encodeOutputFile(filepath, { baseUrl, outputDir })));
+  const content = outputs.find((entry) => entry?.content)?.content || null;
 
   return {
     status: data?.status || "success",
     message: data?.message || "",
     stack_trace: data?.stack_trace || null,
     files,
+    content,
+    action: content?.action ?? null,
     payload: body,
     raw: data
   };

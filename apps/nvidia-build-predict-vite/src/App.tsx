@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ChevronDown,
   Copy,
   ExternalLink,
   FileVideo,
@@ -11,64 +12,229 @@ import {
   Play,
   RotateCcw,
   Search,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
-const SAMPLE_VIDEO = "/examples/race-car.mp4";
-// Standing order: header model name is auto-detected from the live backend on
-// page load; env vars are fallbacks only. See cosmos3_info_server.py.
+const QUICK_VIDEO_PARAMS = {
+  resolution: "256",
+  aspect_ratio: "16,9",
+  frames_count: 24,
+  frames_per_sec: 24,
+  num_steps: 4,
+  guidance: 6
+};
+const ENABLE_ACTION_POLICY =
+  (typeof import.meta !== "undefined" &&
+    (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_ENABLE_ACTION_POLICY === "1") ||
+  false;
+
 const COSMOS3_INFO_URL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_COSMOS3_INFO_URL) ||
   "/api/active-model";
 const DEFAULT_MODEL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_MODEL_NAME) ||
-  "Detecting model…";
-const DEFAULT_PROMPT = "A first person view from a robot working in a chemical plant.";
+  "Detecting model...";
 const HERO_TAGS = [
   "physical ai",
   "world foundation model",
   "robotics",
   "simulation",
   "synthetic data generation",
-  "video-to-world",
-  "image-to-world",
+  "text-to-video",
+  "image-to-video",
   "future state generation"
 ];
 const MODEL_CHOICES = [
   "nvidia/cosmos-predict1-5b",
   "nvidia/cosmos-predict1-7b-video2world",
   "nvidia/cosmos-predict2-5-2b",
-  "nvidia/cosmos-predict2-5-14b"
+  "nvidia/cosmos-predict2-5-14b",
+  "Cosmos3-Nano"
 ];
 const COLLECTIONS = ["cosmos-predict1", "cosmos-predict25", "cosmos3", "nvidia-cosmos-2", "cosmos"];
-const VIDEO_PARAMS = {
-  height: 704,
-  width: 1280,
-  frames_count: 121,
-  frames_per_sec: 24
-};
 const PROGRESS_FRAME_COUNT = 6;
-const PROGRESS_TOTAL_FRAMES = VIDEO_PARAMS.frames_count;
 
-type WorldMode = "Video-to-World" | "Image-to-World";
+const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
+  "256": 256 * 256,
+  "480": 854 * 480,
+  "720": 1280 * 720,
+  "1080": 1920 * 1080
+};
+const ETA_BASELINE_SECONDS = 5;
+const ETA_OPS_PER_SECOND = 10_000_000;
+
+type GeneratorMode = "Text-to-Video" | "Image-to-Video" | "Action Policy";
 type SchemaMode = "local_nim" | "build_openapi";
+type OutputTab = "preview" | "json";
+type MobilePanel = "input" | "output";
 type MediaState = {
   name: string;
   kind: "video" | "image";
   previewUrl: string;
-  dataUrl: string;
+  dataUrl?: string;
+  sourceUrl?: string;
+};
+type ExampleItem = {
+  id: string;
+  label: string;
+  eyebrow: string;
+  mode: GeneratorMode;
+  prompt: string;
+  mediaUrl?: string;
+  mediaName?: string;
+  mediaKind?: "image" | "video";
+  hidden?: boolean;
+  params?: {
+    resolution?: string;
+    numFrames?: number;
+    fps?: number;
+    steps?: number;
+    guidance?: number;
+    seed?: number;
+    shift?: number;
+    imageSize?: number;
+    actionChunkSize?: number;
+    rawActionDim?: number;
+    domainName?: string;
+    actionMode?: string;
+  };
 };
 type ApiResult = {
   videoDataUrl?: string;
   imageDataUrl?: string;
   assetUrl?: string;
   error?: string;
+  status?: string;
+  message?: string;
+  content?: Record<string, unknown> | null;
+  action?: unknown;
+  files?: Array<{
+    path?: string;
+    mime?: string;
+    hasInlineData?: boolean;
+    url?: string;
+    error?: string;
+  }>;
   diagnostic?: Record<string, unknown>;
   payload?: unknown;
   raw?: unknown;
 };
+
+const EXAMPLES: ExampleItem[] = [
+  {
+    id: "omni-t2v",
+    label: "Robotic Fruit Picking",
+    eyebrow: "T2V",
+    mode: "Text-to-Video",
+    prompt:
+      "A smooth first-person robot manipulation video in a greenhouse. The robot arm reaches toward a ripe red apple, gently grasps it, twists, and places it into a harvest bin. Natural daylight, stable camera, realistic physics.",
+    params: {
+      resolution: QUICK_VIDEO_PARAMS.resolution,
+      numFrames: QUICK_VIDEO_PARAMS.frames_count,
+      fps: QUICK_VIDEO_PARAMS.frames_per_sec,
+      steps: QUICK_VIDEO_PARAMS.num_steps,
+      guidance: QUICK_VIDEO_PARAMS.guidance,
+      seed: 0
+    }
+  },
+  {
+    id: "omni-i2v",
+    label: "Robot Tabletop Motion",
+    eyebrow: "I2V",
+    mode: "Image-to-Video",
+    prompt:
+      "Animate the robot arm so it moves with small, precise adjustments while keeping the tabletop scene consistent. Maintain the original camera angle and realistic lighting.",
+    mediaUrl:
+      "https://github.com/nvidia-cosmos/cosmos-dependencies/raw/refs/heads/assets/cosmos3/inputs/vision/robot_153.jpg",
+    mediaName: "robot_153.jpg",
+    mediaKind: "image",
+    params: {
+      resolution: QUICK_VIDEO_PARAMS.resolution,
+      numFrames: QUICK_VIDEO_PARAMS.frames_count,
+      fps: QUICK_VIDEO_PARAMS.frames_per_sec,
+      steps: QUICK_VIDEO_PARAMS.num_steps,
+      guidance: QUICK_VIDEO_PARAMS.guidance,
+      seed: 0
+    }
+  },
+  {
+    id: "omni-action-policy",
+    label: "Bridge Robot Policy",
+    eyebrow: "Action",
+    mode: "Action Policy",
+    prompt: "Predict the next robot action chunk from the bridge robot observation video.",
+    mediaUrl:
+      "https://github.com/nvidia-cosmos/cosmos-dependencies/raw/refs/heads/assets/cosmos3/inputs/vision/bridge_orig_lerobot.mp4",
+    mediaName: "bridge_orig_lerobot.mp4",
+    mediaKind: "video",
+    hidden: !ENABLE_ACTION_POLICY,
+    params: {
+      resolution: "480",
+      imageSize: 480,
+      numFrames: 24,
+      fps: 5,
+      steps: 30,
+      guidance: 1,
+      seed: 0,
+      shift: 5,
+      actionMode: "policy",
+      actionChunkSize: 16,
+      rawActionDim: 10,
+      domainName: "bridge_orig_lerobot"
+    }
+  }
+];
+const DEFAULT_PROMPT = EXAMPLES[0].prompt;
+
+const GENERATOR_MODES: Array<{
+  id: GeneratorMode;
+  label: string;
+  description: string;
+  icon: typeof FileVideo;
+  enabled: boolean;
+  visible: boolean;
+}> = [
+  {
+    id: "Text-to-Video",
+    label: "Text-to-Video",
+    description: "Prompt-only generation with quick staging defaults.",
+    icon: FileVideo,
+    enabled: true,
+    visible: true
+  },
+  {
+    id: "Image-to-Video",
+    label: "Image-to-Video",
+    description: "Animate one conditioning image plus a prompt.",
+    icon: ImageIcon,
+    enabled: true,
+    visible: true
+  },
+  {
+    id: "Action Policy",
+    label: "Action Policy",
+    description: "Robot action scaffold, hidden until backend smoke passes.",
+    icon: FileVideo,
+    enabled: false,
+    visible: ENABLE_ACTION_POLICY
+  }
+];
+
+function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number): number {
+  const px = ETA_PIXELS_BY_RESOLUTION[String(resolution)] || ETA_PIXELS_BY_RESOLUTION["480"];
+  const f = Math.max(1, numFrames);
+  const s = Math.max(1, numSteps);
+  return Math.ceil(ETA_BASELINE_SECONDS + (px * f * s) / ETA_OPS_PER_SECOND);
+}
+
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -77,18 +243,6 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-}
-
-async function sampleToMedia(): Promise<MediaState> {
-  const response = await fetch(SAMPLE_VIDEO);
-  const blob = await response.blob();
-  const file = new File([blob], "Race Car.mp4", { type: "video/mp4" });
-  return {
-    name: file.name,
-    kind: "video",
-    previewUrl: SAMPLE_VIDEO,
-    dataUrl: await readFileAsDataUrl(file)
-  };
 }
 
 function drawVideoCover(video: HTMLVideoElement, canvas: HTMLCanvasElement) {
@@ -138,6 +292,7 @@ function extractVideoFrames(src: string, count = PROGRESS_FRAME_COUNT): Promise<
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
+    video.crossOrigin = "anonymous";
     video.addEventListener("loadedmetadata", () => {
       canvas.width = 360;
       canvas.height = 202;
@@ -166,6 +321,11 @@ async function buildProgressFrames(media: MediaState): Promise<string[]> {
   return extractVideoFrames(media.previewUrl);
 }
 
+function resultAssetUrl(result: ApiResult | null) {
+  if (!result) return null;
+  return result.assetUrl || result.files?.find((file) => file.url)?.url || null;
+}
+
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [collection, setCollection] = useState("cosmos-predict1");
@@ -179,7 +339,41 @@ export default function Page() {
     gpu_name?: string;
     vram_free_gib?: number;
     vram_total_gib?: number;
+    warning?: string;
   } | null>(null);
+  const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Text-to-Video");
+  const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
+  const [media, setMedia] = useState<MediaState | null>(null);
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [resolution, setResolution] = useState(QUICK_VIDEO_PARAMS.resolution);
+  const [numFrames, setNumFrames] = useState(QUICK_VIDEO_PARAMS.frames_count);
+  const [fps, setFps] = useState(QUICK_VIDEO_PARAMS.frames_per_sec);
+  const [guidanceScale, setGuidanceScale] = useState(QUICK_VIDEO_PARAMS.guidance);
+  const [steps, setSteps] = useState(QUICK_VIDEO_PARAMS.num_steps);
+  const [seed, setSeed] = useState(0);
+  const [status, setStatus] = useState("Ready");
+  const [isRunning, setIsRunning] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [submittedAt, setSubmittedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [progressFrames, setProgressFrames] = useState<string[]>([]);
+  const [result, setResult] = useState<ApiResult | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [outputTab, setOutputTab] = useState<OutputTab>("preview");
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
+  const [examplesOpen, setExamplesOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
+
+  const activeExample = useMemo(
+    () => EXAMPLES.find((example) => example.id === selectedExampleId) ?? EXAMPLES[0],
+    [selectedExampleId]
+  );
+  const visibleExamples = useMemo(() => EXAMPLES.filter((example) => !example.hidden), []);
+  const visibleModes = useMemo(() => GENERATOR_MODES.filter((mode) => mode.visible), []);
+  const mediaRequired = generatorMode !== "Text-to-Video";
+  const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
+  const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,24 +396,8 @@ export default function Page() {
       cancelled = true;
     };
   }, []);
-  const [worldMode, setWorldMode] = useState<WorldMode>("Video-to-World");
-  const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
-  const [media, setMedia] = useState<MediaState | null>(null);
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [guidanceScale, setGuidanceScale] = useState(7);
-  const [steps, setSteps] = useState(35);
-  const [seed, setSeed] = useState(-1);
-  const [inputImageIndex, setInputImageIndex] = useState(0);
-  const [status, setStatus] = useState("Ready");
-  const [isRunning, setIsRunning] = useState(false);
-  const [progressPercent, setProgressPercent] = useState(0);
-  const [progressFrames, setProgressFrames] = useState<string[]>([]);
-  const [result, setResult] = useState<ApiResult | null>(null);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    // Standing order: live-backend probe is the source of truth for `model`.
-    // This effect only enriches the dropdown choices.
     fetch("/api/models")
       .then((response) => response.json())
       .then((data) => {
@@ -253,58 +431,99 @@ export default function Page() {
     };
   }, [media]);
 
+  const etaSeconds = useMemo(() => estimateWallSeconds(resolution, numFrames, steps), [numFrames, resolution, steps]);
+
   useEffect(() => {
-    if (!isRunning) return () => undefined;
-
-    const interval = window.setInterval(() => {
-      setProgressPercent((current) => {
-        if (current < 28) return current + 7;
-        if (current < 68) return current + 4;
-        if (current < 90) return current + 2;
-        return Math.min(current + 0.8, 96);
-      });
-    }, 950);
-
+    if (!isRunning || submittedAt === null) return () => undefined;
+    const tick = () => {
+      const elapsed = (Date.now() - submittedAt) / 1000;
+      setElapsedSeconds(elapsed);
+      const pct = Math.min(96, (elapsed / Math.max(1, etaSeconds)) * 96);
+      setProgressPercent(pct);
+    };
+    tick();
+    const interval = window.setInterval(tick, 250);
     return () => window.clearInterval(interval);
-  }, [isRunning]);
+  }, [isRunning, submittedAt, etaSeconds]);
 
   const requestPreview = useMemo(() => {
+    const visionPath = media?.sourceUrl ?? (media?.dataUrl ? "<written to /tmp/uploads/...>" : null);
+    const params: Record<string, unknown> = {
+      num_frames: numFrames,
+      resolution,
+      aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
+      fps,
+      num_steps: steps,
+      guidance: guidanceScale,
+      seed
+    };
+    if (generatorMode === "Action Policy") {
+      params.action_mode = activeExample.params?.actionMode ?? "policy";
+      params.domain_name = activeExample.params?.domainName;
+      params.image_size = activeExample.params?.imageSize ?? Number(resolution);
+      params.action_chunk_size = activeExample.params?.actionChunkSize;
+      params.raw_action_dim = activeExample.params?.rawActionDim;
+      params.shift = activeExample.params?.shift;
+    }
+
     if (schemaMode === "build_openapi") {
       return {
         endpoint: "POST https://ai.api.nvidia.com/v1/infer",
         collection,
         model,
+        mode: generatorMode,
         payload: {
           prompt,
-          input_image_index: inputImageIndex,
-          seed: seed >= 0 ? seed : null
+          image_url: generatorMode === "Image-to-Video" ? visionPath : undefined,
+          seed,
+          ...params
         },
         response: { asset_url: "https://..." }
       };
     }
+
     return {
       endpoint: "POST /generate",
       collection,
       model,
+      mode: generatorMode,
       payload: {
         name: "ui-<auto>",
         model,
         prompt,
-        vision_path: media ? "<written to /tmp/uploads/...>" : "<upload required>",
-        num_frames: VIDEO_PARAMS.frames_count,
-        resolution: 720,
-        aspect_ratio: "16,9",
-        fps: VIDEO_PARAMS.frames_per_sec,
-        num_steps: steps,
-        guidance: guidanceScale,
-        seed: seed >= 0 ? seed : "random"
+        vision_path: visionPath,
+        ...params
       }
     };
-  }, [collection, guidanceScale, inputImageIndex, media, model, prompt, schemaMode, seed, steps, worldMode]);
+  }, [
+    activeExample.params,
+    collection,
+    fps,
+    generatorMode,
+    guidanceScale,
+    media?.dataUrl,
+    media?.sourceUrl,
+    model,
+    numFrames,
+    prompt,
+    resolution,
+    schemaMode,
+    seed,
+    steps
+  ]);
 
-  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+  async function loadFile(file: File | null) {
     if (!file) return;
+    if (generatorMode === "Image-to-Video" && !file.type.startsWith("image/")) {
+      setResult({
+        error: "Image-to-Video expects a JPG, PNG, or WebP image.",
+        diagnostic: { layer: "frontend", issue: "The selected file was not an image." }
+      });
+      setStatus("Wrong input type");
+      setOutputTab("preview");
+      setMobilePanel("output");
+      return;
+    }
     const kind = file.type.startsWith("image/") ? "image" : "video";
     setMedia({
       name: file.name,
@@ -317,73 +536,185 @@ export default function Page() {
     setStatus("Conditioning media loaded");
   }
 
-  async function loadExample() {
-    setStatus("Loading example");
-    setWorldMode("Video-to-World");
-    setMedia(await sampleToMedia());
-    setResult(null);
-    setProgressPercent(0);
-    setStatus("Example loaded");
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
+    await loadFile(event.target.files?.[0] ?? null);
   }
 
-  function reset() {
-    setCollection("cosmos-predict1");
-    setModel(DEFAULT_MODEL);
-    setWorldMode("Video-to-World");
-    setSchemaMode("local_nim");
+  function setMode(mode: GeneratorMode) {
+    setGeneratorMode(mode);
     setMedia(null);
-    setPrompt(DEFAULT_PROMPT);
-    setGuidanceScale(7);
-    setSteps(35);
-    setSeed(-1);
-    setInputImageIndex(0);
-    setStatus("Ready");
+    setProgressFrames([]);
     setProgressPercent(0);
     setResult(null);
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function applyExample(example: ExampleItem) {
+    setSelectedExampleId(example.id);
+    setGeneratorMode(example.mode);
+    setPrompt(example.prompt);
+    setResolution(example.params?.resolution ?? QUICK_VIDEO_PARAMS.resolution);
+    setNumFrames(example.params?.numFrames ?? QUICK_VIDEO_PARAMS.frames_count);
+    setFps(example.params?.fps ?? QUICK_VIDEO_PARAMS.frames_per_sec);
+    setSteps(example.params?.steps ?? QUICK_VIDEO_PARAMS.num_steps);
+    setGuidanceScale(example.params?.guidance ?? QUICK_VIDEO_PARAMS.guidance);
+    setSeed(example.params?.seed ?? 0);
+    setMedia(
+      example.mediaUrl
+        ? {
+            name: example.mediaName ?? "example asset",
+            kind: example.mediaKind ?? "image",
+            previewUrl: example.mediaUrl,
+            sourceUrl: example.mediaUrl
+          }
+        : null
+    );
+    setResult(null);
+    setProgressPercent(0);
+    setStatus(`${example.eyebrow} example loaded`);
+    setOutputTab("preview");
+    setMobilePanel("input");
+    setExamplesOpen(false);
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  function reset() {
+    setCollection("cosmos-predict1");
+    setModel(DEFAULT_MODEL);
+    setGeneratorMode("Text-to-Video");
+    setSchemaMode("local_nim");
+    setMedia(null);
+    setPrompt(DEFAULT_PROMPT);
+    setResolution(QUICK_VIDEO_PARAMS.resolution);
+    setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
+    setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
+    setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
+    setSteps(QUICK_VIDEO_PARAMS.num_steps);
+    setSeed(0);
+    setSelectedExampleId(EXAMPLES[0].id);
+    setStatus("Ready");
+    setProgressPercent(0);
+    setProgressFrames([]);
+    setResult(null);
+    setOutputTab("preview");
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  async function copyJson() {
+    await navigator.clipboard.writeText(JSON.stringify(outputTab === "json" ? { request: requestPreview, response: result } : requestPreview, null, 2));
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  async function handleDrop(event: DragEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    setDragActive(false);
+    await loadFile(event.dataTransfer.files?.[0] ?? null);
+  }
+
   async function run() {
+    if (mediaRequired && !media) {
+      setResult({
+        error: "Add a conditioning image or choose an example before generating.",
+        diagnostic: {
+          layer: "frontend",
+          issue: `${generatorMode} requires a vision_path.`,
+          suggestions: ["Open Examples and choose the I2V sample, or upload a local image."]
+        }
+      });
+      setStatus("Missing input asset");
+      setOutputTab("preview");
+      setMobilePanel("output");
+      return;
+    }
+
+    setSubmittedAt(Date.now());
+    setElapsedSeconds(0);
     setIsRunning(true);
     setResult(null);
-    setProgressPercent(4);
+    setProgressPercent(0);
     setStatus("Predicting frames");
+    setOutputTab("preview");
+    setMobilePanel("output");
     try {
       const response = await fetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mediaDataUrl: media?.dataUrl,
+          visionPath: media?.sourceUrl,
           mediaKind: media?.kind,
-          worldMode,
+          mode: generatorMode,
           prompt,
           model,
           guidanceScale,
           steps,
+          resolution,
+          numFrames,
+          fps,
           seed,
-          inputImageIndex
+          actionMode: generatorMode === "Action Policy" ? activeExample.params?.actionMode ?? "policy" : undefined,
+          domainName: generatorMode === "Action Policy" ? activeExample.params?.domainName : undefined,
+          imageSize: generatorMode === "Action Policy" ? activeExample.params?.imageSize : undefined,
+          actionChunkSize: generatorMode === "Action Policy" ? activeExample.params?.actionChunkSize : undefined,
+          rawActionDim: generatorMode === "Action Policy" ? activeExample.params?.rawActionDim : undefined,
+          shift: generatorMode === "Action Policy" ? activeExample.params?.shift : undefined
         })
       });
-      const data = (await response.json()) as ApiResult;
+
+      const RESULT_SENTINEL = "\n\n---PREDICT-RESULT---\n";
+      let buffer = "";
+      const reader = response.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+        }
+        buffer += decoder.decode();
+      } else {
+        buffer = await response.text();
+      }
+
+      const sentinelIdx = buffer.lastIndexOf(RESULT_SENTINEL);
+      let data: ApiResult;
+      if (sentinelIdx >= 0) {
+        const jsonText = buffer.slice(sentinelIdx + RESULT_SENTINEL.length).trim();
+        try {
+          data = JSON.parse(jsonText) as ApiResult;
+        } catch (parseError) {
+          data = {
+            error: "Response payload was not valid JSON.",
+            diagnostic: {
+              parseError: parseError instanceof Error ? parseError.message : String(parseError),
+              tail: jsonText.slice(-512)
+            }
+          };
+        }
+      } else {
+        try {
+          data = JSON.parse(buffer.trim()) as ApiResult;
+        } catch {
+          data = {
+            error: "Predict response missing the streaming sentinel.",
+            diagnostic: { bufferTail: buffer.slice(-512) }
+          };
+        }
+      }
+
       setResult(data);
       setProgressPercent(100);
-      setStatus(response.ok ? "Complete" : "Backend error");
+      setStatus(response.ok && !data.error ? "Complete" : "Backend error");
     } catch (error) {
       setResult({ error: error instanceof Error ? error.message : "Request failed" });
       setProgressPercent(100);
       setStatus("Request failed");
     } finally {
       setIsRunning(false);
+      setSubmittedAt(null);
     }
   }
-
-  async function copyRequest() {
-    await navigator.clipboard.writeText(JSON.stringify(requestPreview, null, 2));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
-  }
-
-  const accepts = worldMode === "Image-to-World" ? ".jpg,.jpeg,.png" : ".mp4";
 
   return (
     <main>
@@ -408,7 +739,7 @@ export default function Page() {
           <button className="searchButton">
             <Search size={15} />
             <span>Search</span>
-            <kbd>⌘K</kbd>
+            <kbd>Ctrl K</kbd>
           </button>
           <button className="iconButton" aria-label="Help">
             <HelpCircle size={18} />
@@ -432,8 +763,8 @@ export default function Page() {
             </div>
           </div>
           <p>
-            World foundation model that generates future video from image or short-video conditioning for physical AI
-            simulation and synthetic data workflows.
+            Cosmos Generator stages fast text-to-video and image-to-video predictions for physical AI simulation and
+            synthetic data workflows.
           </p>
           <div className="tagRow">
             {HERO_TAGS.map((tag, index) => (
@@ -461,61 +792,85 @@ export default function Page() {
           <button className="noticeView">View</button>
         </div>
 
+        <div className="mobileIOTabs" aria-label="Mobile workspace tabs">
+          <button className={mobilePanel === "input" ? "active" : ""} onClick={() => setMobilePanel("input")}>
+            Input
+          </button>
+          <button className={mobilePanel === "output" ? "active" : ""} onClick={() => setMobilePanel("output")}>
+            Output
+          </button>
+        </div>
+
         <div className="workspace">
-          <section className="panel inputPanel">
+          <section className={`panel inputPanel ${mobilePanel === "input" ? "mobileActivePanel" : ""}`}>
             <div className="panelHeader">
               <h2>Input</h2>
-              <button className="secondaryAction" onClick={loadExample}>
-                View Examples
+              <button className="secondaryAction" onClick={() => setExamplesOpen(true)}>
+                View Examples <ChevronDown size={14} />
               </button>
             </div>
 
-            <label className="fieldLabel">World Creation Mode</label>
+            <label className="fieldLabel">Generator Mode</label>
             <div className="modeGrid">
-              {(["Video-to-World", "Image-to-World"] as const).map((mode) => (
-                <button
-                  className={worldMode === mode ? "active" : ""}
-                  key={mode}
-                  onClick={() => {
-                    setWorldMode(mode);
-                    setMedia(null);
-                    setProgressPercent(0);
-                    if (inputRef.current) inputRef.current.value = "";
-                  }}
-                >
-                  {mode === "Video-to-World" ? <FileVideo size={16} /> : <ImageIcon size={16} />}
-                  <span>{mode}</span>
-                  <small>{mode === "Video-to-World" ? "First 9 frames condition motion" : "First frame condition"}</small>
-                </button>
-              ))}
+              {visibleModes.map((mode) => {
+                const Icon = mode.icon;
+                return (
+                  <button
+                    className={`${generatorMode === mode.id ? "active" : ""} ${!mode.enabled ? "disabledMode" : ""}`}
+                    key={mode.id}
+                    onClick={() => mode.enabled && setMode(mode.id)}
+                    disabled={!mode.enabled}
+                  >
+                    <Icon size={16} />
+                    <span>{mode.label}</span>
+                    <small>{mode.description}</small>
+                  </button>
+                );
+              })}
             </div>
 
             <label className="fieldLabel">Input</label>
-            <button className="dropzone predictDropzone" onClick={() => inputRef.current?.click()}>
-              <input ref={inputRef} type="file" accept={accepts} onChange={handleFile} hidden />
-              {media ? (
-                <span className="mediaLoaded">
-                  {media.kind === "video" ? <FileVideo size={18} /> : <ImageIcon size={18} />}
-                  {media.name}
-                </span>
-              ) : (
-                <>
-                  <Upload size={22} />
-                  <span>{worldMode === "Video-to-World" ? "Drop source video here" : "Drop source image here"}</span>
-                  <small>{accepts}</small>
-                </>
-              )}
-            </button>
-
-            {media ? (
-              <div className="previewFrame">
-                {media.kind === "image" ? (
-                  <img src={media.previewUrl} alt="Selected input" />
+            {mediaRequired ? (
+              <button
+                className={`dropzone predictDropzone ${media ? "hasMedia" : ""} ${dragActive ? "dragActive" : ""}`}
+                onClick={() => inputRef.current?.click()}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setDragActive(true);
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setDragActive(false);
+                }}
+                onDrop={handleDrop}
+                type="button"
+              >
+                <input ref={inputRef} type="file" accept={accepts} onChange={handleFile} hidden />
+                {media ? (
+                  <span className="mediaLoaded mediaPreview">
+                    {media.kind === "image" ? <img src={media.previewUrl} alt="" /> : <video src={media.previewUrl} muted playsInline />}
+                    <span>
+                      <strong>{media.name}</strong>
+                      <small>{media.sourceUrl ? "Remote example asset" : "Upload staged for Ray Serve"}</small>
+                    </span>
+                  </span>
                 ) : (
-                  <video src={media.previewUrl} controls />
+                  <>
+                    <Upload size={22} />
+                    <span>{generatorMode === "Image-to-Video" ? "Drop source image here" : "Drop conditioning asset here"}</span>
+                    <small>{accepts}</small>
+                  </>
                 )}
+              </button>
+            ) : (
+              <div className="textOnlyNotice">
+                <FileVideo size={22} />
+                <div>
+                  <strong>Prompt-only generation</strong>
+                  <span>Cosmos3 receives this request without a vision_path.</span>
+                </div>
               </div>
-            ) : null}
+            )}
 
             <PromptBox
               label="Prompt"
@@ -527,10 +882,12 @@ export default function Page() {
             />
 
             <div className="parameterGrid predictParams">
-              <NumberField label="Guidance" value={guidanceScale} min={1} max={10} step={0.5} onChange={setGuidanceScale} />
-              <NumberField label="Steps" value={steps} min={1} max={50} step={1} onChange={setSteps} />
+              <SelectField label="Resolution" value={resolution} options={["256", "480", "720", "1080"]} onChange={setResolution} />
+              <NumberField label="Guidance" value={guidanceScale} min={1} max={12} step={0.5} onChange={setGuidanceScale} />
+              <NumberField label="Steps" value={steps} min={1} max={80} step={1} onChange={setSteps} />
+              <NumberField label="Frames" value={numFrames} min={8} max={121} step={1} onChange={setNumFrames} />
+              <NumberField label="FPS" value={fps} min={1} max={30} step={1} onChange={setFps} />
               <NumberField label="Seed" value={seed} min={-1} max={2147483647} step={1} onChange={setSeed} />
-              <NumberField label="Image Index" value={inputImageIndex} min={0} max={1} step={1} onChange={setInputImageIndex} />
             </div>
 
             <div className="runBar">
@@ -538,37 +895,65 @@ export default function Page() {
                 <RotateCcw size={16} />
                 Reset
               </button>
-              <button className="runButton" onClick={run} disabled={isRunning}>
+              <span
+                className="etaBadge"
+                title={`Estimator from RTX PRO 6000 Blackwell smoke runs. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
+              >
+                Est. wall ~{formatDuration(etaSeconds)}
+              </span>
+              <button className="runButton" onClick={run} disabled={isRunning || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
                 {isRunning ? "Generating" : "Generate"}
               </button>
             </div>
           </section>
 
-          <section className="panel outputPanel">
+          <section className={`panel outputPanel ${mobilePanel === "output" ? "mobileActivePanel" : ""}`}>
             <div className="panelHeader">
               <div className="outputTabs">
                 <h2>Output</h2>
-                <button className="previewPill">Preview</button>
+                <button className={outputTab === "preview" ? "previewPill activeOutputTab" : "previewPill"} onClick={() => setOutputTab("preview")}>
+                  Preview
+                </button>
+                <button className={outputTab === "json" ? "jsonTab activeOutputTab" : "jsonTab"} onClick={() => setOutputTab("json")}>
+                  JSON
+                </button>
               </div>
-              <span className="statusPill">{status}</span>
+              <div className="outputActions">
+                <span className={`statusPill ${isRunning ? "working" : result?.error ? "error" : status === "Complete" ? "success" : ""}`}>
+                  {status}
+                </span>
+                <button className="copyButton" onClick={copyJson}>
+                  <Copy size={14} />
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
             </div>
             <div className="outputBody">
-              {isRunning ? (
-                <GenerationProgress media={media} frames={progressFrames} progress={progressPercent} />
+              {outputTab === "json" ? (
+                <pre className="jsonOutput">{JSON.stringify({ request: requestPreview, response: result }, null, 2)}</pre>
+              ) : isRunning ? (
+                <GenerationProgress
+                  media={media}
+                  frames={progressFrames}
+                  progress={progressPercent}
+                  elapsedSeconds={elapsedSeconds}
+                  etaSeconds={etaSeconds}
+                  totalFrames={numFrames}
+                />
               ) : result?.error ? (
                 <FailureReport result={result} />
               ) : result?.videoDataUrl ? (
                 <video className="resultVideo" src={result.videoDataUrl} controls />
               ) : result?.imageDataUrl ? (
                 <img className="resultVideo" src={result.imageDataUrl} alt="Generated world state" />
-              ) : result?.assetUrl ? (
-                <a className="assetLink" href={result.assetUrl} target="_blank">
+              ) : assetUrl ? (
+                <a className="assetLink" href={assetUrl} target="_blank">
                   Open generated asset
                   <ExternalLink size={15} />
                 </a>
               ) : (
-                <WorldPreview />
+                <WorldPreview mode={generatorMode} />
               )}
             </div>
           </section>
@@ -577,7 +962,7 @@ export default function Page() {
         <aside className="apiPanel">
           <div className="apiTopline">API request</div>
           <div className="apiButtons">
-            <button onClick={copyRequest}>
+            <button onClick={copyJson}>
               <Copy size={14} />
               {copied ? "Copied" : "Copy"}
             </button>
@@ -612,8 +997,13 @@ export default function Page() {
             </label>
           </div>
           <pre className="codeBlock">{JSON.stringify(requestPreview, null, 2)}</pre>
+          {backendInfo?.warning ? <p className="backendWarning">{backendInfo.warning}</p> : null}
         </aside>
       </section>
+
+      {examplesOpen ? (
+        <ExampleModal examples={visibleExamples} onClose={() => setExamplesOpen(false)} onSelect={applyExample} />
+      ) : null}
     </main>
   );
 }
@@ -672,32 +1062,51 @@ function FailureReport({ result }: { result: ApiResult }) {
 function GenerationProgress({
   media,
   frames,
-  progress
+  progress,
+  elapsedSeconds,
+  etaSeconds,
+  totalFrames
 }: {
   media: MediaState | null;
   frames: string[];
   progress: number;
+  elapsedSeconds: number;
+  etaSeconds: number;
+  totalFrames: number;
 }) {
-  const generatedFrames = Math.max(1, Math.min(PROGRESS_TOTAL_FRAMES, Math.round((progress / 100) * PROGRESS_TOTAL_FRAMES)));
+  const generatedFrames = Math.max(1, Math.min(totalFrames, Math.round((progress / 100) * totalFrames)));
   const displayFrames = frames.length > 0 ? frames : Array.from({ length: PROGRESS_FRAME_COUNT }, () => "");
-  const fallbackLabel = media?.kind === "image" ? "Image condition" : "Video condition";
+  const fallbackLabel = media?.kind === "image" ? "Image condition" : media?.kind === "video" ? "Video condition" : "Text prompt";
+  const remainingSeconds = Math.max(0, etaSeconds - elapsedSeconds);
+  const overrun = elapsedSeconds > etaSeconds;
 
   return (
     <article className="generationProgress" aria-live="polite">
       <div className="progressHeader">
         <p>
-          <strong>The autoregressive model is working:</strong> Predicting future frames for you...
+          <strong>The diffusion model is working:</strong> denoising {totalFrames} latent frames in parallel, then
+          VAE-decoding and encoding the output.
         </p>
-        <span>{generatedFrames} / {PROGRESS_TOTAL_FRAMES} frames</span>
+        <span>
+          {generatedFrames} / {totalFrames} frames - elapsed {formatDuration(elapsedSeconds)}
+          {overrun ? ` - over est. by ${formatDuration(elapsedSeconds - etaSeconds)}` : ` - ETA ${formatDuration(remainingSeconds)}`}
+        </span>
       </div>
-      <div className="progressTrack" aria-label="Generation progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} role="progressbar">
+      <div
+        className="progressTrack"
+        aria-label="Generation progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(progress)}
+        role="progressbar"
+      >
         <span style={{ width: `${Math.max(4, progress)}%` }} />
       </div>
       <div className="generatedFrameStrip">
         {displayFrames.map((src, index) => {
           const threshold = (index / PROGRESS_FRAME_COUNT) * 86;
           const readiness = Math.max(0, Math.min(1, (progress - threshold) / 34));
-          const frameNumber = Math.min(PROGRESS_TOTAL_FRAMES, Math.max(1, Math.round(((index + 1) / PROGRESS_FRAME_COUNT) * PROGRESS_TOTAL_FRAMES)));
+          const frameNumber = Math.min(totalFrames, Math.max(1, Math.round(((index + 1) / PROGRESS_FRAME_COUNT) * totalFrames)));
           const style = {
             "--frame-blur": `${Math.max(0, 10 - readiness * 10)}px`,
             "--frame-opacity": String(0.38 + readiness * 0.62)
@@ -718,11 +1127,12 @@ function GenerationProgress({
   );
 }
 
-function WorldPreview() {
+function WorldPreview({ mode }: { mode: GeneratorMode }) {
+  const labels = mode === "Text-to-Video" ? ["Prompt", "Latent rollout", "Video"] : ["Condition", "Latent rollout", "Future frames"];
   return (
     <article className="worldPreview">
       <div className="worldFrameGrid">
-        {["Condition", "Latent rollout", "Future frames"].map((label, index) => (
+        {labels.map((label, index) => (
           <div className="worldFrame" key={label}>
             <span>{String(index + 1).padStart(2, "0")}</span>
             <strong>{label}</strong>
@@ -731,8 +1141,8 @@ function WorldPreview() {
       </div>
       <h3>Generated Future World</h3>
       <p>
-        Upload a short conditioning clip or image, then generate a future-state video. The local NIM path returns a
-        base64 MP4; the hosted Build schema returns an asset URL.
+        Run a quick T2V prompt or add an I2V conditioning image. The local Ray Serve path returns an inline video when
+        output files are readable, plus raw JSON for diagnostics.
       </p>
     </article>
   );
@@ -777,6 +1187,31 @@ function PromptBox({
   );
 }
 
+function SelectField({
+  label,
+  value,
+  options,
+  onChange
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="numberField">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function NumberField({
   label,
   value,
@@ -804,5 +1239,59 @@ function NumberField({
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
+  );
+}
+
+function ExampleModal({
+  examples,
+  onClose,
+  onSelect
+}: {
+  examples: ExampleItem[];
+  onClose: () => void;
+  onSelect: (example: ExampleItem) => void;
+}) {
+  return (
+    <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
+      <div
+        className="examplesModal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="examples-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modalHeader">
+          <div>
+            <p>Examples</p>
+            <h2 id="examples-title">Cosmos3 Generator presets</h2>
+          </div>
+          <button className="iconButton" aria-label="Close examples" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="exampleList">
+          {examples.map((example) => (
+            <button key={example.id} className="exampleItem" onClick={() => onSelect(example)}>
+              <div className="exampleThumb">
+                {example.mediaUrl ? (
+                  example.mediaKind === "video" ? (
+                    <video src={example.mediaUrl} muted playsInline />
+                  ) : (
+                    <img src={example.mediaUrl} alt="" />
+                  )
+                ) : (
+                  <FileVideo size={28} />
+                )}
+              </div>
+              <div className="exampleText">
+                <span>{example.eyebrow}</span>
+                <strong>{example.label}</strong>
+                <p>{example.prompt}</p>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

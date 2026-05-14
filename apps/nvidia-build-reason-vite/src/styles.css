@@ -781,50 +781,120 @@ select:focus,
   background: transparent;
 }
 
-.reasoningCard,
 .generatingOutput {
   min-height: 620px;
   overflow: hidden;
-  border: 2px solid var(--green);
   border-radius: 8px;
-  background: #0c0c0c;
   padding: 20px 16px;
 }
 
 .generatingOutput {
   display: grid;
   place-items: center;
-  background: #0b0b0b;
+  background:
+    radial-gradient(circle at 50% 34%, rgba(118, 185, 0, 0.16), transparent 16%),
+    #080808;
 }
 
 .generatingCenter {
   display: grid;
   justify-items: center;
-  gap: 14px;
-  color: var(--green);
+  gap: 18px;
+  color: var(--text);
 }
 
-.generatingCenter svg,
-.thinkingCard .stepStatus svg,
-.thinkingCollapsed svg:first-child {
-  animation: hourglassPulse 950ms ease-in-out infinite;
+.generatingMark {
+  position: relative;
+  width: 104px;
+  height: 104px;
+  filter: drop-shadow(0 0 24px rgba(118, 185, 0, 0.45));
+  transform: rotate(45deg);
+  animation: generatingFloat 1600ms ease-in-out infinite;
+}
+
+.facet {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: var(--green);
+}
+
+.facetA {
+  top: 2px;
+  left: 35px;
+  opacity: 1;
+}
+
+.facetB {
+  top: 25px;
+  left: 12px;
+  opacity: 0.9;
+  transform: rotate(180deg);
+}
+
+.facetC {
+  top: 25px;
+  left: 58px;
+  opacity: 0.78;
+  transform: rotate(180deg);
+}
+
+.facetD {
+  top: 36px;
+  left: 35px;
+  opacity: 0.7;
+}
+
+.facetE {
+  top: 58px;
+  left: 12px;
+  opacity: 0.62;
+}
+
+.facetF {
+  top: 58px;
+  left: 58px;
+  opacity: 0.46;
+}
+
+.facetG {
+  top: 69px;
+  left: 35px;
+  opacity: 0.38;
+  transform: rotate(180deg);
+}
+
+.facetH {
+  top: 35px;
+  left: 1px;
+  opacity: 0.34;
+  transform: rotate(90deg);
+}
+
+.facetI {
+  top: 35px;
+  right: 1px;
+  opacity: 0.28;
+  transform: rotate(-90deg);
 }
 
 .generatingCenter h3 {
-  color: var(--green);
-  font-size: 18px;
-  font-weight: 800;
+  color: #f5f5f5;
+  font-size: 22px;
+  font-weight: 500;
 }
 
 .reasoningTopline {
+  align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
 }
 
 .reasoningCard h3 {
-  color: var(--muted);
-  font-size: 24px;
-  line-height: 37px;
+  color: #a7a7a7;
+  font-size: 28px;
+  line-height: 36px;
   font-weight: 700;
 }
 
@@ -840,17 +910,17 @@ select:focus,
 }
 
 .reasoningCard p {
-  max-width: 560px;
-  margin-top: 8px;
-  color: #e5e5e5;
+  max-width: 740px;
+  margin-top: 22px;
+  color: #f0f0f0;
   font-size: 16px;
-  line-height: 25px;
+  line-height: 24px;
 }
 
 .reasoningCard ul {
   display: grid;
   gap: 5px;
-  margin: 24px 0 0;
+  margin: 34px 0 0;
   padding: 0;
   list-style: none;
 }
@@ -867,26 +937,30 @@ select:focus,
 .reasoningStepButton {
   display: grid;
   width: 100%;
-  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
   align-items: start;
-  gap: 8px;
-  min-height: 36px;
+  gap: 12px;
+  min-height: 42px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: #8f8f8f;
-  padding: 8px 9px 8px 0;
+  padding: 10px 10px 10px 14px;
   text-align: left;
 }
 
 .reasoningStepButton:hover,
 .reasoningStepButton.activeStep {
   background: #171717;
+  border-color: #333333;
   color: #b7b7b7;
 }
 
 .stepStatus {
-  display: inline-flex;
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
   justify-content: center;
   color: #777;
   padding-top: 2px;
@@ -1180,27 +1254,66 @@ select {
 
 .responseStack {
   display: grid;
-  gap: 18px;
+  gap: 22px;
 }
 
-.reasoningCollapsed {
+.reasoningFrame {
+  display: grid;
+  gap: 14px;
+}
+
+.reasoningCollapsed,
+.reasoningPill {
   display: inline-flex;
   width: fit-content;
+  min-height: 42px;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--green);
   border-radius: 999px;
-  background: #102100;
+  background: #284b00;
   color: var(--text);
-  padding: 8px 12px;
+  padding: 0 16px;
   font-size: 12px;
   font-weight: 800;
+}
+
+.reasoningCollapsed:hover,
+.reasoningPill:hover {
+  background: #315f00;
+}
+
+.thinkingCollapsed,
+.thinkingPill {
+  border-color: #80c800;
+  background: #284b00;
+}
+
+.reasoningCollapsed svg,
+.reasoningPill svg {
+  color: #f1f1f1;
+}
+
+.pillChevron {
+  transition: transform 150ms ease;
+}
+
+.pillChevron.expanded {
+  transform: rotate(180deg);
 }
 
 .reasoningCard {
   min-height: auto;
   max-height: 620px;
   overflow: auto;
+  border: 2px solid var(--green);
+  border-radius: 8px;
+  background: #090909;
+  padding: 28px 24px;
+}
+
+.thinkingCard {
+  border-color: #80c800;
 }
 
 .answer {
@@ -1249,24 +1362,32 @@ select {
   line-height: 1.5;
 }
 
-.runningOutput {
-  border-color: var(--green);
-  background: linear-gradient(135deg, #102100, #080808);
-}
-
 .streamingAnswer {
   border-color: #385322;
 }
 
-@keyframes hourglassPulse {
+.reasoningSpinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #f4f4f4;
+  border-radius: 50%;
+  animation: reasoningSpin 850ms linear infinite;
+}
+
+@keyframes generatingFloat {
   0%,
   100% {
-    opacity: 0.55;
-    transform: scale(0.96);
+    transform: rotate(45deg) translateY(0) scale(0.96);
   }
   50% {
-    opacity: 1;
-    transform: scale(1);
+    transform: rotate(45deg) translateY(-5px) scale(1);
+  }
+}
+
+@keyframes reasoningSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -1671,8 +1792,13 @@ select {
     min-height: auto;
   }
 
+  .inputPanel,
   .outputPanel {
     display: none;
+  }
+
+  .panel.mobileActivePanel {
+    display: block;
   }
 
   .inputPanel .panelHeader {

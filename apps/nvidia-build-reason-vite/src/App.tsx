@@ -7,7 +7,6 @@ import {
   FileImage,
   FileVideo,
   HelpCircle,
-  Hourglass,
   Info,
   Menu,
   Play,
@@ -55,6 +54,7 @@ const HERO_TAGS = [
 
 type SectionTab = "Experience" | "Model Card" | "System Card" | "Deploy";
 type OutputTab = "preview" | "json";
+type MobilePanel = "input" | "output";
 
 type MediaState = {
   name: string;
@@ -1100,6 +1100,18 @@ function ExperiencePanel({
   topP: number;
   userPrompt: string;
 }) {
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
+
+  async function runWithOutputVisible() {
+    setMobilePanel("output");
+    await run();
+  }
+
+  function resetWithInputVisible() {
+    reset();
+    setMobilePanel("input");
+  }
+
   return (
     <>
       <div className="aiNotice">
@@ -1115,12 +1127,28 @@ function ExperiencePanel({
       </div>
 
       <div className="mobileIOTabs" role="tablist" aria-label="Input output">
-        <button className="active">Input</button>
-        <button>Output</button>
+        <button
+          className={mobilePanel === "input" ? "active" : ""}
+          aria-selected={mobilePanel === "input"}
+          onClick={() => setMobilePanel("input")}
+          role="tab"
+          type="button"
+        >
+          Input
+        </button>
+        <button
+          className={mobilePanel === "output" ? "active" : ""}
+          aria-selected={mobilePanel === "output"}
+          onClick={() => setMobilePanel("output")}
+          role="tab"
+          type="button"
+        >
+          Output
+        </button>
       </div>
 
       <div className="workspace">
-        <section className="panel inputPanel">
+        <section className={mobilePanel === "input" ? "panel inputPanel mobileActivePanel" : "panel inputPanel"}>
           <div className="panelHeader">
             <h2>Input</h2>
             <button className="secondaryAction" onClick={() => setExamplesOpen(true)}>
@@ -1202,11 +1230,11 @@ function ExperiencePanel({
           />
 
           <div className="runBar">
-            <button className="resetButton" onClick={reset} type="button">
+            <button className="resetButton" onClick={resetWithInputVisible} type="button">
               <RotateCcw size={16} />
               Reset
             </button>
-            <button className={`runButton${isRunning ? " running" : ""}`} onClick={run} type="button">
+            <button className={`runButton${isRunning ? " running" : ""}`} onClick={runWithOutputVisible} type="button">
               {isRunning ? null : <Play size={16} fill="currentColor" />}
               {isRunning ? "Quit Task" : "Run"}
             </button>
@@ -1216,7 +1244,7 @@ function ExperiencePanel({
           </div>
         </section>
 
-        <section className="panel outputPanel">
+        <section className={mobilePanel === "output" ? "panel outputPanel mobileActivePanel" : "panel outputPanel"}>
           <div className="panelHeader">
             <div className="outputTabs">
               <h2>Output</h2>
@@ -1249,7 +1277,6 @@ function ExperiencePanel({
               <PreviewOutput
                 isRunning={isRunning}
                 parsedOutput={parsedOutput}
-                reasoningEnabled={reasoningEnabled}
                 reasoningExpanded={reasoningExpanded}
                 result={result}
                 setReasoningExpanded={setReasoningExpanded}
@@ -1367,7 +1394,6 @@ function ExampleModal({
 function PreviewOutput({
   isRunning,
   parsedOutput,
-  reasoningEnabled,
   reasoningExpanded,
   result,
   setReasoningExpanded,
@@ -1375,7 +1401,6 @@ function PreviewOutput({
 }: {
   isRunning: boolean;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
-  reasoningEnabled: boolean;
   reasoningExpanded: boolean;
   result: ApiResult | null;
   setReasoningExpanded: (expanded: boolean) => void;
@@ -1419,7 +1444,7 @@ function PreviewOutput({
     const hasAnswer = Boolean(parsedOutput.answer || result.content);
     return (
       <div className="responseStack">
-        {reasoningEnabled && parsedOutput.reasoning ? (
+        {parsedOutput.reasoning ? (
           <ReasoningCard
             complete={!isRunning || streamPhase === "answer" || streamPhase === "complete"}
             expanded={reasoningExpanded}
@@ -1455,11 +1480,32 @@ function GeneratingOutput() {
   return (
     <article className="generatingOutput" aria-live="polite">
       <div className="generatingCenter">
-        <Hourglass size={36} />
-        <h3>Generating</h3>
+        <GeneratingMark />
+        <h3>Generating...</h3>
       </div>
     </article>
   );
+}
+
+function GeneratingMark() {
+  return (
+    <div className="generatingMark" aria-hidden="true">
+      <span className="facet facetA" />
+      <span className="facet facetB" />
+      <span className="facet facetC" />
+      <span className="facet facetD" />
+      <span className="facet facetE" />
+      <span className="facet facetF" />
+      <span className="facet facetG" />
+      <span className="facet facetH" />
+      <span className="facet facetI" />
+    </div>
+  );
+}
+
+function ReasoningStatusIcon({ complete }: { complete: boolean }) {
+  if (complete) return <CheckCircle2 size={16} />;
+  return <span className="reasoningSpinner" aria-hidden="true" />;
 }
 
 function ReasoningCard({
@@ -1479,6 +1525,9 @@ function ReasoningCard({
 }) {
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
   const title = complete ? "Reasoning Complete" : "Thinking...";
+  const description = complete
+    ? "Below is the entire thinking process the model went through to arrive at its response."
+    : "The Model is thinking. Once it has completed reasoning, it will give you a response.";
 
   if (!expanded) {
     return (
@@ -1487,50 +1536,61 @@ function ReasoningCard({
         onClick={() => setExpanded(true)}
         type="button"
       >
-        {complete ? <CheckCircle2 size={16} /> : <Hourglass size={16} />}
+        <ReasoningStatusIcon complete={complete} />
         <span>{title}</span>
-        <ChevronDown size={15} />
+        <ChevronDown className="pillChevron" size={15} />
       </button>
     );
   }
 
   const visibleSteps = steps.length > 0 ? steps : [reasoning];
   return (
-    <article className={complete ? "reasoningCard" : "reasoningCard thinkingCard"}>
-      <div className="reasoningTopline">
-        <div>
-          <h3>{title}</h3>
-          <p>Below is the entire thinking process the model went through to arrive at its response.</p>
+    <div className="reasoningFrame">
+      <article className={complete ? "reasoningCard" : "reasoningCard thinkingCard"}>
+        <div className="reasoningTopline">
+          <div>
+            <h3>{title}</h3>
+            <p>{description}</p>
+          </div>
+          <button onClick={() => setExpanded(false)} type="button">
+            Collapse
+            <ChevronDown className="collapseChevron" size={15} />
+          </button>
         </div>
-        <button onClick={() => setExpanded(false)} type="button">
-          Collapse
-          <ChevronDown size={15} />
-        </button>
-      </div>
-      <ul>
-        {visibleSteps.map((step, index) => {
-          const id = `reasoning-step-${index}`;
-          const active = isStreaming && index === visibleSteps.length - 1;
-          const open = openSteps[id] ?? active;
-          return (
-            <li className={open ? "open" : ""} key={id}>
-              <button
-                aria-expanded={open}
-                className={active ? "reasoningStepButton activeStep" : "reasoningStepButton"}
-                onClick={() => setOpenSteps((current) => ({ ...current, [id]: !open }))}
-                type="button"
-              >
-                <span className="stepStatus" aria-hidden="true">
-                  {active ? <Hourglass size={15} /> : <CheckCircle2 size={15} />}
-                </span>
-                <span className="stepText">{step}</span>
-                <ChevronRight className="stepChevron" size={14} />
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-    </article>
+        <ul>
+          {visibleSteps.map((step, index) => {
+            const id = `reasoning-step-${index}`;
+            const active = isStreaming && index === visibleSteps.length - 1;
+            const open = openSteps[id] ?? active;
+            return (
+              <li className={open ? "open" : ""} key={id}>
+                <button
+                  aria-expanded={open}
+                  className={active ? "reasoningStepButton activeStep" : "reasoningStepButton"}
+                  onClick={() => setOpenSteps((current) => ({ ...current, [id]: !open }))}
+                  type="button"
+                >
+                  <span className="stepStatus" aria-hidden="true">
+                    {active ? <ReasoningStatusIcon complete={false} /> : <CheckCircle2 size={15} />}
+                  </span>
+                  <span className="stepText">{step}</span>
+                  <ChevronRight className="stepChevron" size={14} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </article>
+      <button
+        className={complete ? "reasoningPill" : "reasoningPill thinkingPill"}
+        onClick={() => setExpanded(false)}
+        type="button"
+      >
+        <ReasoningStatusIcon complete={complete} />
+        <span>{title}</span>
+        <ChevronDown className="pillChevron expanded" size={15} />
+      </button>
+    </div>
   );
 }
 

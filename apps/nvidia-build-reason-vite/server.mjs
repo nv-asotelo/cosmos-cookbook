@@ -647,6 +647,7 @@ function sse(response, event, data) {
   if (response.writableEnded) return;
   response.write(`event: ${event}\n`);
   response.write(`data: ${JSON.stringify(data)}\n\n`);
+  response.flush?.();
 }
 
 function readSseBlocks(buffer) {
@@ -811,6 +812,7 @@ app.post("/api/reason/stream", async (request, response) => {
     Connection: "keep-alive",
     "X-Accel-Buffering": "no"
   });
+  response.flushHeaders?.();
   sse(response, "state", { phase: "waiting_first_token" });
 
   try {
