@@ -97,7 +97,7 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 | `nvidia/Cosmos3-Nano` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-NANO-GEN` |
 | `nvidia/Cosmos3-Super` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-SUPER-GEN` |
 
-**Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`, paired with `gradio_cosmos_reason_build.py` (the auto-routed `nvidia_build` Gradio for the Reason collection).
+**Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`. Current HF API checks return auth-required for `nvidia/Cosmos3-Nano-Reasoner` and `nvidia/Cosmos3-Super-Reasoner`, so set `HF_TOKEN` with the required access before launch. For `MODEL_SIZE=C3-8B` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
 
 **Generators** require the upstream `nvidia-cosmos/cosmos3` package and a different runtime:
 
@@ -368,8 +368,8 @@ AskUserQuestion({
       header: "Cosmos3",
       multiSelect: false,
       options: [
-        { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — chat VLM, ~16 GB BF16, vLLM-served" },
-        { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — chat VLM, ~60 GB BF16, vLLM-served" },
+        { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — chat VLM, ~16 GB BF16, vLLM-served, HF_TOKEN may be required" },
+        { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — chat VLM, ~60 GB BF16, vLLM-served, HF_TOKEN may be required" },
         { label: "Cosmos3-Nano (Generator)",  description: "nvidia/Cosmos3-Nano — diffusion video gen (t2i/t2v/i2v), ~30 GB; needs cosmos3 upstream package" },
         { label: "Cosmos3-Super (Generator)", description: "nvidia/Cosmos3-Super — diffusion video gen (t2i/t2v/i2v), ~60 GB; needs cosmos3 upstream package" }
       ]
@@ -380,8 +380,8 @@ AskUserQuestion({
 
 | Selection | Sets |
 |---|---|
-| Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `INFERENCE_BACKEND=vllm` |
-| Cosmos3-Super-Reasoner | `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `INFERENCE_BACKEND=vllm` |
+| Cosmos3-Nano-Reasoner | `HF_TOKEN=<token>` · `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `INFERENCE_BACKEND=vllm` |
+| Cosmos3-Super-Reasoner | `HF_TOKEN=<token>` · `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `INFERENCE_BACKEND=vllm` |
 | Cosmos3-Nano (Generator) | `MODEL_ID=nvidia/Cosmos3-Nano` · `MODEL_SIZE=C3-NANO-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
 | Cosmos3-Super (Generator) | `MODEL_ID=nvidia/Cosmos3-Super` · `MODEL_SIZE=C3-SUPER-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
 
@@ -1024,11 +1024,22 @@ for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
+
+tar -C apps -czf - _shared nvidia-build-reason-vite | \
+  ssh -i ~/.ssh/id_ed25519 <user@host> \
+    "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite && tar -C /tmp -xzf -"
 ```
 
 Launch setup:
 ```bash
 ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|batch_inference|gradio|fiftyone> BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+```
+
+Cosmos3 Nano Reasoner Vite Build skin on the verified Horde host:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 horde@10.57.232.110 \
+  "nohup bash -c 'export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Tail logs:
@@ -1039,7 +1050,7 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "tail -60 /tmp/byo_video_setup.log 2>/dev/n
 URL capture:
 ```bash
 ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_batch_inference_live.flag 2>/dev/null"
-ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
+ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'vite='; cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
 ```
 
 ---
@@ -1159,7 +1170,7 @@ Only AskUserQuestion when all providers exhausted — present the failure summar
 | Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
 | Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
 | Cosmos Reason2 BF16 | 32B VLM | 141 GB | `32B` | Public; H200 SXM minimum (H100 80GB insufficient) |
-| Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | Public; was Cosmos3-Reasoner-8B-Private |
+| Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | HF_TOKEN required when HF API returns 401; verify access before launch |
 | Cosmos3-Reasoner 2B/32B | 2B/32B | 40/80+ GB | `C3-2B`, `C3-32B` | Gated HF_TOKEN; nvidia org required |
 | Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
 | Nemotron-Nano-12B-v2-VL FP8 | 12B VLM | 24 GB | `NEM-12B` | FP8 quantized |
@@ -1459,13 +1470,17 @@ Agent steps:
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
    done
+
+   tar -C apps -czf - _shared nvidia-build-reason-vite | \
+     ssh -i ~/.ssh/id_ed25519 horde@<ip> \
+       "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite && tar -C /tmp -xzf -"
    ```
 4. Run setup (streams live output here):
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-     "export HF_TOKEN=hf_... INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos-Reason2-2B MODEL_SIZE=2B BYO_VIDEO_FRONTEND=batch_inference BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
+     "export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URLs print at the end. Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected (filename retains `batch_inference` for backward compat). Read both back with `cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
+5. URLs print at the end. The Vite Build skin writes `/tmp/nvidia_build_reason_vite_url.txt`; Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected (filename retains `batch_inference` for backward compat). Read all back with `cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \

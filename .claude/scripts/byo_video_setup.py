@@ -13,16 +13,20 @@ selected companion frontend URL. Gradio is always written to
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
-  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+                      C3-NANO-GEN / C3-SUPER-GEN are Cosmos3 OSS *Generators* (diffusion video gen via the
+                      upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
+                      C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
-  BYO_VIDEO_FRONTEND — gradio | batch_inference | fiftyone (default: gradio)
+  BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
-  BATCH_INFERENCE_PORT — port for batch-inference frontend (default: 7861)
-  BATCH_INFERENCE_DATASET — default public HF dataset for batch-inference (default: pjramg/Safe_Unsafe_Test)
+  REASON_VITE_PORT  — port for Cosmos Reason Vite app (default: 5173)
+  BATCH_INFERENCE_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
+  BATCH_INFERENCE_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
-import os, sys, time, subprocess, re, shutil, json, urllib.request, socket
+import os, sys, time, subprocess, re, shutil, json, urllib.request, urllib.parse, urllib.error, socket, tarfile, platform
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
 GREEN  = "\033[32m"
@@ -70,7 +74,7 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
 
 # ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
 _MODEL_CONFIGS = {
-    # ── Cosmos3-Reasoner (C3-2B/C3-32B/C3-super gated; C3-8B = Cosmos3-Nano-Reasoner, public) ──
+    # ── Cosmos3-Reasoner (HF auth may be required; setup verifies repo access before download) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "~TBD"),
@@ -79,7 +83,9 @@ _MODEL_CONFIGS = {
     },
     "C3-8B": {
         "variants": [
-            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~TBD"),
+            # OSS Reasoner (chat VLM) — qwen3_vl architecture, ~16 GB BF16, vLLM-served.
+            # Smoke-verified on horde RTX PRO 6000 Blackwell 2026-05-12 (~3m boot, warm cache).
+            ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~16 GB"),
         ],
         "nim": None,
     },
@@ -97,15 +103,44 @@ _MODEL_CONFIGS = {
     },
     "C3-super": {
         "variants": [
-            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~TBD"),
+            # OSS Reasoner (chat VLM) — qwen3_vl architecture, ~30B params (13 safetensor
+            # shards observed on HF). BF16 footprint ~60 GB; fits an H200 SXM (141 GB) cleanly and
+            # an RTX PRO 6000 Blackwell (95 GB) with gpu-memory-utilization 0.85.
+            ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~60 GB"),
         ],
         "nim": None,
-        # 32B model — requires H200 SXM 141GB (confirmed from live deployment 2026-05-05).
-        "disk_gb": 1024,
-        # Architecture: NemotronVLForConditionCausalLM. vLLM may raise "Unsupported architecture"
-        # if this arch is not registered in the installed vLLM build. Use INFERENCE_BACKEND=hf
-        # as a fallback — confirmed working on H200 at 2026-05-05 live run.
-        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.93"],
+        # ~60 GB weights + venv + HF cache → 256 GB minimum is plenty; keep 1 TB recommendation for safety on multi-model hosts.
+        "disk_gb": 256,
+        "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.85"],
+    },
+    # ── Cosmos3 OSS Generators (diffusion video generation via upstream cosmos3 package) ──
+    # These models use the nvidia-cosmos/cosmos3 Python package (NOT vLLM / NOT NIM).
+    # Setup path:
+    #   git clone https://github.com/nvidia-cosmos/cosmos3.git ~/cosmos3
+    #   cd ~/cosmos3 && uv sync --all-extras --group=cu130-train
+    # Serve path:
+    #   python -m cosmos3.ray.serve --checkpoint-path Cosmos3-Nano|Cosmos3-Super   # port 8000
+    #   python -m cosmos3.ray.gradio --host 0.0.0.0 --port 8080                    # UI
+    # See scripts/cosmos3_native_launch.sh for the wrapped launcher used by INFERENCE_BACKEND=cosmos3_native.
+    "C3-NANO-GEN": {
+        "variants": [
+            # nvidia/Cosmos3-Nano — public diffusers Cosmos3OmniDiffusersPipeline (t2i/t2v/i2v).
+            # Driven by --checkpoint-path Cosmos3-Nano in cosmos3.scripts.inference.
+            ("Cosmos3-Nano Generator", "Cosmos3-Nano", "nvidia/Cosmos3-Nano", "~30 GB"),
+        ],
+        "nim": None,
+        "disk_gb": 128,
+        "backend_required": "cosmos3_native",
+    },
+    "C3-SUPER-GEN": {
+        "variants": [
+            # nvidia/Cosmos3-Super — public diffusers Cosmos3OmniDiffusersPipeline (t2i/t2v/i2v).
+            # Larger checkpoint than Nano (53 sibling files vs 35).
+            ("Cosmos3-Super Generator", "Cosmos3-Super", "nvidia/Cosmos3-Super", "~60 GB"),
+        ],
+        "nim": None,
+        "disk_gb": 256,
+        "backend_required": "cosmos3_native",
     },
     # ── Cosmos Reason1 7B NIM (older generation; frame fallback at runtime) ───
     "CR1-7B": {
@@ -113,6 +148,35 @@ _MODEL_CONFIGS = {
             ("CR1-7B BF16", "Cosmos-Reason1-7B", "nvidia/Cosmos-Reason1-7B", "~14 GB"),
         ],
         "nim": "nvidia/cosmos-reason1-7b",
+    },
+    # ── Cosmos Predict / Video2World NIMs (Build-style Gradio surface) ───
+    "PREDICT1-5B": {
+        "variants": [
+            ("Cosmos Predict1 5B Video2World", "Cosmos-Predict1-5B-Video2World",
+             "nvidia/Cosmos-Predict1-5B-Video2World", "~10 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict1-5b",
+    },
+    "PREDICT1-7B": {
+        "variants": [
+            ("Cosmos Predict1 7B Video2World", "Cosmos-Predict1-7B-Video2World",
+             "nvidia/Cosmos-Predict1-7B-Video2World", "~14 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict1-7b-video2world",
+    },
+    "PREDICT25-2B": {
+        "variants": [
+            ("Cosmos Predict2.5 2B", "Cosmos-Predict2.5-2B",
+             "nvidia/Cosmos-Predict2.5-2B", "~4 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict2-5-2b",
+    },
+    "PREDICT25-14B": {
+        "variants": [
+            ("Cosmos Predict2.5 14B", "Cosmos-Predict2.5-14B",
+             "nvidia/Cosmos-Predict2.5-14B", "~28 GB"),
+        ],
+        "nim": "nvidia/cosmos-predict2-5-14b",
     },
     # ── Cosmos Reason2 ──
     "2B": {
@@ -242,13 +306,19 @@ MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
-GRADIO_APP    = "/tmp/gradio_cr2_byo.py"
-FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "gradio").strip().lower()
+FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "nvidia_build").strip().lower()
 if FRONTEND == "agent":
     FRONTEND = "batch_inference"
+if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playground"):
+    FRONTEND = "nvidia_build"
 BATCH_INFERENCE_PORT = int(os.environ.get("BATCH_INFERENCE_PORT", "7861"))
 BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
 BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
+REASON_VITE_PORT = int(os.environ.get("REASON_VITE_PORT", os.environ.get("PORT", "5173")))
+REASON_VITE_APP_DIR = os.environ.get("REASON_VITE_APP_DIR", "/tmp/nvidia-build-reason-vite")
+REASON_VITE_URL_FILE = "/tmp/nvidia_build_reason_vite_url.txt"
+REASON_VITE_LIVE_FLAG = "/tmp/nvidia_build_reason_vite_live.flag"
+NODE_HOME = os.environ.get("NODE_HOME", f"{HOME}/.local/node-v20")
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
@@ -269,10 +339,11 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, 2B, 8B, 32B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
+HF_AUTH_REQUIRED = _cfg.get("hf_auth_required", not _cfg.get("hf_public", False))
 
 # Primary variant (first in list) drives MODEL_DIR/MODEL_NAME defaults
 _primary_label, _primary_dirname, _primary_hf_id, _ = _cfg["variants"][0]
@@ -407,11 +478,61 @@ if not MODEL_ID:
 else:
     _variant_labels = MODEL_ID
 
+def _build_playground_app(model_size, *names):
+    tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
+    if "predict" in tokens or "video2world" in tokens or "text2world" in tokens:
+        return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
+    if "reason" in tokens or "cosmos3" in tokens or model_size in {
+        "CR1-7B", "2B", "8B", "32B", "C3-2B", "C3-8B", "C3-32B", "C3-super",
+    }:
+        return "/tmp/gradio_cosmos_reason_build.py", "Cosmos Reason Build-style playground"
+    return "/tmp/gradio_cr2_byo.py", "Cosmos Build-style BYO-video Gradio"
+
+if FRONTEND == "nvidia_build":
+    GRADIO_APP, _GRADIO_APP_LABEL = _build_playground_app(
+        MODEL_SIZE, MODEL_ID, MODEL_NAME, _variant_labels
+    )
+else:
+    GRADIO_APP = os.environ.get("GRADIO_APP", "/tmp/gradio_cr2_byo.py")
+    _GRADIO_APP_LABEL = "Cosmos Build-style BYO-video Gradio"
+
+USE_REASON_VITE = (
+    FRONTEND == "nvidia_build"
+    and INFERENCE_BACKEND == "vllm"
+    and MODEL_SIZE in {"C3-8B", "C3-super"}
+)
+if USE_REASON_VITE:
+    _GRADIO_APP_LABEL = f"Cosmos Reason Gradio fallback for {MODEL_SIZE}"
+
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
+ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
+if USE_REASON_VITE:
+    ok(f"Primary Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
 ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
 STEPS_DONE.append(1)
 print_dashboard()
+
+def hf_repo_access_without_token(model_id):
+    if not model_id or model_id.startswith("/") or os.path.exists(model_id):
+        return True, "local model path"
+    repo = urllib.parse.quote(model_id, safe="/")
+    req = urllib.request.Request(
+        f"https://huggingface.co/api/models/{repo}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+            if payload.get("private") is True:
+                return False, "HF API reports private=true"
+            return True, f"HF API HTTP {resp.status}"
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403, 404):
+            return False, f"HF API HTTP {err.code}"
+        return None, f"HF API HTTP {err.code}"
+    except Exception as err:
+        return None, str(err)
 
 # ── Step 2: HF token ──────────────────────────────────────────────────────────
 header("Step 2 — HuggingFace auth", eta="<5s")
@@ -426,12 +547,20 @@ elif os.path.exists(hf_cache):
         HF_TOKEN = f.read().strip()
     ENV["HF_TOKEN"] = HF_TOKEN
 else:
-    print("  ✗  HF_TOKEN not set and no cached token found.")
-    print("     Run: export HF_TOKEN=hf_... and re-run this script.")
-    sys.exit(1)
+    public_access, public_msg = hf_repo_access_without_token(MODEL_NAME)
+    if public_access:
+        HF_AUTH_REQUIRED = False
+        info(f"{MODEL_NAME} is reachable without HF_TOKEN ({public_msg})")
+    elif HF_AUTH_REQUIRED or public_access is False:
+        print("  ✗  HF_TOKEN not set and no cached token found.")
+        print(f"     {MODEL_NAME} is not reachable anonymously ({public_msg}).")
+        print("     Run: export HF_TOKEN=hf_... and re-run this script.")
+        sys.exit(1)
+    else:
+        warn(f"Could not verify anonymous HF access ({public_msg}) — continuing without token")
 
 # ── Step 2b: Validate HF token ────────────────────────────────────────────────
-if INFERENCE_BACKEND != "nim_local":
+if INFERENCE_BACKEND != "nim_local" and HF_TOKEN:
     header("Step 2b — Validate HF token", eta="<2s")
     _hf_req = urllib.request.Request(
         "https://huggingface.co/api/whoami",
@@ -446,6 +575,8 @@ if INFERENCE_BACKEND != "nim_local":
                 sys.exit(1)
     except Exception as _hf_err:
         warn(f"HF token check failed ({_hf_err}) — continuing, will fail at download if token is bad")
+elif INFERENCE_BACKEND != "nim_local":
+    info("No HF token to validate for public model.")
 
 STEPS_DONE.append(2)
 print_dashboard()
@@ -610,6 +741,118 @@ else:
     else:
         ok("requests installed")
 
+if USE_REASON_VITE:
+    def _activate_node_home():
+        node_bin = os.path.join(NODE_HOME, "bin")
+        node_path = os.path.join(node_bin, "node")
+        if os.path.exists(node_path):
+            ENV["PATH"] = f"{node_bin}:{ENV.get('PATH', '')}"
+            os.environ["PATH"] = ENV["PATH"]
+            return True
+        return False
+
+    def _node_major():
+        rc_node, out_node = run_cmd(["node", "--version"], env=ENV)
+        if rc_node != 0:
+            return 0, out_node.strip()
+        match = re.search(r"v(\d+)", out_node)
+        return int(match.group(1)) if match else 0, out_node.strip()
+
+    def _portable_node_arch():
+        machine = platform.machine().lower()
+        if machine in ("x86_64", "amd64"):
+            return "x64"
+        if machine in ("aarch64", "arm64"):
+            return "arm64"
+        return None
+
+    def _install_portable_node():
+        arch = _portable_node_arch()
+        if not arch:
+            return False, f"unsupported CPU architecture for Node.js tarball: {platform.machine()}"
+
+        requested = os.environ.get("NODE_VERSION", "20.19.5").lstrip("v")
+        versions = []
+        for version in (requested, "20.18.1", "20.11.1"):
+            if version not in versions:
+                versions.append(version)
+
+        last_error = ""
+        os.makedirs(os.path.dirname(NODE_HOME), exist_ok=True)
+        for version in versions:
+            dist = f"node-v{version}-linux-{arch}"
+            url = f"https://nodejs.org/dist/v{version}/{dist}.tar.xz"
+            archive = f"/tmp/{dist}.tar.xz"
+            extract_dir = f"/tmp/{dist}-extract"
+            try:
+                info(f"Downloading portable Node.js {version} from nodejs.org")
+                urllib.request.urlretrieve(url, archive)
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                os.makedirs(extract_dir, exist_ok=True)
+                with tarfile.open(archive, "r:xz") as tar:
+                    tar.extractall(extract_dir)
+                extracted_root = os.path.join(extract_dir, dist)
+                if not os.path.exists(os.path.join(extracted_root, "bin", "node")):
+                    raise RuntimeError("downloaded Node.js archive did not contain bin/node")
+                shutil.rmtree(NODE_HOME, ignore_errors=True)
+                shutil.move(extracted_root, NODE_HOME)
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                _activate_node_home()
+                return True, f"portable Node.js {version} installed under {NODE_HOME}"
+            except Exception as err:
+                last_error = f"{version}: {err}"
+                warn(f"Portable Node.js {version} install failed ({err})")
+        return False, last_error
+
+    _activate_node_home()
+    node_major, node_version = _node_major()
+    if node_major < 18:
+        run("Installing Node.js 20 for Vite Reason app")
+        apt_attempted = False
+        if shutil.which("apt-get") is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
+            apt_attempted = True
+            rc, out = run_cmd(
+                ["bash", "-lc", "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs"],
+                env=ENV,
+                timeout=240,
+            )
+            if rc != 0:
+                warn(f"NodeSource apt install failed, falling back to portable Node.js: {out[-600:]}")
+        if not apt_attempted:
+            info("No root apt-get access detected — installing portable Node.js for this user")
+        _activate_node_home()
+        node_major, node_version = _node_major()
+        if node_major < 18:
+            ok_portable, portable_msg = _install_portable_node()
+            if ok_portable:
+                ok(portable_msg)
+            else:
+                print(f"  ✗  Node.js install failed: {portable_msg}")
+                sys.exit(1)
+            node_major, node_version = _node_major()
+    if node_major < 18:
+        print(f"  ✗  Node.js >=18 is required for Vite; found {node_version or 'none'}.")
+        sys.exit(1)
+    ok(f"Node.js ready ({node_version})")
+
+    if not os.path.exists(os.path.join(REASON_VITE_APP_DIR, "package.json")):
+        print(f"  ✗  {REASON_VITE_APP_DIR}/package.json not found — deploy apps/nvidia-build-reason-vite first.")
+        sys.exit(1)
+    if not os.path.exists("/tmp/_shared/reasonerClient.mjs"):
+        print("  ✗  /tmp/_shared/reasonerClient.mjs not found — deploy apps/_shared first.")
+        sys.exit(1)
+
+    node_modules = os.path.join(REASON_VITE_APP_DIR, "node_modules")
+    if os.path.isdir(node_modules):
+        ok("Reason Vite npm dependencies already installed")
+    else:
+        run("Installing Reason Vite npm dependencies")
+        rc, out = run_cmd(["npm", "ci"], cwd=REASON_VITE_APP_DIR, env=ENV, timeout=240)
+        if rc != 0:
+            print("  ✗  npm ci failed:", out[-1200:])
+            sys.exit(1)
+        ok("Reason Vite npm dependencies installed")
+
 if FRONTEND in ("batch_inference", "fiftyone"):
     rc, fo_check = run_cmd(
         ["uv", "run", "python", "-c", "import fiftyone, huggingface_hub; print(fiftyone.__version__)"],
@@ -624,7 +867,7 @@ if FRONTEND in ("batch_inference", "fiftyone"):
             cwd=REASON2_DIR, env=ENV, timeout=240
         )
         if rc != 0:
-            warn(f"FiftyOne install failed — batch inference will fall back where possible: {out[-500:]}")
+            warn(f"FiftyOne install failed — Batch Inference UI will fall back where possible: {out[-500:]}")
         else:
             ok("FiftyOne + huggingface_hub installed")
 
@@ -718,6 +961,17 @@ def _resolve_nim_launch_config(model_id, model_size, cfg):
         or (cfg["variants"][0][2] if cfg.get("variants") else "")
     )
     requested_l = requested.lower()
+    _predict_nim_aliases = {
+        "nvidia/cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
+        "cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
+        "nvidia/cosmos-predict1-7b-video2world": "nvidia/cosmos-predict1-7b-video2world",
+        "cosmos-predict1-7b-video2world": "nvidia/cosmos-predict1-7b-video2world",
+        "nvidia/cosmos-predict2.5-2b": "nvidia/cosmos-predict2-5-2b",
+        "cosmos-predict2.5-2b": "nvidia/cosmos-predict2-5-2b",
+        "nvidia/cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
+        "cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
+    }
+    requested_l = _predict_nim_aliases.get(requested_l, requested_l)
     if requested_l.startswith("nvcr.io/nim/"):
         requested_l = requested_l[len("nvcr.io/nim/"):]
     if requested_l.endswith(":latest"):
@@ -924,7 +1178,7 @@ def _drain_stdout(fh, path):
         pass
 
 def _launch_gradio(sidecar=False):
-    label = "Gradio sidecar" if sidecar else "Cosmos Reason2 demo"
+    label = "Gradio sidecar" if sidecar else _GRADIO_APP_LABEL
     run(f"Starting {label} on port {GRADIO_PORT}")
     gradio_env = dict(launch_env)
     if sidecar:
@@ -1022,6 +1276,71 @@ def _launch_gradio(sidecar=False):
     _thr.Thread(target=_drain_stdout, args=(proc.stdout, LOG_FILE), daemon=True).start()
     return proc, url
 
+def _launch_reason_vite():
+    run(f"Starting Cosmos Reason Vite Build skin on port {REASON_VITE_PORT}")
+    vite_env = {
+        **launch_env,
+        "PORT": str(REASON_VITE_PORT),
+        "MODEL_ID": MODEL_ID,
+        "MODEL_NAME": MODEL_NAME or MODEL_ID,
+        "VLLM_BASE_URL": os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+        "VITE_COSMOS3_INFO_URL": "/api/active-model",
+    }
+    proc = subprocess.Popen(
+        ["npm", "run", "dev"],
+        cwd=REASON_VITE_APP_DIR,
+        env=vite_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    local_url = f"http://localhost:{REASON_VITE_PORT}"
+    log_path = "/tmp/nvidia_build_reason_vite.log"
+    t_launch = time.time()
+    with open(log_path, "w") as log:
+        while time.time() - t_launch < 90:
+            line = proc.stdout.readline()
+            if line:
+                log.write(line)
+                log.flush()
+                stripped = line.rstrip()
+                if stripped:
+                    print(f"     {DIM}{stripped}{RESET}", flush=True)
+                if "vite-build-reason" in stripped:
+                    break
+            if proc.poll() is not None:
+                print(f"  ✗  Reason Vite exited early. Check {log_path}")
+                sys.exit(1)
+            time.sleep(0.2)
+
+    _probe_ok = False
+    for _probe_attempt in range(20):
+        try:
+            urllib.request.urlopen(f"{local_url}/api/models", timeout=3)
+            _probe_ok = True
+            break
+        except Exception:
+            time.sleep(2)
+
+    if not _probe_ok:
+        print("  ✗  Reason Vite launched but /api/models probe failed after 40s.")
+        print(f"     Check {log_path} for errors.")
+        proc.terminate()
+        sys.exit(1)
+
+    host_ip = _detect_host_ip()
+    url = local_url if not host_ip else f"http://{host_ip}:{REASON_VITE_PORT}"
+    for _path in (REASON_VITE_URL_FILE, REASON_VITE_LIVE_FLAG):
+        with open(_path, "w") as f:
+            f.write(url + "\n")
+
+    ok("Reason Vite Build skin is live")
+    import threading as _thr
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, log_path), daemon=True).start()
+    return proc, url
+
 if FRONTEND in ("batch_inference", "fiftyone"):
     if not os.path.exists(BATCH_INFERENCE_APP):
         print(f"  ✗  {BATCH_INFERENCE_APP} not found — deploy byo_video_batch_inference.py first"); sys.exit(1)
@@ -1038,7 +1357,7 @@ if FRONTEND in ("batch_inference", "fiftyone"):
 
     gradio_proc, gradio_url = _launch_gradio(sidecar=True)
 
-    run(f"Starting Cosmos BYO Video batch inference on port {BATCH_INFERENCE_PORT}")
+    run(f"Starting Cosmos BYO Video Batch Inference on port {BATCH_INFERENCE_PORT}")
     proc = subprocess.Popen(
         ["uv", "run", "python", "-u", BATCH_INFERENCE_APP, "serve",
          "--host", "0.0.0.0", "--port", str(BATCH_INFERENCE_PORT)],
@@ -1067,7 +1386,7 @@ if FRONTEND in ("batch_inference", "fiftyone"):
                 break
 
     if not url:
-        print(f"  ✗  Runtime agent printed no URL. Check {BATCH_INFERENCE_LOG_FILE}")
+        print(f"  ✗  Batch Inference printed no URL. Check {BATCH_INFERENCE_LOG_FILE}")
         proc.terminate()
         gradio_proc.terminate()
         sys.exit(1)
@@ -1086,7 +1405,7 @@ if FRONTEND in ("batch_inference", "fiftyone"):
             time.sleep(2)
 
     if not _probe_ok:
-        print("  ✗  Runtime agent launched but /api/state probe failed after 20s.")
+        print("  ✗  Batch Inference launched but /api/state probe failed after 20s.")
         print(f"     Check {BATCH_INFERENCE_LOG_FILE} for errors.")
         proc.terminate()
         gradio_proc.terminate()
@@ -1096,7 +1415,7 @@ if FRONTEND in ("batch_inference", "fiftyone"):
         with open(_path, "w") as f:
             f.write(url + "\n")
 
-    ok("Runtime agent frontend is live")
+    ok("Batch Inference frontend is live")
     STEPS_DONE.append(9)
     print_dashboard()
 
@@ -1116,6 +1435,35 @@ if FRONTEND in ("batch_inference", "fiftyone"):
 
     import threading as _thr
     _thr.Thread(target=_drain_stdout, args=(proc.stdout, BATCH_INFERENCE_LOG_FILE), daemon=True).start()
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        gradio_proc.terminate()
+        proc.wait()
+        gradio_proc.wait()
+    sys.exit(0)
+
+if USE_REASON_VITE:
+    gradio_proc, gradio_url = _launch_gradio(sidecar=True)
+    proc, url = _launch_reason_vite()
+
+    ok("Reason Vite primary UI up; Gradio fallback remains live")
+    STEPS_DONE.append(9)
+    print_dashboard()
+
+    print(flush=True)
+    print(f"{BOLD}{'─'*62}{RESET}", flush=True)
+    print(f"{BOLD}  Cosmos Reason {MODEL_SIZE} Vite Demo — Ready{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(f"  {BOLD}Vite URL:{RESET}    {hyperlink(url)}", flush=True)
+    print(f"  {BOLD}Gradio URL:{RESET}  {hyperlink(gradio_url)}", flush=True)
+    print(f"  {DIM}Model: {MODEL_ID}{RESET}", flush=True)
+    print(f"  {DIM}Vite log: /tmp/nvidia_build_reason_vite.log{RESET}", flush=True)
+    print(f"  {DIM}If direct access is blocked: ssh -L {REASON_VITE_PORT}:localhost:{REASON_VITE_PORT} <user@host>{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(flush=True)
+
     try:
         proc.wait()
     except KeyboardInterrupt:

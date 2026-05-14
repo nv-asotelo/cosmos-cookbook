@@ -1,32 +1,36 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { submitGeneration } from "../_shared/cosmos3Client.mjs";
+import { listReasonerModels, submitReasoning } from "../_shared/reasonerClient.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 5173);
 
-// Env var priority: COSMOS3_BASE_URL > RAY_SERVE_BASE_URL > VLLM_BASE_URL > default.
-const baseUrl =
-  process.env.COSMOS3_BASE_URL ||
-  process.env.RAY_SERVE_BASE_URL ||
-  process.env.VLLM_BASE_URL ||
-  "http://localhost:8000";
-const defaultModel = process.env.MODEL_NAME || "Cosmos3-Nano";
+const defaultModel = process.env.MODEL_NAME || process.env.MODEL_ID || "nvidia/Cosmos3-Nano-Reasoner";
 
 const app = express();
 app.use(express.json({ limit: "128mb" }));
 
-app.get("/api/models", (_request, response) => {
-  // Ray Serve does not expose an OpenAI /models listing — surface the
-  // configured model name as the single available option.
-  response.json({ baseUrl, models: [defaultModel] });
+app.get("/api/models", async (_request, response) => {
+  response.json(await listReasonerModels());
+});
+
+app.get("/api/active-model", async (_request, response) => {
+  const info = await listReasonerModels();
+  response.json({
+    checkpoint: info.models?.[0] || defaultModel,
+    display_name: info.models?.[0] || defaultModel,
+    backend: "vllm",
+    base_url: info.baseUrl,
+    warning: info.warning
+  });
 });
 
 app.post("/api/reason", async (request, response) => {
   const body = request.body || {};
   const prompt = body.prompt || body.userPrompt || "";
+  const systemPrompt = body.systemPrompt || body.system_prompt || "";
 
   let mediaDataUrl;
   let mediaKind = null;
@@ -42,8 +46,10 @@ app.post("/api/reason", async (request, response) => {
   }
 
   try {
-    const result = await submitGeneration({
+    const result = await submitReasoning({
+      model: body.model || defaultModel,
       prompt,
+      systemPrompt,
       mediaDataUrl,
       mediaKind,
       params: body.params || {}
