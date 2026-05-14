@@ -11,7 +11,7 @@ New in this version:
   - Right-side status panel: Step N/5 WIP + live token metrics (replaces grey loading box)
   - NIM mode: NVCF API via NGC_API_KEY (no local weights needed)
 """
-import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup, html as _html_ui
+import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup
 warnings.filterwarnings("ignore")
 
 def _kill_frpc():
@@ -581,16 +581,20 @@ DEMO_PROMPTS = [
 
 
 def _reasoning_badge_html(reasoning_on):
-    """Inline pill rendered near the prompt picker. NV-green for ON,
-    muted graphite for OFF."""
+    """Inline pill rendered above the response area. NV-green for ON,
+    slate-300 for OFF — both readable on Gradio's light theme."""
     if reasoning_on:
         return (
-            '<div class="reasoning-badge reasoning-on">'
-            '<span>Reasoning</span><b>ON</b></div>'
+            '<div style="display:inline-flex;align-items:center;gap:6px;'
+            'background:#76b900;color:#0f172a;padding:4px 12px;'
+            'border-radius:14px;font-size:0.85em;font-weight:600;'
+            'margin-bottom:6px">🧠 Reasoning: ON</div>'
         )
     return (
-        '<div class="reasoning-badge reasoning-off">'
-        '<span>Reasoning</span><b>OFF</b></div>'
+        '<div style="display:inline-flex;align-items:center;gap:6px;'
+        'background:#cbd5e1;color:#0f172a;padding:4px 12px;'
+        'border-radius:14px;font-size:0.85em;font-weight:600;'
+        'margin-bottom:6px">○ Reasoning: OFF</div>'
     )
 
 HF_STEPS = [
@@ -727,276 +731,6 @@ def _expected_quant(model_id):
 # tokens are still streaming inside <think>, the header reads "Reasoning…"
 # and stays expanded so the user can watch the model think.
 _REASONING_PANEL_CSS = """
-/* NVIDIA Build-style skin for the default BYO-video Gradio surface. */
-:root {
-  --nv-green: #76b900;
-  --nv-bg: #0b0b0b;
-  --nv-panel: #111111;
-  --nv-panel-2: #161616;
-  --nv-line: #2d2d2d;
-  --nv-text: #f6f6f6;
-  --nv-muted: #b4b4b4;
-}
-body,
-.gradio-container {
-  background: var(--nv-bg) !important;
-  color: var(--nv-text) !important;
-  font-family: Inter, "NVIDIA Sans", Arial, sans-serif !important;
-}
-.gradio-container {
-  max-width: 1540px !important;
-  padding: 0 28px 32px !important;
-}
-.gradio-container .main {
-  background: transparent !important;
-}
-.nv-appbar {
-  height: 68px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--nv-line);
-  background: #000;
-  margin: 0 -28px;
-  padding: 0 28px;
-}
-.nv-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  color: #fff;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-.nv-brand-mark {
-  background: var(--nv-green);
-  color: #000;
-  font-weight: 800;
-  padding: 7px 10px;
-  line-height: 1;
-}
-.nv-nav {
-  display: flex;
-  gap: 24px;
-  color: #bdbdbd;
-  font-size: 13px;
-}
-.nv-status {
-  color: #dcdcdc;
-  font-size: 12px;
-  border: 1px solid #3a3a3a;
-  padding: 7px 10px;
-  background: #121212;
-}
-.nv-hero {
-  position: relative;
-  min-height: 330px;
-  display: flex;
-  align-items: flex-end;
-  padding: 42px 44px;
-  margin: 0 -28px 0;
-  overflow: hidden;
-  border-bottom: 1px solid var(--nv-line);
-  background:
-    linear-gradient(90deg, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.82) 43%, rgba(0,0,0,0.35) 100%),
-    radial-gradient(circle at 78% 18%, rgba(118,185,0,0.38), transparent 30%),
-    linear-gradient(135deg, #121212 0%, #202020 45%, #050505 100%);
-}
-.nv-hero::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(135deg, transparent 0 35%, rgba(255,255,255,0.05) 35% 36%, transparent 36% 100%),
-    repeating-linear-gradient(90deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 72px);
-  opacity: 0.72;
-  pointer-events: none;
-}
-.nv-hero-copy {
-  position: relative;
-  z-index: 1;
-  max-width: 920px;
-}
-.nv-kicker {
-  color: var(--nv-green);
-  font-size: 13px;
-  font-weight: 700;
-  text-transform: lowercase;
-  margin-bottom: 12px;
-}
-.nv-title-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-bottom: 12px;
-}
-.nv-title-row h1 {
-  margin: 0 !important;
-  color: #fff !important;
-  font-size: clamp(42px, 7vw, 92px) !important;
-  line-height: 0.93 !important;
-  font-weight: 700 !important;
-  letter-spacing: 0 !important;
-}
-.nv-pill {
-  color: #111;
-  background: var(--nv-green);
-  padding: 5px 10px;
-  font-size: 12px;
-  font-weight: 700;
-}
-.nv-desc {
-  max-width: 760px;
-  color: #d6d6d6;
-  font-size: 18px;
-  line-height: 1.45;
-  margin: 0 0 20px;
-}
-.nv-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.nv-tags span {
-  color: #dadada;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.18);
-  padding: 6px 9px;
-  font-size: 12px;
-}
-.nv-meta-strip,
-.nv-ai-notice {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  margin: 16px 0;
-  color: var(--nv-muted);
-  font-size: 13px;
-}
-.nv-meta-strip span {
-  border: 1px solid var(--nv-line);
-  background: #101010;
-  padding: 8px 10px;
-}
-.nv-ai-notice {
-  border: 1px solid #393939;
-  background: #141414;
-  padding: 12px 14px;
-  color: #cecece;
-}
-.nv-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #fff;
-  font-size: 15px;
-  font-weight: 700;
-  margin-bottom: 12px;
-}
-.nv-section-heading span {
-  color: var(--nv-green);
-  font-size: 12px;
-  font-weight: 700;
-}
-.nv-workspace,
-.nv-results-row {
-  border: 1px solid var(--nv-line);
-  background: #0f0f0f;
-  padding: 22px;
-  margin-top: 18px;
-  gap: 18px !important;
-}
-.nv-input-panel,
-.nv-prompt-panel,
-.nv-output-panel,
-.nv-status-panel {
-  border: 1px solid var(--nv-line);
-  background: var(--nv-panel);
-  padding: 18px;
-  min-width: 0;
-}
-.nv-prompt-panel {
-  background: var(--nv-panel-2);
-}
-.nv-control-row {
-  align-items: stretch;
-}
-.reasoning-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  gap: 10px;
-  border: 1px solid var(--nv-line);
-  padding: 9px 10px;
-  margin: 8px 0 12px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0;
-}
-.reasoning-badge span {
-  color: #d6d6d6;
-}
-.reasoning-badge b {
-  color: #050505;
-  background: var(--nv-green);
-  padding: 3px 8px;
-}
-.reasoning-off b {
-  color: #e8e8e8;
-  background: #3a3a3a;
-}
-.gradio-container button.primary,
-.gradio-container button[variant="primary"] {
-  background: var(--nv-green) !important;
-  color: #050505 !important;
-  border: 1px solid var(--nv-green) !important;
-  border-radius: 0 !important;
-  font-weight: 700 !important;
-}
-.gradio-container button.secondary,
-.gradio-container button {
-  border-radius: 0 !important;
-}
-.gradio-container .tabs,
-.gradio-container .tab-nav,
-.gradio-container .tabitem {
-  border-radius: 0 !important;
-}
-.gradio-container label,
-.gradio-container .prose,
-.gradio-container .markdown,
-.gradio-container .wrap,
-.gradio-container .block,
-.gradio-container .form,
-.gradio-container .panel {
-  color: var(--nv-text) !important;
-}
-.gradio-container textarea,
-.gradio-container input,
-.gradio-container select {
-  background: #0b0b0b !important;
-  color: #f5f5f5 !important;
-  border-color: #3a3a3a !important;
-  border-radius: 0 !important;
-}
-.gradio-container .accordion {
-  border: 1px solid var(--nv-line) !important;
-  background: #101010 !important;
-  border-radius: 0 !important;
-}
-@media (max-width: 760px) {
-  .gradio-container { padding: 0 14px 24px !important; }
-  .nv-appbar { margin: 0 -14px; padding: 0 14px; }
-  .nv-nav { display: none; }
-  .nv-hero { margin: 0 -14px; padding: 30px 18px; min-height: 300px; }
-  .nv-title-row h1 { font-size: 44px !important; }
-  .nv-workspace, .nv-results-row { padding: 12px; }
-}
-
 /* Self-contained dark wrapper so contrast holds regardless of Gradio
    theme (light/dark). Mirrors build.nvidia.com's reasoning panel. */
 .cr-output {
@@ -1708,15 +1442,12 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                            {"elapsed_s": _elapsed()}, steps=steps), gr.update()
 
     # Step 3: prepare media content
-    frames_sent = None
     def _build_hosted_frame_content(reason="fallback"):
-        nonlocal frames_sent
         print(f"[nim] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
         _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
         if not _frames_b64:
             raise RuntimeError("Could not extract frames from video (PyAV missing or video unreadable)")
         print(f"[nim] {len(_frames_b64)} frames extracted", flush=True)
-        frames_sent = len(_frames_b64)
         _content = [{"type": "text", "text": f"[Video — {len(_frames_b64)} frames at {fps}fps]\n{prompt}"}]
         for _fb64 in _frames_b64:
             _content.append({
@@ -1738,7 +1469,6 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                {"elapsed_s": _elapsed()}, steps=steps), _table_html()
             return
-        frames_sent = 1
         content = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_img_b64}"}},
@@ -1754,7 +1484,6 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                {"elapsed_s": _elapsed()}, steps=steps), _table_html()
             return
-        frames_sent = 0
         content = [
             {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
             {"type": "text", "text": prompt},
@@ -1857,7 +1586,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         "infer_time_s": round(infer_time, 1),
         "ttft_s": round(ttft_s, 2) if ttft_s else None,
         "tokens_out": tokens_decoded,
-        "frames_sent": frames_sent, "fps": fps, "status": "success",
+        "frames_sent": len(frames_b64), "fps": fps, "status": "success",
     }
     try:
         with open(OUT_FILE, "w") as f:
@@ -2604,57 +2333,23 @@ with gr.Blocks(
     if _cfg["nim"]:
         _variant_labels += f" → NIM-{MODEL_SIZE}"
     _backend_note = (
-        f"NIM local Docker ({VLLM_BASE_URL})"
+        f"**Backend:** NIM local Docker (`{VLLM_BASE_URL}`)"
         if INFERENCE_BACKEND == "nim_local"
-        else f"vLLM ({VLLM_BASE_URL})"
+        else f"**Backend:** vLLM (`{VLLM_BASE_URL}`)"
         if INFERENCE_BACKEND == "vllm"
-        else "HF transformers (quantized models upcast to BF16)"
+        else "**Backend:** HF transformers *(quantized models upcast to BF16)*"
     )
-    _model_title_src = (_SERVER_MODEL_ID or MODEL_NAME or f"Cosmos-Reason-{MODEL_SIZE}").split("/")[-1]
-    _model_title = _model_title_src.replace("_", "-").lower()
-    gr.HTML(
-        f"""
-        <div class="nv-appbar">
-          <div class="nv-brand"><span class="nv-brand-mark">NVIDIA</span><span>Build</span></div>
-          <div class="nv-nav"><span>AI Models</span><span>Physical AI</span><span>Inference</span></div>
-          <div class="nv-status">Gradio</div>
-        </div>
-        <section class="nv-hero">
-          <div class="nv-hero-copy">
-            <div class="nv-kicker">nvidia</div>
-            <div class="nv-title-row">
-              <h1>{_html_ui.escape(_model_title)}</h1>
-              <span class="nv-pill">Downloadable</span>
-            </div>
-            <p class="nv-desc">
-              Analyze video and images for physical AI workflows with Cosmos reasoning presets,
-              backend-aware parameters, and streamed responses.
-            </p>
-            <div class="nv-tags">
-              <span>Video understanding</span>
-              <span>Image understanding</span>
-              <span>Reasoning presets</span>
-              <span>OpenAI-compatible backend</span>
-            </div>
-          </div>
-        </section>
-        <div class="nv-meta-strip">
-          <span>{_html_ui.escape(_load_note)}</span>
-          <span>GPU: {_html_ui.escape(str(gpu_name))}</span>
-          <span>VRAM free: {free_vram:,} MiB</span>
-          <span>Backend: {_html_ui.escape(_backend_note)}</span>
-        </div>
-        <div class="nv-ai-notice">
-          AI-generated responses can be inaccurate or incomplete. Validate outputs before use in
-          production safety, autonomy, or dataset approval workflows.
-        </div>
-        """
+    gr.Markdown(
+        f"# 🌌 Cosmos Reason — BYO Video Demo ({MODEL_SIZE})\n"
+        f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
+        f"**VRAM free:** {free_vram:,} MiB &nbsp;·&nbsp; {_backend_note}\n\n"
+        f"Upload any MP4 or image (JPG/PNG/WebP) and ask the model a question. "
+        f"Select a checkpoint from the dropdown to load it into vLLM."
     )
 
     # ── Input row ───────────────────────────────────────────────────────────
-    with gr.Row(elem_classes=["nv-workspace"]):
-        with gr.Column(scale=2, elem_classes=["nv-input-panel"]):
-            gr.HTML('<div class="nv-section-heading">Input <span>Video / Image</span></div>')
+    with gr.Row():
+        with gr.Column(scale=2):
             with gr.Tabs():
                 with gr.TabItem("Video"):
                     video_input = gr.Video(label="Upload Video (MP4)", sources=["upload"], height=250)
@@ -2667,19 +2362,14 @@ with gr.Blocks(
                     )
             clip_info = gr.Markdown("*Upload a video or image to see info*")
 
-        with gr.Column(scale=1, elem_classes=["nv-prompt-panel"]):
-            gr.HTML('<div class="nv-section-heading">Prompt <span>Preset</span></div>')
+        with gr.Column(scale=1):
             demo_picker = gr.Dropdown(
                 label="Demo Prompt",
                 choices=[p[0] for p in DEMO_PROMPTS],
                 value=DEMO_PROMPTS[0][0],
                 info="Quick preset prompts",
             )
-            reasoning_badge = gr.HTML(
-                value=_reasoning_badge_html(DEMO_PROMPTS[0][3]),
-                show_label=False,
-            )
-            with gr.Row(elem_classes=["nv-control-row"]):
+            with gr.Row():
                 run_btn = gr.Button("▶  Run Inference",    variant="primary",   size="lg")
                 all_btn = gr.Button("⚡  Run All Variants", variant="secondary", size="lg",
                                     visible=False)
@@ -2705,9 +2395,10 @@ with gr.Blocks(
             "HF Transformers" + (" (active)" if _active_be == "HF" else ""),
             _vllm_label + (" (active)" if _active_be == "VLLM" else ""),
             "NIM (local Docker)" + (" (active)" if _active_be == "NIM_LOCAL" else ""),
+            "TRT-LLM (not yet supported)",
         ]
         _be_map = {c: v for c, v in zip(
-            _be_choices, ["hf", "vllm", "nim_local"]
+            _be_choices, ["hf", "vllm", "nim_local", "trtllm"]
         )}
         _current_be_choice = _be_choices[{"HF": 0, "VLLM": 1, "NIM_LOCAL": 2}.get(_active_be, 0)]
 
@@ -2733,6 +2424,14 @@ with gr.Blocks(
         def _on_backend_change(choice):
             selected = _be_map.get(choice, "hf")
             active   = INFERENCE_BACKEND
+            if selected == "trtllm":
+                warn_html = (
+                    '<div style="background:#7f1d1d;color:#fca5a5;padding:10px 14px;'
+                    'border-radius:6px;margin:4px 0;font-size:13px">'
+                    '🚫 <b>TRT-LLM</b> is not yet supported in this demo. '
+                    'Use HF Transformers or vLLM backend instead.</div>'
+                )
+                return gr.update(value=warn_html, visible=True), gr.update(visible=False)
             if selected == "nim_local" and active != "nim_local":
                 _code_pill = ('background:#dbeafe;color:#1e293b;padding:2px 6px;'
                               'border-radius:4px;font-size:12px')
@@ -2789,8 +2488,8 @@ with gr.Blocks(
         _ckpt_info = (
             "VLM NIMs supported on this target. Source: "
             "docs.nvidia.com/nim/vision-language-models/latest/introduction.html. "
-            "Pick a different NIM, then use the swap instructions below to restart "
-            "the running container. Pull + load takes 5-15 min on first run."
+            "Pick a different NIM and click 'Switch to selected NIM' to swap the "
+            "running container — pull + load takes 5-15 min on first run."
             if _is_nim_local else
             "Preset checkpoints — changing this in vLLM mode reloads the server"
         )
@@ -3035,12 +2734,16 @@ with gr.Blocks(
             clean_cache_btn.click( fn=_clean_hf_cache,    inputs=[], outputs=[disk_status_out])
 
     # ── Output row ───────────────────────────────────────────────────────────
-    with gr.Row(elem_classes=["nv-results-row"]):
-        with gr.Column(scale=2, elem_classes=["nv-output-panel"]):
-            gr.HTML('<div class="nv-section-heading">Output <span>Stream</span></div>')
+    with gr.Row():
+        with gr.Column(scale=2):
+            # Initial badge state matches the first DEMO_PROMPT (which is the
+            # default selection in the dropdown). Updated by on_demo().
+            reasoning_badge = gr.HTML(
+                value=_reasoning_badge_html(DEMO_PROMPTS[0][3]),
+                show_label=False,
+            )
             response_out = gr.HTML(label="Model Response", value="", show_label=True)
-        with gr.Column(scale=1, elem_classes=["nv-status-panel"]):
-            gr.HTML('<div class="nv-section-heading">Status <span>Live</span></div>')
+        with gr.Column(scale=1):
             status_panel = gr.HTML(_status_html(["wait"] * 5), show_progress="hidden")
 
     # ── Benchmark results table ───────────────────────────────────────────────
