@@ -703,16 +703,41 @@ def _is_frames_fallback_nim(model_id):
     return INFERENCE_BACKEND == "nim_local" and "cosmos-reason1" in mid
 
 def _uses_native_video_url(model_id):
-    """Use build.nvidia.com-style base64 video_url for NIM/vLLM models.
+    """Backend-dynamic decision: which message shape does this backend+model accept?
 
-    Cosmos Reason1 7B is the known exception from the May smoke sprint: its
-    NIM rejects native video_url and needs image-frame fallback.
+    True  → send ONE `video_url` content item with base64 data: URL (canonical
+            OpenAI / build.nvidia.com shape; what Vite frontends use).
+    False → fall back to N `image_url` items with extracted JPEG frames
+            (legacy path for backends/models that reject native video_url).
+
+    Backend matrix:
+      nim_local : most NIMs accept native video_url. Exception: Cosmos Reason1
+                  NIM rejects it (May 2026 smoke sprint).
+      vllm      : Qwen3-VL family (including Cosmos3-Nano-Reasoner,
+                  Cosmos3-Super-Reasoner, Cosmos Reason2 2B/8B/32B), Nemotron
+                  family, and explicit "qwen3-vl" strings accept native via
+                  qwen_vl_utils. Other architectures use frame extraction.
+      hf        : same architecture check; qwen_vl_utils handles both natively.
     """
-    if _is_frames_fallback_nim(model_id):
-        return False
+    mid = (model_id or _SERVER_MODEL_ID or "").lower()
+
+    # ── nim_local backend ───────────────────────────────────────────────────
     if INFERENCE_BACKEND == "nim_local":
+        if "cosmos-reason1" in mid:
+            return False  # frame fallback (May 2026 smoke sprint finding)
         return True
-    return _uses_file_url(model_id)
+
+    # ── vllm + hf backends ──────────────────────────────────────────────────
+    # Both route through qwen_vl_utils for native-capable models. Empirical list
+    # from smoke sprints: any model whose ID contains one of these substrings
+    # has a processor that accepts {type:"video_url", video_url:{url:"data:..."}}.
+    native_signatures = (
+        "qwen3-vl", "qwen3vl",                  # base Qwen3-VL releases
+        "cosmos3", "cosmos-3",                  # Cosmos3-Nano-Reasoner / Super-Reasoner
+        "cosmos-reason2", "cosmos-reason-2",    # Cosmos Reason 2 family (2B/8B/32B)
+        "nemotron",                             # Nemotron-Nano-12B-v2-VL
+    )
+    return any(sig in mid for sig in native_signatures)
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
