@@ -2591,13 +2591,20 @@ with gr.Blocks(
         with gr.Row():
             fps_slider = gr.Slider(
                 minimum=1, maximum=60, step=1, value=_UI_DEFAULT_FPS,
-                label="Video sampling rate (fps) — ignored for images",
-                info="Higher = more frames sent. The NIM will tell you if it's too much.",
+                label="Video sampling rate (fps)",
+                info=(
+                    "Snaps to source fps on upload. Drag to override — no client-side cap."
+                    + (" NIM server decides actual frame count regardless." if INFERENCE_BACKEND == "nim_local" else "")
+                ),
             )
             maxpx_slider = gr.Slider(
                 minimum=64*(32**2), maximum=8192*(32**2), step=64*(32**2),
                 value=DEFAULT_MAX_PIXELS,
-                label="Max pixels per frame (HF mode only — NIM ignores)",
+                label="Max pixels per frame",
+                info=(
+                    "Snaps to source W×H on upload. Drag to override — no client-side cap."
+                    + (" NIM server decides pixel budget regardless." if INFERENCE_BACKEND == "nim_local" else "")
+                ),
             )
             maxtok_slider = gr.Slider(
                 minimum=64, maximum=131072, step=64, value=DEFAULT_MAX_TOKENS,
@@ -2750,6 +2757,36 @@ with gr.Blocks(
     results_table = gr.HTML(_table_html(), label="Benchmark Log", show_progress="hidden")
 
     # ── Event handlers ───────────────────────────────────────────────────────
+    # Adaptive defaults: on media upload, snap fps + max_pixels sliders to the
+    # source media's native parameters. Slider RANGES are unchanged — only the
+    # suggested default value adapts. Users can drag freely. No client-side caps
+    # (per standing order: send the user's request; let the backend 4xx if it
+    # can't handle).
+    def _snap_sliders_to_source(path):
+        if not path:
+            return gr.update(), gr.update()
+        m = get_video_meta(path)
+        if not m.width or m.width <= 0:
+            return gr.update(), gr.update()
+        src_fps = max(1, min(60, int(round(m.fps)))) if (m.fps and m.fps > 0) else None
+        src_px = max(64*(32**2), min(8192*(32**2), int(m.width) * int(m.height)))
+        fps_upd = gr.update(value=src_fps) if src_fps else gr.update()
+        return fps_upd, gr.update(value=src_px)
+
+    def _snap_maxpx_to_image(path):
+        if not path:
+            return gr.update()
+        try:
+            from PIL import Image as _pil
+            img = _pil.open(path)
+            w, h = img.size
+        except Exception:
+            return gr.update()
+        if not w or not h:
+            return gr.update()
+        src_px = max(64*(32**2), min(8192*(32**2), int(w) * int(h)))
+        return gr.update(value=src_px)
+
     def on_upload(path, fps_val, disable_autocap):
         if not path:
             return "*Upload a video to see clip info*", gr.update()
@@ -2758,24 +2795,26 @@ with gr.Blocks(
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
         target   = max(1, int(m.duration_s * fps_val))
-        # Post-cap honesty: NIM/native-video paths pass a video_url and let the
-        # service sample frames. OSS/HF frame paths still apply local caps.
+        # Post-cap honesty: NIM and vLLM both consume the full video — the server
+        # / processor samples internally at the requested fps. No client-side cap
+        # on frames (per standing order: send the user's request; let the backend
+        # 4xx if it can't handle). HF transformers path keeps _MAX_HF_FRAMES as a
+        # memory-safety bound until that conversation is separately re-litigated.
         if INFERENCE_BACKEND == "nim_local":
             info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
-                        "video_url sent to NIM (server samples frames)")
+                        f"video_url sent to NIM (server samples at ~{fps_val} fps → ~{target} frames)")
             return info_str, gr.update()
-        elif INFERENCE_BACKEND == "vllm":
-            cap = 8
-        else:
-            cap = _MAX_HF_FRAMES
+        if INFERENCE_BACKEND == "vllm":
+            info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
+                        f"video sent to vLLM (processor samples at ~{fps_val} fps → ~{target} frames)")
+            return info_str, gr.update()
+        # HF transformers path: client-side frame extraction is bounded by
+        # _MAX_HF_FRAMES for memory safety. Display reflects what's actually sent.
+        cap = _MAX_HF_FRAMES
         n_frames = min(target, cap)
         cap_note = f" (capped from {target})" if target > cap else ""
         info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                     f"{n_frames} frames sampled{cap_note}")
-        # Fast backends (vLLM, NIM) are 100-500x faster than HF — HF-based
-        # timing estimates are meaningless and auto-cap is unnecessary.
-        if INFERENCE_BACKEND in ("vllm", "nim_local"):
-            return info_str, gr.update()
         est_s_full = _est_tokens(n_frames, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(n_frames, DEFAULT_MAX_PIXELS)
         if not disable_autocap:
@@ -2797,6 +2836,11 @@ with gr.Blocks(
     video_input.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     disable_autocap_chk.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
+    # Adaptive defaults: snap fps + max_pixels sliders to the uploaded video's
+    # native parameters. Fires alongside on_upload — on_upload uses the OLD
+    # slider values for its first render, then fps_slider.change auto-re-fires
+    # on_upload with the new fps for an accurate clip_info on the next paint.
+    video_input.change(_snap_sliders_to_source, inputs=[video_input], outputs=[fps_slider, maxpx_slider])
 
     def on_image_upload(path, disable_autocap):
         if not path:
@@ -2832,6 +2876,8 @@ with gr.Blocks(
         return info_str, gr.update()
 
     image_input.change(on_image_upload, inputs=[image_input, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
+    # Adaptive default: snap max_pixels slider to image's native W×H on upload.
+    image_input.change(_snap_maxpx_to_image, inputs=[image_input], outputs=[maxpx_slider])
 
     def on_demo(name):
         """Pick a demo: populate user prompt + system prompt + Reasoning badge."""
