@@ -665,6 +665,14 @@ def _auto_cap(n_frames, current_max_pixels):
 # _run_vllm_inference would actually send. The preview is rendered in the
 # Advanced Settings accordion; the user can edit it and the sliders snap to
 # the parsed values. A warnings panel flags non-recommended settings.
+#
+# Ping-pong prevention: _LAST_PREVIEW_JSON caches the most recent JSON we
+# wrote programmatically (slider→preview direction). When payload_preview
+# .change fires, _parse_payload_edit compares the incoming text against this
+# cache — match means "the change event came from OUR write, not from the
+# user typing," so we skip the slider-update path entirely. Only genuine
+# user edits (text differs from cache) propagate back to sliders.
+_LAST_PREVIEW_JSON = ""
 
 def _video_transmission_mode(video_path, image_path, is_image, model_id):
     """Determine which content shape would be sent for the current selection."""
@@ -727,13 +735,41 @@ def _build_payload_preview(video_path, image_path, user_prompt, system_prompt,
         "transmission_mode": mode,
         "note": "max_tokens not sent at the wire (standing order); server max_model_len governs.",
     }
-    return _json.dumps(body, indent=2, ensure_ascii=False)
+    text = _json.dumps(body, indent=2, ensure_ascii=False)
+    # Cache the exact bytes we wrote so _parse_payload_edit can distinguish
+    # programmatic round-trips (slider→preview, then preview.change re-fires
+    # with our own text) from genuine user edits.
+    global _LAST_PREVIEW_JSON
+    _LAST_PREVIEW_JSON = text
+    return text
 
 
 def _parse_payload_edit(payload_text, fps_cur, mp_cur, mt_cur, t_cur, p_cur, r_cur):
     """Parse a user-edited preview. Missing keys → preserve current slider value.
     Bad JSON → no slider updates + inline error in warnings panel.
+
+    Ping-pong guard: if payload_text == _LAST_PREVIEW_JSON (our most recent
+    programmatic write), this change event came from OUR write — not from the
+    user typing — so we no-op all slider outputs. This breaks the
+    slider→preview→parse→slider loop entirely.
+
     Returns: 6 slider updates + warnings HTML."""
+    if payload_text == _LAST_PREVIEW_JSON:
+        # Round-trip from our own write — no user edit. Skip slider updates.
+        # Still rebuild warnings (they may have changed for other reasons —
+        # e.g. live VRAM probe drift between renders).
+        mode = None
+        try:
+            import json as _json
+            _d = _json.loads(payload_text)
+            _ui = _d.get("_ui_only", {}) if isinstance(_d.get("_ui_only"), dict) else {}
+            mode = _ui.get("transmission_mode")
+        except Exception:
+            pass
+        warn_html = _build_warnings_html(fps_cur, mp_cur, mt_cur, t_cur, p_cur, r_cur, mode)
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), warn_html)
+
     import json as _json
     try:
         d = _json.loads(payload_text)
