@@ -1012,6 +1012,90 @@ _REASONING_PANEL_CSS = """
   font-size: 1.02em;
   font-weight: 500;
 }
+.active-model-details {
+  margin: 8px 0 14px 0;
+}
+.active-model-details details {
+  display: inline-block;
+  width: 100%;
+}
+.active-model-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #76b900;
+  font-weight: 800;
+  list-style: none;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.active-model-details summary::-webkit-details-marker { display: none; }
+.active-model-details summary::after {
+  content: '▸';
+  font-size: 0.9em;
+}
+.active-model-details details[open] summary::after {
+  content: '▾';
+}
+.active-model-box {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0b0b0b;
+}
+.active-model-metric {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.active-model-label {
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+.active-model-value {
+  min-width: 0;
+  color: #f8fafc;
+  font-size: 13px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+.active-model-value code {
+  border: 1px solid #334155;
+  border-radius: 4px;
+  background: #050505;
+  color: #d8d8d8;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 1px 5px;
+}
+.active-model-link {
+  display: inline-flex;
+  align-items: center;
+  color: #76b900;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-decoration: none;
+}
+.active-model-link:hover {
+  color: #8ed600;
+  text-decoration: underline;
+}
+@media (max-width: 900px) {
+  .active-model-box {
+    grid-template-columns: 1fr;
+  }
+}
 """
 
 
@@ -1086,6 +1170,171 @@ def _render_with_think(text):
         f"</details>"
     )
     return f"<div class='cr-output'>{pre_html}{reasoning_html}{answer_html}</div>"
+
+
+# ── Active model details panel (vLLM launch flags + quantization + build) ────
+def _command_value(command, flag):
+    index = command.find(flag)
+    if index == -1:
+        return None
+    rest = command[index + len(flag):].lstrip()
+    next_flag = rest.find(" --")
+    value = rest if next_flag == -1 else rest[:next_flag]
+    return value.strip().strip("'\"") or None
+
+
+def _parse_vllm_command(command):
+    flags = {
+        "served_model_name": _command_value(command, "--served-model-name"),
+        "max_model_len": _command_value(command, "--max-model-len"),
+        "media_io_kwargs": _command_value(command, "--media-io-kwargs"),
+        "reasoning_parser": _command_value(command, "--reasoning-parser"),
+        "dtype": _command_value(command, "--dtype"),
+        "quantization": _command_value(command, "--quantization"),
+        "gpu_memory_utilization": _command_value(command, "--gpu-memory-utilization"),
+        "host": _command_value(command, "--host"),
+        "port": _command_value(command, "--port"),
+        "allowed_local_media_path": _command_value(command, "--allowed-local-media-path"),
+        "trust_remote_code": "--trust-remote-code" in command,
+    }
+    return {key: value for key, value in flags.items() if value is not None}
+
+
+def _find_vllm_process(model_id):
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["ps", "-eo", "pid=,cmd="], timeout=3).decode()
+    except Exception:
+        return None
+    lines = [line.strip() for line in out.splitlines() if "vllm serve" in line]
+    if not lines:
+        return None
+    needle = (model_id or "").lower()
+    line = next((item for item in lines if needle and needle in item.lower()), None)
+    line = line or next((item for item in lines if "--port 8000" in item), None) or lines[0]
+    pid, _, command = line.partition(" ")
+    return {
+        "pid": int(pid) if pid.strip().isdigit() else None,
+        "command": command.strip(),
+        "flags": _parse_vllm_command(command),
+    }
+
+
+def _backend_model_info(model_id, timeout=2.0):
+    if INFERENCE_BACKEND not in ("vllm", "nim_local"):
+        return None
+    try:
+        import urllib.request as _urlreq, json as _json
+        req = _urlreq.Request(
+            f"{VLLM_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {VLLM_API_KEY}"},
+        )
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            models = (_json.loads(resp.read()) or {}).get("data") or []
+        if not models:
+            return None
+        return next((item for item in models if item.get("id") == model_id), models[0])
+    except Exception:
+        return None
+
+
+def _infer_quantization(model_id, flags):
+    mid = (model_id or "").lower()
+    explicit = flags.get("quantization") or os.environ.get("MODEL_QUANTIZATION") or os.environ.get("VLLM_QUANTIZATION") or ""
+    inferred = ""
+    if "nvfp4" in mid or "fp4" in mid:
+        inferred = "nvfp4/fp4"
+    elif "fp8" in mid:
+        inferred = "fp8"
+    elif "int8" in mid:
+        inferred = "int8"
+    elif "awq" in mid:
+        inferred = "awq"
+    elif "gptq" in mid:
+        inferred = "gptq"
+    method = explicit or inferred
+    return {
+        "applied": bool(method),
+        "method": method or None,
+        "dtype": flags.get("dtype") or os.environ.get("MODEL_DTYPE"),
+        "source": (
+            "vLLM launch flag"
+            if explicit
+            else "model identifier"
+            if inferred
+            else "no --quantization flag or quantized model suffix detected"
+        ),
+    }
+
+
+def _active_model_details():
+    live_model = (
+        _refresh_server_model_id(timeout=1.5)
+        if INFERENCE_BACKEND in ("vllm", "nim_local")
+        else None
+    ) or _SERVER_MODEL_ID or _loaded.get("model_id") or MODEL_NAME
+    proc = _find_vllm_process(live_model) if INFERENCE_BACKEND in ("vllm", "nim_local") else None
+    flags = (proc or {}).get("flags") or {}
+    return {
+        "checkpoint": live_model,
+        "display_name": live_model,
+        "backend": INFERENCE_BACKEND,
+        "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local") else None,
+        "source": {
+            "sha": os.environ.get("APP_GIT_SHA"),
+            "timestamp": os.environ.get("APP_GIT_TIMESTAMP"),
+            "branch": os.environ.get("APP_GIT_BRANCH"),
+            "dirty": (
+                True
+                if os.environ.get("APP_GIT_DIRTY") == "1"
+                else False
+                if os.environ.get("APP_GIT_DIRTY") == "0"
+                else None
+            ),
+        },
+        "quantization": _infer_quantization(live_model, flags),
+        "vllm": {
+            "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local") else None,
+            "model": _backend_model_info(live_model),
+            "process": proc,
+        },
+    }
+
+
+def _fmt(value, fallback="unknown"):
+    if value is None or value == "":
+        return fallback
+    return str(value)
+
+
+def _active_model_details_html(details_url):
+    import html as _html
+    details = _active_model_details()
+    flags = (((details.get("vllm") or {}).get("process") or {}).get("flags") or {})
+    model_info = (details.get("vllm") or {}).get("model") or {}
+    source = details.get("source") or {}
+    quant = details.get("quantization") or {}
+    sha = _fmt(source.get("sha"))
+    short_sha = sha[:12] if sha != "unknown" else sha
+    quant_label = _fmt(quant.get("method")) if quant.get("applied") else f"None detected, dtype {_fmt(quant.get('dtype'))}"
+    max_len = model_info.get("max_model_len") or flags.get("max_model_len")
+    parser = flags.get("reasoning_parser")
+    gpu_util = flags.get("gpu_memory_utilization")
+    return f"""
+    <div class="active-model-details">
+      <details>
+        <summary>Active Model details</summary>
+        <div class="active-model-box">
+          <div class="active-model-metric"><span class="active-model-label">Live Model</span><span class="active-model-value">{_html.escape(_fmt(details.get("checkpoint")))}</span></div>
+          <div class="active-model-metric"><span class="active-model-label">Backend</span><span class="active-model-value">{_html.escape(_fmt(details.get("backend")))} at {_html.escape(_fmt(details.get("base_url")))}</span></div>
+          <div class="active-model-metric"><span class="active-model-label">Quantization</span><span class="active-model-value">{_html.escape(quant_label)}</span></div>
+          <div class="active-model-metric"><span class="active-model-label">Build</span><span class="active-model-value"><code>{_html.escape(short_sha)}</code> {_html.escape(_fmt(source.get("timestamp")))}</span></div>
+          <div class="active-model-metric"><span class="active-model-label">vLLM Details</span><span class="active-model-value">max len {_html.escape(_fmt(max_len))}{', parser ' + _html.escape(_fmt(parser)) if parser else ''}{', GPU util ' + _html.escape(_fmt(gpu_util)) if gpu_util else ''}</span></div>
+          <a class="active-model-link" href="{_html.escape(details_url)}" target="_blank" rel="noreferrer">Full JSON details</a>
+        </div>
+      </details>
+    </div>
+    """
 
 
 def _status_html(statuses, metrics=None, steps=None):
@@ -2606,6 +2855,7 @@ with gr.Blocks(
         f"Upload any MP4 or image (JPG/PNG/WebP) and ask the model a question. "
         f"Select a checkpoint from the dropdown to load it into vLLM."
     )
+    gr.HTML(_active_model_details_html("/api/active-model"))
 
     # ── Input row ───────────────────────────────────────────────────────────
     with gr.Row():
@@ -3298,6 +3548,7 @@ _app, _local_url, _share_url = demo.launch(
     server_name="0.0.0.0", server_port=PORT, share=SHARE, prevent_thread_lock=True,
     theme=gr.themes.Base(primary_hue="green", font=gr.themes.GoogleFont("Inter")),
 )
+_app.add_api_route("/api/active-model", _active_model_details, methods=["GET"])
 _pub = _share_url or _local_url or f"http://0.0.0.0:{PORT}"
 print(f"[launch] {_pub}", flush=True)
 try:
