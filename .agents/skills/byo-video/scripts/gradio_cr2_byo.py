@@ -1303,6 +1303,34 @@ def _infer_quantization(model_id, flags):
     }
 
 
+def _hf_model_commit_sha(model_id):
+    """Resolve the HuggingFace commit SHA for the model snapshot currently
+    on disk. Inspects ~/.cache/huggingface/hub/models--<org>--<name>/snapshots/
+    — the snapshot directory name IS the commit SHA. Returns None when the
+    model isn't HF-cached (e.g. served from a local path). The SHA reflects
+    what the server actually loaded, not necessarily HEAD on HF Hub."""
+    if not model_id or "/" not in model_id:
+        return None
+    try:
+        import os as _os
+        repo_dir = model_id.replace("/", "--")
+        hub = _os.path.expanduser("~/.cache/huggingface/hub")
+        snapshots_dir = _os.path.join(hub, f"models--{repo_dir}", "snapshots")
+        if not _os.path.isdir(snapshots_dir):
+            return None
+        candidates = [
+            (_os.path.getmtime(_os.path.join(snapshots_dir, name)), name)
+            for name in _os.listdir(snapshots_dir)
+            if _os.path.isdir(_os.path.join(snapshots_dir, name))
+        ]
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    except Exception:
+        return None
+
+
 def _active_model_details():
     live_model = (
         _refresh_server_model_id(timeout=1.5)
@@ -1311,11 +1339,22 @@ def _active_model_details():
     ) or _SERVER_MODEL_ID or _loaded.get("model_id") or MODEL_NAME
     proc = _find_vllm_process(live_model) if INFERENCE_BACKEND in ("vllm", "nim_local") else None
     flags = (proc or {}).get("flags") or {}
+    hf_sha = _hf_model_commit_sha(live_model)
+    hf_url = (
+        f"https://huggingface.co/{live_model}/commit/{hf_sha}"
+        if hf_sha and live_model and "/" in live_model
+        else None
+    )
     return {
         "checkpoint": live_model,
         "display_name": live_model,
         "backend": INFERENCE_BACKEND,
         "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local") else None,
+        "model_commit": {
+            "sha": hf_sha,
+            "url": hf_url,
+            "source": "huggingface_hub_cache" if hf_sha else "local_or_uncached",
+        },
         "source": {
             "sha": os.environ.get("APP_GIT_SHA"),
             "timestamp": os.environ.get("APP_GIT_TIMESTAMP"),
@@ -1348,10 +1387,18 @@ def _active_model_details_html(details_url):
     details = _active_model_details()
     flags = (((details.get("vllm") or {}).get("process") or {}).get("flags") or {})
     model_info = (details.get("vllm") or {}).get("model") or {}
-    source = details.get("source") or {}
     quant = details.get("quantization") or {}
-    sha = _fmt(source.get("sha"))
-    short_sha = sha[:12] if sha != "unknown" else sha
+    model_commit = details.get("model_commit") or {}
+    mc_sha = model_commit.get("sha")
+    mc_url = model_commit.get("url")
+    mc_short = mc_sha[:12] if mc_sha else "local"
+    if mc_url:
+        mc_html = (
+            f'<a class="active-model-link" href="{_html.escape(mc_url)}" '
+            f'target="_blank" rel="noreferrer"><code>{_html.escape(mc_short)}</code></a>'
+        )
+    else:
+        mc_html = f'<code>{_html.escape(mc_short)}</code>'
     quant_label = _fmt(quant.get("method")) if quant.get("applied") else f"None detected, dtype {_fmt(quant.get('dtype'))}"
     max_len = model_info.get("max_model_len") or flags.get("max_model_len")
     parser = flags.get("reasoning_parser")
@@ -1364,7 +1411,7 @@ def _active_model_details_html(details_url):
           <div class="active-model-metric"><span class="active-model-label">Live Model</span><span class="active-model-value">{_html.escape(_fmt(details.get("checkpoint")))}</span></div>
           <div class="active-model-metric"><span class="active-model-label">Backend</span><span class="active-model-value">{_html.escape(_fmt(details.get("backend")))} at {_html.escape(_fmt(details.get("base_url")))}</span></div>
           <div class="active-model-metric"><span class="active-model-label">Quantization</span><span class="active-model-value">{_html.escape(quant_label)}</span></div>
-          <div class="active-model-metric"><span class="active-model-label">Build</span><span class="active-model-value"><code>{_html.escape(short_sha)}</code> {_html.escape(_fmt(source.get("timestamp")))}</span></div>
+          <div class="active-model-metric"><span class="active-model-label">HF Commit</span><span class="active-model-value">{mc_html}</span></div>
           <div class="active-model-metric"><span class="active-model-label">vLLM Details</span><span class="active-model-value">max len {_html.escape(_fmt(max_len))}{', parser ' + _html.escape(_fmt(parser)) if parser else ''}{', GPU util ' + _html.escape(_fmt(gpu_util)) if gpu_util else ''}</span></div>
           <a class="active-model-link" href="{_html.escape(details_url)}" target="_blank" rel="noreferrer">Full JSON details</a>
         </div>
