@@ -122,36 +122,44 @@ PREFILL_TPS = float(os.environ.get("GRADIO_PREFILL_TPS", _prefill_default))
 # We must use this exact name in chat/completions requests or get 404.
 _NIM_LOCAL_MODEL_ID = None  # kept for backward compat
 _SERVER_MODEL_ID = None
+_SERVER_MAX_MODEL_LEN = None  # captured from /v1/models; used by warnings panel
 if INFERENCE_BACKEND in ("vllm", "nim_local"):
     try:
         import urllib.request as _urlreq, json as _json
         with _urlreq.urlopen(f"{VLLM_BASE_URL}/models", timeout=5) as _r:
             _srv_data = _json.loads(_r.read())
-            _SERVER_MODEL_ID = _srv_data["data"][0]["id"]
+            _entry = _srv_data["data"][0]
+            _SERVER_MODEL_ID = _entry["id"]
             _NIM_LOCAL_MODEL_ID = _SERVER_MODEL_ID  # backward compat
-            print(f"[{INFERENCE_BACKEND}] Detected server model: {_SERVER_MODEL_ID}", flush=True)
+            _SERVER_MAX_MODEL_LEN = _entry.get("max_model_len")
+            print(f"[{INFERENCE_BACKEND}] Detected server model: {_SERVER_MODEL_ID} "
+                  f"(max_model_len={_SERVER_MAX_MODEL_LEN})", flush=True)
     except Exception as _e:
         print(f"[{INFERENCE_BACKEND}] Could not detect model from {VLLM_BASE_URL}/models: {_e}", flush=True)
 
 
 def _refresh_server_model_id(timeout=2):
-    """Re-query /v1/models and update _SERVER_MODEL_ID in place if the served
-    model has changed (e.g. after a NIM container swap). Returns the current
-    served id or None on failure. Lets Gradio recover from a swap without a
-    process restart — see the retry-on-404 path in _run_vllm_inference.
+    """Re-query /v1/models and update _SERVER_MODEL_ID + _SERVER_MAX_MODEL_LEN
+    in place if the served model has changed (e.g. after a NIM container swap).
+    Returns the current served id or None on failure. Lets Gradio recover from
+    a swap without a process restart — see the retry-on-404 path in
+    _run_vllm_inference.
     """
-    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID
+    global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID, _SERVER_MAX_MODEL_LEN
     if INFERENCE_BACKEND not in ("vllm", "nim_local"):
         return _SERVER_MODEL_ID
     try:
         import urllib.request as _urlreq, json as _json
         with _urlreq.urlopen(f"{VLLM_BASE_URL}/models", timeout=timeout) as _r:
-            _new_id = _json.loads(_r.read())["data"][0]["id"]
+            _entry = _json.loads(_r.read())["data"][0]
+            _new_id = _entry["id"]
+            _new_mml = _entry.get("max_model_len")
         if _new_id != _SERVER_MODEL_ID:
             print(f"[{INFERENCE_BACKEND}] Server model changed: "
                   f"{_SERVER_MODEL_ID} → {_new_id}", flush=True)
             _SERVER_MODEL_ID = _new_id
             _NIM_LOCAL_MODEL_ID = _new_id
+        _SERVER_MAX_MODEL_LEN = _new_mml
         return _new_id
     except Exception as _e:
         print(f"[{INFERENCE_BACKEND}] _refresh_server_model_id failed: {_e}", flush=True)
@@ -650,6 +658,193 @@ def _auto_cap(n_frames, current_max_pixels):
             return px, est_s
     px = _PIXEL_TIERS[0]
     return px, _est_tokens(n_frames, px) / PREFILL_TPS
+
+
+# ── Live request-payload preview + warnings ──────────────────────────────────
+# Builds an OpenAI chat-completions JSON payload that mirrors what
+# _run_vllm_inference would actually send. The preview is rendered in the
+# Advanced Settings accordion; the user can edit it and the sliders snap to
+# the parsed values. A warnings panel flags non-recommended settings.
+
+def _video_transmission_mode(video_path, image_path, is_image, model_id):
+    """Determine which content shape would be sent for the current selection."""
+    if is_image or image_path:
+        return "image_url_base64"
+    if not video_path:
+        return "text_only"
+    return "video_url_base64" if _uses_native_video_url(model_id) else "image_url_frames"
+
+
+def _build_payload_preview(video_path, image_path, user_prompt, system_prompt,
+                           fps_val, max_pixels, max_tokens, temperature, top_p,
+                           rep_penalty, model_id=None, is_image=False):
+    """Render the OpenAI chat-completions payload as pretty JSON. Media bytes
+    are shown as placeholder strings so the JSON stays readable. Standing order
+    honored: max_tokens is shown in a _ui_only hint, not in the wire payload."""
+    import json as _json
+    effective_model = model_id or _SERVER_MODEL_ID or "<no model loaded>"
+    mode = _video_transmission_mode(video_path, image_path, is_image, effective_model)
+
+    if mode == "video_url_base64":
+        media_parts = [{
+            "type": "video_url",
+            "video_url": {"url": "data:video/mp4;base64,<...uploaded video bytes...>"},
+        }]
+    elif mode == "image_url_base64":
+        media_parts = [{
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64,<...uploaded image bytes...>"},
+        }]
+    elif mode == "image_url_frames":
+        media_parts = [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<frame_1>"}},
+            {"_repeated": "N frames at requested fps (extracted client-side)"},
+        ]
+    else:
+        media_parts = []
+
+    user_content = media_parts + [{"type": "text", "text": user_prompt or ""}] if media_parts else [{"type": "text", "text": user_prompt or ""}]
+
+    body = {
+        "model": effective_model,
+        "messages": [
+            {"role": "system", "content": system_prompt or ""},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": round(float(temperature), 3),
+        "top_p": round(float(top_p), 3),
+        "stream": True,
+    }
+    if INFERENCE_BACKEND == "nim_local":
+        body["nvext"] = {"repetition_penalty": round(float(rep_penalty), 3)}
+    else:
+        body["repetition_penalty"] = round(float(rep_penalty), 3)
+    # UI-only hints (not sent at the wire) — editable by the user, parsed back to sliders.
+    body["_ui_only"] = {
+        "max_tokens": int(max_tokens),
+        "fps": int(fps_val),
+        "max_pixels": int(max_pixels),
+        "transmission_mode": mode,
+        "note": "max_tokens not sent at the wire (standing order); server max_model_len governs.",
+    }
+    return _json.dumps(body, indent=2, ensure_ascii=False)
+
+
+def _parse_payload_edit(payload_text, fps_cur, mp_cur, mt_cur, t_cur, p_cur, r_cur):
+    """Parse a user-edited preview. Missing keys → preserve current slider value.
+    Bad JSON → no slider updates + inline error in warnings panel.
+    Returns: 6 slider updates + warnings HTML."""
+    import json as _json
+    try:
+        d = _json.loads(payload_text)
+    except _json.JSONDecodeError as e:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                '<div style="color:#dc2626;padding:6px 10px;background:#fef2f2;border-left:3px solid #dc2626;margin:4px 0;font-size:13px">'
+                f'⛔ Invalid JSON: {str(e)[:200]} — slider values unchanged</div>')
+
+    ui = d.get("_ui_only", {}) if isinstance(d.get("_ui_only"), dict) else {}
+    new_fps = int(ui.get("fps", fps_cur))
+    new_mp  = int(ui.get("max_pixels", mp_cur))
+    new_mt  = int(ui.get("max_tokens", mt_cur))
+    new_t   = float(d.get("temperature", t_cur))
+    new_p   = float(d.get("top_p", p_cur))
+    if isinstance(d.get("nvext"), dict) and "repetition_penalty" in d["nvext"]:
+        new_r = float(d["nvext"]["repetition_penalty"])
+    else:
+        new_r = float(d.get("repetition_penalty", r_cur))
+
+    mode = ui.get("transmission_mode")
+    warn_html = _build_warnings_html(new_fps, new_mp, new_mt, new_t, new_p, new_r, mode)
+
+    def _upd(new, cur):
+        # Avoid useless re-renders when value unchanged (suppresses ping-pong).
+        try:
+            return gr.update(value=new) if abs(float(new) - float(cur)) > 1e-9 else gr.update()
+        except Exception:
+            return gr.update(value=new) if new != cur else gr.update()
+
+    return (_upd(new_fps, fps_cur), _upd(new_mp, mp_cur), _upd(new_mt, mt_cur),
+            _upd(new_t, t_cur), _upd(new_p, p_cur), _upd(new_r, r_cur),
+            warn_html)
+
+
+def _build_warnings_html(fps, max_pixels, max_tokens, temperature, top_p,
+                         rep_penalty, transmission_mode=None):
+    """Severity-coded HTML warnings panel for non-recommended settings.
+    Reads live state: INFERENCE_BACKEND, _SERVER_MAX_MODEL_LEN, free VRAM."""
+    rows = []
+
+    # ── Transmission-shape standing order ──────────────────────────────────
+    if transmission_mode == "image_url_frames":
+        rows.append(("error",
+            "Transmission mode is image_url_frames (N JPEG frames). This shape "
+            "is rejected with HTTP 400 by vLLM and build.nvidia.com hosted "
+            "endpoints. Canonical shape is one video_url with base64 data URL. "
+            "Fix path: extend _uses_native_video_url(model_id) for this model."))
+
+    # ── NIM-FP8-8B EOS bug (Alex 2026-05-08) ───────────────────────────────
+    if INFERENCE_BACKEND == "nim_local" and float(temperature) < 0.3:
+        rows.append(("warn",
+            f"Temperature {float(temperature):.2f} on NIM-local triggers the "
+            "FP8-8B <think>+EOS bug (response truncates to 2-3 tokens, no "
+            "answer). Keep temperature ≥ 0.3 in NIM-local mode."))
+
+    # ── Token budget vs server max_model_len ───────────────────────────────
+    server_max = _SERVER_MAX_MODEL_LEN
+    if server_max and int(max_tokens) > server_max:
+        rows.append(("info",
+            f"Slider max_tokens ({int(max_tokens):,}) > server max_model_len "
+            f"({server_max:,}). Per standing order max_tokens is not sent at "
+            "the wire, but operator should know effective output cap is "
+            "max_model_len − input tokens."))
+
+    # ── Input-token estimate from fps × max_pixels ─────────────────────────
+    try:
+        est_tok_10s = _est_tokens(max(1, int(fps) * 10), int(max_pixels))
+    except Exception:
+        est_tok_10s = None
+    if server_max and est_tok_10s and est_tok_10s > int(server_max * 0.8):
+        rows.append(("warn",
+            f"Input tokens for a 10s clip at fps={int(fps)} × max_pixels="
+            f"{int(max_pixels):,} estimate to ~{est_tok_10s:,}, approaching "
+            f"server max_model_len ({server_max:,}). Expect HTTP 400 on longer "
+            "clips. Reduce max_pixels or fps if running long videos."))
+
+    # ── VRAM headroom (live probe) ─────────────────────────────────────────
+    try:
+        vram_free = get_free_vram_mib()
+    except Exception:
+        vram_free = None
+    if vram_free is not None and vram_free < 1024:
+        rows.append(("info",
+            f"Free VRAM is {vram_free:,} MiB (vLLM preallocates the KV pool, "
+            "so this is normal for a properly-sized server). New inferences "
+            "still work; co-running a second model is blocked at this level."))
+
+    # ── Rep penalty extremes ───────────────────────────────────────────────
+    if float(rep_penalty) > 1.5:
+        rows.append(("info",
+            f"Repetition penalty {float(rep_penalty):.2f} is high — may degrade "
+            "fluency. Typical range 1.0-1.3; build.nvidia.com Cosmos Reason 2 "
+            "default is 1.2."))
+
+    if not rows:
+        return ('<div style="color:#16a34a;padding:6px 10px;background:#f0fdf4;'
+                'border-left:3px solid #16a34a;margin:4px 0;font-size:13px">'
+                '✓ All parameters within recommended bounds for this backend.</div>')
+
+    out = []
+    for sev, msg in rows:
+        color, bg, icon = {
+            "error": ("#dc2626", "#fef2f2", "⛔"),
+            "warn":  ("#d97706", "#fffbeb", "⚠"),
+            "info":  ("#0369a1", "#f0f9ff", "ℹ"),
+        }[sev]
+        out.append(
+            f'<div style="color:{color};padding:6px 10px;background:{bg};'
+            f'border-left:3px solid {color};margin:4px 0;font-size:13px">'
+            f'{icon} {msg}</div>')
+    return "\n".join(out)
 
 
 def get_video_meta(path):
@@ -2632,8 +2827,9 @@ with gr.Blocks(
                 ),
             )
             maxtok_slider = gr.Slider(
-                minimum=64, maximum=131072, step=64, value=DEFAULT_MAX_TOKENS,
+                minimum=64, maximum=131072, step=64, value=131072,
                 label="Max output tokens",
+                info="Default is slider maximum. max_tokens is not sent at the wire (standing order); server max_model_len governs the actual cap.",
             )
 
         # NIM-8B-FP8-THINK-EOS: greedy decode (temp=0) on the FP8-quantized
@@ -2684,6 +2880,38 @@ with gr.Blocks(
             inputs=[nim_defaults_chk],
             outputs=[temp_slider, top_p_slider, rep_penalty_slider],
         )
+
+        # ── Live request-payload preview + warnings ────────────────────────
+        # Collapsible Accordion: shows the OpenAI chat-completions JSON that
+        # would be sent for the current parameter selection. Editable —
+        # changes here propagate back to the sliders. Warnings panel flags
+        # non-recommended settings (transmission shape, NIM-FP8 EOS temp,
+        # token budget vs max_model_len, VRAM headroom, rep-penalty extremes).
+        with gr.Accordion("Request payload — live preview · editable", open=False):
+            payload_warnings = gr.HTML(
+                value=_build_warnings_html(
+                    _UI_DEFAULT_FPS, DEFAULT_MAX_PIXELS, 131072,
+                    (_NIM_DEFAULTS[0] if _nim_active else 0.0),
+                    (_NIM_DEFAULTS[1] if _nim_active else 1.0),
+                    (_NIM_DEFAULTS[2] if _nim_active else 1.05),
+                    transmission_mode=None,
+                ),
+                show_label=False,
+            )
+            payload_preview = gr.Code(
+                value=_build_payload_preview(
+                    None, None, "", "",
+                    _UI_DEFAULT_FPS, DEFAULT_MAX_PIXELS, 131072,
+                    (_NIM_DEFAULTS[0] if _nim_active else 0.0),
+                    (_NIM_DEFAULTS[1] if _nim_active else 1.0),
+                    (_NIM_DEFAULTS[2] if _nim_active else 1.05),
+                    model_id=_SERVER_MODEL_ID,
+                ),
+                language="json",
+                interactive=True,
+                lines=22,
+                show_label=False,
+            )
 
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
@@ -2903,6 +3131,40 @@ with gr.Blocks(
     image_input.change(on_image_upload, inputs=[image_input, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     # Adaptive default: snap max_pixels slider to image's native W×H on upload.
     image_input.change(_snap_maxpx_to_image, inputs=[image_input], outputs=[maxpx_slider])
+
+    # ── Live payload preview wiring ─────────────────────────────────────────
+    # Any parameter change → rebuild the JSON preview + warnings panel.
+    # JSON edit (interactive=True on gr.Code) → parse → snap sliders back.
+    # Ping-pong dies after one bounce because _parse_payload_edit returns
+    # gr.update() when parsed values equal current slider values.
+    def _refresh_preview(video_path, image_path, user_p, system_p,
+                        fps_val, mp_val, mt_val, t_val, p_val, r_val):
+        json_text = _build_payload_preview(
+            video_path, image_path, user_p, system_p,
+            fps_val, mp_val, mt_val, t_val, p_val, r_val,
+            model_id=_SERVER_MODEL_ID,
+        )
+        mode = _video_transmission_mode(video_path, image_path, False,
+                                        _SERVER_MODEL_ID or "")
+        warn_html = _build_warnings_html(fps_val, mp_val, mt_val, t_val, p_val, r_val, mode)
+        return json_text, warn_html
+
+    _preview_inputs = [
+        video_input, image_input, user_box, system_box,
+        fps_slider, maxpx_slider, maxtok_slider,
+        temp_slider, top_p_slider, rep_penalty_slider,
+    ]
+    _preview_outputs = [payload_preview, payload_warnings]
+    for _comp in _preview_inputs:
+        _comp.change(_refresh_preview, inputs=_preview_inputs, outputs=_preview_outputs)
+
+    payload_preview.change(
+        _parse_payload_edit,
+        inputs=[payload_preview, fps_slider, maxpx_slider, maxtok_slider,
+                temp_slider, top_p_slider, rep_penalty_slider],
+        outputs=[fps_slider, maxpx_slider, maxtok_slider,
+                 temp_slider, top_p_slider, rep_penalty_slider, payload_warnings],
+    )
 
     def on_demo(name):
         """Pick a demo: populate user prompt + system prompt + Reasoning badge."""
