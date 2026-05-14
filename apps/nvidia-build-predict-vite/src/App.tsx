@@ -21,7 +21,7 @@ const SAMPLE_VIDEO = "/examples/race-car.mp4";
 // page load; env vars are fallbacks only. See cosmos3_info_server.py.
 const COSMOS3_INFO_URL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_COSMOS3_INFO_URL) ||
-  "http://10.57.233.111:8088/active-model";
+  "/api/active-model";
 const DEFAULT_MODEL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_MODEL_NAME) ||
   "Detecting model…";
@@ -62,6 +62,7 @@ type MediaState = {
 };
 type ApiResult = {
   videoDataUrl?: string;
+  imageDataUrl?: string;
   assetUrl?: string;
   error?: string;
   diagnostic?: Record<string, unknown>;
@@ -186,7 +187,10 @@ export default function Page() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
-        const name = (d.checkpoint as string | undefined) || (d.display_name as string | undefined);
+        const name =
+          (d.checkpoint as string | undefined) ||
+          (d.display_name as string | undefined) ||
+          (Array.isArray(d.models) ? (d.models[0] as string | undefined) : undefined);
         if (name) {
           setModel(name);
           setModels((prev) => (prev.includes(name) ? prev : [name, ...prev]));
@@ -556,6 +560,8 @@ export default function Page() {
                 <FailureReport result={result} />
               ) : result?.videoDataUrl ? (
                 <video className="resultVideo" src={result.videoDataUrl} controls />
+              ) : result?.imageDataUrl ? (
+                <img className="resultVideo" src={result.imageDataUrl} alt="Generated world state" />
               ) : result?.assetUrl ? (
                 <a className="assetLink" href={result.assetUrl} target="_blank">
                   Open generated asset

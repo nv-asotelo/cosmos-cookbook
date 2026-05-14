@@ -17,10 +17,7 @@ import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
 const SAMPLE_VIDEO = "/examples/race-car.mp4";
-// Standing order: header model name is auto-detected from the live backend on
-// page load; env vars are fallbacks only. See cosmos3_info_server.py.
-const COSMOS3_INFO_URL =
-  process.env.NEXT_PUBLIC_COSMOS3_INFO_URL || "http://10.57.233.111:8088/active-model";
+const COSMOS3_INFO_URL = process.env.NEXT_PUBLIC_COSMOS3_INFO_URL || "/api/active-model";
 const DEFAULT_MODEL = process.env.NEXT_PUBLIC_MODEL_NAME || "Detecting model…";
 const DEFAULT_PROMPT = "A first person view from a robot working in a chemical plant.";
 const HERO_TAGS = [
@@ -59,6 +56,7 @@ type MediaState = {
 };
 type ApiResult = {
   videoDataUrl?: string;
+  imageDataUrl?: string;
   assetUrl?: string;
   error?: string;
   diagnostic?: Record<string, unknown>;
@@ -554,6 +552,8 @@ export default function Page() {
                 <FailureReport result={result} />
               ) : result?.videoDataUrl ? (
                 <video className="resultVideo" src={result.videoDataUrl} controls />
+              ) : result?.imageDataUrl ? (
+                <img className="resultVideo" src={result.imageDataUrl} alt="Generated world state" />
               ) : result?.assetUrl ? (
                 <a className="assetLink" href={result.assetUrl} target="_blank">
                   Open generated asset

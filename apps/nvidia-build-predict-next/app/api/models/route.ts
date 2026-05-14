@@ -1,12 +1,29 @@
-const DEFAULT_BASE_URL = "http://localhost:8000/v1";
-const DEFAULT_MODEL = "nvidia/cosmos-predict1-5b";
+const DEFAULT_BASE_URL = "http://localhost:8000";
+const DEFAULT_MODEL = "nvidia/Cosmos3-Nano";
+
+function advertisedBaseUrl() {
+  return (
+    process.env.COSMOS3_BASE_URL ||
+    process.env.RAY_SERVE_BASE_URL ||
+    process.env.PREDICT_BASE_URL ||
+    process.env.NIM_BASE_URL ||
+    process.env.VLLM_BASE_URL ||
+    DEFAULT_BASE_URL
+  ).replace(/\/$/, "");
+}
+
+function probeModelsUrl() {
+  const baseUrl = process.env.VLLM_BASE_URL || process.env.NIM_BASE_URL || advertisedBaseUrl();
+  const stripped = baseUrl.replace(/\/$/, "");
+  return stripped.endsWith("/v1") ? `${stripped}/models` : `${stripped}/v1/models`;
+}
 
 export async function GET() {
-  const baseUrl = process.env.PREDICT_BASE_URL ?? process.env.NIM_BASE_URL ?? process.env.VLLM_BASE_URL ?? DEFAULT_BASE_URL;
+  const baseUrl = advertisedBaseUrl();
   const apiKey = process.env.PREDICT_API_KEY ?? process.env.NIM_API_KEY ?? process.env.VLLM_API_KEY ?? "EMPTY";
 
   try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+    const response = await fetch(probeModelsUrl(), {
       headers: { Authorization: `Bearer ${apiKey}` },
       cache: "no-store"
     });

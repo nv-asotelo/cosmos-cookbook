@@ -99,6 +99,10 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 
 **Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`. Current HF API checks return auth-required for `nvidia/Cosmos3-Nano-Reasoner` and `nvidia/Cosmos3-Super-Reasoner`, so set `HF_TOKEN` with the required access before launch. For `MODEL_SIZE=C3-8B` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
 
+**Predict / generator playgrounds** use the matching Vite Build skin in `apps/nvidia-build-predict-vite` on port `5174` when `BYO_VIDEO_FRONTEND=nvidia_build` and the selected model is a Cosmos Predict / Video2World / generator class. Set `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` to keep the guided Batch Inference UI live alongside either Vite skin.
+
+**Next.js source-capture frontends** live in `apps/nvidia-build-reason-next` and `apps/nvidia-build-predict-next`. They share the same `/api/models`, `/api/active-model`, `/api/reason`, and `/api/predict` contract as the Vite apps and are useful as editable reference captures; launch them manually on ports `3000` and `3001` when comparing against the Vite primaries.
+
 **Generators** require the upstream `nvidia-cosmos/cosmos3` package and a different runtime:
 
 ```
@@ -1025,14 +1029,14 @@ for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
 
-tar -C apps -czf - _shared nvidia-build-reason-vite | \
+tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
   ssh -i ~/.ssh/id_ed25519 <user@host> \
-    "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite && tar -C /tmp -xzf -"
+    "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite /tmp/nvidia-build-predict-vite /tmp/nvidia-build-reason-next /tmp/nvidia-build-predict-next && tar -C /tmp -xzf -"
 ```
 
 Launch setup:
 ```bash
-ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|batch_inference|gradio|fiftyone> BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+ssh -i ~/.ssh/id_ed25519 <user@host> "nohup bash -c 'export INFERENCE_BACKEND=<backend> MODEL_ID=<model_id> MODEL_NAME=<model_id> MODEL_SIZE=<model_size> BYO_VIDEO_FRONTEND=<nvidia_build|batch_inference|gradio|fiftyone> BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Cosmos3 Nano Reasoner Vite Build skin on the verified Horde host:
@@ -1050,7 +1054,7 @@ ssh -i ~/.ssh/id_ed25519 <user@host> "tail -60 /tmp/byo_video_setup.log 2>/dev/n
 URL capture:
 ```bash
 ssh -i ~/.ssh/id_ed25519 <user@host> "cat /tmp/gradio_live.flag 2>/dev/null; cat /tmp/byo_video_batch_inference_live.flag 2>/dev/null"
-ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'vite='; cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
+ssh -i ~/.ssh/id_ed25519 <user@host> "printf 'reason_vite='; cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; printf 'predict_vite='; cat /tmp/nvidia_build_predict_vite_url.txt 2>/dev/null; printf 'reason_next='; cat /tmp/nvidia_build_reason_next_url.txt 2>/dev/null; printf 'predict_next='; cat /tmp/nvidia_build_predict_next_url.txt 2>/dev/null; printf 'gradio='; cat /tmp/gradio_url.txt 2>/dev/null; printf 'batch_inference='; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null || true"
 ```
 
 ---
@@ -1471,16 +1475,16 @@ Agent steps:
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
    done
 
-   tar -C apps -czf - _shared nvidia-build-reason-vite | \
+   tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-       "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite && tar -C /tmp -xzf -"
+       "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite /tmp/nvidia-build-predict-vite /tmp/nvidia-build-reason-next /tmp/nvidia-build-predict-next && tar -C /tmp -xzf -"
    ```
 4. Run setup (streams live output here):
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
-     "export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
+     "export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1 REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URLs print at the end. The Vite Build skin writes `/tmp/nvidia_build_reason_vite_url.txt`; Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected (filename retains `batch_inference` for backward compat). Read all back with `cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
+5. URLs print at the end. Reason Vite writes `/tmp/nvidia_build_reason_vite_url.txt`; Predict Vite writes `/tmp/nvidia_build_predict_vite_url.txt`; Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected or when `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` is set. Optional Next.js captures can write `/tmp/nvidia_build_reason_next_url.txt` and `/tmp/nvidia_build_predict_next_url.txt` when started manually. Read all back with `cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; cat /tmp/nvidia_build_predict_vite_url.txt 2>/dev/null; cat /tmp/nvidia_build_reason_next_url.txt 2>/dev/null; cat /tmp/nvidia_build_predict_next_url.txt 2>/dev/null; cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \

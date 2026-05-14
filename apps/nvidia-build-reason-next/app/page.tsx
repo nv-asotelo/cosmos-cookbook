@@ -18,10 +18,7 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-reason2-8b.jpg";
 const SAMPLE_VIDEO = "/examples/race-car.mp4";
-// Standing order: header model name is auto-detected from the live backend on
-// page load; env vars are fallbacks only. See cosmos3_info_server.py.
-const COSMOS3_INFO_URL =
-  process.env.NEXT_PUBLIC_COSMOS3_INFO_URL || "http://10.57.233.111:8088/active-model";
+const COSMOS3_INFO_URL = process.env.NEXT_PUBLIC_COSMOS3_INFO_URL || "/api/active-model";
 const DEFAULT_MODEL = process.env.NEXT_PUBLIC_MODEL_NAME || "Detecting model…";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
@@ -156,21 +153,30 @@ export default function Page() {
     () => ({
       name: "req-<timestamp>",
       model,
-      prompt: userPrompt,
-      negative_prompt: "",
-      vision_path: media
-        ? media.kind === "image"
-          ? "/tmp/uploads/<sha1>.jpg"
-          : "/tmp/uploads/<sha1>.mp4"
-        : null,
-      num_frames: 121,
-      resolution: 480,
-      aspect_ratio: "16,9",
-      num_steps: 35,
-      guidance: 6.0,
+      messages: [
+        ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+        {
+          role: "user",
+          content: [
+            ...(media
+              ? [
+                  media.kind === "image"
+                    ? { type: "image_url", image_url: { url: "data:image/<type>;base64,<payload>" } }
+                    : { type: "video_url", video_url: { url: "data:video/mp4;base64,<payload>" } }
+                ]
+              : []),
+            { type: "text", text: userPrompt || "Describe the provided media." }
+          ]
+        }
+      ],
+      temperature,
+      top_p: topP,
+      max_tokens: maxTokens,
+      repetition_penalty: repetitionPenalty,
+      frames_per_second: framesPerSecond,
       seed
     }),
-    [media, model, seed, userPrompt]
+    [framesPerSecond, maxTokens, media, model, repetitionPenalty, seed, systemPrompt, temperature, topP, userPrompt]
   );
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
@@ -219,15 +225,21 @@ export default function Page() {
       const response = await fetch("/api/reason", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: userPrompt,
-          video: media?.kind === "video" ? media.dataUrl : undefined,
-          image: media?.kind === "image" ? media.dataUrl : undefined,
-          params: {
-            seed,
-            num_steps: maxTokens > 0 ? 35 : 35
-          }
-        })
+          body: JSON.stringify({
+            prompt: userPrompt,
+            systemPrompt,
+            model,
+            video: media?.kind === "video" ? media.dataUrl : undefined,
+            image: media?.kind === "image" ? media.dataUrl : undefined,
+            params: {
+              temperature,
+              top_p: topP,
+              max_tokens: maxTokens,
+              frames_per_second: framesPerSecond,
+              repetition_penalty: repetitionPenalty,
+              seed,
+            }
+          })
       });
       const data = (await response.json()) as ApiResult;
       setResult(data);

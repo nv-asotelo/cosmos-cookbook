@@ -21,6 +21,8 @@ Env vars:
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
   GRADIO_PORT       — port for Gradio (default: 7860)
   REASON_VITE_PORT  — port for Cosmos Reason Vite app (default: 5173)
+  PREDICT_VITE_PORT — port for Cosmos Predict Vite app (default: 5174)
+  BYO_VIDEO_LAUNCH_BATCH_INFERENCE — set to 1 to launch Batch Inference as a companion UI
   BATCH_INFERENCE_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
   BATCH_INFERENCE_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
@@ -314,11 +316,21 @@ if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playgroun
 BATCH_INFERENCE_PORT = int(os.environ.get("BATCH_INFERENCE_PORT", "7861"))
 BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
 BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
+BATCH_INFERENCE_URL_FILE = "/tmp/byo_video_batch_inference_url.txt"
+BATCH_INFERENCE_LIVE_FLAG = "/tmp/byo_video_batch_inference_live.flag"
 REASON_VITE_PORT = int(os.environ.get("REASON_VITE_PORT", os.environ.get("PORT", "5173")))
 REASON_VITE_APP_DIR = os.environ.get("REASON_VITE_APP_DIR", "/tmp/nvidia-build-reason-vite")
 REASON_VITE_URL_FILE = "/tmp/nvidia_build_reason_vite_url.txt"
 REASON_VITE_LIVE_FLAG = "/tmp/nvidia_build_reason_vite_live.flag"
+PREDICT_VITE_PORT = int(os.environ.get("PREDICT_VITE_PORT", "5174"))
+PREDICT_VITE_APP_DIR = os.environ.get("PREDICT_VITE_APP_DIR", "/tmp/nvidia-build-predict-vite")
+PREDICT_VITE_URL_FILE = "/tmp/nvidia_build_predict_vite_url.txt"
+PREDICT_VITE_LIVE_FLAG = "/tmp/nvidia_build_predict_vite_live.flag"
 NODE_HOME = os.environ.get("NODE_HOME", f"{HOME}/.local/node-v20")
+LAUNCH_BATCH_INFERENCE_COMPANION = os.environ.get(
+    "BYO_VIDEO_LAUNCH_BATCH_INFERENCE",
+    os.environ.get("LAUNCH_BATCH_INFERENCE", "0"),
+).strip().lower() in {"1", "true", "yes", "on"}
 URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
@@ -501,14 +513,27 @@ USE_REASON_VITE = (
     and INFERENCE_BACKEND == "vllm"
     and MODEL_SIZE in {"C3-8B", "C3-super"}
 )
-if USE_REASON_VITE:
+USE_PREDICT_VITE = (
+    FRONTEND == "nvidia_build"
+    and (
+        MODEL_SIZE in {"PREDICT1-5B", "PREDICT1-7B", "PREDICT25-2B", "PREDICT25-14B", "C3-NANO-GEN", "C3-SUPER-GEN"}
+        or any(token in " ".join(str(n or "") for n in (MODEL_ID, MODEL_NAME, _variant_labels)).lower() for token in ("predict", "video2world", "text2world"))
+    )
+)
+if USE_REASON_VITE or USE_PREDICT_VITE:
     _GRADIO_APP_LABEL = f"Cosmos Reason Gradio fallback for {MODEL_SIZE}"
+if USE_PREDICT_VITE:
+    _GRADIO_APP_LABEL = f"Cosmos Predict Gradio fallback for {MODEL_SIZE}"
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
 ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
 if USE_REASON_VITE:
     ok(f"Primary Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
+if USE_PREDICT_VITE:
+    ok(f"Primary Predict Vite app: {PREDICT_VITE_APP_DIR} on port {PREDICT_VITE_PORT}")
+if LAUNCH_BATCH_INFERENCE_COMPANION:
+    ok(f"Companion Batch Inference UI requested on port {BATCH_INFERENCE_PORT}")
 ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
 STEPS_DONE.append(1)
 print_dashboard()
@@ -807,7 +832,7 @@ if USE_REASON_VITE:
     _activate_node_home()
     node_major, node_version = _node_major()
     if node_major < 18:
-        run("Installing Node.js 20 for Vite Reason app")
+        run("Installing Node.js 20 for Vite frontends")
         apt_attempted = False
         if shutil.which("apt-get") is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
             apt_attempted = True
@@ -835,25 +860,32 @@ if USE_REASON_VITE:
         sys.exit(1)
     ok(f"Node.js ready ({node_version})")
 
-    if not os.path.exists(os.path.join(REASON_VITE_APP_DIR, "package.json")):
-        print(f"  ✗  {REASON_VITE_APP_DIR}/package.json not found — deploy apps/nvidia-build-reason-vite first.")
-        sys.exit(1)
-    if not os.path.exists("/tmp/_shared/reasonerClient.mjs"):
-        print("  ✗  /tmp/_shared/reasonerClient.mjs not found — deploy apps/_shared first.")
-        sys.exit(1)
+    vite_apps = []
+    if USE_REASON_VITE:
+        vite_apps.append(("Reason Vite", REASON_VITE_APP_DIR, "/tmp/_shared/reasonerClient.mjs"))
+    if USE_PREDICT_VITE:
+        vite_apps.append(("Predict Vite", PREDICT_VITE_APP_DIR, "/tmp/_shared/cosmos3Client.mjs"))
 
-    node_modules = os.path.join(REASON_VITE_APP_DIR, "node_modules")
-    if os.path.isdir(node_modules):
-        ok("Reason Vite npm dependencies already installed")
-    else:
-        run("Installing Reason Vite npm dependencies")
-        rc, out = run_cmd(["npm", "ci"], cwd=REASON_VITE_APP_DIR, env=ENV, timeout=240)
-        if rc != 0:
-            print("  ✗  npm ci failed:", out[-1200:])
+    for app_label, app_dir, shared_client in vite_apps:
+        if not os.path.exists(os.path.join(app_dir, "package.json")):
+            print(f"  ✗  {app_dir}/package.json not found — deploy the matching apps/ frontend first.")
             sys.exit(1)
-        ok("Reason Vite npm dependencies installed")
+        if not os.path.exists(shared_client):
+            print(f"  ✗  {shared_client} not found — deploy apps/_shared first.")
+            sys.exit(1)
 
-if FRONTEND in ("batch_inference", "fiftyone"):
+        node_modules = os.path.join(app_dir, "node_modules")
+        if os.path.isdir(node_modules):
+            ok(f"{app_label} npm dependencies already installed")
+        else:
+            run(f"Installing {app_label} npm dependencies")
+            rc, out = run_cmd(["npm", "ci"], cwd=app_dir, env=ENV, timeout=240)
+            if rc != 0:
+                print(f"  ✗  {app_label} npm ci failed:", out[-1200:])
+                sys.exit(1)
+            ok(f"{app_label} npm dependencies installed")
+
+if FRONTEND in ("batch_inference", "fiftyone") or LAUNCH_BATCH_INFERENCE_COMPANION:
     rc, fo_check = run_cmd(
         ["uv", "run", "python", "-c", "import fiftyone, huggingface_hub; print(fiftyone.__version__)"],
         cwd=REASON2_DIR, env=ENV
@@ -1341,21 +1373,88 @@ def _launch_reason_vite():
     _thr.Thread(target=_drain_stdout, args=(proc.stdout, log_path), daemon=True).start()
     return proc, url
 
-if FRONTEND in ("batch_inference", "fiftyone"):
+def _launch_predict_vite():
+    run(f"Starting Cosmos Predict Vite Build skin on port {PREDICT_VITE_PORT}")
+    vite_env = {
+        **launch_env,
+        "PORT": str(PREDICT_VITE_PORT),
+        "MODEL_ID": MODEL_ID,
+        "MODEL_NAME": MODEL_NAME or MODEL_ID,
+        "COSMOS3_BASE_URL": os.environ.get(
+            "COSMOS3_BASE_URL",
+            os.environ.get("RAY_SERVE_BASE_URL", "http://localhost:8000"),
+        ),
+        "COSMOS3_CLIENT_REQUIRE_ROOT": PREDICT_VITE_APP_DIR,
+        "VITE_COSMOS3_INFO_URL": "/api/models",
+    }
+    proc = subprocess.Popen(
+        ["npm", "run", "dev"],
+        cwd=PREDICT_VITE_APP_DIR,
+        env=vite_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    local_url = f"http://localhost:{PREDICT_VITE_PORT}"
+    log_path = "/tmp/nvidia_build_predict_vite.log"
+    t_launch = time.time()
+    with open(log_path, "w") as log:
+        while time.time() - t_launch < 90:
+            line = proc.stdout.readline()
+            if line:
+                log.write(line)
+                log.flush()
+                stripped = line.rstrip()
+                if stripped:
+                    print(f"     {DIM}{stripped}{RESET}", flush=True)
+                if "vite-build-predict" in stripped:
+                    break
+            if proc.poll() is not None:
+                print(f"  ✗  Predict Vite exited early. Check {log_path}")
+                sys.exit(1)
+            time.sleep(0.2)
+
+    _probe_ok = False
+    for _probe_attempt in range(20):
+        try:
+            urllib.request.urlopen(f"{local_url}/api/models", timeout=3)
+            _probe_ok = True
+            break
+        except Exception:
+            time.sleep(2)
+
+    if not _probe_ok:
+        print("  ✗  Predict Vite launched but /api/models probe failed after 40s.")
+        print(f"     Check {log_path} for errors.")
+        proc.terminate()
+        sys.exit(1)
+
+    host_ip = _detect_host_ip()
+    url = local_url if not host_ip else f"http://{host_ip}:{PREDICT_VITE_PORT}"
+    for _path in (PREDICT_VITE_URL_FILE, PREDICT_VITE_LIVE_FLAG):
+        with open(_path, "w") as f:
+            f.write(url + "\n")
+
+    ok("Predict Vite Build skin is live")
+    import threading as _thr
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, log_path), daemon=True).start()
+    return proc, url
+
+def _launch_batch_inference(gradio_proc=None):
     if not os.path.exists(BATCH_INFERENCE_APP):
         print(f"  ✗  {BATCH_INFERENCE_APP} not found — deploy byo_video_batch_inference.py first"); sys.exit(1)
 
     runtime_env = {
         **launch_env,
-        "BYO_VIDEO_FRONTEND": FRONTEND,
+        "BYO_VIDEO_FRONTEND": FRONTEND if FRONTEND in ("batch_inference", "fiftyone") else "batch_inference",
         "BATCH_INFERENCE_PORT": str(BATCH_INFERENCE_PORT),
         "BATCH_INFERENCE_DATASET": os.environ.get("BATCH_INFERENCE_DATASET", "pjramg/Safe_Unsafe_Test"),
         "BATCH_INFERENCE_CONCURRENCY": os.environ.get("BATCH_INFERENCE_CONCURRENCY", "4"),
         "BATCH_INFERENCE_MAX_VIDEOS": os.environ.get("BATCH_INFERENCE_MAX_VIDEOS", "20"),
         "FIFTYONE_PORT": os.environ.get("FIFTYONE_PORT", "5151"),
     }
-
-    gradio_proc, gradio_url = _launch_gradio(sidecar=True)
 
     run(f"Starting Cosmos BYO Video Batch Inference on port {BATCH_INFERENCE_PORT}")
     proc = subprocess.Popen(
@@ -1388,7 +1487,8 @@ if FRONTEND in ("batch_inference", "fiftyone"):
     if not url:
         print(f"  ✗  Batch Inference printed no URL. Check {BATCH_INFERENCE_LOG_FILE}")
         proc.terminate()
-        gradio_proc.terminate()
+        if gradio_proc:
+            gradio_proc.terminate()
         sys.exit(1)
 
     host_ip = _detect_host_ip()
@@ -1408,17 +1508,26 @@ if FRONTEND in ("batch_inference", "fiftyone"):
         print("  ✗  Batch Inference launched but /api/state probe failed after 20s.")
         print(f"     Check {BATCH_INFERENCE_LOG_FILE} for errors.")
         proc.terminate()
-        gradio_proc.terminate()
+        if gradio_proc:
+            gradio_proc.terminate()
         sys.exit(1)
 
-    for _path in ("/tmp/byo_video_batch_inference_url.txt", "/tmp/byo_video_batch_inference_live.flag"):
+    for _path in (BATCH_INFERENCE_URL_FILE, BATCH_INFERENCE_LIVE_FLAG):
         with open(_path, "w") as f:
             f.write(url + "\n")
 
     ok("Batch Inference frontend is live")
+    import threading as _thr
+    _thr.Thread(target=_drain_stdout, args=(proc.stdout, BATCH_INFERENCE_LOG_FILE), daemon=True).start()
+    return proc, url
+
+if FRONTEND in ("batch_inference", "fiftyone"):
+    gradio_proc, gradio_url = _launch_gradio(sidecar=True)
+    proc, url = _launch_batch_inference(gradio_proc=gradio_proc)
     STEPS_DONE.append(9)
     print_dashboard()
 
+    fiftyone_port = os.environ.get("FIFTYONE_PORT", "5151")
     print(flush=True)
     print(f"{BOLD}{'─'*62}{RESET}", flush=True)
     print(f"{BOLD}  Cosmos BYO Video Batch Inference — Ready{RESET}", flush=True)
@@ -1427,14 +1536,12 @@ if FRONTEND in ("batch_inference", "fiftyone"):
     print(f"  {BOLD}Gradio URL:{RESET}         {hyperlink(gradio_url)}", flush=True)
     print(f"  {DIM}Dataset smoke default: pjramg/Safe_Unsafe_Test{RESET}", flush=True)
     print(f"  {DIM}Results: /tmp/byo_video_batch_inference_results.json{RESET}", flush=True)
-    print(f"  {DIM}FiftyOne port: {runtime_env['FIFTYONE_PORT']} when opened from the UI{RESET}", flush=True)
+    print(f"  {DIM}FiftyOne port: {fiftyone_port} when opened from the UI{RESET}", flush=True)
     if os.path.exists("/tmp/byo_video_runtime_guide.py"):
         print(f"  {DIM}Claude CLI guide: python3 /tmp/byo_video_runtime_guide.py --url {url} wizard{RESET}", flush=True)
     print(f"{'─'*62}", flush=True)
     print(flush=True)
 
-    import threading as _thr
-    _thr.Thread(target=_drain_stdout, args=(proc.stdout, BATCH_INFERENCE_LOG_FILE), daemon=True).start()
     try:
         proc.wait()
     except KeyboardInterrupt:
@@ -1447,6 +1554,10 @@ if FRONTEND in ("batch_inference", "fiftyone"):
 if USE_REASON_VITE:
     gradio_proc, gradio_url = _launch_gradio(sidecar=True)
     proc, url = _launch_reason_vite()
+    batch_proc = None
+    batch_url = None
+    if LAUNCH_BATCH_INFERENCE_COMPANION:
+        batch_proc, batch_url = _launch_batch_inference(gradio_proc=gradio_proc)
 
     ok("Reason Vite primary UI up; Gradio fallback remains live")
     STEPS_DONE.append(9)
@@ -1458,6 +1569,8 @@ if USE_REASON_VITE:
     print(f"{'─'*62}", flush=True)
     print(f"  {BOLD}Vite URL:{RESET}    {hyperlink(url)}", flush=True)
     print(f"  {BOLD}Gradio URL:{RESET}  {hyperlink(gradio_url)}", flush=True)
+    if batch_url:
+        print(f"  {BOLD}Batch Inference URL:{RESET}  {hyperlink(batch_url)}", flush=True)
     print(f"  {DIM}Model: {MODEL_ID}{RESET}", flush=True)
     print(f"  {DIM}Vite log: /tmp/nvidia_build_reason_vite.log{RESET}", flush=True)
     print(f"  {DIM}If direct access is blocked: ssh -L {REASON_VITE_PORT}:localhost:{REASON_VITE_PORT} <user@host>{RESET}", flush=True)
@@ -1469,8 +1582,51 @@ if USE_REASON_VITE:
     except KeyboardInterrupt:
         proc.terminate()
         gradio_proc.terminate()
+        if batch_proc:
+            batch_proc.terminate()
         proc.wait()
         gradio_proc.wait()
+        if batch_proc:
+            batch_proc.wait()
+    sys.exit(0)
+
+if USE_PREDICT_VITE:
+    gradio_proc, gradio_url = _launch_gradio(sidecar=True)
+    proc, url = _launch_predict_vite()
+    batch_proc = None
+    batch_url = None
+    if LAUNCH_BATCH_INFERENCE_COMPANION:
+        batch_proc, batch_url = _launch_batch_inference(gradio_proc=gradio_proc)
+
+    ok("Predict Vite primary UI up; Gradio fallback remains live")
+    STEPS_DONE.append(9)
+    print_dashboard()
+
+    print(flush=True)
+    print(f"{BOLD}{'─'*62}{RESET}", flush=True)
+    print(f"{BOLD}  Cosmos Predict {MODEL_SIZE} Vite Demo — Ready{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(f"  {BOLD}Predict Vite URL:{RESET}  {hyperlink(url)}", flush=True)
+    print(f"  {BOLD}Gradio URL:{RESET}        {hyperlink(gradio_url)}", flush=True)
+    if batch_url:
+        print(f"  {BOLD}Batch Inference URL:{RESET}  {hyperlink(batch_url)}", flush=True)
+    print(f"  {DIM}Model: {MODEL_ID}{RESET}", flush=True)
+    print(f"  {DIM}Vite log: /tmp/nvidia_build_predict_vite.log{RESET}", flush=True)
+    print(f"  {DIM}If direct access is blocked: ssh -L {PREDICT_VITE_PORT}:localhost:{PREDICT_VITE_PORT} <user@host>{RESET}", flush=True)
+    print(f"{'─'*62}", flush=True)
+    print(flush=True)
+
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        gradio_proc.terminate()
+        if batch_proc:
+            batch_proc.terminate()
+        proc.wait()
+        gradio_proc.wait()
+        if batch_proc:
+            batch_proc.wait()
     sys.exit(0)
 
 proc, url = _launch_gradio(sidecar=False)

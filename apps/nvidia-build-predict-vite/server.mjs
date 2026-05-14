@@ -44,7 +44,7 @@ const VIDEO_PARAMS = {
 const app = express();
 app.use(express.json({ limit: "128mb" }));
 
-app.get("/api/models", async (_request, response) => {
+async function getModelInfo() {
   // Ray Serve doesn't expose /v1/models. Surface the configured default so
   // the UI has at least one entry; users with a NIM still listening on
   // ${VLLM_BASE_URL}/v1/models will fall through to the warning branch.
@@ -56,14 +56,30 @@ app.get("/api/models", async (_request, response) => {
     if (!upstream.ok) throw new Error(`Model probe failed with HTTP ${upstream.status}`);
     const data = await upstream.json();
     const models = Array.isArray(data?.data) ? data.data.map((model) => model.id).filter(Boolean) : [];
-    response.json({ baseUrl: advertisedBaseUrl, models: models.length > 0 ? models : [defaultModel] });
+    return { baseUrl: advertisedBaseUrl, models: models.length > 0 ? models : [defaultModel] };
   } catch (error) {
-    response.json({
+    return {
       baseUrl: advertisedBaseUrl,
       models: [defaultModel],
       warning: error instanceof Error ? error.message : "Unable to reach model endpoint"
-    });
+    };
   }
+}
+
+app.get("/api/models", async (_request, response) => {
+  response.json(await getModelInfo());
+});
+
+app.get("/api/active-model", async (_request, response) => {
+  const info = await getModelInfo();
+  const checkpoint = info.models[0] || defaultModel;
+  response.json({
+    checkpoint,
+    display_name: checkpoint,
+    backend: "cosmos3-generate",
+    base_url: advertisedBaseUrl,
+    warning: info.warning
+  });
 });
 
 function redactPayload(payload) {

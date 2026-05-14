@@ -12,7 +12,7 @@
 // host (under `outputs/ray_serve/`). We base64-encode each file so the browser
 // can render it inline.
 //
-// Node 20+ built-ins only (`crypto`, `fs/promises`, `path`, `fetch`, `undici`).
+// Node 20+ built-ins plus the app-local `undici` package.
 //
 // LONG-RUNNING-REQUEST NOTE (2026-05-13 incident — generate_20260513_212614_ad1d):
 // Cosmos3 Ray Serve `/generate` is a synchronous long call (HD 720p × 121 frames
@@ -26,19 +26,44 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { Agent, fetch as undiciFetch } from "undici";
 
 // 30-minute dispatcher for the long-running Ray Serve POST /generate call.
 // Headers + body timeouts both bumped to 30 min so HD generations don't get
 // cut off mid-flight.
 const RAY_SERVE_TIMEOUT_MS = Number(process.env.COSMOS3_REQUEST_TIMEOUT_MS) || 30 * 60 * 1000;
-const RAY_SERVE_AGENT = new Agent({
-  headersTimeout: RAY_SERVE_TIMEOUT_MS,
-  bodyTimeout: RAY_SERVE_TIMEOUT_MS,
-  keepAliveTimeout: 60_000,
-  connect: { timeout: 30_000 }
-});
+const UNDICI_REQUIRE_ROOTS = [
+  process.env.COSMOS3_CLIENT_REQUIRE_ROOT,
+  process.env.PREDICT_VITE_APP_DIR,
+  process.cwd(),
+  "/tmp/nvidia-build-predict-vite"
+].filter(Boolean);
+
+function loadUndici() {
+  for (const root of UNDICI_REQUIRE_ROOTS) {
+    try {
+      const requireFromRoot = createRequire(path.join(root, "package.json"));
+      const undici = requireFromRoot("undici");
+      if (undici?.Agent && undici?.fetch) {
+        return undici;
+      }
+    } catch {
+      // Try the next candidate root.
+    }
+  }
+  return { Agent: null, fetch: globalThis.fetch };
+}
+
+const { Agent, fetch: undiciFetch } = loadUndici();
+const RAY_SERVE_AGENT = Agent
+  ? new Agent({
+      headersTimeout: RAY_SERVE_TIMEOUT_MS,
+      bodyTimeout: RAY_SERVE_TIMEOUT_MS,
+      keepAliveTimeout: 60_000,
+      connect: { timeout: 30_000 }
+    })
+  : null;
 
 const UPLOAD_DIR = "/tmp/uploads";
 
@@ -151,7 +176,7 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      dispatcher: RAY_SERVE_AGENT
+      ...(RAY_SERVE_AGENT ? { dispatcher: RAY_SERVE_AGENT } : {})
     });
   } catch (error) {
     return {
