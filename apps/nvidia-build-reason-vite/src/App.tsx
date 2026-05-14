@@ -85,6 +85,7 @@ type ApiResult = {
   stack_trace?: string | null;
   files?: ApiFile[];
   content?: string;
+  reasoning?: string;
   error?: string;
   payload?: unknown;
   raw?: unknown;
@@ -203,11 +204,15 @@ function isAcceptedFile(file: File): boolean {
   return /\.(mp4|jpg|jpeg|png)$/i.test(file.name);
 }
 
-function parseReasoning(content?: string) {
+function stripAnswerTags(text: string): string {
+  return text.replace(/^<answer>\s*/i, "").replace(/\s*<\/answer>$/i, "").trim();
+}
+
+function parseReasoning(content?: string, explicitReasoning?: string) {
   const text = content || "";
   const match = text.match(/<think>([\s\S]*?)<\/think>/i);
-  const reasoning = match?.[1]?.trim() || "";
-  const answer = match ? text.slice((match.index || 0) + match[0].length).trim() : text.trim();
+  const reasoning = (explicitReasoning || match?.[1] || "").trim();
+  const answer = stripAnswerTags(match ? text.slice((match.index || 0) + match[0].length).trim() : text.trim());
   const steps = reasoning
     .split(/\n{2,}/)
     .map((step) => step.trim())
@@ -316,7 +321,7 @@ export default function App() {
       top_p: topP,
       max_tokens: maxTokens,
       repetition_penalty: repetitionPenalty,
-      frames_per_second: framesPerSecond,
+      mm_processor_kwargs: { fps: framesPerSecond },
       seed
     }),
     [
@@ -333,7 +338,7 @@ export default function App() {
     ]
   );
 
-  const parsedOutput = useMemo(() => parseReasoning(result?.content), [result?.content]);
+  const parsedOutput = useMemo(() => parseReasoning(result?.content, result?.reasoning), [result?.content, result?.reasoning]);
   const jsonOutput = useMemo(
     () => ({
       status,
@@ -901,6 +906,7 @@ function ExperiencePanel({
               </div>
             ) : (
               <PreviewOutput
+                isRunning={isRunning}
                 parsedOutput={parsedOutput}
                 reasoningEnabled={reasoningEnabled}
                 reasoningExpanded={reasoningExpanded}
@@ -1017,12 +1023,14 @@ function ExampleModal({
 }
 
 function PreviewOutput({
+  isRunning,
   parsedOutput,
   reasoningEnabled,
   reasoningExpanded,
   result,
   setReasoningExpanded
 }: {
+  isRunning: boolean;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
   reasoningEnabled: boolean;
   reasoningExpanded: boolean;
@@ -1031,6 +1039,15 @@ function PreviewOutput({
 }) {
   if (result?.status === "error" || result?.error) {
     return <pre className="errorBox">{result.message || result.error}</pre>;
+  }
+
+  if (result?.status === "skip") {
+    return (
+      <article className="emptyOutput">
+        <h3>Task stopped</h3>
+        <p>{result.message || "The current inference task was stopped before completion."}</p>
+      </article>
+    );
   }
 
   if (result?.files && result.files.length > 0) {
@@ -1054,7 +1071,7 @@ function PreviewOutput({
     );
   }
 
-  if (result?.content) {
+  if (result?.content || result?.reasoning) {
     return (
       <div className="responseStack">
         {reasoningEnabled && parsedOutput.reasoning ? (
@@ -1067,9 +1084,18 @@ function PreviewOutput({
         ) : null}
         <article className="answer">
           <p className="responseLabel">Response</p>
-          <FormattedText text={parsedOutput.answer || result.content} />
+          <FormattedText text={parsedOutput.answer || result.content || "No final response returned."} />
         </article>
       </div>
+    );
+  }
+
+  if (isRunning) {
+    return (
+      <article className="emptyOutput runningOutput">
+        <h3>Running inference</h3>
+        <p>Sending the request to the local Reasoner backend. The response and reasoning trace will appear here.</p>
+      </article>
     );
   }
 

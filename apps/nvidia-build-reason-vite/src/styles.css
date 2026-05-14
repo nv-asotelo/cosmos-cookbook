@@ -1051,6 +1051,11 @@ select {
   line-height: 1.5;
 }
 
+.runningOutput {
+  border-color: var(--green);
+  background: linear-gradient(135deg, #102100, #080808);
+}
+
 .jsonOutput {
   position: relative;
   min-height: 420px;

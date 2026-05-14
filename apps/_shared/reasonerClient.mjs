@@ -98,8 +98,9 @@ export async function submitReasoning({
     max_tokens: Number.isFinite(Number(p.max_tokens)) ? Number(p.max_tokens) : 4096,
     seed: Number.isFinite(Number(p.seed)) ? Number(p.seed) : undefined,
     repetition_penalty: Number.isFinite(Number(p.repetition_penalty)) ? Number(p.repetition_penalty) : undefined,
-    extra_body: Number.isFinite(Number(p.frames_per_second))
-      ? { mm_processor_kwargs: { fps: Number(p.frames_per_second) } }
+    top_k: Number.isFinite(Number(p.top_k)) ? Number(p.top_k) : undefined,
+    mm_processor_kwargs: Number.isFinite(Number(p.frames_per_second))
+      ? { fps: Number(p.frames_per_second) }
       : undefined
   };
 
@@ -144,11 +145,28 @@ export async function submitReasoning({
     };
   }
 
-  const contentText = data?.choices?.[0]?.message?.content || "";
+  const message = data?.choices?.[0]?.message || {};
+  const contentText = message.content || "";
+  const reasoningText = message.reasoning_content || message.reasoning || "";
+  const mockBackend =
+    data?.id === "chatcmpl-byo-mock" ||
+    /mock cosmos reasoner response/i.test(contentText);
+  if (mockBackend) {
+    return {
+      status: "error",
+      message: "Mock backend is active on the configured Reasoner endpoint; start a real vLLM/NIM server on /v1.",
+      content: "",
+      reasoning: "",
+      payload: redactPayload(payload),
+      raw: data
+    };
+  }
+
   return {
     status: "success",
     message: data?.usage ? `prompt ${data.usage.prompt_tokens || 0} / completion ${data.usage.completion_tokens || 0}` : "",
     content: contentText,
+    reasoning: reasoningText,
     payload: redactPayload(payload),
     raw: data
   };
