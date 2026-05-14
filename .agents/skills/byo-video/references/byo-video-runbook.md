@@ -16,6 +16,14 @@ unspecified frontend requests. Select `batch_inference` only when the user asks 
 guided dataset loading, concurrent batch inference, worker-safety smoke testing,
 or result writeback.
 
+For Build-style playgrounds, serve only the tower the loaded model can actually
+run. VLM/reasoner checkpoints use Reason surfaces. VFM/generator checkpoints use
+Predict/generation surfaces. Do not leave a Predict frontend running for
+`nvidia/Cosmos3-Nano-Reasoner`; that checkpoint is VLM-only and cannot generate.
+For a future Omni/Mixture-of-Transformers checkpoint that exposes both towers,
+ask the user which use cases they want to see — generation, reasoning, or both —
+then set `BYO_VIDEO_MOT_TOWER=generation|reasoning|both` before launch.
+
 Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`. Dataset/batch selections additionally serve the **Batch Inference web UI** on `BATCH_INFERENCE_PORT` (default `7861`) and write `/tmp/byo_video_batch_inference_url.txt`. (Internal identifiers `batch_inference` / `BATCH_INFERENCE_PORT` are retained; user-visible prose says "batch inference".)
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
@@ -99,9 +107,9 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 
 **Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`. Current HF API checks return auth-required for `nvidia/Cosmos3-Nano-Reasoner` and `nvidia/Cosmos3-Super-Reasoner`, so set `HF_TOKEN` with the required access before launch. For `MODEL_SIZE=C3-8B` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
 
-**Predict / generator playgrounds** use the matching Vite Build skin in `apps/nvidia-build-predict-vite` on port `5174` when `BYO_VIDEO_FRONTEND=nvidia_build` and the selected model is a Cosmos Predict / Video2World / generator class. Set `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` to keep the guided Batch Inference UI live alongside either Vite skin.
+**Predict / generator playgrounds** use the matching Vite Build skin in `apps/nvidia-build-predict-vite` on port `5174` only when `BYO_VIDEO_FRONTEND=nvidia_build` and the selected model is a Cosmos Predict / Video2World / generator class. If the loaded model is a VLM reasoner, kill stale Predict Vite / Next.js capture processes instead of advertising those URLs. Set `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` to keep the guided Batch Inference UI live alongside the selected model-matched skin.
 
-**Next.js source-capture frontends** live in `apps/nvidia-build-reason-next` and `apps/nvidia-build-predict-next`. They share the same `/api/models`, `/api/active-model`, `/api/reason`, and `/api/predict` contract as the Vite apps and are useful as editable reference captures; launch them manually on ports `3000` and `3001` when comparing against the Vite primaries.
+**Next.js source-capture frontends** live in `apps/nvidia-build-reason-next` and `apps/nvidia-build-predict-next`. They share the same `/api/models`, `/api/active-model`, `/api/reason`, and `/api/predict` contract as the Vite apps and are useful as editable reference captures; launch only the capture that matches the loaded model tower when comparing against the Vite primary.
 
 **Generators** require the upstream `nvidia-cosmos/cosmos3` package and a different runtime:
 
@@ -1484,7 +1492,7 @@ Agent steps:
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \
      "export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1 REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py"
    ```
-5. URLs print at the end. Reason Vite writes `/tmp/nvidia_build_reason_vite_url.txt`; Predict Vite writes `/tmp/nvidia_build_predict_vite_url.txt`; Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected or when `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` is set. Optional Next.js captures can write `/tmp/nvidia_build_reason_next_url.txt` and `/tmp/nvidia_build_predict_next_url.txt` when started manually. Read all back with `cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; cat /tmp/nvidia_build_predict_vite_url.txt 2>/dev/null; cat /tmp/nvidia_build_reason_next_url.txt 2>/dev/null; cat /tmp/nvidia_build_predict_next_url.txt 2>/dev/null; cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
+5. URLs print at the end. For the Cosmos3 Nano Reasoner VLM path, Reason Vite writes `/tmp/nvidia_build_reason_vite_url.txt`; Predict Vite should not be running or advertised. Gradio is always written to `/tmp/gradio_url.txt`; Batch Inference / FiftyOne companion UI is written to `/tmp/byo_video_batch_inference_url.txt` when selected or when `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` is set. Optional Next.js captures should match the loaded model tower. Read the active VLM URLs with `cat /tmp/nvidia_build_reason_vite_url.txt 2>/dev/null; cat /tmp/gradio_url.txt; cat /tmp/byo_video_batch_inference_url.txt 2>/dev/null` via ssh.
 6. Smoke test the worker-safety dataset after the frontend is live:
    ```bash
    ssh -i ~/.ssh/id_ed25519 horde@<ip> \

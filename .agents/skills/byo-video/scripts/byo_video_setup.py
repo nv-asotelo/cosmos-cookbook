@@ -19,6 +19,8 @@ Env vars:
                       C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
+  BYO_VIDEO_MOT_TOWER — reasoning | generation | both for future Omni/MoT models. Single-tower
+                      VLM/VFM models ignore this because their frontend is inferred from the loaded model.
   GRADIO_PORT       — port for Gradio (default: 7860)
   REASON_VITE_PORT  — port for Cosmos Reason Vite app (default: 5173)
   PREDICT_VITE_PORT — port for Cosmos Predict Vite app (default: 5174)
@@ -490,19 +492,124 @@ if not MODEL_ID:
 else:
     _variant_labels = MODEL_ID
 
-def _build_playground_app(model_size, *names):
+_REASONING_MODEL_SIZES = {
+    "CR1-7B", "2B", "8B", "32B",
+    "C3-2B", "C3-8B", "C3-32B", "C3-super",
+    "NEM-12B", "OMNI-30B", "GM-4-31B",
+    "QW3-2B", "QW3-8B", "QW3-32B",
+}
+_GENERATION_MODEL_SIZES = {
+    "PREDICT1-5B", "PREDICT1-7B", "PREDICT25-2B", "PREDICT25-14B",
+    "C3-NANO-GEN", "C3-SUPER-GEN",
+}
+_TOWER_ALIASES = {
+    "reason": "reasoning",
+    "reasoner": "reasoning",
+    "reasoning": "reasoning",
+    "vlm": "reasoning",
+    "understanding": "reasoning",
+    "chat": "reasoning",
+    "generate": "generation",
+    "generator": "generation",
+    "generation": "generation",
+    "gen": "generation",
+    "vfm": "generation",
+    "predict": "generation",
+    "video2world": "generation",
+    "both": "both",
+    "all": "both",
+}
+
+def _infer_model_towers(model_size, *names):
+    """Return the MoT tower(s) the loaded model can actually serve."""
     tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
+    if any(token in tokens for token in ("predict", "video2world", "text2world", "generator")):
+        return {"generation"}
+    if any(token in tokens for token in ("reason", "reasoner", "vlm", "qwen", "nemotron", "gemma")):
+        return {"reasoning"}
+    if any(token in tokens for token in ("cosmos3-nano", "cosmos3-super", "cosmos-3-nano", "cosmos-3-super")):
+        return {"generation"}
+    if "omni" in tokens:
+        return {"reasoning", "generation"}
+    if model_size in _REASONING_MODEL_SIZES:
+        return {"reasoning"}
+    if model_size in _GENERATION_MODEL_SIZES:
+        return {"generation"}
+    if INFERENCE_BACKEND == "cosmos3_native":
+        return {"generation"}
+    return {"reasoning"}
+
+def _requested_towers_from_env():
+    raw = (
+        os.environ.get("BYO_VIDEO_MOT_TOWER")
+        or os.environ.get("COSMOS3_TOWER")
+        or os.environ.get("COSMOS3_FRONTEND_TOWER")
+        or ""
+    ).strip().lower()
+    if not raw:
+        return None
+    requested = set()
+    for part in re.split(r"[,/+ ]+", raw):
+        if not part:
+            continue
+        tower = _TOWER_ALIASES.get(part)
+        if not tower:
+            print(
+                f"  ✗  BYO_VIDEO_MOT_TOWER={raw!r} is not supported. "
+                "Use reasoning, generation, or both."
+            )
+            sys.exit(1)
+        if tower == "both":
+            requested.update({"reasoning", "generation"})
+        else:
+            requested.add(tower)
+    return requested or None
+
+def _select_frontend_towers(available):
+    requested = _requested_towers_from_env()
+    if requested:
+        unsupported = requested - available
+        if unsupported:
+            available_label = ", ".join(sorted(available))
+            requested_label = ", ".join(sorted(requested))
+            print(
+                f"  ✗  Requested frontend tower(s) {requested_label} do not match "
+                f"the loaded model capability ({available_label})."
+            )
+            sys.exit(1)
+        return requested
+
+    if available == {"reasoning", "generation"}:
+        print("  ✗  This Omni/MoT model can expose multiple towers.")
+        print("     Ask the user which use cases they want to see: generation, reasoning, or both.")
+        print("     Then set BYO_VIDEO_MOT_TOWER=reasoning|generation|both and rerun setup.")
+        sys.exit(1)
+
+    return set(available)
+
+def _tower_label(towers):
+    if towers == {"reasoning"}:
+        return "VLM / Reasoner"
+    if towers == {"generation"}:
+        return "VFM / Generator"
+    return "Omni MoT / Reasoner + Generator"
+
+MODEL_TOWERS = _infer_model_towers(MODEL_SIZE, MODEL_ID, MODEL_NAME, _variant_labels)
+FRONTEND_TOWERS = _select_frontend_towers(MODEL_TOWERS)
+
+def _build_playground_app(model_size, towers, *names):
+    tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
+    if "generation" in towers and "reasoning" not in towers:
+        return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
+    if "reasoning" in towers and "generation" not in towers:
+        return "/tmp/gradio_cosmos_reason_build.py", "Cosmos Reason Build-style playground"
     if "predict" in tokens or "video2world" in tokens or "text2world" in tokens:
         return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
-    if "reason" in tokens or "cosmos3" in tokens or model_size in {
-        "CR1-7B", "2B", "8B", "32B", "C3-2B", "C3-8B", "C3-32B", "C3-super",
-    }:
-        return "/tmp/gradio_cosmos_reason_build.py", "Cosmos Reason Build-style playground"
     return "/tmp/gradio_cr2_byo.py", "Cosmos Build-style BYO-video Gradio"
 
 if FRONTEND == "nvidia_build":
     GRADIO_APP, _GRADIO_APP_LABEL = _build_playground_app(
-        MODEL_SIZE, MODEL_ID, MODEL_NAME, _variant_labels
+        MODEL_SIZE, FRONTEND_TOWERS, MODEL_ID, MODEL_NAME, _variant_labels
     )
 else:
     GRADIO_APP = os.environ.get("GRADIO_APP", "/tmp/gradio_cr2_byo.py")
@@ -510,23 +617,25 @@ else:
 
 USE_REASON_VITE = (
     FRONTEND == "nvidia_build"
+    and "reasoning" in FRONTEND_TOWERS
     and INFERENCE_BACKEND == "vllm"
     and MODEL_SIZE in {"C3-8B", "C3-super"}
 )
 USE_PREDICT_VITE = (
     FRONTEND == "nvidia_build"
-    and (
-        MODEL_SIZE in {"PREDICT1-5B", "PREDICT1-7B", "PREDICT25-2B", "PREDICT25-14B", "C3-NANO-GEN", "C3-SUPER-GEN"}
-        or any(token in " ".join(str(n or "") for n in (MODEL_ID, MODEL_NAME, _variant_labels)).lower() for token in ("predict", "video2world", "text2world"))
-    )
+    and "generation" in FRONTEND_TOWERS
 )
-if USE_REASON_VITE or USE_PREDICT_VITE:
+if USE_REASON_VITE and USE_PREDICT_VITE:
+    _GRADIO_APP_LABEL = f"Cosmos Omni Gradio fallback for {MODEL_SIZE}"
+elif USE_REASON_VITE:
     _GRADIO_APP_LABEL = f"Cosmos Reason Gradio fallback for {MODEL_SIZE}"
-if USE_PREDICT_VITE:
+elif USE_PREDICT_VITE:
     _GRADIO_APP_LABEL = f"Cosmos Predict Gradio fallback for {MODEL_SIZE}"
 
 ok(f"{gpu_name}  {vram_free:,} MiB free / {vram_total:,} MiB total")
 ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
+ok(f"Model frontend capability: {_tower_label(MODEL_TOWERS)}")
+ok(f"Serving frontend tower: {_tower_label(FRONTEND_TOWERS)}")
 ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
 if USE_REASON_VITE:
     ok(f"Primary Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
@@ -1151,6 +1260,8 @@ launch_env = {
     "MODEL_SIZE":         MODEL_SIZE,
     "MODEL_DIR":          MODEL_DIR,
     "MODEL_NAME":         MODEL_NAME,
+    "BYO_VIDEO_MODEL_TOWERS": ",".join(sorted(MODEL_TOWERS)),
+    "BYO_VIDEO_ACTIVE_TOWERS": ",".join(sorted(FRONTEND_TOWERS)),
     "GRADIO_PORT":        str(GRADIO_PORT),
     "GRADIO_SHARE":       "true",
     "PYTHONUNBUFFERED":   "1",

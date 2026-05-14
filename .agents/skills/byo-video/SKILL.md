@@ -30,7 +30,15 @@ descriptive labels and map the answer to the env var afterward:
   for a model-specific Gradio surface that mirrors the corresponding
   build.nvidia.com playground when the selected model is from the Cosmos,
   Cosmos3, Cosmos Predict, or Cosmos Reason collections. The setup script
-  chooses the closest bundled app for the selected model.
+  chooses the closest bundled app for the selected model and gates generation
+  frontends by model capability: VLM/reasoner checkpoints serve Reason surfaces,
+  VFM/generator checkpoints serve Predict/generation surfaces.
+
+Do not serve a Predict/generation frontend for a VLM-only Reasoner such as
+`nvidia/Cosmos3-Nano-Reasoner`. For future Omni/Mixture-of-Transformers
+checkpoints that expose both towers, ask the user what use cases they want to
+see — generation, reasoning, or both — and map the answer to
+`BYO_VIDEO_MOT_TOWER=generation|reasoning|both` before launch.
 
 Regardless of the selected mode, `byo_video_setup.py` must serve a live Gradio
 link on `GRADIO_PORT` and write it to `/tmp/gradio_url.txt` plus
