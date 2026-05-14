@@ -1132,6 +1132,86 @@ _REASONING_PANEL_CSS = """
     grid-template-columns: 1fr;
   }
 }
+.ap-overlay-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0b0b0b;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 8px 0 12px 0;
+}
+.ap-overlay-frame > img,
+.ap-overlay-frame > video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ap-overlay-panels {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: min(380px, 42%);
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 2;
+  pointer-events: none;
+}
+.ap-prompt-panel,
+.ap-reasoning-panel,
+.ap-action-panel {
+  background: rgba(20, 20, 20, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 10px 14px;
+  pointer-events: auto;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.ap-prompt-text {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.ap-panel-header {
+  color: #76b900;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.ap-panel-header-action { color: #fef08a; }
+.ap-panel-body {
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.55;
+  font-family: 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+  max-height: 280px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ap-panel-body-action {
+  color: #fef9c3;
+}
+.ap-empty-canvas {
+  width: 100%;
+  height: 100%;
+  background: #0b0b0b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 14px;
+  font-style: italic;
+}
 """
 
 
@@ -1167,45 +1247,201 @@ def _compose_thinking_text(content_parts, reasoning_parts):
     return f"<think>\n{rsn}"
 
 
-def _render_with_think(text):
+# ── Action-policy style mode (Cosmos3 silent overlay) ────────────────────────
+# Renders a full-bleed still→video canvas with floating user-prompt +
+# reasoning + action panels in the top-right corner. Mimics the silent
+# Mixture-of-Transformers action-policy UX from Cosmos3-Nano / Cosmos3-Super.
+#
+# State machine (derived from the streamed text, not a separate flag):
+#   reasoning streaming (<think> open, no </think> seen yet)
+#     → canvas shows frame 0 of the uploaded video
+#   reasoning complete (</think> seen, OR no <think> at all)
+#     → canvas swaps to <video autoplay muted loop> with the uploaded MP4
+_FRAME0_CACHE = {}
+_VIDEO_DATA_URL_CACHE = {}
+
+
+def _extract_frame_0_as_data_url(path):
+    """Extract frame 0 of a video as a base64 data: JPEG URL. Cached per
+    path so the streaming loop doesn't re-decode on every yield."""
+    if not path or not _AV_OK:
+        return None
+    if path in _FRAME0_CACHE:
+        return _FRAME0_CACHE[path]
+    try:
+        container = _av_module.open(path)
+        stream = next((s for s in container.streams if s.type == "video"), None)
+        if not stream:
+            container.close()
+            _FRAME0_CACHE[path] = None
+            return None
+        result = None
+        for frame in container.decode(stream):
+            from PIL import Image as _pil_img
+            img = frame.to_image()
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=88)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            result = f"data:image/jpeg;base64,{b64}"
+            break
+        container.close()
+        _FRAME0_CACHE[path] = result
+        return result
+    except Exception:
+        _FRAME0_CACHE[path] = None
+        return None
+
+
+def _video_as_data_url(path, max_bytes=25 * 1024 * 1024):
+    """Read a video file and return as base64 data: MP4 URL. None for files
+    larger than max_bytes — caller should fall back to the still or to a
+    Gradio /file= URL. Cached per path."""
+    if not path:
+        return None
+    if path in _VIDEO_DATA_URL_CACHE:
+        return _VIDEO_DATA_URL_CACHE[path]
+    try:
+        import os as _os
+        size = _os.path.getsize(path)
+        if size > max_bytes:
+            _VIDEO_DATA_URL_CACHE[path] = None
+            return None
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        result = f"data:video/mp4;base64,{b64}"
+        _VIDEO_DATA_URL_CACHE[path] = result
+        return result
+    except Exception:
+        _VIDEO_DATA_URL_CACHE[path] = None
+        return None
+
+
+def _render_action_policy_overlay(video_path, user_prompt, reasoning_text,
+                                   answer_text, reasoning_complete):
+    """Build the Cosmos3-style overlay HTML: full-bleed canvas (still→video)
+    with floating user-prompt + REASONING + ACTION panels in the top-right."""
+    import html as _h
+
+    # ── Canvas: still (during reasoning) or autoplay video (on complete) ──
+    if reasoning_complete and video_path:
+        vurl = _video_as_data_url(video_path)
+        if vurl:
+            media_html = (
+                f'<video autoplay muted loop playsinline>'
+                f'<source src="{vurl}" type="video/mp4">'
+                '</video>'
+            )
+        else:
+            # Too large to inline — fall back to still + note.
+            still = _extract_frame_0_as_data_url(video_path) or ""
+            media_html = f'<img src="{still}" alt="frame 0" />' if still else (
+                '<div class="ap-empty-canvas">Video too large to inline; '
+                'reasoning complete.</div>'
+            )
+    elif video_path:
+        still = _extract_frame_0_as_data_url(video_path)
+        media_html = f'<img src="{still}" alt="frame 0" />' if still else (
+            '<div class="ap-empty-canvas">Could not extract frame 0.</div>'
+        )
+    else:
+        media_html = (
+            '<div class="ap-empty-canvas">Upload a video to enable '
+            'action-policy style mode</div>'
+        )
+
+    # ── Overlays ──
+    panels = []
+    if user_prompt and user_prompt.strip():
+        first_line = user_prompt.strip().split("\n")[0][:200]
+        panels.append(
+            f'<div class="ap-prompt-panel"><div class="ap-prompt-text">'
+            f'{_h.escape(first_line)}</div></div>'
+        )
+    if reasoning_text and reasoning_text.strip():
+        panels.append(
+            '<div class="ap-reasoning-panel">'
+            '<div class="ap-panel-header">REASONING</div>'
+            f'<div class="ap-panel-body">{_h.escape(reasoning_text)}</div>'
+            '</div>'
+        )
+    if reasoning_complete and answer_text and answer_text.strip():
+        panels.append(
+            '<div class="ap-action-panel">'
+            '<div class="ap-panel-header ap-panel-header-action">ACTION</div>'
+            f'<div class="ap-panel-body ap-panel-body-action">'
+            f'{_h.escape(answer_text)}</div></div>'
+        )
+
+    panels_html = (
+        f'<div class="ap-overlay-panels">{"".join(panels)}</div>'
+        if panels else ''
+    )
+    return f'<div class="ap-overlay-frame">{media_html}{panels_html}</div>'
+
+
+def _render_with_think(text, video_path=None, style_mode=False, user_prompt=""):
     """Split streamed model output on <think>...</think> and render the
     reasoning as a collapsible panel + the answer plainly below.
-    Plain text (no <think>) renders as-is. Streaming mid-think shows a
-    "Reasoning…" header (open by default); once </think> arrives the
-    header switches to "Reasoning Complete ✓" and collapses by default.
+
+    When style_mode is True, ALSO prepend the action-policy overlay frame
+    (full-bleed still→video with floating panels). The text-rendering below
+    the overlay is unchanged — additive, preserves the existing reasoning
+    trace + model output panels.
+
     Always returns HTML safe for gr.HTML — escapes user-visible text."""
     import html as _html
+
+    # Parse text into pre / reasoning / answer + reasoning-complete flag.
     if not text:
-        return "<div class='cr-output'></div>"
-    open_tag, close_tag = "<think>", "</think>"
-    i_open = text.find(open_tag)
-    if i_open < 0:
-        return f"<div class='cr-output'><div class='cr-answer'>{_html.escape(text)}</div></div>"
-    pre = text[:i_open]
-    body_start = i_open + len(open_tag)
-    i_close = text.find(close_tag, body_start)
-    if i_close < 0:
-        reasoning = text[body_start:]
-        summary = "⏳ Reasoning…"
-        details_open = " open"
-        answer_html = ""
-        blurb = "<div class='cr-reasoning-blurb'>The model is thinking… stream continues below.</div>"
+        reasoning_text, answer_text, reasoning_complete, pre = "", "", False, ""
+        rendered = "<div class='cr-output'></div>"
     else:
-        reasoning = text[body_start:i_close]
-        post = text[i_close + len(close_tag):].lstrip("\n")
-        summary = "✓ Reasoning Complete"
-        details_open = ""
-        answer_html = f"<div class='cr-answer'>{_html.escape(post)}</div>" if post else ""
-        blurb = "<div class='cr-reasoning-blurb'>Below is the entire thinking process the model went through to arrive at its response.</div>"
-    pre_html = f"<div class='cr-prelude'>{_html.escape(pre)}</div>" if pre.strip() else ""
-    reasoning_html = (
-        f"<details{details_open} class='cr-reasoning'>"
-        f"<summary>{summary}</summary>"
-        f"{blurb}"
-        f"<div class='cr-think-body'>{_html.escape(reasoning)}</div>"
-        f"</details>"
-    )
-    return f"<div class='cr-output'>{pre_html}{reasoning_html}{answer_html}</div>"
+        open_tag, close_tag = "<think>", "</think>"
+        i_open = text.find(open_tag)
+        if i_open < 0:
+            # No <think> tag at all — text is all final answer; reasoning done.
+            reasoning_text, answer_text, reasoning_complete, pre = "", text, True, ""
+            rendered = (
+                f"<div class='cr-output'><div class='cr-answer'>"
+                f"{_html.escape(text)}</div></div>"
+            )
+        else:
+            pre = text[:i_open]
+            body_start = i_open + len(open_tag)
+            i_close = text.find(close_tag, body_start)
+            if i_close < 0:
+                reasoning_text = text[body_start:]
+                answer_text = ""
+                reasoning_complete = False
+                summary = "⏳ Reasoning…"
+                details_open = " open"
+                answer_html = ""
+                blurb = "<div class='cr-reasoning-blurb'>The model is thinking… stream continues below.</div>"
+            else:
+                reasoning_text = text[body_start:i_close]
+                post = text[i_close + len(close_tag):].lstrip("\n")
+                answer_text = post
+                reasoning_complete = True
+                summary = "✓ Reasoning Complete"
+                details_open = ""
+                answer_html = f"<div class='cr-answer'>{_html.escape(post)}</div>" if post else ""
+                blurb = "<div class='cr-reasoning-blurb'>Below is the entire thinking process the model went through to arrive at its response.</div>"
+            pre_html = f"<div class='cr-prelude'>{_html.escape(pre)}</div>" if pre.strip() else ""
+            reasoning_html = (
+                f"<details{details_open} class='cr-reasoning'>"
+                f"<summary>{summary}</summary>"
+                f"{blurb}"
+                f"<div class='cr-think-body'>{_html.escape(reasoning_text)}</div>"
+                f"</details>"
+            )
+            rendered = f"<div class='cr-output'>{pre_html}{reasoning_html}{answer_html}</div>"
+
+    if style_mode:
+        overlay = _render_action_policy_overlay(
+            video_path, user_prompt, reasoning_text, answer_text, reasoning_complete
+        )
+        return overlay + rendered
+    return rendered
 
 
 # ── Active model details panel (vLLM launch flags + quantization + build) ────
@@ -3286,6 +3522,23 @@ with gr.Blocks(
                 show_label=False,
             )
 
+        with gr.Row():
+            style_mode_chk = gr.Checkbox(
+                label="Action-policy style mode (Cosmos3 silent overlay)",
+                value=False,
+                info=(
+                    "When ON, the response panel renders a full-bleed canvas with "
+                    "floating user-prompt / REASONING / ACTION panels in the "
+                    "top-right corner. Frame 0 of the uploaded video shows during "
+                    "reasoning, then the canvas auto-plays the video when the "
+                    "reasoning trace completes. Mimics the silent Mixture-of-"
+                    "Transformers action-policy UX of Cosmos3-Nano / Cosmos3-Super. "
+                    "Additive — the existing reasoning trace + answer panels still "
+                    "render below."
+                ),
+                interactive=True,
+            )
+
         with gr.Row(visible=INFERENCE_BACKEND != "vllm"):
             disable_autocap_chk = gr.Checkbox(
                 label="Disable resolution auto-cap",
@@ -3575,13 +3828,15 @@ with gr.Blocks(
         return CHECKPOINT_PRESETS[0][1]
 
     def _run(video_path, image_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
-             ckpt_name, custom_val, disable_autocap, temperature, top_p, rep_penalty):
+             ckpt_name, custom_val, disable_autocap, temperature, top_p, rep_penalty, style_mode):
         model_id  = resolve_model_id(ckpt_name, custom_val)
         media     = video_path
         is_image  = False
         if media is None and image_path is not None:
             media    = image_path
             is_image = True
+        # Style mode only meaningful with a video; image inputs skip the overlay.
+        overlay_video = video_path if not is_image else None
         for text, status, tbl in run_inference(
             media, user_prompt, system_prompt,
             fps, max_pixels, max_new_tokens, model_id,
@@ -3591,30 +3846,40 @@ with gr.Blocks(
             top_p=top_p,
             rep_penalty=rep_penalty,
         ):
-            yield _render_with_think(text), status, tbl
+            yield _render_with_think(
+                text,
+                video_path=overlay_video,
+                style_mode=bool(style_mode),
+                user_prompt=user_prompt,
+            ), status, tbl
 
     def _run_all(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
-                 disable_autocap, reload_vllm):
+                 disable_autocap, reload_vllm, style_mode):
         for combined, status, tbl in run_all_variants(
             video_path, user_prompt, system_prompt,
             fps, max_pixels, max_new_tokens,
             disable_autocap=disable_autocap,
             reload_vllm=reload_vllm,
         ):
-            yield _render_with_think(combined), status, tbl
+            yield _render_with_think(
+                combined,
+                video_path=video_path,
+                style_mode=bool(style_mode),
+                user_prompt=user_prompt,
+            ), status, tbl
 
     run_btn.click(
         fn=_run,
         inputs=[video_input, image_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
                 checkpoint_dd, custom_ckpt, disable_autocap_chk,
-                temp_slider, top_p_slider, rep_penalty_slider],
+                temp_slider, top_p_slider, rep_penalty_slider, style_mode_chk],
         outputs=[response_out, status_panel, results_table],
     )
 
     all_btn.click(
         fn=_run_all,
         inputs=[video_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
-                disable_autocap_chk, reload_vllm_chk],
+                disable_autocap_chk, reload_vllm_chk, style_mode_chk],
         outputs=[response_out, status_panel, results_table],
     )
 
