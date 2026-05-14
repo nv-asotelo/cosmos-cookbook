@@ -43,42 +43,147 @@ LOCAL_SOURCE_DIR = pathlib.Path(os.environ.get("BUILD_NVIDIA_SOURCE_DIR", _DEFAU
 if not LOCAL_SOURCE_DIR.exists() and _LOCAL_SOURCE_DIR.exists():
     LOCAL_SOURCE_DIR = _LOCAL_SOURCE_DIR
 
-DEFAULT_SYSTEM = os.environ.get("DEFAULT_SYSTEM_PROMPT", "You are a helpful assistant.")
+GENERIC_SYSTEM = "You are a helpful assistant."
+WAREHOUSE_SYSTEM = "You are a helpful warehouse monitoring system."
+DEFAULT_SYSTEM = os.environ.get(
+    "DEFAULT_SYSTEM_PROMPT",
+    "You are a helpful assistant that analyzes videos.",
+)
 DEFAULT_USER = os.environ.get(
     "DEFAULT_USER_PROMPT",
-    "What is happening in this video or image?",
+    "Describe what is happening in this video. What are the key actions, objects, and events?",
 )
 REASONING_SUFFIX = (
     "Answer the question using the following format:\n\n"
     "<think>\nYour reasoning.\n</think>\n\n"
     "Write your final answer immediately after the </think> tag."
 )
+WORKER_SAFETY_SYSTEM = """
+You are an expert Industrial Safety Inspector monitoring a manufacturing facility.
+Your goal is to classify the video into EXACTLY ONE of the 8 classes defined below.
+
+CRITICAL NEGATIVE CONSTRAINTS (What to IGNORE):
+1. IGNORE SITTING WORKERS:
+   - If a person is SITTING at a machine board working, this is NOT an intervention class. Ignore them.
+   - If a person is SITTING driving a forklift, the driver is NOT the class. Focus only on the LOAD carried.
+2. IGNORE BACKGROUND:
+   - The facility is old. Do not report hazards based on faded floor markings or unpainted areas.
+3. SINGLE OUTPUT:
+   - Even if multiple things happen, choose the MOST PROMINENT behavior.
+   - Prioritize UNSAFE behaviors over SAFE behaviors if both are present.
+""".strip()
+WORKER_SAFETY_USER = """
+Analyze the video and output a JSON object. You MUST select the class ID and Label EXACTLY from the table below.
+
+STRICT CLASSIFICATION TABLE (Use these exact IDs and Labels):
+
+| ID | Label | Definition (Ground Truth) | Hazard Status |
+| :--- | :--- | :--- | :--- |
+| 0 | Safe Walkway Violation | Worker walks OUTSIDE the designated Green Path. | TRUE (Unsafe) |
+| 4 | Safe Walkway | Worker walks INSIDE the designated Green Path. | FALSE (Safe) |
+| 1 | Unauthorized Intervention | Worker interacts with machine board WITHOUT a green vest. | TRUE (Unsafe) |
+| 5 | Authorized Intervention | Worker interacts with machine board WITH a green vest. | FALSE (Safe) |
+| 2 | Opened Panel Cover | Machine panel cover is left OPEN after intervention. | TRUE (Unsafe) |
+| 6 | Closed Panel Cover | Machine panel cover is CLOSED after intervention. | FALSE (Safe) |
+| 3 | Carrying Overload with Forklift | Forklift carries 3 OR MORE blocks. | TRUE (Unsafe) |
+| 7 | Safe Carrying | Forklift carries 2 OR FEWER blocks. | FALSE (Safe) |
+
+INSTRUCTIONS:
+1. Identify the behavior in the video.
+2. Match it to one row in the table above.
+3. Output the exact "ID" and "Label" from that row. Do not invent new labels like "safe and compliant".
+
+OUTPUT FORMAT:
+{
+  "prediction_class_id": [Integer from Table],
+  "prediction_label": "[Exact String from Table]",
+  "video_description": "[Concise description of the observed action]",
+  "hazard_detection": {
+    "is_hazardous": [true/false based on the Hazard Status column],
+    "temporal_segment": "[Start Time - End Time] or null"
+  }
+}
+""".strip()
 RACE_CAR_PROMPT = (
     "Describe the video. Add timestamps in mm:ss format.\n\n"
     "Answer the question using the following format:\n\n"
     "<think>\nYour reasoning.\n</think>\n\n"
     "Write your final answer immediately after the </think> tag and include the timestamps."
 )
+DEFAULT_PRESET = "General description"
 PROMPT_PRESETS: Dict[str, Tuple[str, str, bool]] = {
-    "General scene description": (
-        DEFAULT_USER,
+    "Worker safety classification": (WORKER_SAFETY_USER, WORKER_SAFETY_SYSTEM, False),
+    "General description": (DEFAULT_USER, DEFAULT_SYSTEM, False),
+    "Safety analysis": (
+        "Identify any safety hazards, risks, or unsafe behaviors visible in this video. Be specific.",
         DEFAULT_SYSTEM,
         False,
     ),
-    "Timestamped video understanding": (
-        RACE_CAR_PROMPT,
+    "Non-expert summary": (
+        "Summarize this video in plain language for someone with no domain expertise.",
         DEFAULT_SYSTEM,
-        True,
-    ),
-    "Physical-world reasoning": (
-        "Describe what is happening in the media. Explain the likely physical interactions, object states, and risks.",
-        "You are a physical-world reasoning assistant. Be precise and grounded in the visual evidence.",
-        True,
-    ),
-    "Robotics task inspection": (
-        "Inspect the scene for robot-relevant state: objects, affordances, hazards, and next likely actions.",
-        "You are a robotics scene understanding assistant. Focus on actionable observations.",
         False,
+    ),
+    "Action recognition": (
+        "List every distinct action or motion performed in this video, in the order they occur.",
+        DEFAULT_SYSTEM,
+        False,
+    ),
+    "Object inventory": (
+        "List all objects, equipment, and people visible. Note their state.",
+        DEFAULT_SYSTEM,
+        False,
+    ),
+    "Anomaly detection": (
+        "Identify anything unusual, unexpected, or out of place in this video.",
+        DEFAULT_SYSTEM,
+        False,
+    ),
+    "Temporal summary": (
+        "Break this video into time segments and describe what changes in each segment.",
+        DEFAULT_SYSTEM,
+        False,
+    ),
+    "Race car: timestamps (reasoning)": (RACE_CAR_PROMPT, GENERIC_SYSTEM, True),
+    "Forklift: load weight (JSON)": (
+        "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. "
+        "Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.",
+        GENERIC_SYSTEM,
+        False,
+    ),
+    "Mail package: pickup allowed? (reasoning)": (
+        "Is the person allowed to pick up the packages?\nAnswer the question using the following format:\n\n"
+        "<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.",
+        GENERIC_SYSTEM,
+        True,
+    ),
+    "Warehouse: who picked up the box? (reasoning)": (
+        "Which worker picked up the dropped box?\nAnswer the question using the following format:\n\n"
+        "<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.",
+        WAREHOUSE_SYSTEM,
+        True,
+    ),
+    "AV: next ego action (reasoning)": (
+        "What's the next immediate action for the Ego vehicle?\n\nAnswer the question using the following format:\n\n"
+        "<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.",
+        GENERIC_SYSTEM,
+        True,
+    ),
+    "Robot arm: 2D trajectory (JSON) (reasoning)": (
+        'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should '
+        'follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], '
+        '"label": "gripper trajectory"}.\n\nAnswer the question using the following format:\n\n'
+        "<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.",
+        GENERIC_SYSTEM,
+        True,
+    ),
+    "SDG critic: approve / reject (reasoning)": (
+        "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must "
+        "perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection.\n"
+        "Answer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\n"
+        "Write your final answer immediately after the </think> tag. Answer with Approve or Reject only.",
+        GENERIC_SYSTEM,
+        True,
     ),
 }
 
@@ -354,7 +459,7 @@ def _normalize_prompt(prompt: str) -> str:
 
 def _append_reasoning_suffix(prompt: str) -> str:
     prompt = _normalize_prompt(prompt)
-    if REASONING_SUFFIX in prompt:
+    if REASONING_SUFFIX in prompt or ("<think>" in prompt and "</think>" in prompt):
         return prompt
     return f"{prompt}\n\n{REASONING_SUFFIX}".strip()
 
@@ -528,7 +633,7 @@ def apply_prompt_preset(
 ) -> Tuple[str, str, bool, str]:
     user_prompt, system_prompt, use_reasoning = PROMPT_PRESETS.get(
         preset_name,
-        PROMPT_PRESETS["General scene description"],
+        PROMPT_PRESETS[DEFAULT_PRESET],
     )
     prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else user_prompt
     preview = _preview_for_current(
@@ -579,8 +684,8 @@ def run_inference(
 ) -> Generator[Tuple[str, str, str], None, None]:
     model, source = detect_model(timeout=3.0)
     prompt = (user_prompt or "").strip()
-    if use_reasoning and REASONING_SUFFIX not in prompt:
-        prompt = f"{prompt}\n\n{REASONING_SUFFIX}".strip()
+    if use_reasoning:
+        prompt = _append_reasoning_suffix(prompt)
 
     preview = _request_preview(
         model, upload, prompt, system_prompt, max_tokens, temperature, top_p,
@@ -631,10 +736,10 @@ def run_inference(
         yield "", f"Error: {exc}", preview
 
 
-def reset_ui() -> Tuple[None, str, str, bool, str, str, str]:
+def reset_ui() -> Tuple[None, str, str, str, bool, str, str, str]:
     model, source = detect_model(timeout=1.5)
     preview = _request_preview(model, None, DEFAULT_USER, DEFAULT_SYSTEM, 4096, 0.3, 0.3, 1.2, 20, 42, 4.0)
-    return None, DEFAULT_USER, DEFAULT_SYSTEM, False, "", f"Detected model: `{model}` ({source}).", preview
+    return None, DEFAULT_PRESET, DEFAULT_USER, DEFAULT_SYSTEM, False, "", f"Detected model: `{model}` ({source}).", preview
 
 
 def build_app() -> gr.Blocks:
@@ -679,7 +784,8 @@ def build_app() -> gr.Blocks:
                 prompt_preset = gr.Dropdown(
                     label="Prompt preset",
                     choices=list(PROMPT_PRESETS.keys()),
-                    value="General scene description",
+                    value=DEFAULT_PRESET,
+                    elem_id="promptPreset",
                     info="Preloaded prompts for common Cosmos Reasoner demos.",
                 )
                 user_prompt = gr.Textbox(
@@ -778,7 +884,7 @@ def build_app() -> gr.Blocks:
         reset.click(
             fn=reset_ui,
             inputs=[],
-            outputs=[upload, user_prompt, system_prompt, reasoning, output, status, code],
+            outputs=[upload, prompt_preset, user_prompt, system_prompt, reasoning, output, status, code],
         )
 
     return demo
