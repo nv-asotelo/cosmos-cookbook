@@ -1015,6 +1015,38 @@ _REASONING_PANEL_CSS = """
 """
 
 
+def _extract_streaming_delta(data_str):
+    """Pull both `content` and `reasoning_content` from one OpenAI SSE chunk.
+    Returns (content_delta, reasoning_delta). Either may be empty string. On
+    parse error returns (None, None) — caller skips the chunk."""
+    try:
+        d = json.loads(data_str)["choices"][0]["delta"]
+        return d.get("content", "") or "", d.get("reasoning_content", "") or ""
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None, None
+
+
+def _compose_thinking_text(content_parts, reasoning_parts):
+    """Combine the two streaming buffers into a single string that the
+    existing _render_with_think() can split into reasoning + answer panels.
+
+    Schema-agnostic — works for BOTH:
+      • inline `<think>...</think>` in content (raw vLLM, NIM without parser)
+      • separate `reasoning_content` field (vLLM/NIM with reasoning parser)
+
+    When reasoning_parts is empty the original content passes through unchanged
+    (so inline-think schemas keep working). When reasoning_parts is non-empty
+    we synthesize the <think>...</think> wrap; absence of a closing tag while
+    final answer hasn't started yet preserves the "⏳ Reasoning…" UI state."""
+    if not reasoning_parts:
+        return "".join(content_parts)
+    rsn = "".join(reasoning_parts)
+    cnt = "".join(content_parts)
+    if cnt:
+        return f"<think>\n{rsn}\n</think>\n\n{cnt}"
+    return f"<think>\n{rsn}"
+
+
 def _render_with_think(text):
     """Split streamed model output on <think>...</think> and render the
     reasoning as a collapsible panel + the answer plainly below.
@@ -1569,9 +1601,10 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         return
 
     # Step 5: stream
-    parts          = []
-    ttft_s         = None
-    tokens_decoded = 0
+    parts           = []
+    reasoning_parts = []  # separate buffer for server-parsed reasoning_content
+    ttft_s          = None
+    tokens_decoded  = 0
 
     for line in resp.iter_lines():
         if not line:
@@ -1583,24 +1616,27 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         data = line[6:]
         if data == "[DONE]":
             break
-        try:
-            delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-        except (json.JSONDecodeError, KeyError, IndexError):
+        content_d, reasoning_d = _extract_streaming_delta(data)
+        if content_d is None:
             continue
-        if delta:
-            if ttft_s is None:
-                ttft_s = time.time() - t_start
-            parts.append(delta)
-            tokens_decoded += 1
-            yield "".join(parts), _status_html(
-                ["ok", "ok", "ok", "ok", "run"],
-                {"model_id": model_id, "tokens_out": tokens_decoded,
-                 "ttft_s": ttft_s, "elapsed_s": _elapsed(), "backend": _be_label},
-                steps=steps,
-            ), gr.update()
+        if not content_d and not reasoning_d:
+            continue
+        if ttft_s is None:
+            ttft_s = time.time() - t_start
+        if content_d:
+            parts.append(content_d)
+        if reasoning_d:
+            reasoning_parts.append(reasoning_d)
+        tokens_decoded += 1
+        yield _compose_thinking_text(parts, reasoning_parts), _status_html(
+            ["ok", "ok", "ok", "ok", "run"],
+            {"model_id": model_id, "tokens_out": tokens_decoded,
+             "ttft_s": ttft_s, "elapsed_s": _elapsed(), "backend": _be_label},
+            steps=steps,
+        ), gr.update()
 
     infer_time = time.time() - t_start
-    response   = "".join(parts)
+    response   = _compose_thinking_text(parts, reasoning_parts)
     total_s    = _elapsed()
     print(f"[vllm done] {infer_time:.1f}s · {tokens_decoded} tok out", flush=True)
     _log_run(model_id, ttft_s=ttft_s, infer_s=infer_time,
@@ -1764,9 +1800,10 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         return
 
     # Step 5: stream
-    parts  = []
-    ttft_s = None
-    tokens_decoded = 0
+    parts           = []
+    reasoning_parts = []  # separate buffer for server-parsed reasoning_content
+    ttft_s          = None
+    tokens_decoded  = 0
 
     for line in resp.iter_lines():
         if not line:
@@ -1778,27 +1815,30 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         data = line[6:]
         if data == "[DONE]":
             break
-        try:
-            delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-        except (json.JSONDecodeError, KeyError, IndexError):
+        content_d, reasoning_d = _extract_streaming_delta(data)
+        if content_d is None:
             continue
-        if delta:
-            if ttft_s is None:
-                ttft_s = time.time() - t_start
-            parts.append(delta)
-            tokens_decoded += 1
-            cur_metrics = {
-                "model_id": model_id,
-                "tokens_out": tokens_decoded,
-                "ttft_s": ttft_s,
-                "elapsed_s": _elapsed(),
-            }
-            yield "".join(parts), _status_html(
-                ["ok", "ok", "ok", "ok", "run"], cur_metrics, steps=steps
-            ), gr.update()
+        if not content_d and not reasoning_d:
+            continue
+        if ttft_s is None:
+            ttft_s = time.time() - t_start
+        if content_d:
+            parts.append(content_d)
+        if reasoning_d:
+            reasoning_parts.append(reasoning_d)
+        tokens_decoded += 1
+        cur_metrics = {
+            "model_id": model_id,
+            "tokens_out": tokens_decoded,
+            "ttft_s": ttft_s,
+            "elapsed_s": _elapsed(),
+        }
+        yield _compose_thinking_text(parts, reasoning_parts), _status_html(
+            ["ok", "ok", "ok", "ok", "run"], cur_metrics, steps=steps
+        ), gr.update()
 
     infer_time = time.time() - t_start
-    response   = "".join(parts)
+    response   = _compose_thinking_text(parts, reasoning_parts)
     total_s    = _elapsed()
 
     result = {
