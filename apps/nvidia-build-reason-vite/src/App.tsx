@@ -33,6 +33,7 @@ const DEFAULT_MAX_TOKENS = 512;
 const DEFAULT_FRAMES_PER_SECOND = 2;
 const DEFAULT_REPETITION_PENALTY = 1.2;
 const DEFAULT_SEED = 42;
+const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
 const REASONING_FORMAT_INSTRUCTION = `Answer the question using the following format:
 
 <think>
@@ -169,6 +170,17 @@ type BackendInfo = {
 
 const EXAMPLES: ExampleItem[] = [
   {
+    id: "robot-arm",
+    title: "robot arm pick up stuff",
+    mediaUrl: ROBOT_TAPE_IMAGE,
+    mediaName: "robot_tape.png",
+    mediaKind: "image",
+    userPrompt:
+      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true
+  },
+  {
     id: "race-car",
     title: "race car footage",
     mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_drift.mp4",
@@ -224,17 +236,6 @@ const EXAMPLES: ExampleItem[] = [
     reasoning: true
   },
   {
-    id: "robot-arm",
-    title: "robot arm pick up stuff",
-    mediaUrl: HERO_IMAGE,
-    mediaName: "robot-arm-pick-up-stuff.jpg",
-    mediaKind: "image",
-    userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: true
-  },
-  {
     id: "sdg-critic",
     title: "SDG critic",
     mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_rejection_sampling.mp4",
@@ -247,13 +248,17 @@ const EXAMPLES: ExampleItem[] = [
   }
 ];
 
-function readFileAsDataUrl(file: File): Promise<string> {
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = reject;
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return readBlobAsDataUrl(file);
 }
 
 function withReasoningInstruction(prompt: string): string {
@@ -628,6 +633,21 @@ export default function App() {
   }
 
   async function mediaFromExample(example: ExampleItem): Promise<MediaState> {
+    if (example.mediaUrl.startsWith("/")) {
+      const response = await fetch(example.mediaUrl);
+      if (!response.ok) {
+        throw new Error(`Could not load example media (${response.status})`);
+      }
+      const blob = await response.blob();
+      const mime = blob.type || (example.mediaKind === "image" ? "image/png" : "video/mp4");
+      return {
+        name: example.mediaName,
+        kind: mime.startsWith("image/") ? "image" : "video",
+        previewUrl: example.mediaUrl,
+        dataUrl: await readBlobAsDataUrl(blob)
+      };
+    }
+
     const params = new URLSearchParams({ url: example.mediaUrl, name: example.mediaName });
     const response = await fetch(`/api/example-media?${params.toString()}`);
     if (!response.ok) {
