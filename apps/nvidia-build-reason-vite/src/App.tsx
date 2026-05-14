@@ -7,6 +7,7 @@ import {
   FileImage,
   FileVideo,
   HelpCircle,
+  Hourglass,
   Info,
   Menu,
   Play,
@@ -26,10 +27,11 @@ const DEFAULT_MODEL =
   "Detecting model...";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
-const DEFAULT_TEMPERATURE = 0.6;
+const DEFAULT_TEMPERATURE = 0.3;
 const DEFAULT_TOP_P = 0.3;
-const DEFAULT_MAX_TOKENS = 4096;
-const DEFAULT_FRAMES_PER_SECOND = 6;
+const DEFAULT_TOP_K = 20;
+const DEFAULT_MAX_TOKENS = 512;
+const DEFAULT_FRAMES_PER_SECOND = 2;
 const DEFAULT_REPETITION_PENALTY = 1.2;
 const DEFAULT_SEED = 42;
 const REASONING_FORMAT_INSTRUCTION = `Answer the question using the following format:
@@ -86,9 +88,83 @@ type ApiResult = {
   files?: ApiFile[];
   content?: string;
   reasoning?: string;
+  combined_content?: string;
+  schema?: string;
   error?: string;
+  openai?: unknown;
   payload?: unknown;
   raw?: unknown;
+};
+
+type StreamPhase = "idle" | "waiting_first_token" | "reasoning" | "answer" | "complete" | "error" | "stopped";
+
+type StreamState = {
+  phase: StreamPhase;
+  reasoning: string;
+  answer: string;
+  schema: string;
+  raw?: unknown;
+  usage?: unknown;
+  message?: string;
+  created: number;
+  model: string;
+};
+
+type ParsedSseEvent = {
+  event: string;
+  data: unknown;
+};
+
+type VllmProcessFlags = Record<string, string | boolean | number | null | undefined>;
+
+type BackendInfo = {
+  checkpoint?: string;
+  display_name?: string;
+  cosmos3_version?: string;
+  backend?: string;
+  gpu_name?: string;
+  vram_free_gib?: number;
+  vram_total_gib?: number;
+  base_url?: string;
+  source?: {
+    sha?: string | null;
+    timestamp?: string | null;
+    branch?: string | null;
+    dirty?: boolean | null;
+    repo_id?: string | null;
+    revision?: string | null;
+    cache_path?: string | null;
+    commit_url?: string | null;
+    source?: string | null;
+  };
+  app_source?: {
+    sha?: string | null;
+    timestamp?: string | null;
+    branch?: string | null;
+    dirty?: boolean | null;
+  };
+  quantization?: {
+    applied?: boolean;
+    method?: string | null;
+    dtype?: string | null;
+    source?: string | null;
+  };
+  vllm?: {
+    base_url?: string;
+    model?: {
+      id?: string;
+      created?: number;
+      owned_by?: string;
+      root?: string;
+      max_model_len?: number;
+      [key: string]: unknown;
+    } | null;
+    process?: {
+      pid?: number;
+      command?: string;
+      flags?: VllmProcessFlags;
+    } | null;
+  };
 };
 
 const EXAMPLES: ExampleItem[] = [
@@ -98,7 +174,11 @@ const EXAMPLES: ExampleItem[] = [
     mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_drift.mp4",
     mediaName: "race-car-footage.mp4",
     mediaKind: "video",
-    userPrompt: "Describe the video. Add timestamps in mm:ss format.",
+    userPrompt:
+      "Describe the video. Add timestamps in mm:ss format.\n\n" +
+      "Answer the question using the following format:\n\n" +
+      "<think>\nYour reasoning.\n</think>\n\n" +
+      "Write your final answer immediately after the </think> tag and include the timestamps.",
     systemPrompt: "You are a helpful assistant.",
     reasoning: true
   },
@@ -220,8 +300,157 @@ function parseReasoning(content?: string, explicitReasoning?: string) {
   return { reasoning, answer, steps };
 }
 
+function makeStreamState(model: string): StreamState {
+  return {
+    phase: "waiting_first_token",
+    reasoning: "",
+    answer: "",
+    schema: "plain_content",
+    created: Math.floor(Date.now() / 1000),
+    model
+  };
+}
+
+function idleStreamState(model = DEFAULT_MODEL): StreamState {
+  return {
+    phase: "idle",
+    reasoning: "",
+    answer: "",
+    schema: "plain_content",
+    created: Math.floor(Date.now() / 1000),
+    model
+  };
+}
+
+function combinedContent(reasoning: string, answer: string) {
+  return reasoning ? `<think>\n${reasoning.trim()}\n</think>\n\n${answer || ""}`.trim() : answer || "";
+}
+
+function streamStateToResult(streamState: StreamState): ApiResult | null {
+  if (streamState.phase === "idle" || streamState.phase === "stopped") return null;
+  if (streamState.phase === "error") {
+    return { status: "error", message: streamState.message || "Backend stream failed" };
+  }
+  if (!streamState.reasoning && !streamState.answer && !streamState.raw) return null;
+  if (streamState.raw && typeof streamState.raw === "object") return streamState.raw as ApiResult;
+  const content = combinedContent(streamState.reasoning, streamState.answer);
+  return {
+    status: streamState.phase === "complete" ? "success" : undefined,
+    content: streamState.answer,
+    reasoning: streamState.reasoning,
+    combined_content: content,
+    schema: streamState.schema,
+    openai: {
+      id: "chatcmpl-byo-stream-preview",
+      object: "chat.completion",
+      created: streamState.created,
+      model: streamState.model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content
+          },
+          finish_reason: streamState.phase === "complete" ? "stop" : null
+        }
+      ],
+      usage: streamState.usage || null
+    }
+  };
+}
+
+function parseSseBlock(block: string): ParsedSseEvent | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  const dataText = dataLines.join("\n");
+  return { event, data: JSON.parse(dataText) };
+}
+
+function drainSseEvents(buffer: string) {
+  const blocks = buffer.split(/\r?\n\r?\n/);
+  const rest = blocks.pop() || "";
+  const events = blocks.map(parseSseBlock).filter((event): event is ParsedSseEvent => Boolean(event));
+  return { events, rest };
+}
+
+function statusForPhase(phase: StreamPhase) {
+  if (phase === "waiting_first_token") return "Waiting for first token";
+  if (phase === "reasoning") return "Streaming reasoning";
+  if (phase === "answer") return "Streaming response";
+  if (phase === "complete") return "Complete";
+  if (phase === "stopped") return "Stopped";
+  if (phase === "error") return "Backend error";
+  return "Ready";
+}
+
 function safeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
+}
+
+function displayValue(value: unknown, fallback = "unknown") {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value);
+}
+
+function shortSha(sha?: string | null) {
+  return sha ? sha.slice(0, 12) : "unknown";
+}
+
+function formatTimestamp(value?: string | number | null) {
+  if (!value) return "unknown";
+  const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short"
+  });
+}
+
+function flagValue(backendInfo: BackendInfo | null, key: string) {
+  return backendInfo?.vllm?.process?.flags?.[key];
+}
+
+function quantizationLabel(backendInfo: BackendInfo | null) {
+  const quantization = backendInfo?.quantization;
+  if (!quantization) return "unknown";
+  if (quantization.applied) return quantization.method || "applied";
+  return `None detected${quantization.dtype ? `, dtype ${quantization.dtype}` : ""}`;
+}
+
+function modelDefaults(modelName: string) {
+  const lower = modelName.toLowerCase();
+  if (lower.includes("cosmos3") || lower.includes("c3-") || lower.includes("nano-reasoner")) {
+    return { fps: 2, maxTokens: 512 };
+  }
+  if (lower.includes("32b") || lower.includes("super")) {
+    return { fps: 1, maxTokens: 1024 };
+  }
+  return { fps: DEFAULT_FRAMES_PER_SECOND, maxTokens: DEFAULT_MAX_TOKENS };
+}
+
+function usesFrameFallback(modelName: string, backend?: string) {
+  const lower = modelName.toLowerCase();
+  if (backend === "nim_local" && !lower.includes("cosmos-reason1")) return false;
+  return !(
+    lower.includes("nemotron") ||
+    lower.includes("qwen3-vl") ||
+    lower.includes("qwen3vl") ||
+    lower.includes("qwen") ||
+    lower.includes("cosmos3") ||
+    lower.includes("cosmos-3") ||
+    lower.includes("cosmos-reason2") ||
+    lower.includes("cosmos-reason-2")
+  );
 }
 
 export default function App() {
@@ -232,6 +461,7 @@ export default function App() {
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [parametersOpen, setParametersOpen] = useState(false);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [reasoningExpanded, setReasoningExpanded] = useState(true);
   const [dragActive, setDragActive] = useState(false);
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -240,18 +470,10 @@ export default function App() {
   const [reasoningEnabled, setReasoningEnabled] = useState(true);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>([DEFAULT_MODEL]);
-  const [backendInfo, setBackendInfo] = useState<{
-    checkpoint?: string;
-    display_name?: string;
-    cosmos3_version?: string;
-    backend?: string;
-    gpu_name?: string;
-    vram_free_gib?: number;
-    vram_total_gib?: number;
-    base_url?: string;
-  } | null>(null);
+  const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
   const [temperature, setTemperature] = useState(DEFAULT_TEMPERATURE);
   const [topP, setTopP] = useState(DEFAULT_TOP_P);
+  const [topK, setTopK] = useState(DEFAULT_TOP_K);
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
   const [framesPerSecond, setFramesPerSecond] = useState(DEFAULT_FRAMES_PER_SECOND);
   const [repetitionPenalty, setRepetitionPenalty] = useState(DEFAULT_REPETITION_PENALTY);
@@ -259,6 +481,7 @@ export default function App() {
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<ApiResult | null>(null);
+  const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -292,6 +515,12 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    const defaults = modelDefaults(model);
+    setFramesPerSecond(defaults.fps);
+    setMaxTokens(defaults.maxTokens);
+  }, [model]);
+
   const effectivePrompt = useMemo(
     () => promptForReasoning(userPrompt || "Describe the provided media.", reasoningEnabled),
     [reasoningEnabled, userPrompt]
@@ -305,50 +534,62 @@ export default function App() {
         ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
         {
           role: "user",
-          content: [
-            ...(media
-              ? [
-                  media.kind === "image"
-                    ? { type: "image_url", image_url: { url: "data:image/<type>;base64,<payload>" } }
-                    : { type: "video_url", video_url: { url: "data:video/mp4;base64,<payload>" } }
-                ]
-              : []),
-            { type: "text", text: effectivePrompt }
-          ]
-        }
-      ],
-      temperature,
-      top_p: topP,
-      max_tokens: maxTokens,
-      repetition_penalty: repetitionPenalty,
-      mm_processor_kwargs: { fps: framesPerSecond },
-      seed
-    }),
+	      content: [
+	            ...(media
+	              ? [
+	                  media.kind === "image"
+	                    ? { type: "image_url", image_url: { url: "data:image/<type>;base64,<payload>" } }
+	                    : usesFrameFallback(model, backendInfo?.backend)
+	                      ? { type: "text", text: `[Video — sampled frames at ${framesPerSecond}fps]\n${effectivePrompt}` }
+	                      : { type: "video_url", video_url: { url: "data:video/mp4;base64,<payload>" } }
+	                ]
+	              : []),
+	            ...(media?.kind === "video" && usesFrameFallback(model, backendInfo?.backend)
+	              ? [{ type: "image_url", image_url: { url: "data:image/jpeg;base64,<sampled-frame>" } }]
+	              : [{ type: "text", text: effectivePrompt }])
+	          ]
+	        }
+	      ],
+	      temperature,
+	      top_p: topP,
+	      top_k: topK,
+	      max_tokens: maxTokens,
+	      repetition_penalty: repetitionPenalty,
+	      seed,
+	      stream: true,
+	      media_sampling:
+	        media?.kind === "video"
+	          ? {
+	              mode: usesFrameFallback(model, backendInfo?.backend) ? "image-frame-fallback" : "video_url",
+	              fps: framesPerSecond
+	            }
+	          : undefined
+	    }),
     [
-      effectivePrompt,
-      framesPerSecond,
-      maxTokens,
-      media,
-      model,
-      repetitionPenalty,
-      seed,
-      systemPrompt,
-      temperature,
-      topP
-    ]
-  );
+	      effectivePrompt,
+	      framesPerSecond,
+	      backendInfo?.backend,
+	      media,
+	      model,
+	      maxTokens,
+	      repetitionPenalty,
+	      seed,
+	      systemPrompt,
+	      temperature,
+	      topK,
+	      topP
+	    ]
+	  );
 
-  const parsedOutput = useMemo(() => parseReasoning(result?.content, result?.reasoning), [result?.content, result?.reasoning]);
+  const streamResult = useMemo(() => streamStateToResult(streamState), [streamState]);
+  const activeResult = result || streamResult;
+  const parsedOutput = useMemo(
+    () => parseReasoning(activeResult?.content, activeResult?.reasoning),
+    [activeResult?.content, activeResult?.reasoning]
+  );
   const jsonOutput = useMemo(
-    () => ({
-      status,
-      model,
-      reasoning: parsedOutput.reasoning || null,
-      response: parsedOutput.answer || null,
-      request: requestPreview,
-      raw: result?.raw || result || null
-    }),
-    [model, parsedOutput.answer, parsedOutput.reasoning, requestPreview, result, status]
+    () => activeResult?.openai || activeResult?.raw || activeResult || requestPreview,
+    [activeResult, requestPreview]
   );
 
   async function setFileMedia(file: File) {
@@ -364,6 +605,7 @@ export default function App() {
       dataUrl: await readFileAsDataUrl(file)
     });
     setResult(null);
+    setStreamState(idleStreamState(model));
     setOutputTab("preview");
     setStatus("Media loaded");
   }
@@ -410,6 +652,7 @@ export default function App() {
       setUserPrompt(promptForReasoning(example.userPrompt, example.reasoning));
       setSystemPrompt(example.systemPrompt);
       setResult(null);
+      setStreamState(idleStreamState(model));
       setOutputTab("preview");
       setExamplesOpen(false);
       setStatus("Example loaded");
@@ -432,6 +675,7 @@ export default function App() {
     setReasoningEnabled(true);
     setTemperature(DEFAULT_TEMPERATURE);
     setTopP(DEFAULT_TOP_P);
+    setTopK(DEFAULT_TOP_K);
     setMaxTokens(DEFAULT_MAX_TOKENS);
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
@@ -441,6 +685,7 @@ export default function App() {
     setOutputTab("preview");
     setStatus("Ready");
     setResult(null);
+    setStreamState(idleStreamState(model));
     setIsRunning(false);
     if (inputRef.current) inputRef.current.value = "";
   }
@@ -456,12 +701,20 @@ export default function App() {
     abortRef.current = controller;
     setIsRunning(true);
     setResult(null);
+    const initialStreamState = makeStreamState(model);
+    setStreamState(initialStreamState);
     setOutputTab("preview");
     setReasoningExpanded(true);
-    setStatus("Running inference");
+    setStatus(statusForPhase("waiting_first_token"));
+
+    let reasoning = "";
+    let answer = "";
+    let schema = "plain_content";
+    let usage: unknown = null;
+    let rawResult: ApiResult | null = null;
 
     try {
-      const response = await fetch("/api/reason", {
+      const response = await fetch("/api/reason/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -471,25 +724,94 @@ export default function App() {
           model,
           video: media?.kind === "video" ? media.dataUrl : undefined,
           image: media?.kind === "image" ? media.dataUrl : undefined,
-          params: {
-            temperature,
-            top_p: topP,
-            max_tokens: maxTokens,
-            frames_per_second: framesPerSecond,
-            repetition_penalty: repetitionPenalty,
-            seed
-          }
+            params: {
+              temperature,
+              top_p: topP,
+              top_k: topK,
+              max_tokens: maxTokens,
+              frames_per_second: framesPerSecond,
+              repetition_penalty: repetitionPenalty,
+              seed
+            }
         })
       });
-      const data = (await response.json()) as ApiResult;
-      setResult(data);
-      setStatus(response.ok ? "Complete" : "Backend error");
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(error || `Reasoner stream returned HTTP ${response.status}`);
+      }
+      if (!response.body) throw new Error("Reasoner stream did not include a response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const drained = drainSseEvents(buffer);
+        buffer = drained.rest;
+
+        for (const event of drained.events) {
+          if (event.event === "state") {
+            const data = event.data as { phase?: StreamPhase };
+            if (data.phase) {
+              setStreamState((current) => ({ ...current, phase: data.phase || current.phase }));
+              setStatus(statusForPhase(data.phase));
+            }
+          } else if (event.event === "delta") {
+            const data = event.data as { channel?: "reasoning" | "answer"; text?: string; schema?: string };
+            const text = data.text || "";
+            schema = data.schema || schema;
+            if (data.channel === "reasoning") {
+              reasoning += text;
+            } else {
+              answer += text;
+            }
+            const phase: StreamPhase = data.channel === "reasoning" ? "reasoning" : "answer";
+            setStreamState((current) => ({
+              ...current,
+              phase,
+              reasoning,
+              answer,
+              schema
+            }));
+            setStatus(statusForPhase(phase));
+          } else if (event.event === "usage") {
+            usage = event.data;
+            setStreamState((current) => ({ ...current, usage }));
+          } else if (event.event === "raw") {
+            rawResult = event.data as ApiResult;
+            setStreamState((current) => ({ ...current, raw: rawResult || undefined }));
+          } else if (event.event === "error") {
+            const data = event.data as { message?: string };
+            throw new Error(data.message || "Backend stream failed");
+          }
+        }
+
+        if (done) break;
+      }
+
+      const finalState: StreamState = {
+        ...initialStreamState,
+        phase: "complete",
+        reasoning,
+        answer,
+        schema,
+        raw: rawResult || undefined,
+        usage
+      };
+      setStreamState(finalState);
+      setResult(rawResult || streamStateToResult(finalState));
+      setStatus("Complete");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         setResult({ status: "skip", message: "Task stopped by user" });
+        setStreamState((current) => ({ ...current, phase: "stopped" }));
         setStatus("Stopped");
       } else {
-        setResult({ error: error instanceof Error ? error.message : "Request failed" });
+        const message = error instanceof Error ? error.message : "Request failed";
+        setResult({ status: "error", message });
+        setStreamState((current) => ({ ...current, phase: "error", message }));
         setStatus("Request failed");
       }
     } finally {
@@ -571,6 +893,14 @@ export default function App() {
         </div>
       </section>
 
+      <RuntimeDetailsToggle
+        backendInfo={backendInfo}
+        detailsUrl={`${window.location.origin}/api/active-model`}
+        model={model}
+        open={runtimeOpen}
+        setOpen={setRuntimeOpen}
+      />
+
       <div className="tabs" role="tablist" aria-label="Model sections">
         {(["Experience", "Model Card", "System Card", "Deploy"] as SectionTab[]).map((tab) => {
           const id = tab.toLowerCase().replace(/\s+/g, "-");
@@ -625,7 +955,7 @@ export default function App() {
             repetitionPenalty={repetitionPenalty}
             requestPreview={requestPreview}
             reset={reset}
-            result={result}
+            result={activeResult}
             run={run}
             seed={seed}
             selectedExampleId={selectedExampleId}
@@ -642,11 +972,14 @@ export default function App() {
             setSelectedExampleId={setSelectedExampleId}
             setSystemPrompt={setSystemPrompt}
             setTemperature={setTemperature}
+            setTopK={setTopK}
             setTopP={setTopP}
             setUserPrompt={setUserPrompt}
             status={status}
+            streamPhase={streamState.phase}
             systemPrompt={systemPrompt}
             temperature={temperature}
+            topK={topK}
             topP={topP}
             userPrompt={userPrompt}
             framesPerSecond={framesPerSecond}
@@ -703,16 +1036,19 @@ function ExperiencePanel({
   setSelectedExampleId,
   setSystemPrompt,
   setTemperature,
+  setTopK,
   setTopP,
   setUserPrompt,
   status,
+  streamPhase,
   systemPrompt,
   temperature,
+  topK,
   topP,
   userPrompt
 }: {
   applyExample: () => Promise<void>;
-  backendInfo: { backend?: string; base_url?: string } | null;
+  backendInfo: BackendInfo | null;
   copied: boolean;
   copyRequest: () => Promise<void>;
   dragActive: boolean;
@@ -753,11 +1089,14 @@ function ExperiencePanel({
   setSelectedExampleId: (id: string) => void;
   setSystemPrompt: (value: string) => void;
   setTemperature: (value: number) => void;
+  setTopK: (value: number) => void;
   setTopP: (value: number) => void;
   setUserPrompt: (value: string) => void;
   status: string;
+  streamPhase: StreamPhase;
   systemPrompt: string;
   temperature: number;
+  topK: number;
   topP: number;
   userPrompt: string;
 }) {
@@ -855,8 +1194,10 @@ function ExperiencePanel({
             setRepetitionPenalty={setRepetitionPenalty}
             setSeed={setSeed}
             setTemperature={setTemperature}
+            setTopK={setTopK}
             setTopP={setTopP}
             temperature={temperature}
+            topK={topK}
             topP={topP}
           />
 
@@ -912,6 +1253,7 @@ function ExperiencePanel({
                 reasoningExpanded={reasoningExpanded}
                 result={result}
                 setReasoningExpanded={setReasoningExpanded}
+                streamPhase={streamPhase}
               />
             )}
           </div>
@@ -1028,7 +1370,8 @@ function PreviewOutput({
   reasoningEnabled,
   reasoningExpanded,
   result,
-  setReasoningExpanded
+  setReasoningExpanded,
+  streamPhase
 }: {
   isRunning: boolean;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
@@ -1036,6 +1379,7 @@ function PreviewOutput({
   reasoningExpanded: boolean;
   result: ApiResult | null;
   setReasoningExpanded: (expanded: boolean) => void;
+  streamPhase: StreamPhase;
 }) {
   if (result?.status === "error" || result?.error) {
     return <pre className="errorBox">{result.message || result.error}</pre>;
@@ -1072,31 +1416,31 @@ function PreviewOutput({
   }
 
   if (result?.content || result?.reasoning) {
+    const hasAnswer = Boolean(parsedOutput.answer || result.content);
     return (
       <div className="responseStack">
         {reasoningEnabled && parsedOutput.reasoning ? (
           <ReasoningCard
+            complete={!isRunning || streamPhase === "answer" || streamPhase === "complete"}
             expanded={reasoningExpanded}
+            isStreaming={isRunning && streamPhase === "reasoning"}
             reasoning={parsedOutput.reasoning}
             steps={parsedOutput.steps}
             setExpanded={setReasoningExpanded}
           />
         ) : null}
-        <article className="answer">
-          <p className="responseLabel">Response</p>
-          <FormattedText text={parsedOutput.answer || result.content || "No final response returned."} />
-        </article>
+        {hasAnswer ? (
+          <article className={isRunning ? "answer streamingAnswer" : "answer"}>
+            <p className="responseLabel">Response</p>
+            <FormattedText text={parsedOutput.answer || result.content || "No final response returned."} />
+          </article>
+        ) : null}
       </div>
     );
   }
 
   if (isRunning) {
-    return (
-      <article className="emptyOutput runningOutput">
-        <h3>Running inference</h3>
-        <p>Sending the request to the local Reasoner backend. The response and reasoning trace will appear here.</p>
-      </article>
-    );
+    return <GeneratingOutput />;
   }
 
   return (
@@ -1107,22 +1451,44 @@ function PreviewOutput({
   );
 }
 
+function GeneratingOutput() {
+  return (
+    <article className="generatingOutput" aria-live="polite">
+      <div className="generatingCenter">
+        <Hourglass size={36} />
+        <h3>Generating</h3>
+      </div>
+    </article>
+  );
+}
+
 function ReasoningCard({
+  complete,
   expanded,
+  isStreaming,
   reasoning,
   setExpanded,
   steps
 }: {
+  complete: boolean;
   expanded: boolean;
+  isStreaming: boolean;
   reasoning: string;
   setExpanded: (expanded: boolean) => void;
   steps: string[];
 }) {
+  const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({});
+  const title = complete ? "Reasoning Complete" : "Thinking...";
+
   if (!expanded) {
     return (
-      <button className="reasoningCollapsed" onClick={() => setExpanded(true)} type="button">
-        <CheckCircle2 size={16} />
-        <span>Reasoning Complete</span>
+      <button
+        className={complete ? "reasoningCollapsed" : "reasoningCollapsed thinkingCollapsed"}
+        onClick={() => setExpanded(true)}
+        type="button"
+      >
+        {complete ? <CheckCircle2 size={16} /> : <Hourglass size={16} />}
+        <span>{title}</span>
         <ChevronDown size={15} />
       </button>
     );
@@ -1130,10 +1496,10 @@ function ReasoningCard({
 
   const visibleSteps = steps.length > 0 ? steps : [reasoning];
   return (
-    <article className="reasoningCard">
+    <article className={complete ? "reasoningCard" : "reasoningCard thinkingCard"}>
       <div className="reasoningTopline">
         <div>
-          <h3>Reasoning Complete</h3>
+          <h3>{title}</h3>
           <p>Below is the entire thinking process the model went through to arrive at its response.</p>
         </div>
         <button onClick={() => setExpanded(false)} type="button">
@@ -1142,13 +1508,27 @@ function ReasoningCard({
         </button>
       </div>
       <ul>
-        {visibleSteps.map((step, index) => (
-          <li key={`${step}-${index}`}>
-            <CheckCircle2 size={15} />
-            <span>{step}</span>
-            <ChevronRight size={14} />
-          </li>
-        ))}
+        {visibleSteps.map((step, index) => {
+          const id = `reasoning-step-${index}`;
+          const active = isStreaming && index === visibleSteps.length - 1;
+          const open = openSteps[id] ?? active;
+          return (
+            <li className={open ? "open" : ""} key={id}>
+              <button
+                aria-expanded={open}
+                className={active ? "reasoningStepButton activeStep" : "reasoningStepButton"}
+                onClick={() => setOpenSteps((current) => ({ ...current, [id]: !open }))}
+                type="button"
+              >
+                <span className="stepStatus" aria-hidden="true">
+                  {active ? <Hourglass size={15} /> : <CheckCircle2 size={15} />}
+                </span>
+                <span className="stepText">{step}</span>
+                <ChevronRight className="stepChevron" size={14} />
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </article>
   );
@@ -1182,8 +1562,10 @@ function ParameterAccordion({
   setRepetitionPenalty,
   setSeed,
   setTemperature,
+  setTopK,
   setTopP,
   temperature,
+  topK,
   topP
 }: {
   framesPerSecond: number;
@@ -1199,8 +1581,10 @@ function ParameterAccordion({
   setRepetitionPenalty: (value: number) => void;
   setSeed: (value: number) => void;
   setTemperature: (value: number) => void;
+  setTopK: (value: number) => void;
   setTopP: (value: number) => void;
   temperature: number;
+  topK: number;
   topP: number;
 }) {
   return (
@@ -1219,6 +1603,7 @@ function ParameterAccordion({
         <div className="nv-accordion-content" data-state="open">
           <SliderField label="Temperature" min={0} max={1} step={0.05} value={temperature} onChange={setTemperature} />
           <SliderField label="Top P" min={0.01} max={1} step={0.01} value={topP} onChange={setTopP} />
+          <SliderField label="Top K" min={1} max={100} step={1} value={topK} onChange={setTopK} />
           <SliderField
             label="Repetition Penalty"
             min={1}
@@ -1342,13 +1727,169 @@ function PromptBox({
   );
 }
 
+function RuntimeDetailsToggle({
+  backendInfo,
+  detailsUrl,
+  model,
+  open,
+  setOpen
+}: {
+  backendInfo: BackendInfo | null;
+  detailsUrl: string;
+  model: string;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}) {
+  return (
+    <section className="runtimeShell" aria-label="Active model details">
+      <button
+        aria-controls="active-model-runtime-details"
+        aria-expanded={open}
+        className="runtimeToggle"
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        Active Model details
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {open ? <RuntimeBar backendInfo={backendInfo} detailsUrl={detailsUrl} model={model} /> : null}
+    </section>
+  );
+}
+
+function RuntimeBar({
+  backendInfo,
+  detailsUrl,
+  model
+}: {
+  backendInfo: BackendInfo | null;
+  detailsUrl: string;
+  model: string;
+}) {
+  const maxModelLen = backendInfo?.vllm?.model?.max_model_len || flagValue(backendInfo, "max_model_len");
+  const parser = flagValue(backendInfo, "reasoning_parser");
+  const gpuUtil = flagValue(backendInfo, "gpu_memory_utilization");
+  const source = backendInfo?.source;
+
+  return (
+    <div className="runtimeBar" id="active-model-runtime-details">
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Live Model</span>
+        <span className="runtimeValue">{model}</span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Backend</span>
+        <span className="runtimeValue">
+          {displayValue(backendInfo?.backend || "vLLM")} at {displayValue(backendInfo?.vllm?.base_url || backendInfo?.base_url)}
+        </span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Quantization</span>
+        <span className="runtimeValue">{quantizationLabel(backendInfo)}</span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Model Commit</span>
+        <span className="runtimeValue">
+          {source?.commit_url ? (
+            <a className="runtimeCommitLink" href={source.commit_url} rel="noreferrer" target="_blank">
+              <code>{shortSha(source?.sha)}</code>
+            </a>
+          ) : (
+            <code>{shortSha(source?.sha)}</code>
+          )}
+          <span className="runtimeSubtle"> {formatTimestamp(source?.timestamp)}</span>
+        </span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">vLLM Details</span>
+        <span className="runtimeValue">
+          max len {displayValue(maxModelLen)}
+          {parser ? `, parser ${parser}` : ""}
+          {gpuUtil ? `, GPU util ${gpuUtil}` : ""}
+        </span>
+      </div>
+      <a className="runtimeJsonLink" href={detailsUrl} rel="noreferrer" target="_blank">
+        Full JSON details
+        <ExternalLink size={13} />
+      </a>
+    </div>
+  );
+}
+
+function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | null; model: string }) {
+  return (
+    <dl className="metadataGrid">
+      <dt>Loaded model</dt>
+      <dd>{model}</dd>
+      <dt>Backend</dt>
+      <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
+      <dt>Backend endpoint</dt>
+      <dd>{backendInfo?.vllm?.base_url || backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
+      <dt>HF model commit SHA</dt>
+      <dd>
+        <code>{displayValue(backendInfo?.source?.sha)}</code>
+      </dd>
+      <dt>HF commit time</dt>
+      <dd>{formatTimestamp(backendInfo?.source?.timestamp)}</dd>
+      <dt>HF repo</dt>
+      <dd>{displayValue(backendInfo?.source?.repo_id)}</dd>
+      <dt>HF revision</dt>
+      <dd>{displayValue(backendInfo?.source?.revision || backendInfo?.source?.branch)}</dd>
+      <dt>HF commit URL</dt>
+      <dd>
+        {backendInfo?.source?.commit_url ? (
+          <a href={backendInfo.source.commit_url} rel="noreferrer" target="_blank">
+            {backendInfo.source.commit_url}
+          </a>
+        ) : (
+          "unknown"
+        )}
+      </dd>
+      <dt>HF cache path</dt>
+      <dd>
+        <code>{displayValue(backendInfo?.source?.cache_path)}</code>
+      </dd>
+      <dt>Source detection</dt>
+      <dd>{displayValue(backendInfo?.source?.source)}</dd>
+      <dt>Quantization</dt>
+      <dd>{quantizationLabel(backendInfo)}</dd>
+      <dt>Quantization source</dt>
+      <dd>{displayValue(backendInfo?.quantization?.source)}</dd>
+      <dt>vLLM model id</dt>
+      <dd>{displayValue(backendInfo?.vllm?.model?.id)}</dd>
+      <dt>vLLM owner</dt>
+      <dd>{displayValue(backendInfo?.vllm?.model?.owned_by)}</dd>
+      <dt>vLLM max model len</dt>
+      <dd>{displayValue(backendInfo?.vllm?.model?.max_model_len || flagValue(backendInfo, "max_model_len"))}</dd>
+      <dt>vLLM process</dt>
+      <dd>{backendInfo?.vllm?.process?.pid ? `pid ${backendInfo.vllm.process.pid}` : "unknown"}</dd>
+      <dt>Reasoning parser</dt>
+      <dd>{displayValue(flagValue(backendInfo, "reasoning_parser"))}</dd>
+      <dt>Media IO kwargs</dt>
+      <dd>
+        <code>{displayValue(flagValue(backendInfo, "media_io_kwargs"))}</code>
+      </dd>
+      <dt>vLLM dtype</dt>
+      <dd>{displayValue(flagValue(backendInfo, "dtype"))}</dd>
+      <dt>GPU memory utilization</dt>
+      <dd>{displayValue(flagValue(backendInfo, "gpu_memory_utilization"))}</dd>
+      <dt>Served model name</dt>
+      <dd>{displayValue(flagValue(backendInfo, "served_model_name"))}</dd>
+      <dt>Allowed media path</dt>
+      <dd>
+        <code>{displayValue(flagValue(backendInfo, "allowed_local_media_path"))}</code>
+      </dd>
+    </dl>
+  );
+}
+
 function StaticTab({
   backendInfo,
   model,
   requestPreview,
   tab
 }: {
-  backendInfo: { backend?: string; base_url?: string; gpu_name?: string } | null;
+  backendInfo: BackendInfo | null;
   model: string;
   requestPreview: unknown;
   tab: SectionTab;
@@ -1361,6 +1902,7 @@ function StaticTab({
           Cosmos3 Nano Reasoner is a VLM reasoning surface for video and image understanding. It does not expose a
           generation tower in this deployment.
         </p>
+        <RuntimeDetails backendInfo={backendInfo} model={model} />
         <dl>
           <dt>Model type</dt>
           <dd>VLM / Reasoner</dd>
@@ -1385,6 +1927,10 @@ function StaticTab({
           <dd>.mp4, .jpg, .jpeg, .png</dd>
           <dt>GPU</dt>
           <dd>{backendInfo?.gpu_name || "Detected on target host"}</dd>
+          <dt>vLLM launch command</dt>
+          <dd>
+            <code>{displayValue(backendInfo?.vllm?.process?.command)}</code>
+          </dd>
           <dt>Privacy</dt>
           <dd>Do not upload confidential or personal data unless expressly permitted.</dd>
         </dl>
