@@ -603,6 +603,7 @@ h2 {
   border-radius: 8px;
   background: #090909;
   color: #d7d7d7;
+  cursor: pointer;
   padding: 18px;
   text-align: center;
 }
@@ -1078,9 +1079,15 @@ select {
 
 .dropzone.hasMedia {
   align-content: stretch;
+  cursor: default;
   justify-items: stretch;
   gap: 12px;
   overflow: hidden;
+  text-align: left;
+}
+
+.dropzone.hasMedia .mediaLoaded {
+  justify-self: start;
 }
 
 .mediaPreview {
@@ -1099,7 +1106,32 @@ select {
   display: block;
   width: 100%;
   max-height: 300px;
+  background: #000;
   object-fit: contain;
+}
+
+.mediaPreview video {
+  pointer-events: auto;
+}
+
+.replaceMediaButton {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-self: end;
+  gap: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: #111111;
+  color: var(--text);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.replaceMediaButton:hover {
+  border-color: var(--green);
+  color: var(--green);
 }
 
 .parameterAccordion {
@@ -1829,8 +1861,8 @@ select {
     min-height: 136px;
   }
 
-  .dropzone > svg,
-  .dropzone > span {
+  .dropzone:not(.hasMedia) > svg,
+  .dropzone:not(.hasMedia) > span {
     opacity: 0.08;
   }
 

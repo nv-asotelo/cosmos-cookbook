@@ -615,14 +615,14 @@ export default function App() {
     if (file) await setFileMedia(file);
   }
 
-  async function handleDrop(event: DragEvent<HTMLButtonElement>) {
+  async function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     setDragActive(false);
     const file = event.dataTransfer.files?.[0];
     if (file) await setFileMedia(file);
   }
 
-  function handleDrag(event: DragEvent<HTMLButtonElement>, active: boolean) {
+  function handleDrag(event: DragEvent<HTMLElement>, active: boolean) {
     event.preventDefault();
     setDragActive(active);
   }
@@ -643,8 +643,10 @@ export default function App() {
     };
   }
 
-  async function applyExample() {
-    const example = EXAMPLES.find((item) => item.id === selectedExampleId) || EXAMPLES[0];
+  async function applyExample(exampleId = selectedExampleId) {
+    const example = EXAMPLES.find((item) => item.id === exampleId) || EXAMPLES[0];
+    setSelectedExampleId(example.id);
+    setExamplesOpen(false);
     setStatus("Loading example");
     try {
       setMedia(await mediaFromExample(example));
@@ -654,7 +656,6 @@ export default function App() {
       setResult(null);
       setStreamState(idleStreamState(model));
       setOutputTab("preview");
-      setExamplesOpen(false);
       setStatus("Example loaded");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Example failed to load");
@@ -1047,15 +1048,15 @@ function ExperiencePanel({
   topP,
   userPrompt
 }: {
-  applyExample: () => Promise<void>;
+  applyExample: (exampleId?: string) => Promise<void>;
   backendInfo: BackendInfo | null;
   copied: boolean;
   copyRequest: () => Promise<void>;
   dragActive: boolean;
   examplesOpen: boolean;
   framesPerSecond: number;
-  handleDrag: (event: DragEvent<HTMLButtonElement>, active: boolean) => void;
-  handleDrop: (event: DragEvent<HTMLButtonElement>) => Promise<void>;
+  handleDrag: (event: DragEvent<HTMLElement>, active: boolean) => void;
+  handleDrop: (event: DragEvent<HTMLElement>) => Promise<void>;
   handleFile: (event: ChangeEvent<HTMLInputElement>) => Promise<void>;
   inputRef: RefObject<HTMLInputElement | null>;
   isRunning: boolean;
@@ -1158,38 +1159,52 @@ function ExperiencePanel({
           </div>
 
           <label className="fieldLabel">Input</label>
-          <button
-            className={`dropzone${dragActive ? " dragActive" : ""}${media ? " hasMedia" : ""}`}
-            onClick={() => inputRef.current?.click()}
-            onDragEnter={(event) => handleDrag(event, true)}
-            onDragOver={(event) => handleDrag(event, true)}
-            onDragLeave={(event) => handleDrag(event, false)}
-            onDrop={handleDrop}
-            type="button"
-          >
-            <input ref={inputRef} type="file" accept=".mp4,.jpg,.jpeg,.png" onChange={handleFile} hidden />
-            {media ? (
-              <>
-                <span className="mediaLoaded">
-                  {media.kind === "image" ? <FileImage size={18} /> : <FileVideo size={18} />}
-                  {media.name}
-                </span>
-                <span className="mediaPreview">
-                  {media.kind === "image" ? (
-                    <img src={media.previewUrl} alt="Selected input" />
-                  ) : (
-                    <video src={media.previewUrl} muted playsInline />
-                  )}
-                </span>
-              </>
-            ) : (
-              <>
-                <Upload size={22} />
-                <span>Drop files here</span>
-                <small>.mp4, .jpg, .jpeg, .png</small>
-              </>
-            )}
-          </button>
+          <input ref={inputRef} type="file" accept=".mp4,.jpg,.jpeg,.png" onChange={handleFile} hidden />
+          {media ? (
+            <div
+              className={`dropzone hasMedia${dragActive ? " dragActive" : ""}`}
+              onDragEnter={(event) => handleDrag(event, true)}
+              onDragOver={(event) => handleDrag(event, true)}
+              onDragLeave={(event) => handleDrag(event, false)}
+              onDrop={handleDrop}
+            >
+              <span className="mediaLoaded">
+                {media.kind === "image" ? <FileImage size={18} /> : <FileVideo size={18} />}
+                {media.name}
+              </span>
+              <div className="mediaPreview">
+                {media.kind === "image" ? (
+                  <img src={media.previewUrl} alt="Selected input" />
+                ) : (
+                  <video
+                    aria-label={`Preview of ${media.name}`}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    src={media.previewUrl}
+                  />
+                )}
+              </div>
+              <button className="replaceMediaButton" onClick={() => inputRef.current?.click()} type="button">
+                <Upload size={14} />
+                Replace input
+              </button>
+            </div>
+          ) : (
+            <button
+              className={`dropzone${dragActive ? " dragActive" : ""}`}
+              onClick={() => inputRef.current?.click()}
+              onDragEnter={(event) => handleDrag(event, true)}
+              onDragOver={(event) => handleDrag(event, true)}
+              onDragLeave={(event) => handleDrag(event, false)}
+              onDrop={handleDrop}
+              type="button"
+            >
+              <Upload size={22} />
+              <span>Drop files here</span>
+              <small>.mp4, .jpg, .jpeg, .png</small>
+            </button>
+          )}
 
           <PromptBox
             label="User Prompt"
@@ -1328,11 +1343,19 @@ function ExampleModal({
   selectedExampleId,
   setSelectedExampleId
 }: {
-  applyExample: () => Promise<void>;
+  applyExample: (exampleId?: string) => Promise<void>;
   close: () => void;
   selectedExampleId: string;
   setSelectedExampleId: (id: string) => void;
 }) {
+  const [draftExampleId, setDraftExampleId] = useState(selectedExampleId);
+  const [isApplying, setIsApplying] = useState(false);
+
+  function handleDone() {
+    setIsApplying(true);
+    void applyExample(draftExampleId);
+  }
+
   return (
     <div className="nv-modal-overlay" data-state="open" role="presentation">
       <div className="nv-modal-content" role="dialog" aria-modal="true" aria-labelledby="example-modal-title">
@@ -1347,14 +1370,17 @@ function ExampleModal({
           <p>Select the input from the examples below:</p>
           <div className="exampleList" role="radiogroup" aria-label="Examples">
             {EXAMPLES.map((example) => {
-              const checked = selectedExampleId === example.id;
+              const checked = draftExampleId === example.id;
               return (
                 <button
                   className={checked ? "exampleItem checked" : "exampleItem"}
                   key={example.id}
                   role="radio"
                   aria-checked={checked}
-                  onClick={() => setSelectedExampleId(example.id)}
+                  onClick={() => {
+                    setDraftExampleId(example.id);
+                    setSelectedExampleId(example.id);
+                  }}
                   type="button"
                 >
                   <div className="exampleThumb">
@@ -1382,8 +1408,8 @@ function ExampleModal({
           </div>
         </div>
         <div className="modalFooter">
-          <button className="runButton" onClick={applyExample} type="button">
-            Done
+          <button className="runButton" disabled={isApplying} onClick={handleDone} type="button" aria-busy={isApplying}>
+            {isApplying ? "Loading" : "Done"}
           </button>
         </div>
       </div>
