@@ -174,9 +174,10 @@ export function buildReasoningPayload({
   const payload = {
     model: selectedModel,
     messages,
-    temperature: Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 0.3,
-    top_p: Number.isFinite(Number(p.top_p)) ? Number(p.top_p) : 0.3,
-    repetition_penalty: Number.isFinite(Number(p.repetition_penalty)) ? Number(p.repetition_penalty) : undefined
+    temperature: Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 0.6,
+    top_p: Number.isFinite(Number(p.top_p)) ? Number(p.top_p) : 0.95,
+    repetition_penalty: Number.isFinite(Number(p.repetition_penalty)) ? Number(p.repetition_penalty) : undefined,
+    presence_penalty: Number.isFinite(Number(p.presence_penalty)) ? Number(p.presence_penalty) : undefined
   };
 
   // Keep parity with the Gradio C3/vLLM path: it exposes these controls in

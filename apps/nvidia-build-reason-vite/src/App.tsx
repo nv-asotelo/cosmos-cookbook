@@ -15,9 +15,12 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-reason2-8b.jpg";
+const BUILD_REASON2_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/modelcard";
+const BUILD_REASON2_SYSTEM_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/systemcard";
+const BUILD_REASON2_DEPLOY_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/deploy";
 const COSMOS3_INFO_URL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_COSMOS3_INFO_URL) ||
   "/api/active-model";
@@ -26,14 +29,94 @@ const DEFAULT_MODEL =
   "Detecting model...";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
-const DEFAULT_TEMPERATURE = 0.3;
-const DEFAULT_TOP_P = 0.3;
+const DEPLOY_DOCKER_COMMAND = `docker login nvcr.io
+Username: $oauthtoken
+Password: <PASTE_API_KEY_HERE>
+
+export NGC_API_KEY=<PASTE_API_KEY_HERE>
+export LOCAL_NIM_CACHE=~/.cache/nim
+mkdir -p "$LOCAL_NIM_CACHE"
+chmod -R a+w "$LOCAL_NIM_CACHE"
+
+docker run -it --rm \\
+  --gpus all \\
+  --ipc host \\
+  --shm-size=32GB \\
+  -e NGC_API_KEY \\
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \\
+  -u $(id -u) \\
+  -p 8000:8000 \\
+  nvcr.io/nim/nvidia/cosmos3-nano-reasoner:latest`;
+const DEPLOY_CURL_COMMAND = `curl -X POST "http://0.0.0.0:8000/v1/chat/completions" \\
+  -H "Accept: application/json" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "nvidia/cosmos3-nano-reasoner",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "What is in this video?" },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason1-7b/av_construction_stop_timestamped.mp4"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 256
+  }'`;
+const DEPLOY_UI_COMMAND = `VITE_MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner \\
+VITE_COSMOS3_INFO_URL=/api/active-model \\
+npm run dev -- --host 0.0.0.0`;
+const SAMPLING_DEFAULTS = {
+  standard: {
+    topP: 0.8,
+    topK: 20,
+    repetitionPenalty: 1.0,
+    presencePenalty: 1.5,
+    temperature: 0.7
+  },
+  reasoning: {
+    topP: 0.95,
+    topK: 20,
+    repetitionPenalty: 1.0,
+    presencePenalty: 0.0,
+    temperature: 0.6
+  }
+};
+const DEFAULT_TEMPERATURE = SAMPLING_DEFAULTS.reasoning.temperature;
+const DEFAULT_TOP_P = SAMPLING_DEFAULTS.reasoning.topP;
 const DEFAULT_TOP_K = 20;
 const DEFAULT_MAX_TOKENS = 512;
 const DEFAULT_FRAMES_PER_SECOND = 2;
-const DEFAULT_REPETITION_PENALTY = 1.2;
+const DEFAULT_REPETITION_PENALTY = SAMPLING_DEFAULTS.reasoning.repetitionPenalty;
+const DEFAULT_PRESENCE_PENALTY = SAMPLING_DEFAULTS.reasoning.presencePenalty;
 const DEFAULT_SEED = 42;
+const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
+const PARAMETER_HELP = {
+  temperature:
+    "Sampling parameter from the guide. Default 0.7, or 0.6 with reasoning. Lower values are more deterministic; higher values are more varied.",
+  topP:
+    "Sampling parameter top_p from the guide. Default 0.8, or 0.95 with reasoning. Smaller values use a tighter nucleus; larger values allow a broader token pool.",
+  topK:
+    "Sampling parameter top_k from the guide. Default 20 with or without reasoning. Caps the candidate token set considered during sampling.",
+  repetitionPenalty:
+    "Sampling parameter repetition_penalty from the guide. Default 1.0 with or without reasoning, which is neutral repetition handling.",
+  presencePenalty:
+    "Sampling parameter presence_penalty from the guide. Default 1.5, or 0.0 with reasoning. Higher values push novelty; 0.0 applies no novelty push.",
+  framesPerSecond:
+    "Vite media preprocessing control. It is not part of the guide sampling table; it controls video frame sampling before the request when frame fallback is needed.",
+  maxTokens:
+    "App completion limit control. It is not part of the guide sampling table; the server forwards it only when configured to send max_tokens.",
+  seed:
+    "Reproducibility control. It is not part of the guide sampling table; the server forwards it only when configured to send seed.",
+  reasoning:
+    "Matches the guide's reasoning format. When enabled, Vite appends the <think> instruction and uses reasoning sampling defaults: temperature 0.6, top_p 0.95, top_k 20, repetition_penalty 1.0, presence_penalty 0.0."
+};
 const REASONING_FORMAT_INSTRUCTION = `Answer the question using the following format:
 
 <think>
@@ -73,6 +156,15 @@ type ExampleItem = {
   userPrompt: string;
   systemPrompt: string;
   reasoning: boolean;
+  parameters?: Partial<{
+    framesPerSecond: number;
+    maxTokens: number;
+    presencePenalty: number;
+    repetitionPenalty: number;
+    temperature: number;
+    topK: number;
+    topP: number;
+  }>;
 };
 
 type ApiFile = {
@@ -170,70 +262,18 @@ type BackendInfo = {
 
 const EXAMPLES: ExampleItem[] = [
   {
-    id: "robot-arm",
-    title: "robot arm pick up stuff",
-    mediaUrl: ROBOT_TAPE_IMAGE,
-    mediaName: "robot_tape.png",
-    mediaKind: "image",
-    userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: true
-  },
-  {
-    id: "race-car",
-    title: "race car footage",
-    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_drift.mp4",
-    mediaName: "race-car-footage.mp4",
+    id: "robotics-next-action",
+    title: "Robotics Next Action Prediction",
+    mediaUrl: AGIBOT_VIDEO,
+    mediaName: "agibot.mp4",
     mediaKind: "video",
-    userPrompt:
-      "Describe the video. Add timestamps in mm:ss format.\n\n" +
-      "Answer the question using the following format:\n\n" +
-      "<think>\nYour reasoning.\n</think>\n\n" +
-      "Write your final answer immediately after the </think> tag and include the timestamps.",
+    userPrompt: "What can be the next immediate action?",
     systemPrompt: "You are a helpful assistant.",
-    reasoning: true
-  },
-  {
-    id: "forklift",
-    title: "forklift load weight evaluation",
-    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_forklift.jpg",
-    mediaName: "forklift-load.jpg",
-    mediaKind: "image",
-    userPrompt:
-      "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.",
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: false
-  },
-  {
-    id: "mail-package",
-    title: "mail package",
-    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_mail_package.mp4",
-    mediaName: "mail-package.mp4",
-    mediaKind: "video",
-    userPrompt: "Is the person allowed to pick up the packages?",
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: true
-  },
-  {
-    id: "warehouse",
-    title: "warehouse",
-    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_warehouse.mp4",
-    mediaName: "warehouse.mp4",
-    mediaKind: "video",
-    userPrompt: "Which worker picked up the dropped box?",
-    systemPrompt: "You are a helpful warehouse monitoring system.",
-    reasoning: true
-  },
-  {
-    id: "construction",
-    title: "construction worker road sign",
-    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_construction_car.mp4",
-    mediaName: "construction-worker-road-sign.mp4",
-    mediaKind: "video",
-    userPrompt: "What's the next immediate action for the Ego vehicle?",
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: true
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 4096
+    }
   },
   {
     id: "sdg-critic",
@@ -244,7 +284,84 @@ const EXAMPLES: ExampleItem[] = [
     userPrompt:
       "Approve or reject this generated video for inclusion in a dataset for physical world model ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. Any issue or concern causes rejection. Answer with Approve or Reject only.",
     systemPrompt: "You are a helpful assistant.",
-    reasoning: true
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
+    id: "warehouse",
+    title: "warehouse",
+    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_warehouse.mp4",
+    mediaName: "warehouse.mp4",
+    mediaKind: "video",
+    userPrompt: "Which worker picked up the dropped box?",
+    systemPrompt: "You are a helpful warehouse monitoring system.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
+    id: "forklift",
+    title: "forklift load weight evaluation",
+    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_forklift.jpg",
+    mediaName: "forklift-load.jpg",
+    mediaKind: "image",
+    userPrompt:
+      "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.",
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: false,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
+    id: "mail-package",
+    title: "mail package",
+    mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_mail_package.mp4",
+    mediaName: "mail-package.mp4",
+    mediaKind: "video",
+    userPrompt: "Is the person allowed to pick up the packages?",
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  },
+  {
+    id: "robot-arm",
+    title: "robot arm pick up stuff",
+    mediaUrl: ROBOT_TAPE_IMAGE,
+    mediaName: "robot_tape.png",
+    mediaKind: "image",
+    userPrompt:
+      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
   }
 ];
 
@@ -461,12 +578,12 @@ function usesFrameFallback(modelName: string, backend?: string) {
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const defaultExampleLoadedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
   const [outputTab, setOutputTab] = useState<OutputTab>("preview");
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [parametersOpen, setParametersOpen] = useState(false);
-  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [reasoningExpanded, setReasoningExpanded] = useState(true);
   const [dragActive, setDragActive] = useState(false);
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -482,6 +599,7 @@ export default function App() {
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
   const [framesPerSecond, setFramesPerSecond] = useState(DEFAULT_FRAMES_PER_SECOND);
   const [repetitionPenalty, setRepetitionPenalty] = useState(DEFAULT_REPETITION_PENALTY);
+  const [presencePenalty, setPresencePenalty] = useState(DEFAULT_PRESENCE_PENALTY);
   const [seed, setSeed] = useState(DEFAULT_SEED);
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
@@ -521,10 +639,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const example = EXAMPLES.find((item) => item.id === selectedExampleId);
+    if (example) {
+      applyExampleParameters(example);
+      return;
+    }
     const defaults = modelDefaults(model);
     setFramesPerSecond(defaults.fps);
     setMaxTokens(defaults.maxTokens);
   }, [model]);
+
+  useEffect(() => {
+    if (defaultExampleLoadedRef.current) return;
+    defaultExampleLoadedRef.current = true;
+    void applyExample(EXAMPLES[0].id, { closeModal: false });
+  }, []);
 
   const effectivePrompt = useMemo(
     () => promptForReasoning(userPrompt || "Describe the provided media.", reasoningEnabled),
@@ -558,6 +687,7 @@ export default function App() {
 	      temperature,
 	      top_p: topP,
 	      top_k: topK,
+	      presence_penalty: presencePenalty,
 	      max_tokens: maxTokens,
 	      repetition_penalty: repetitionPenalty,
 	      seed,
@@ -577,6 +707,7 @@ export default function App() {
 	      media,
 	      model,
 	      maxTokens,
+	      presencePenalty,
 	      repetitionPenalty,
 	      seed,
 	      systemPrompt,
@@ -663,16 +794,18 @@ export default function App() {
     };
   }
 
-  async function applyExample(exampleId = selectedExampleId) {
+  async function applyExample(exampleId = selectedExampleId, options: { closeModal?: boolean } = {}) {
+    const closeModal = options.closeModal ?? true;
     const example = EXAMPLES.find((item) => item.id === exampleId) || EXAMPLES[0];
     setSelectedExampleId(example.id);
-    setExamplesOpen(false);
+    if (closeModal) setExamplesOpen(false);
     setStatus("Loading example");
     try {
-      setMedia(await mediaFromExample(example));
       setReasoningEnabled(example.reasoning);
       setUserPrompt(promptForReasoning(example.userPrompt, example.reasoning));
       setSystemPrompt(example.systemPrompt);
+      applyExampleParameters(example);
+      setMedia(await mediaFromExample(example));
       setResult(null);
       setStreamState(idleStreamState(model));
       setOutputTab("preview");
@@ -685,6 +818,29 @@ export default function App() {
   function setReasoning(next: boolean) {
     setReasoningEnabled(next);
     setUserPrompt((current) => promptForReasoning(current, next));
+    applySamplingDefaults(next);
+  }
+
+  function applySamplingDefaults(useReasoning: boolean) {
+    const defaults = useReasoning ? SAMPLING_DEFAULTS.reasoning : SAMPLING_DEFAULTS.standard;
+    setTemperature(defaults.temperature);
+    setTopP(defaults.topP);
+    setTopK(defaults.topK);
+    setRepetitionPenalty(defaults.repetitionPenalty);
+    setPresencePenalty(defaults.presencePenalty);
+  }
+
+  function applyExampleParameters(example: ExampleItem) {
+    const samplingDefaults = example.reasoning ? SAMPLING_DEFAULTS.reasoning : SAMPLING_DEFAULTS.standard;
+    const mediaDefaults = modelDefaults(model);
+    const params = example.parameters || {};
+    setTemperature(params.temperature ?? samplingDefaults.temperature);
+    setTopP(params.topP ?? samplingDefaults.topP);
+    setTopK(params.topK ?? samplingDefaults.topK);
+    setRepetitionPenalty(params.repetitionPenalty ?? samplingDefaults.repetitionPenalty);
+    setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
+    setFramesPerSecond(params.framesPerSecond ?? mediaDefaults.fps);
+    setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
   }
 
   function reset() {
@@ -700,6 +856,7 @@ export default function App() {
     setMaxTokens(DEFAULT_MAX_TOKENS);
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
+    setPresencePenalty(DEFAULT_PRESENCE_PENALTY);
     setSeed(DEFAULT_SEED);
     setParametersOpen(false);
     setReasoningExpanded(true);
@@ -749,6 +906,7 @@ export default function App() {
               temperature,
               top_p: topP,
               top_k: topK,
+              presence_penalty: presencePenalty,
               max_tokens: maxTokens,
               frames_per_second: framesPerSecond,
               repetition_penalty: repetitionPenalty,
@@ -914,13 +1072,7 @@ export default function App() {
         </div>
       </section>
 
-      <RuntimeDetailsToggle
-        backendInfo={backendInfo}
-        detailsUrl={`${window.location.origin}/api/active-model`}
-        model={model}
-        open={runtimeOpen}
-        setOpen={setRuntimeOpen}
-      />
+      <RuntimeDetailsNotice />
 
       <div className="tabs" role="tablist" aria-label="Model sections">
         {(["Experience", "Model Card", "System Card", "Deploy"] as SectionTab[]).map((tab) => {
@@ -971,6 +1123,7 @@ export default function App() {
             outputTab={outputTab}
             parametersOpen={parametersOpen}
             parsedOutput={parsedOutput}
+            presencePenalty={presencePenalty}
             reasoningEnabled={reasoningEnabled}
             reasoningExpanded={reasoningExpanded}
             repetitionPenalty={repetitionPenalty}
@@ -986,6 +1139,7 @@ export default function App() {
             setModel={setModel}
             setOutputTab={setOutputTab}
             setParametersOpen={setParametersOpen}
+            setPresencePenalty={setPresencePenalty}
             setReasoning={setReasoning}
             setReasoningExpanded={setReasoningExpanded}
             setRepetitionPenalty={setRepetitionPenalty}
@@ -1007,7 +1161,7 @@ export default function App() {
             applyExample={applyExample}
           />
         ) : (
-          <StaticTab tab={activeTab} model={model} backendInfo={backendInfo} requestPreview={requestPreview} />
+          <StaticTab tab={activeTab} model={model} backendInfo={backendInfo} />
         )}
       </section>
     </main>
@@ -1035,6 +1189,7 @@ function ExperiencePanel({
   outputTab,
   parametersOpen,
   parsedOutput,
+  presencePenalty,
   reasoningEnabled,
   reasoningExpanded,
   repetitionPenalty,
@@ -1050,6 +1205,7 @@ function ExperiencePanel({
   setModel,
   setOutputTab,
   setParametersOpen,
+  setPresencePenalty,
   setReasoning,
   setReasoningExpanded,
   setRepetitionPenalty,
@@ -1088,6 +1244,7 @@ function ExperiencePanel({
   outputTab: OutputTab;
   parametersOpen: boolean;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
+  presencePenalty: number;
   reasoningEnabled: boolean;
   reasoningExpanded: boolean;
   repetitionPenalty: number;
@@ -1103,6 +1260,7 @@ function ExperiencePanel({
   setModel: (value: string) => void;
   setOutputTab: (tab: OutputTab) => void;
   setParametersOpen: (open: boolean) => void;
+  setPresencePenalty: (value: number) => void;
   setReasoning: (enabled: boolean) => void;
   setReasoningExpanded: (expanded: boolean) => void;
   setRepetitionPenalty: (value: number) => void;
@@ -1247,12 +1405,14 @@ function ExperiencePanel({
             framesPerSecond={framesPerSecond}
             maxTokens={maxTokens}
             open={parametersOpen}
+            presencePenalty={presencePenalty}
             reasoningEnabled={reasoningEnabled}
             repetitionPenalty={repetitionPenalty}
             seed={seed}
             setFramesPerSecond={setFramesPerSecond}
             setMaxTokens={setMaxTokens}
             setOpen={setParametersOpen}
+            setPresencePenalty={setPresencePenalty}
             setReasoning={setReasoning}
             setRepetitionPenalty={setRepetitionPenalty}
             setSeed={setSeed}
@@ -1658,12 +1818,14 @@ function ParameterAccordion({
   framesPerSecond,
   maxTokens,
   open,
+  presencePenalty,
   reasoningEnabled,
   repetitionPenalty,
   seed,
   setFramesPerSecond,
   setMaxTokens,
   setOpen,
+  setPresencePenalty,
   setReasoning,
   setRepetitionPenalty,
   setSeed,
@@ -1677,12 +1839,14 @@ function ParameterAccordion({
   framesPerSecond: number;
   maxTokens: number;
   open: boolean;
+  presencePenalty: number;
   reasoningEnabled: boolean;
   repetitionPenalty: number;
   seed: number;
   setFramesPerSecond: (value: number) => void;
   setMaxTokens: (value: number) => void;
   setOpen: (open: boolean) => void;
+  setPresencePenalty: (value: number) => void;
   setReasoning: (enabled: boolean) => void;
   setRepetitionPenalty: (value: number) => void;
   setSeed: (value: number) => void;
@@ -1707,10 +1871,35 @@ function ParameterAccordion({
       </button>
       {open ? (
         <div className="nv-accordion-content" data-state="open">
-          <SliderField label="Temperature" min={0} max={1} step={0.05} value={temperature} onChange={setTemperature} />
-          <SliderField label="Top P" min={0.01} max={1} step={0.01} value={topP} onChange={setTopP} />
-          <SliderField label="Top K" min={1} max={100} step={1} value={topK} onChange={setTopK} />
           <SliderField
+            help={PARAMETER_HELP.temperature}
+            label="Temperature"
+            min={0}
+            max={1}
+            step={0.05}
+            value={temperature}
+            onChange={setTemperature}
+          />
+          <SliderField
+            help={PARAMETER_HELP.topP}
+            label="Top P"
+            min={0.01}
+            max={1}
+            step={0.01}
+            value={topP}
+            onChange={setTopP}
+          />
+          <SliderField
+            help={PARAMETER_HELP.topK}
+            label="Top K"
+            min={1}
+            max={100}
+            step={1}
+            value={topK}
+            onChange={setTopK}
+          />
+          <SliderField
+            help={PARAMETER_HELP.repetitionPenalty}
             label="Repetition Penalty"
             min={1}
             max={2}
@@ -1719,6 +1908,16 @@ function ParameterAccordion({
             onChange={setRepetitionPenalty}
           />
           <SliderField
+            help={PARAMETER_HELP.presencePenalty}
+            label="Presence Penalty"
+            min={0}
+            max={2}
+            step={0.05}
+            value={presencePenalty}
+            onChange={setPresencePenalty}
+          />
+          <SliderField
+            help={PARAMETER_HELP.framesPerSecond}
             label="Frames per Second"
             min={2}
             max={8}
@@ -1726,12 +1925,23 @@ function ParameterAccordion({
             value={framesPerSecond}
             onChange={setFramesPerSecond}
           />
-          <SliderField label="Max Tokens" min={128} max={4096} step={128} value={maxTokens} onChange={setMaxTokens} />
+          <SliderField
+            help={PARAMETER_HELP.maxTokens}
+            label="Max Tokens"
+            min={128}
+            max={4096}
+            step={128}
+            value={maxTokens}
+            onChange={setMaxTokens}
+          />
           <label className="seedField">
-            <span>Seed</span>
+            <span>
+              Seed
+              <InfoTooltip help={PARAMETER_HELP.seed} label="Seed" />
+            </span>
             <input type="number" value={seed} disabled onChange={(event) => setSeed(Number(event.target.value))} />
           </label>
-          <label className="reasoningSwitch">
+          <div className="reasoningSwitch">
             <button
               aria-checked={reasoningEnabled}
               className={reasoningEnabled ? "switchTrack checked" : "switchTrack"}
@@ -1742,8 +1952,8 @@ function ParameterAccordion({
               <span />
             </button>
             <span>Reasoning</span>
-            <Info size={15} />
-          </label>
+            <InfoTooltip help={PARAMETER_HELP.reasoning} label="Reasoning" />
+          </div>
         </div>
       ) : null}
     </div>
@@ -1751,6 +1961,7 @@ function ParameterAccordion({
 }
 
 function SliderField({
+  help,
   label,
   max,
   min,
@@ -1758,6 +1969,7 @@ function SliderField({
   step,
   value
 }: {
+  help: string;
   label: string;
   max: number;
   min: number;
@@ -1769,7 +1981,7 @@ function SliderField({
     <fieldset className="sliderField">
       <legend>
         <span>{label}</span>
-        <Info size={15} />
+        <InfoTooltip help={help} label={label} />
       </legend>
       <div className="sliderRow">
         <input
@@ -1792,6 +2004,17 @@ function SliderField({
         />
       </div>
     </fieldset>
+  );
+}
+
+function InfoTooltip({ help, label }: { help: string; label: string }) {
+  return (
+    <span className="infoTooltip" tabIndex={0} aria-label={`${label}: ${help}`}>
+      <Info size={15} />
+      <span className="tooltipBubble" role="tooltip">
+        {help}
+      </span>
+    </span>
   );
 }
 
@@ -1833,32 +2056,13 @@ function PromptBox({
   );
 }
 
-function RuntimeDetailsToggle({
-  backendInfo,
-  detailsUrl,
-  model,
-  open,
-  setOpen
-}: {
-  backendInfo: BackendInfo | null;
-  detailsUrl: string;
-  model: string;
-  open: boolean;
-  setOpen: (open: boolean) => void;
-}) {
+function RuntimeDetailsNotice() {
   return (
-    <section className="runtimeShell" aria-label="Active model details">
-      <button
-        aria-controls="active-model-runtime-details"
-        aria-expanded={open}
-        className="runtimeToggle"
-        onClick={() => setOpen(!open)}
-        type="button"
-      >
-        Active Model details
-        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-      </button>
-      {open ? <RuntimeBar backendInfo={backendInfo} detailsUrl={detailsUrl} model={model} /> : null}
+    <section className="runtimeShell" aria-label="Active model details internal notice">
+      <div className="runtimeNotice" role="note">
+        <strong>Active Model details</strong>
+        <span>Web copy note: internal use only. Do not implement this button live.</span>
+      </div>
     </section>
   );
 }
@@ -1992,62 +2196,189 @@ function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | nul
 function StaticTab({
   backendInfo,
   model,
-  requestPreview,
   tab
 }: {
   backendInfo: BackendInfo | null;
   model: string;
-  requestPreview: unknown;
   tab: SectionTab;
 }) {
   if (tab === "Model Card") {
     return (
       <div className="staticPanel">
+        <p className="staticEyebrow">Overview</p>
         <h2>{model}</h2>
-        <p>
-          Cosmos3 Nano Reasoner is a VLM reasoning surface for video and image understanding. It does not expose a
-          generation tower in this deployment.
+        <p className="staticLead">
+          Cosmos3 Nano Reasoner is a vision-language reasoning surface for images and videos. This Vite deployment is
+          tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback,
+          and concise final answers.
         </p>
-        <RuntimeDetails backendInfo={backendInfo} model={model} />
-        <dl>
-          <dt>Model type</dt>
-          <dd>VLM / Reasoner</dd>
-          <dt>Primary backend</dt>
-          <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
-          <dt>Endpoint</dt>
-          <dd>{backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
-        </dl>
+
+        <StaticSection title="ModelCard++">
+          <p>
+            This card follows the NVIDIA Build model-card layout while reflecting the active Cosmos3 Nano Reasoner
+            deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for
+            evaluating the local OpenAI-compatible endpoint.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Description">
+          <p>
+            The UI sends multimodal chat messages to a local reasoner service and renders streamed reasoning when the
+            backend returns it. The experience is intended for robotics, industrial inspection, smart-city review,
+            annotation, and video-understanding workflows where spatial and temporal cues matter.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Input">
+          <dl>
+            <dt>Type</dt>
+            <dd>Text with video or image</dd>
+            <dt>Formats</dt>
+            <dd>.mp4, .jpg, .jpeg, .png</dd>
+            <dt>Prompting</dt>
+            <dd>Reasoning prompts can request a <code>&lt;think&gt;</code> trace followed by the answer.</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Output">
+          <dl>
+            <dt>Type</dt>
+            <dd>Text</dd>
+            <dt>Reasoning trace</dt>
+            <dd>Displayed when returned as inline <code>&lt;think&gt;</code> content or streamed reasoning deltas.</dd>
+            <dt>Recommended review</dt>
+            <dd>Validate conclusions against the source media before using outputs in production workflows.</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Software Integration">
+          <RuntimeDetails backendInfo={backendInfo} model={model} />
+          <dl>
+            <dt>Model type</dt>
+            <dd>VLM / Reasoner</dd>
+            <dt>Primary backend</dt>
+            <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
+            <dt>Endpoint</dt>
+            <dd>{backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Ethical Considerations">
+          <p>
+            Users are responsible for evaluating whether inputs, outputs, and downstream decisions are appropriate for
+            their domain. Add domain-specific guardrails, validation, logging policies, and human review before deploying
+            decisions that affect people, property, or safety.
+          </p>
+        </StaticSection>
+
+        <a className="staticLink" href={BUILD_REASON2_MODEL_CARD_URL} rel="noreferrer" target="_blank">
+          NVIDIA Build model-card reference <ExternalLink size={16} />
+        </a>
       </div>
     );
   }
   if (tab === "System Card") {
     return (
       <div className="staticPanel">
-        <h2>System Card</h2>
-        <p>
-          This app sends image or video inputs to the local OpenAI-compatible Reasoner endpoint using multimodal chat
-          messages. Reasoning can be toggled from the parameter accordion.
+        <p className="staticEyebrow">System Card</p>
+        <h2>NVIDIA Cosmos</h2>
+        <p className="staticLead">
+          Cosmos is NVIDIA's platform for physical AI world-model development. This placeholder adapts the Cosmos
+          system-card topics for a reasoning UI that consumes images, videos, and text prompts through a local service.
         </p>
-        <dl>
-          <dt>Supported input</dt>
-          <dd>.mp4, .jpg, .jpeg, .png</dd>
-          <dt>GPU</dt>
-          <dd>{backendInfo?.gpu_name || "Detected on target host"}</dd>
-          <dt>vLLM launch command</dt>
-          <dd>
-            <code>{displayValue(backendInfo?.vllm?.process?.command)}</code>
-          </dd>
-          <dt>Privacy</dt>
-          <dd>Do not upload confidential or personal data unless expressly permitted.</dd>
-        </dl>
+
+        <StaticSection title="Cosmos Model Family">
+          <p>
+            Cosmos models support physical AI workflows such as robot training, curation, simulation, and multimodal
+            reasoning. This app focuses on the reasoner path: it analyzes supplied media and returns natural-language
+            conclusions, optionally with a streamed reasoning trace.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Governing Terms / Terms of Use">
+          <p>
+            Use is subject to the license and terms attached to the model and deployment environment. Confirm commercial
+            rights, derivative-model requirements, and any guardrail obligations before production use.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Specific Risk Areas and Mitigations">
+          <ul>
+            <li>Model output can be incomplete, incorrect, or overconfident; verify against the original media.</li>
+            <li>Physical-world tasks can carry safety consequences; keep humans in the review loop for high-risk uses.</li>
+            <li>Apply prompt, content, privacy, and access controls that match the deployment environment.</li>
+          </ul>
+        </StaticSection>
+
+        <StaticSection title="Deployment">
+          <dl>
+            <dt>Supported input</dt>
+            <dd>.mp4, .jpg, .jpeg, .png</dd>
+            <dt>GPU</dt>
+            <dd>{backendInfo?.gpu_name || "Detected on target host"}</dd>
+            <dt>vLLM launch command</dt>
+            <dd>
+              <code>{displayValue(backendInfo?.vllm?.process?.command)}</code>
+            </dd>
+            <dt>Privacy</dt>
+            <dd>Do not upload confidential or personal data unless expressly permitted.</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Getting Help / Support">
+          <p>
+            For model safety concerns, security issues, or deployment policy questions, use the NVIDIA support and AI
+            concern channels linked from the source system card.
+          </p>
+        </StaticSection>
+
+        <a className="staticLink" href={BUILD_REASON2_SYSTEM_CARD_URL} rel="noreferrer" target="_blank">
+          NVIDIA Build system-card reference <ExternalLink size={16} />
+        </a>
       </div>
     );
   }
   return (
     <div className="staticPanel">
+      <p className="staticEyebrow">Linux with Docker</p>
       <h2>Deploy</h2>
-      <p>Use the BYO-video skill to launch this model-matched Reasoner UI and optional batch inference companion.</p>
-      <pre className="codeBlock">{safeJson(requestPreview)}</pre>
+      <p className="staticLead">
+        Follow the NVIDIA Build deployment flow for a downloadable NIM, with the model references adapted to
+        <code> cosmos3-nano-reasoner</code>. After the service is running, this Vite UI can point at the same local
+        OpenAI-compatible endpoint.
+      </p>
+
+      <StaticSection title="Step 1: Generate API Key">
+        <p>
+          Sign in to NVIDIA Build or NGC, create an API key, and use it to authenticate against the NVIDIA container
+          registry before pulling the NIM image.
+        </p>
+      </StaticSection>
+
+      <StaticSection title="Step 2: Pull and Run the NIM">
+        <pre className="codeBlock">{DEPLOY_DOCKER_COMMAND}</pre>
+      </StaticSection>
+
+      <StaticSection title="Step 3: Test the NIM">
+        <pre className="codeBlock">{DEPLOY_CURL_COMMAND}</pre>
+      </StaticSection>
+
+      <StaticSection title="Step 4: Run the Vite UI">
+        <pre className="codeBlock">{DEPLOY_UI_COMMAND}</pre>
+      </StaticSection>
+
+      <a className="staticLink" href={BUILD_REASON2_DEPLOY_URL} rel="noreferrer" target="_blank">
+        NVIDIA Build deploy reference <ExternalLink size={16} />
+      </a>
     </div>
+  );
+}
+
+function StaticSection({ children, title }: { children: ReactNode; title: string }) {
+  return (
+    <section className="staticSection">
+      <h3>{title}</h3>
+      {children}
+    </section>
   );
 }
