@@ -11,6 +11,7 @@ Target default for the Horde BYO-video flow:
 from __future__ import annotations
 
 import base64
+import html
 import json
 import mimetypes
 import os
@@ -58,6 +59,28 @@ RACE_CAR_PROMPT = (
     "<think>\nYour reasoning.\n</think>\n\n"
     "Write your final answer immediately after the </think> tag and include the timestamps."
 )
+PROMPT_PRESETS: Dict[str, Tuple[str, str, bool]] = {
+    "General scene description": (
+        DEFAULT_USER,
+        DEFAULT_SYSTEM,
+        False,
+    ),
+    "Timestamped video understanding": (
+        RACE_CAR_PROMPT,
+        DEFAULT_SYSTEM,
+        True,
+    ),
+    "Physical-world reasoning": (
+        "Describe what is happening in the media. Explain the likely physical interactions, object states, and risks.",
+        "You are a physical-world reasoning assistant. Be precise and grounded in the visual evidence.",
+        True,
+    ),
+    "Robotics task inspection": (
+        "Inspect the scene for robot-relevant state: objects, affordances, hazards, and next likely actions.",
+        "You are a robotics scene understanding assistant. Focus on actionable observations.",
+        False,
+    ),
+}
 
 ALLOWED_EXTENSIONS = {".mp4", ".jpg", ".jpeg", ".png"}
 
@@ -235,6 +258,24 @@ body,
   font-size: 12px;
   line-height: 1.45;
 }
+.backend-note strong {
+  color: var(--nv-text);
+}
+.gradio-container .input-column,
+.gradio-container .output-column {
+  min-width: 360px !important;
+}
+.gradio-container .output-column textarea {
+  min-height: 360px !important;
+}
+.gradio-container .api-code-panel {
+  margin-top: 14px !important;
+}
+.gradio-container .api-code-panel textarea,
+.gradio-container .api-code-panel pre {
+  max-height: 330px !important;
+  overflow: auto !important;
+}
 .gradio-container label,
 .gradio-container .label-wrap,
 .gradio-container .block-title {
@@ -291,6 +332,36 @@ def detect_model(timeout: float = 5.0) -> Tuple[str, str]:
         print(f"[model] Could not detect model from {BASE_URL}/models: {exc}", flush=True)
 
     return "nvidia/Cosmos3-Nano-Reasoner", "fallback"
+
+
+def backend_label() -> str:
+    explicit = os.environ.get("INFERENCE_BACKEND") or os.environ.get("BYO_VIDEO_BACKEND")
+    if explicit:
+        name = explicit.strip()
+        if name.lower() == "vllm":
+            return "vLLM / OpenAI-compatible"
+        if name.lower() == "nim":
+            return "NIM / OpenAI-compatible"
+        return name
+    if os.environ.get("NIM_BASE_URL") or os.environ.get("NIM_API_KEY"):
+        return "NIM / OpenAI-compatible"
+    return "vLLM / OpenAI-compatible"
+
+
+def _normalize_prompt(prompt: str) -> str:
+    return (prompt or "").strip()
+
+
+def _append_reasoning_suffix(prompt: str) -> str:
+    prompt = _normalize_prompt(prompt)
+    if REASONING_SUFFIX in prompt:
+        return prompt
+    return f"{prompt}\n\n{REASONING_SUFFIX}".strip()
+
+
+def _remove_reasoning_suffix(prompt: str) -> str:
+    prompt = _normalize_prompt(prompt)
+    return prompt.replace(f"\n\n{REASONING_SUFFIX}", "").replace(REASONING_SUFFIX, "").strip()
 
 
 def _file_path(upload: Any) -> Optional[str]:
@@ -380,6 +451,91 @@ def _request_preview(
     if path and pathlib.Path(path).suffix.lower() == ".mp4":
         body["media_io_kwargs"] = {"video": {"fps": fps}}
     return json.dumps(body, indent=2)
+
+
+def _preview_for_current(
+    upload: Any,
+    user_prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    top_k: int,
+    seed: int,
+    fps: float,
+    use_reasoning: bool,
+    timeout: float = 1.5,
+) -> str:
+    model, _source = detect_model(timeout=timeout)
+    prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else _normalize_prompt(user_prompt)
+    return _request_preview(
+        model, upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        repetition_penalty, top_k, seed, fps
+    )
+
+
+def toggle_reasoning_prompt(
+    user_prompt: str,
+    use_reasoning: bool,
+    upload: Any,
+    system_prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    top_k: int,
+    seed: int,
+    fps: float,
+) -> Tuple[str, str]:
+    prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else _remove_reasoning_suffix(user_prompt)
+    preview = _preview_for_current(
+        upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        repetition_penalty, top_k, seed, fps, use_reasoning=False
+    )
+    return prompt, preview
+
+
+def update_preview(
+    upload: Any,
+    user_prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    top_k: int,
+    seed: int,
+    fps: float,
+    use_reasoning: bool,
+) -> str:
+    return _preview_for_current(
+        upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+        repetition_penalty, top_k, seed, fps, use_reasoning
+    )
+
+
+def apply_prompt_preset(
+    preset_name: str,
+    upload: Any,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    repetition_penalty: float,
+    top_k: int,
+    seed: int,
+    fps: float,
+) -> Tuple[str, str, bool, str]:
+    user_prompt, system_prompt, use_reasoning = PROMPT_PRESETS.get(
+        preset_name,
+        PROMPT_PRESETS["General scene description"],
+    )
+    prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else user_prompt
+    preview = _preview_for_current(
+        upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        repetition_penalty, top_k, seed, fps, use_reasoning=False
+    )
+    return prompt, system_prompt, use_reasoning, preview
 
 
 def _stream_text(resp: requests.Response) -> Iterable[str]:
@@ -475,19 +631,23 @@ def run_inference(
         yield "", f"Error: {exc}", preview
 
 
-def reset_ui() -> Tuple[None, str, str, str, str, str]:
+def reset_ui() -> Tuple[None, str, str, bool, str, str, str]:
     model, source = detect_model(timeout=1.5)
     preview = _request_preview(model, None, DEFAULT_USER, DEFAULT_SYSTEM, 4096, 0.3, 0.3, 1.2, 20, 42, 4.0)
-    return None, DEFAULT_USER, DEFAULT_SYSTEM, "", f"Detected model: `{model}` ({source}).", preview
+    return None, DEFAULT_USER, DEFAULT_SYSTEM, False, "", f"Detected model: `{model}` ({source}).", preview
 
 
 def build_app() -> gr.Blocks:
     model, source = detect_model(timeout=2.0)
     initial_preview = _request_preview(model, None, DEFAULT_USER, DEFAULT_SYSTEM, 4096, 0.3, 0.3, 1.2, 20, 42, 4.0)
+    model_html = html.escape(model)
+    backend_html = html.escape(backend_label())
+    base_url_html = html.escape(BASE_URL)
+    source_html = html.escape(source)
 
-    with gr.Blocks(title="cosmos-reason2-8b | NVIDIA NIM") as demo:
+    with gr.Blocks(title=f"{model} | NVIDIA Build") as demo:
         gr.HTML(
-            """
+            f"""
             <div class="nv-appbar">
               <div class="nv-logo"><span>NVIDIA</span></div>
               <div class="nv-nav"><span>Explore</span><span>Models</span><span>Blueprints</span><span>GPUs</span><span>Docs</span></div>
@@ -495,7 +655,7 @@ def build_app() -> gr.Blocks:
             <div class="nv-hero">
               <p class="nv-publisher">nvidia</p>
               <div class="nv-title-row">
-                <h1>cosmos-reason2-8b</h1>
+                <h1>{model_html}</h1>
                 <span class="nv-pill-solid">Downloadable</span>
               </div>
               <p class="nv-desc">Vision language model that excels in understanding the physical world using structured reasoning on videos or images.</p>
@@ -515,6 +675,12 @@ def build_app() -> gr.Blocks:
                     label="Input",
                     file_types=[".mp4", ".jpg", ".jpeg", ".png"],
                     file_count="single",
+                )
+                prompt_preset = gr.Dropdown(
+                    label="Prompt preset",
+                    choices=list(PROMPT_PRESETS.keys()),
+                    value="General scene description",
+                    info="Preloaded prompts for common Cosmos Reasoner demos.",
                 )
                 user_prompt = gr.Textbox(
                     label="User Prompt",
@@ -546,14 +712,15 @@ def build_app() -> gr.Blocks:
                         <div class="api-credit">Using free API <span style="color:#8b8b8b">for development</span></div>
                       </div>
                       <div class="backend-note">
-                        Local backend: <code>{BASE_URL}</code><br>
-                        Model: <code>{model}</code> ({source})
+                        Backend: <strong>{backend_html}</strong><br>
+                        Endpoint: <code>{base_url_html}</code><br>
+                        Model: <code>{model_html}</code> ({source_html})
                       </div>
                     </div>
                     """
                 )
-                with gr.Accordion("API / code", open=True):
-                    code = gr.Code(label="Request body", value=initial_preview, language="json", lines=16)
+                status = gr.Markdown(f"Detected model: `{model}` ({source}).")
+                output = gr.Textbox(label="Output", lines=16)
                 with gr.Accordion("Generation settings", open=False):
                     reasoning = gr.Checkbox(label="Append reasoning format instruction", value=False)
                     max_tokens = gr.Slider(1, 4096, value=4096, step=1, label="Max tokens")
@@ -563,9 +730,8 @@ def build_app() -> gr.Blocks:
                     top_k = gr.Slider(1, 100, value=20, step=1, label="Top K")
                     seed = gr.Number(value=42, precision=0, label="Seed")
                     fps = gr.Slider(0.25, 8, value=4.0, step=0.25, label="Video FPS")
-
-        status = gr.Markdown(f"Detected model: `{model}` ({source}).")
-        output = gr.Textbox(label="Output", lines=16)
+                with gr.Accordion("API / code", open=False, elem_classes=["api-code-panel"]):
+                    code = gr.Code(label="Request body", value=initial_preview, language="json", lines=12)
 
         race_car = LOCAL_SOURCE_DIR / "Race Car.mp4"
         if race_car.exists():
@@ -578,6 +744,29 @@ def build_app() -> gr.Blocks:
                 label="View Examples",
             )
 
+        preview_inputs = [
+            upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+            repetition_penalty, top_k, seed, fps, reasoning
+        ]
+        for component in preview_inputs:
+            component.change(fn=update_preview, inputs=preview_inputs, outputs=code)
+        reasoning.change(
+            fn=toggle_reasoning_prompt,
+            inputs=[
+                user_prompt, reasoning, upload, system_prompt, max_tokens, temperature, top_p,
+                repetition_penalty, top_k, seed, fps
+            ],
+            outputs=[user_prompt, code],
+        )
+        prompt_preset.change(
+            fn=apply_prompt_preset,
+            inputs=[
+                prompt_preset, upload, max_tokens, temperature, top_p,
+                repetition_penalty, top_k, seed, fps
+            ],
+            outputs=[user_prompt, system_prompt, reasoning, code],
+        )
+
         run.click(
             fn=run_inference,
             inputs=[
@@ -589,7 +778,7 @@ def build_app() -> gr.Blocks:
         reset.click(
             fn=reset_ui,
             inputs=[],
-            outputs=[upload, user_prompt, system_prompt, output, status, code],
+            outputs=[upload, user_prompt, system_prompt, reasoning, output, status, code],
         )
 
     return demo
