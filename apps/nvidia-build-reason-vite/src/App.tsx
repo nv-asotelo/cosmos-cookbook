@@ -68,9 +68,6 @@ const DEPLOY_CURL_COMMAND = `curl -X POST "http://0.0.0.0:8000/v1/chat/completio
     ],
     "max_tokens": 256
   }'`;
-const DEPLOY_UI_COMMAND = `VITE_MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner \\
-VITE_COSMOS3_INFO_URL=/api/active-model \\
-npm run dev -- --host 0.0.0.0`;
 const SAMPLING_DEFAULTS = {
   standard: {
     topP: 0.8,
@@ -626,6 +623,11 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!model || model === DEFAULT_MODEL) return;
+    document.title = `${model} | NVIDIA NIM`;
+  }, [model]);
 
   useEffect(() => {
     fetch("/api/models")
@@ -2370,8 +2372,8 @@ function StaticTab({
       <h2>Deploy</h2>
       <p className="staticLead">
         Follow the NVIDIA Build deployment flow for a downloadable NIM, with the model references adapted to
-        <code> cosmos3-nano-reasoner</code>. After the service is running, this Vite UI can point at the same local
-        OpenAI-compatible endpoint.
+        <code> cosmos3-nano-reasoner</code>. After the service is running, test the same local OpenAI-compatible
+        endpoint with a multimodal chat completion request.
       </p>
 
       <StaticSection title="Step 1: Generate API Key">
@@ -2387,10 +2389,6 @@ function StaticTab({
 
       <StaticSection title="Step 3: Test the NIM">
         <pre className="codeBlock">{DEPLOY_CURL_COMMAND}</pre>
-      </StaticSection>
-
-      <StaticSection title="Step 4: Run the Vite UI">
-        <pre className="codeBlock">{DEPLOY_UI_COMMAND}</pre>
       </StaticSection>
 
       <a className="staticLink" href={BUILD_REASON2_DEPLOY_URL} rel="noreferrer" target="_blank">
