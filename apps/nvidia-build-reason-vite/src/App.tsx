@@ -276,6 +276,24 @@ const EXAMPLES: ExampleItem[] = [
     }
   },
   {
+    id: "robot-arm",
+    title: "robot arm pick up stuff",
+    mediaUrl: ROBOT_TAPE_IMAGE,
+    mediaName: "robot_tape.png",
+    mediaKind: "image",
+    userPrompt:
+      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
     id: "sdg-critic",
     title: "SDG critic",
     mediaUrl: "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_rejection_sampling.mp4",
@@ -343,24 +361,6 @@ const EXAMPLES: ExampleItem[] = [
       repetitionPenalty: 1.2,
       temperature: 0.3,
       topP: 0.8
-    }
-  },
-  {
-    id: "robot-arm",
-    title: "robot arm pick up stuff",
-    mediaUrl: ROBOT_TAPE_IMAGE,
-    mediaName: "robot_tape.png",
-    mediaKind: "image",
-    userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
-    systemPrompt: "You are a helpful assistant.",
-    reasoning: true,
-    parameters: {
-      framesPerSecond: 2,
-      maxTokens: 4096,
-      repetitionPenalty: 1.2,
-      temperature: 0.3,
-      topP: 0.3
     }
   }
 ];
