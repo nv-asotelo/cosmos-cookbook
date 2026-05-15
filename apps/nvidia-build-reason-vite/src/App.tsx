@@ -584,6 +584,7 @@ export default function App() {
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [parametersOpen, setParametersOpen] = useState(false);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [reasoningExpanded, setReasoningExpanded] = useState(true);
   const [dragActive, setDragActive] = useState(false);
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -1072,7 +1073,13 @@ export default function App() {
         </div>
       </section>
 
-      <RuntimeDetailsNotice />
+      <RuntimeDetailsToggle
+        backendInfo={backendInfo}
+        detailsUrl={`${window.location.origin}/api/active-model`}
+        model={model}
+        open={runtimeOpen}
+        setOpen={setRuntimeOpen}
+      />
 
       <div className="tabs" role="tablist" aria-label="Model sections">
         {(["Experience", "Model Card", "System Card", "Deploy"] as SectionTab[]).map((tab) => {
@@ -2056,13 +2063,32 @@ function PromptBox({
   );
 }
 
-function RuntimeDetailsNotice() {
+function RuntimeDetailsToggle({
+  backendInfo,
+  detailsUrl,
+  model,
+  open,
+  setOpen
+}: {
+  backendInfo: BackendInfo | null;
+  detailsUrl: string;
+  model: string;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}) {
   return (
-    <section className="runtimeShell" aria-label="Active model details internal notice">
-      <div className="runtimeNotice" role="note">
-        <strong>Active Model details</strong>
-        <span>Web copy note: internal use only. Do not implement this button live.</span>
-      </div>
+    <section className="runtimeShell" aria-label="Active model details">
+      <button
+        aria-controls="active-model-runtime-details"
+        aria-expanded={open}
+        className="runtimeToggle"
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        Active Model details
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {open ? <RuntimeBar backendInfo={backendInfo} detailsUrl={detailsUrl} model={model} /> : null}
     </section>
   );
 }

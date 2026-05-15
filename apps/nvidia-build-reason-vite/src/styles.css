@@ -328,27 +328,21 @@ h1 {
   margin: 12px auto 0;
 }
 
-.runtimeNotice {
+.runtimeToggle {
   display: inline-flex;
   min-height: 34px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 10px;
+  gap: 6px;
   border: 0;
   background: transparent;
+  color: var(--green);
   font-size: 14px;
+  font-weight: 800;
   padding: 0;
 }
 
-.runtimeNotice strong {
-  color: var(--green);
-  font-weight: 800;
-}
-
-.runtimeNotice span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
+.runtimeToggle:hover {
+  color: var(--green-hover);
 }
 
 .runtimeBar {
