@@ -59,6 +59,8 @@ async function getModelInfo() {
       baseUrl: advertisedBaseUrl,
       models: models.length > 0 ? models : [defaultModel],
       output_dir: data?.output_dir,
+      environment: data?.environment,
+      cosmos3_version: data?.environment?.cosmos3_version,
       capabilities: {
         text_to_video: true,
         image_to_video: true,
@@ -116,6 +118,9 @@ app.get("/api/active-model", async (_request, response) => {
     display_name: checkpoint,
     backend: "cosmos3-generate",
     base_url: advertisedBaseUrl,
+    cosmos3_version: info.cosmos3_version,
+    environment: info.environment,
+    output_dir: info.output_dir,
     capabilities: info.capabilities,
     warning: info.warning
   });

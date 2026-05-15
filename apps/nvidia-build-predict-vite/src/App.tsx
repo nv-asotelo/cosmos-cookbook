@@ -2,6 +2,7 @@
 
 import {
   ChevronDown,
+  ChevronRight,
   Copy,
   ExternalLink,
   FileVideo,
@@ -122,6 +123,24 @@ type ApiResult = {
   payload?: unknown;
   raw?: unknown;
 };
+type BackendInfo = {
+  checkpoint?: string;
+  display_name?: string;
+  cosmos3_version?: string;
+  backend?: string;
+  gpu_name?: string;
+  vram_free_gib?: number;
+  vram_total_gib?: number;
+  base_url?: string;
+  output_dir?: string;
+  warning?: string;
+  capabilities?: Record<string, boolean>;
+  environment?: {
+    cosmos3_version?: string;
+    commit_sha?: string;
+    [key: string]: unknown;
+  };
+};
 
 const EXAMPLES: ExampleItem[] = [
   {
@@ -236,6 +255,15 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+function displayValue(value: unknown, fallback = "unknown") {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value);
+}
+
+function shortSha(sha?: string | null) {
+  return sha ? sha.slice(0, 12) : "unknown";
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -331,16 +359,8 @@ export default function Page() {
   const [collection, setCollection] = useState("cosmos-predict1");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>(MODEL_CHOICES);
-  const [backendInfo, setBackendInfo] = useState<{
-    checkpoint?: string;
-    display_name?: string;
-    cosmos3_version?: string;
-    backend?: string;
-    gpu_name?: string;
-    vram_free_gib?: number;
-    vram_total_gib?: number;
-    warning?: string;
-  } | null>(null);
+  const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Text-to-Video");
   const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -776,6 +796,14 @@ export default function Page() {
           </div>
         </div>
       </section>
+
+      <RuntimeDetailsToggle
+        backendInfo={backendInfo}
+        detailsUrl={`${window.location.origin}/api/active-model`}
+        model={model}
+        open={runtimeOpen}
+        setOpen={setRuntimeOpen}
+      />
 
       <div className="tabs" role="tablist" aria-label="Model sections">
         <button className="active">Experience</button>
@@ -1239,6 +1267,98 @@ function NumberField({
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
+  );
+}
+
+function RuntimeDetailsToggle({
+  backendInfo,
+  detailsUrl,
+  model,
+  open,
+  setOpen
+}: {
+  backendInfo: BackendInfo | null;
+  detailsUrl: string;
+  model: string;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}) {
+  return (
+    <section className="runtimeShell" aria-label="Active model details">
+      <button
+        aria-controls="active-model-runtime-details"
+        aria-expanded={open}
+        className="runtimeToggle"
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        Active Model details
+        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {open ? <RuntimeBar backendInfo={backendInfo} detailsUrl={detailsUrl} model={model} /> : null}
+    </section>
+  );
+}
+
+function RuntimeBar({
+  backendInfo,
+  detailsUrl,
+  model
+}: {
+  backendInfo: BackendInfo | null;
+  detailsUrl: string;
+  model: string;
+}) {
+  const environment = backendInfo?.environment;
+  const commitSha = environment?.commit_sha;
+  const capabilities = backendInfo?.capabilities
+    ? Object.entries(backendInfo.capabilities)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key.replace(/_/g, "-"))
+        .join(", ")
+    : "";
+
+  return (
+    <div className="runtimeBar" id="active-model-runtime-details">
+      {backendInfo?.warning ? (
+        <div className="runtimeWarning">
+          <Info size={15} />
+          <span>{backendInfo.warning}</span>
+        </div>
+      ) : null}
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Live Model</span>
+        <span className="runtimeValue">{displayValue(backendInfo?.display_name || backendInfo?.checkpoint || model)}</span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Backend</span>
+        <span className="runtimeValue">
+          {displayValue(backendInfo?.backend || "cosmos3-generate")} at {displayValue(backendInfo?.base_url)}
+        </span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Cosmos3</span>
+        <span className="runtimeValue">{displayValue(backendInfo?.cosmos3_version || environment?.cosmos3_version)}</span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Ray Commit</span>
+        <span className="runtimeValue">
+          <code>{shortSha(commitSha)}</code>
+        </span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Output Dir</span>
+        <span className="runtimeValue">{displayValue(backendInfo?.output_dir)}</span>
+      </div>
+      <div className="runtimeMetric">
+        <span className="runtimeLabel">Capabilities</span>
+        <span className="runtimeValue">{displayValue(capabilities)}</span>
+      </div>
+      <a className="runtimeJsonLink" href={detailsUrl} rel="noreferrer" target="_blank">
+        Full JSON details
+        <ExternalLink size={13} />
+      </a>
+    </div>
   );
 }
 

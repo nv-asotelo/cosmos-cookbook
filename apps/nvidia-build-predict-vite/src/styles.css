@@ -334,6 +334,104 @@ h1 {
   background: var(--green-hover);
 }
 
+.runtimeShell {
+  width: calc(100% - 64px);
+  margin: 12px auto 0;
+}
+
+.runtimeToggle {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  font-size: 14px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.runtimeToggle:hover {
+  color: var(--green-hover);
+}
+
+.runtimeBar {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1fr 1.3fr 0.65fr 0.8fr 1.4fr 1fr auto;
+  gap: 14px;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b0b0b;
+  padding: 12px 16px;
+}
+
+.runtimeWarning {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid rgba(240, 113, 120, 0.42);
+  border-radius: 6px;
+  background: rgba(240, 113, 120, 0.08);
+  color: #ff9aa1;
+  font-size: 13px;
+  line-height: 18px;
+  padding: 9px 10px;
+}
+
+.runtimeMetric {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.runtimeLabel {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.runtimeValue {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+
+.runtimeValue code {
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: #050505;
+  color: #d8d8d8;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 1px 5px;
+  white-space: pre-wrap;
+}
+
+.runtimeJsonLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-decoration: none;
+}
+
+.runtimeJsonLink:hover {
+  color: var(--green-hover);
+  text-decoration: underline;
+}
+
 .tabs {
   display: flex;
   width: calc(100% - 64px);
@@ -1543,6 +1641,18 @@ select {
     right: auto;
     bottom: 16px;
     left: 16px;
+  }
+
+  .runtimeShell {
+    width: calc(100% - 32px);
+    margin-top: 12px;
+  }
+
+  .runtimeBar {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-top: 4px;
+    padding: 12px;
   }
 
   .tabs {
