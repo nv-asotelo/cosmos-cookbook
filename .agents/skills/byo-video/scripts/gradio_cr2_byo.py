@@ -11,7 +11,7 @@ New in this version:
   - Right-side status panel: Step N/5 WIP + live token metrics (replaces grey loading box)
   - NIM mode: NVCF API via NGC_API_KEY (no local weights needed)
 """
-import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup
+import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup, html as _html
 warnings.filterwarnings("ignore")
 
 def _kill_frpc():
@@ -501,6 +501,79 @@ else:
     _VLLM_DD_DEFAULT = CHECKPOINT_PRESETS[0][0]
 
 _INITIAL_FPS, _INITIAL_MAX_PIXELS, _INITIAL_MAX_TOKENS = _ckpt_slider_defaults(_VLLM_DD_DEFAULT)
+
+def _nim_code_pill(text, title=""):
+    style = "background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px"
+    title_attr = f' title="{_html.escape(title, quote=True)}"' if title else ""
+    return f'<code{title_attr} style="{style}">{_html.escape(text)}</code>'
+
+
+def _nim_catalog_short_ids_html():
+    nims = _NIM_CATALOG or []
+    if not nims:
+        return (
+            "Short-id values: run "
+            f"{_nim_code_pill('python3 /tmp/nim_catalog.py list --no-probe')} "
+            "on the target to print the current supported catalog."
+        )
+
+    chips = []
+    for nim in nims:
+        short_id = getattr(nim, "short_id", "")
+        label = getattr(nim, "label", short_id)
+        image = getattr(nim, "image", "")
+        served = getattr(nim, "served_model_id", "")
+        title = f"{label} | image: {image} | served model: {served}"
+        chips.append(_nim_code_pill(short_id, title=title))
+    return (
+        f"Short-id values from the current upstream/byo-video catalog ({len(chips)}): "
+        + " · ".join(chips)
+    )
+
+
+def _nim_switch_help_html():
+    docs_url = "https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html"
+    ssh_target = os.environ.get("BYO_VIDEO_SSH_TARGET", os.environ.get("SSH_TARGET", "<user@host>"))
+    ssh_command = (
+        f"ssh {ssh_target}\n"
+        "NIM_SHORT=<short-id>\n"
+        "read -rsp \"NGC API key: \" NGC_API_KEY; echo\n"
+        "export NGC_API_KEY\n"
+        "docker rm -f cosmos-nim 2>/dev/null || true\n"
+        "MODEL=\"$NIM_SHORT\" CONTAINER_NAME=cosmos-nim PORT=8000 \\\n"
+        "  bash /tmp/nim_launch.sh\n"
+        "curl -fsS http://localhost:8000/v1/models\n"
+        "# Then reload this Gradio page.\n"
+    )
+    return (
+        "<div style=\"background:#eff6ff;border:1px solid #3b82f6;border-radius:6px;"
+        "padding:12px 14px;margin:8px 0;color:#1e3a8a;font-size:13px;line-height:1.5\">"
+        "<b style=\"color:#1e3a8a\">↻ Switching the running NIM</b><br>"
+        "<span style=\"color:#475569\">"
+        "The dropdown above is generated at page load from NVIDIA's current VLM NIM docs "
+        f"(<a href=\"{docs_url}\" target=\"_blank\" style=\"color:#1d4ed8\">docs source</a>) "
+        "cross-referenced with the BYO-video supported NIM catalog. "
+        "<code style=\"font-size:11px;background:#dbeafe;color:#1e293b;padding:1px 4px;"
+        "border-radius:3px\">nim_launch.sh</code> resolves each short-id to the correct "
+        "vendor image, served model id, and any required launch env."
+        "</span>"
+        "<ol style=\"margin:8px 0 4px 18px;color:#1e3a8a\">"
+        "<li><b>Ask the runtime agent</b> — say <i>“switch the NIM to "
+        "Cosmos Reason2 2B”</i> and it will SSH in, stop/swap the container, run "
+        f"{_nim_code_pill('nim_launch.sh')}, and confirm "
+        f"{_nim_code_pill('/v1/models')} is back up.</li>"
+        "<li><b>Run it yourself by SSH</b> (no agent needed):"
+        "<pre style=\"background:#0f1a2e;border:1px solid #334155;border-radius:4px;"
+        "padding:8px 10px;margin:6px 0;color:#e5e7eb;font-size:11px;overflow-x:auto;"
+        f"white-space:pre-wrap\">{_html.escape(ssh_command)}</pre>"
+        "<span style=\"color:#475569;font-size:12px\">"
+        f"{_nim_catalog_short_ids_html()} "
+        "First-time pulls can take 5–30 min depending on model size; subsequent cached starts "
+        "are usually a few minutes for engine warmup."
+        "</span>"
+        "</li></ol>"
+        "</div>"
+    )
 
 DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
 DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
@@ -3495,57 +3568,7 @@ with gr.Blocks(
         # /v1/models on every reload and picks up the new served model id.
         if _is_nim_local:
             gr.HTML(
-                "<div style=\"background:#eff6ff;border:1px solid #3b82f6;border-radius:6px;"
-                "padding:12px 14px;margin:8px 0;color:#1e3a8a;font-size:13px;line-height:1.5\">"
-                "<b style=\"color:#1e3a8a\">↻ Switching the running NIM</b><br>"
-                "<span style=\"color:#475569\">"
-                "The dropdown above lists every VLM NIM in the upstream catalog "
-                "(<a href=\"https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html\" "
-                "target=\"_blank\" style=\"color:#1d4ed8\">docs source</a>). To actually swap "
-                "the running container, do one of:"
-                "</span>"
-                "<ol style=\"margin:8px 0 4px 18px;color:#1e3a8a\">"
-                "<li><b>Ask the runtime agent</b> — say <i>“switch the NIM to "
-                "Cosmos Reason2 2B”</i> and it will SSH in, stop the container, run "
-                "<code style=\"font-size:11px;background:#dbeafe;color:#1e293b;padding:1px 4px;"
-                "border-radius:3px\">nim_launch.sh</code>, and confirm "
-                "<code style=\"font-size:11px;background:#dbeafe;color:#1e293b;padding:1px 4px;"
-                "border-radius:3px\">/v1/models</code> is back up.</li>"
-                "<li><b>Run it yourself by SSH</b> (no agent needed):"
-                "<pre style=\"background:#0f1a2e;border:1px solid #334155;border-radius:4px;"
-                "padding:8px 10px;margin:6px 0;color:#e5e7eb;font-size:11px;overflow-x:auto;"
-                "white-space:pre-wrap\">"
-                "ssh &lt;user@host&gt;\n"
-                "docker rm -f cosmos-nim\n"
-                "MODEL=&lt;short-id&gt; CONTAINER_NAME=cosmos-nim PORT=8000 \\\n"
-                "  bash /tmp/nim_launch.sh &lt;NGC_API_KEY&gt;\n"
-                "# Then reload this Gradio page."
-                "</pre>"
-                "<span style=\"color:#475569;font-size:12px\">"
-                "Short-id values: <code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;"
-                "border-radius:3px\">cosmos-reason2-2b</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "cosmos-reason2-8b</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "cosmos-reason1-7b</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "nemotron-nano-12b-v2-vl</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "llama-3.1-nemotron-nano-vl-8b-v1</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "llama-3.2-11b-vision-instruct</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "llama-3.2-90b-vision-instruct</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "llama-4-maverick-17b-128e-instruct</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "llama-4-scout-17b-16e-instruct</code> · "
-                "<code style=\"background:#dbeafe;color:#1e293b;padding:1px 4px;border-radius:3px\">"
-                "mistral-small-3.2-24b-instruct-2506</code>. "
-                "First-time pulls take 5–15 min; subsequent restarts ~3 min for vLLM warmup."
-                "</span>"
-                "</li></ol>"
-                "</div>",
+                _nim_switch_help_html(),
                 visible=True,
             )
 

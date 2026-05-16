@@ -1,9 +1,9 @@
 #!/bin/bash
-# NIM launch script for any Cosmos Reason 2 NIM (2B / 8B / 32B) on any host.
+# NIM launch script for any BYO-video supported VLM NIM on any host.
 # Run as: bash nim_launch.sh <NGC_API_KEY> [HF_TOKEN]
 # Env overrides:
-#   MODEL            — short id: cosmos-reason2-8b (default) | cosmos-reason2-2b | cosmos-reason2-32b
-#   IMAGE            — full image override (defaults to nvcr.io/nim/nvidia/$MODEL:latest)
+#   MODEL            — short id from nim_catalog.py (default cosmos-reason2-8b)
+#   IMAGE            — full image override (otherwise resolved from nim_catalog.py)
 #   PORT             — host port (default 8000)
 #   CONTAINER_NAME   — docker container name (default cosmos-nim)
 #   LOCAL_NIM_CACHE  — host cache dir (default $HOME/.cache/nim)
@@ -16,11 +16,12 @@
 # Logs streamed to /tmp/nim_launch.log; container logs via `docker logs $CONTAINER_NAME`.
 
 set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGC_API_KEY="${1:-${NGC_API_KEY:-}}"
 HF_TOKEN="${2:-${HF_TOKEN:-}}"
 
 MODEL="${MODEL:-cosmos-reason2-8b}"
-IMAGE="${IMAGE:-nvcr.io/nim/nvidia/${MODEL}:latest}"
+IMAGE="${IMAGE:-}"
 PORT="${PORT:-8000}"
 CONTAINER_NAME="${CONTAINER_NAME:-cosmos-nim}"
 LOCAL_NIM_CACHE="${LOCAL_NIM_CACHE:-$HOME/.cache/nim}"
@@ -28,6 +29,67 @@ NIM_CACHE_MODE="${NIM_CACHE_MODE:-internal}"
 NIM_EXTRA_ENV="${NIM_EXTRA_ENV:-}"
 MAX_WAIT="${MAX_WAIT:-1800}"
 SHM_SIZE="${SHM_SIZE:-32GB}"
+
+if [ -z "$IMAGE" ]; then
+    _resolved="$(
+        MODEL_TO_RESOLVE="$MODEL" \
+        NIM_LAUNCH_SCRIPT_DIR="$SCRIPT_DIR" \
+        python3 - <<'PY' 2>/dev/null || true
+import os
+import re
+import shlex
+import sys
+
+script_dir = os.environ.get("NIM_LAUNCH_SCRIPT_DIR", "")
+for path in (script_dir, "/tmp", os.getcwd()):
+    if path and path not in sys.path:
+        sys.path.insert(0, path)
+
+try:
+    from nim_catalog import KNOWN_VLM_NIMS  # type: ignore
+except Exception:
+    sys.exit(0)
+
+requested = os.environ.get("MODEL_TO_RESOLVE", "").lower()
+if requested.startswith("nvcr.io/nim/"):
+    requested = requested[len("nvcr.io/nim/"):]
+if requested.endswith(":latest"):
+    requested = requested[:-len(":latest")]
+requested_leaf = requested.split("/")[-1]
+
+def _image_key(image: str) -> str:
+    key = image.lower()
+    if key.startswith("nvcr.io/nim/"):
+        key = key[len("nvcr.io/nim/"):]
+    if key.endswith(":latest"):
+        key = key[:-len(":latest")]
+    return key
+
+for nim in KNOWN_VLM_NIMS:
+    image_key = _image_key(getattr(nim, "image", ""))
+    tokens = {
+        getattr(nim, "short_id", "").lower(),
+        getattr(nim, "served_model_id", "").lower(),
+        image_key,
+        image_key.split("/")[-1],
+    }
+    if requested in tokens or requested_leaf in tokens:
+        print("MODEL=" + shlex.quote(getattr(nim, "short_id", "")))
+        print("IMAGE=" + shlex.quote(getattr(nim, "image", "")))
+        if not os.environ.get("NIM_SERVED_MODEL_NAME"):
+            print("NIM_SERVED_MODEL_NAME=" + shlex.quote(getattr(nim, "served_model_id", "")))
+        for key, value in (getattr(nim, "env", {}) or {}).items():
+            if re.match(r"^[A-Z_][A-Z0-9_]*$", key) and not os.environ.get(key):
+                print(f"{key}=" + shlex.quote(str(value)))
+        break
+PY
+    )"
+    if [ -n "$_resolved" ]; then
+        eval "$_resolved"
+    fi
+fi
+
+IMAGE="${IMAGE:-nvcr.io/nim/nvidia/${MODEL}:latest}"
 
 LOG=/tmp/nim_launch.log
 exec > >(tee -a "$LOG") 2>&1

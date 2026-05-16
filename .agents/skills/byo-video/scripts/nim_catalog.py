@@ -54,7 +54,7 @@ DOCS_URL = "https://docs.nvidia.com/nim/vision-language-models/latest/introducti
 RELEASE_NOTES_URL_FMT = "https://docs.nvidia.com/nim/vision-language-models/{version}/release-notes.html"
 KNOWN_RELEASE_VERSIONS = [
     "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0",
-    "1.5.0", "1.6.0", "1.7.0",
+    "1.3.1", "1.5.0", "1.6.0", "1.7.0",
 ]
 
 
