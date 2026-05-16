@@ -29,6 +29,7 @@ PORT = int(os.environ.get("NIM_SWITCH_PORT", "7862"))
 STATE_FILE = Path(os.environ.get("NIM_SWITCH_STATE_FILE", "/tmp/nim_switch_state.json"))
 LOG_FILE = Path(os.environ.get("NIM_SWITCH_LOG_FILE", "/tmp/nim_switch_service.log"))
 CREDENTIAL_FILE = Path(os.environ.get("NIM_CREDENTIAL_FILE", "/tmp/byo_video_nim_credentials.env"))
+CUSTOM_NIMS_FILE = Path(os.environ.get("NIM_CUSTOM_NIMS_FILE", "/tmp/nim_switch_custom_nims.json"))
 NIM_LAUNCH = os.environ.get("NIM_LAUNCH_SCRIPT", "/tmp/nim_launch.sh")
 GRADIO_APP = os.environ.get("GRADIO_APP", "/tmp/gradio_cr2_byo.py")
 GRADIO_LOG = Path(os.environ.get("GRADIO_LOG_FILE", "/tmp/gradio_demo.log"))
@@ -230,6 +231,7 @@ def _enrich_state(state: Dict[str, Any], now: Optional[float] = None) -> Dict[st
     state["eta_label"] = eta_label
     state["current_step"] = next((s["title"] for s in _step_details(state, phase) if s["status"] == "running"), "Ready" if phase == "ready" else phase)
     state["steps"] = _step_details(state, phase)
+    state["custom_nims"] = _read_custom_nims()
     previous_model = state.get("previous")
     target_model = state.get("target")
     if previous_model or target_model:
@@ -325,15 +327,16 @@ def _catalog() -> list[Any]:
     try:
         from nim_catalog import list_switchable_video_nims  # type: ignore
 
-        return list_switchable_video_nims(
+        nims = list_switchable_video_nims(
             ngc_api_key=os.environ.get("NGC_API_KEY"),
             vram_mb=_target_vram_mb(),
             use_upstream=True,
             do_probe=False,
         )
+        return nims + _read_custom_nims()
     except Exception as exc:
         _append_log(f"Catalog load failed: {exc}")
-        return []
+        return _read_custom_nims()
 
 
 def _known_catalog() -> list[Any]:
@@ -491,6 +494,102 @@ def _infer_changelog(previous: Optional[Dict[str, Any]], target: Optional[Dict[s
         "items": changes,
         "source": "Inferred from docker runtime metadata plus the BYO-video NIM catalog when available.",
     }
+
+
+def _custom_short_id(served_model_id: str, image: str = "") -> str:
+    seed = served_model_id or image or "custom-nim"
+    leaf = seed.split("/")[-1].split(":")[0]
+    slug = re.sub(r"[^a-z0-9]+", "-", leaf.lower()).strip("-")
+    return f"custom-{slug or 'nim'}"
+
+
+def _normalise_custom_nim(payload: Dict[str, Any]) -> Dict[str, Any]:
+    image = str(payload.get("image") or payload.get("docker_image") or "").strip()
+    served = str(payload.get("served_model_id") or payload.get("model_id") or "").strip()
+    if not image.startswith("nvcr.io/"):
+        raise ValueError("Custom NIM image must be a full nvcr.io image path")
+    if not served:
+        raise ValueError("Custom NIM served_model_id is required")
+    short_id = str(payload.get("short_id") or _custom_short_id(served, image)).strip()
+    label = str(payload.get("label") or f"Custom: {served}").strip()
+    family = str(payload.get("family") or "Custom NIM").strip()
+    notes = str(
+        payload.get("notes")
+        or "Custom/recent NIM registered locally; not necessarily present in the public catalog."
+    ).strip()
+    return {
+        "short_id": short_id,
+        "label": label,
+        "family": family,
+        "image": image,
+        "served_model_id": served,
+        "min_vram_mb": int(payload.get("min_vram_mb") or 0),
+        "supports_video": bool(payload.get("supports_video", True)),
+        "switchable": True,
+        "custom": True,
+        "env": dict(payload.get("env") or {}),
+        "notes": notes,
+        "catalog_source": str(payload.get("catalog_source") or "custom cache"),
+    }
+
+
+def _read_custom_nims() -> list[Dict[str, Any]]:
+    try:
+        data = json.loads(CUSTOM_NIMS_FILE.read_text(encoding="utf-8"))
+        items = data.get("nims", data) if isinstance(data, dict) else data
+        out = []
+        for item in items or []:
+            try:
+                out.append(_normalise_custom_nim(item))
+            except Exception as exc:
+                _append_log(f"Skipping invalid custom NIM cache entry: {exc}")
+        return out
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        _append_log(f"Custom NIM cache read failed: {exc}")
+        return []
+
+
+def _write_custom_nims(items: list[Dict[str, Any]]) -> None:
+    CUSTOM_NIMS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CUSTOM_NIMS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"nims": items}, indent=2, sort_keys=True), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(CUSTOM_NIMS_FILE)
+    os.chmod(CUSTOM_NIMS_FILE, 0o600)
+
+
+def _remember_custom_nim(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        item = _normalise_custom_nim(payload)
+    except Exception as exc:
+        _append_log(f"Custom NIM registration skipped: {exc}")
+        return None
+    existing = _read_custom_nims()
+    deduped = [
+        nim for nim in existing
+        if nim.get("served_model_id") != item["served_model_id"]
+        and nim.get("image") != item["image"]
+        and nim.get("short_id") != item["short_id"]
+    ]
+    deduped.insert(0, item)
+    _write_custom_nims(deduped[:20])
+    return item
+
+
+def _remember_runtime_if_custom(model: Optional[Dict[str, Any]]) -> None:
+    if not model:
+        return
+    image = str(model.get("image") or "")
+    source = str(model.get("catalog_source") or "")
+    is_custom = bool(model.get("custom")) or "nvstaging" in image or source not in {"BYO-video NIM catalog", ""}
+    if not is_custom:
+        return
+    payload = dict(model)
+    if payload.get("label", "").startswith("Current custom:"):
+        payload["label"] = f"Recent custom: {payload.get('served_model_id')}"
+    _remember_custom_nim(payload)
 
 
 def _resolve_target(short_id: str) -> Optional[Dict[str, Any]]:
@@ -812,6 +911,8 @@ def _switch_worker(target: Dict[str, Any]) -> None:
             "message": f"Switch requested for {target['label']}",
         })
         current = previous_runtime
+        _remember_runtime_if_custom(previous_model)
+        _remember_runtime_if_custom(target)
         if target.get("custom_current") or (
             current.get("served_model_id") == target.get("served_model_id")
             and (not target.get("image") or current.get("image") == target.get("image"))
@@ -835,6 +936,7 @@ def _switch_worker(target: Dict[str, Any]) -> None:
 
 def _initial_state() -> None:
     current = _current_runtime()
+    _remember_runtime_if_custom(_runtime_model(current))
     if not STATE_FILE.exists():
         _write_state({
             "phase": "idle",
@@ -1050,8 +1152,12 @@ class Handler(BaseHTTPRequestHandler):
             state = _read_json(STATE_FILE)
             state["current"] = _current_runtime()
             state["credentials_present"] = _credentials_present()
+            state["custom_nims"] = _read_custom_nims()
             state = _enrich_state(state)
             self._json(200, state)
+            return
+        if parsed.path == "/api/custom-nims":
+            self._json(200, {"nims": _read_custom_nims()})
             return
         if parsed.path == "/api/log":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1088,6 +1194,16 @@ class Handler(BaseHTTPRequestHandler):
                 _write_credentials(payload)
                 _write_state({"credentials_present": True})
                 self._json(200, {"ok": True})
+            except Exception as exc:
+                self._json(400, {"error": str(exc)})
+            return
+        if parsed.path == "/api/custom-nims":
+            try:
+                nim = _remember_custom_nim(payload)
+                if not nim:
+                    raise ValueError("Could not register custom NIM")
+                _write_state({"custom_nims": _read_custom_nims(), "message": f"Registered custom NIM {nim['label']}"})
+                self._json(200, {"ok": True, "nim": nim, "nims": _read_custom_nims()})
             except Exception as exc:
                 self._json(400, {"error": str(exc)})
             return

@@ -429,6 +429,77 @@ def _nim_docker_image():
         return os.environ.get("NIM_IMAGE") or None
 
 
+def _nim_slug(value):
+    import re as _re
+    leaf = str(value or "custom-nim").split("/")[-1].split(":")[0]
+    return _re.sub(r"[^a-z0-9]+", "-", leaf.lower()).strip("-") or "custom-nim"
+
+
+def _nim_custom_cache_dicts():
+    paths = [
+        os.environ.get("NIM_CUSTOM_NIMS_FILE", "/tmp/nim_switch_custom_nims.json"),
+        os.environ.get("NIM_SWITCH_STATE_FILE", "/tmp/nim_switch_state.json"),
+    ]
+    out = []
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        candidates = []
+        if isinstance(data, dict) and "nims" in data:
+            candidates.extend(data.get("nims") or [])
+        elif isinstance(data, list):
+            candidates.extend(data)
+        elif isinstance(data, dict):
+            for key in ("previous", "target"):
+                item = data.get(key)
+                if isinstance(item, dict):
+                    candidates.append(item)
+            change = data.get("model_change") or {}
+            for key in ("previous", "target"):
+                item = change.get(key) if isinstance(change, dict) else None
+                if isinstance(item, dict):
+                    candidates.append(item)
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            image = str(item.get("image") or item.get("docker_image") or "").strip()
+            served = str(item.get("served_model_id") or item.get("model_id") or "").strip()
+            if not image.startswith("nvcr.io/") or not served:
+                continue
+            is_custom = bool(item.get("custom")) or "nvstaging" in image or str(item.get("catalog_source") or "").startswith("runtime")
+            if not is_custom:
+                continue
+            label = str(item.get("label") or f"Custom: {served}").strip()
+            if served != (_SERVER_MODEL_ID or "") and label.startswith("Current custom:"):
+                label = f"Recent custom: {served}"
+            out.append({
+                "short_id": str(item.get("short_id") or f"custom-{_nim_slug(served or image)}"),
+                "image": image,
+                "family": str(item.get("family") or "Custom NIM"),
+                "label": label,
+                "served_model_id": served,
+                "min_vram_mb": int(item.get("min_vram_mb") or 0),
+                "supports_video": bool(item.get("supports_video", True)),
+                "switchable": True,
+                "notes": str(item.get("notes") or "Custom/recent NIM remembered from this target."),
+                "env": dict(item.get("env") or {}),
+            })
+    deduped = []
+    seen = set()
+    for item in out:
+        key = (item["served_model_id"], item["image"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 _NIM_CATALOG = []
 _NIM_BY_LABEL = {}
 _NIM_BY_SHORT_ID = {}
@@ -471,6 +542,21 @@ if INFERENCE_BACKEND == "nim_local":
                 supports_video=True,
                 switchable=False,
                 notes="Currently running NIM on this instance; not present in the public catalog.",
+            ))
+        for _custom in reversed(_nim_custom_cache_dicts()):
+            if any(n.served_model_id == _custom["served_model_id"] and n.image == _custom["image"] for n in _NIM_CATALOG):
+                continue
+            _NIM_CATALOG.insert(0, NimImage(
+                _custom["short_id"],
+                _custom["image"],
+                _custom["family"],
+                _custom["label"],
+                _custom["served_model_id"],
+                min_vram_mb=_custom["min_vram_mb"],
+                supports_video=_custom["supports_video"],
+                switchable=True,
+                env=_custom["env"],
+                notes=_custom["notes"],
             ))
         _deduped = []
         _seen_served = set()
@@ -921,6 +1007,58 @@ def _save_nim_credentials(ngc_key, label):
         _nim_switch_panel_html(label, payload.get("error", "Could not store key.")),
         gr.update(value=""),
         _nim_switch_button_update(label),
+    )
+
+
+def _register_custom_nim(image, served_model_id, label):
+    image = (image or "").strip()
+    served_model_id = (served_model_id or "").strip()
+    label = (label or "").strip() or (f"Custom: {served_model_id}" if served_model_id else "")
+    if not image or not served_model_id:
+        current = _VLLM_DD_DEFAULT
+        return (
+            gr.update(),
+            _nim_switch_panel_html(current, "Enter both the custom Docker image and served model id."),
+            _nim_switch_button_update(current),
+        )
+    payload = {
+        "image": image,
+        "served_model_id": served_model_id,
+        "label": label,
+        "family": "Custom NIM",
+        "notes": "Custom NIM registered from the Gradio switch UI.",
+    }
+    status, response = _nim_http_json("POST", "/api/custom-nims", payload, timeout=8)
+    if status != 200:
+        current = _VLLM_DD_DEFAULT
+        return (
+            gr.update(),
+            _nim_switch_panel_html(current, response.get("error", "Could not register custom NIM.")),
+            _nim_switch_button_update(current),
+        )
+    nim_data = response.get("nim") or payload
+    try:
+        from types import SimpleNamespace
+        record = SimpleNamespace(**nim_data)
+        global CHECKPOINT_PRESETS, _NIM_CATALOG, _NIM_BY_LABEL, _NIM_BY_SHORT_ID
+        _NIM_CATALOG = [
+            n for n in _NIM_CATALOG
+            if not (
+                getattr(n, "served_model_id", "") == getattr(record, "served_model_id", "")
+                and getattr(n, "image", "") == getattr(record, "image", "")
+            )
+        ]
+        _NIM_CATALOG.insert(0, record)
+        CHECKPOINT_PRESETS = [(n.label, n.served_model_id) for n in _NIM_CATALOG]
+        _NIM_BY_LABEL = {n.label: n for n in _NIM_CATALOG}
+        _NIM_BY_SHORT_ID = {n.short_id: n for n in _NIM_CATALOG}
+        new_label = record.label
+    except Exception:
+        new_label = label
+    return (
+        gr.update(choices=[p[0] for p in CHECKPOINT_PRESETS], value=new_label),
+        _nim_switch_panel_html(new_label, "Custom NIM saved. Review the Docker image and click Switch to selected NIM when ready."),
+        _nim_switch_button_update(new_label),
     )
 
 
@@ -3964,11 +4102,34 @@ with gr.Blocks(
                     info="Stored on the target as /tmp/byo_video_nim_credentials.env with chmod 0600.",
                 )
                 nim_save_key_btn = gr.Button("Save key", variant="secondary", min_width=120)
+            with gr.Accordion("Custom NIM Docker image", open=False):
+                custom_nim_image = gr.Textbox(
+                    label="Docker image",
+                    value="",
+                    placeholder="nvcr.io/nvstaging/nim/cosmos3-super-reasoner:1.7.1.rc0-51109231",
+                    info="Full NIM image path. Stored in /tmp/nim_switch_custom_nims.json after registration.",
+                )
+                custom_nim_served = gr.Textbox(
+                    label="Served model id",
+                    value="",
+                    placeholder="nvidia/Cosmos3-Super-Reasoner",
+                    info="The model id returned by /v1/models after this image starts.",
+                )
+                custom_nim_label = gr.Textbox(
+                    label="Dropdown label",
+                    value="",
+                    placeholder="Recent custom: nvidia/Cosmos3-Super-Reasoner",
+                )
+                custom_nim_register_btn = gr.Button("Add custom NIM to dropdown", variant="secondary")
         else:
             nim_switch_panel = gr.HTML(value="", visible=False)
             nim_switch_btn = gr.Button(visible=False)
             nim_ngc_key = gr.Textbox(visible=False)
             nim_save_key_btn = gr.Button(visible=False)
+            custom_nim_image = gr.Textbox(visible=False)
+            custom_nim_served = gr.Textbox(visible=False)
+            custom_nim_label = gr.Textbox(visible=False)
+            custom_nim_register_btn = gr.Button(visible=False)
 
         with gr.Row():
             fps_slider = gr.Slider(
@@ -4416,6 +4577,11 @@ with gr.Blocks(
             fn=_save_nim_credentials,
             inputs=[nim_ngc_key, checkpoint_dd],
             outputs=[nim_switch_panel, nim_ngc_key, nim_switch_btn],
+        )
+        custom_nim_register_btn.click(
+            fn=_register_custom_nim,
+            inputs=[custom_nim_image, custom_nim_served, custom_nim_label],
+            outputs=[checkpoint_dd, nim_switch_panel, nim_switch_btn],
         )
 
     def resolve_model_id(ckpt_name, custom_val):
