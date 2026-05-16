@@ -331,7 +331,7 @@ _MODEL_SIZE_DEFAULTS = {
     "C3-2B": {"fps": 2, "max_tokens": 512},
     "C3-8B": {"fps": 2, "max_tokens": 512},
     "C3-32B":  {"fps": 1, "max_tokens": 1024},
-    "C3-super":{"fps": 1, "max_tokens": 1024},
+    "C3-super":{"fps": 1, "max_pixels": 512*(32**2), "max_tokens": 1024},
 }
 # Flat map: checkpoint UI label → MODEL_CONFIGS size key (built after MODEL_CONFIGS is complete)
 _LABEL_TO_MODEL_SIZE = {
@@ -499,6 +499,8 @@ elif INFERENCE_BACKEND == "nim_local" and _NIM_CATALOG:
     _VLLM_DD_DEFAULT = _matched or CHECKPOINT_PRESETS[0][0]
 else:
     _VLLM_DD_DEFAULT = CHECKPOINT_PRESETS[0][0]
+
+_INITIAL_FPS, _INITIAL_MAX_PIXELS, _INITIAL_MAX_TOKENS = _ckpt_slider_defaults(_VLLM_DD_DEFAULT)
 
 DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
 DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
@@ -956,7 +958,11 @@ def _uses_file_url(model_id):
 
 def _is_frames_fallback_nim(model_id):
     mid = (model_id or _SERVER_MODEL_ID or "").lower()
-    return INFERENCE_BACKEND == "nim_local" and "cosmos-reason1" in mid
+    return INFERENCE_BACKEND == "nim_local" and (
+        "cosmos-reason1" in mid
+        or "cosmos3" in mid
+        or "cosmos-3" in mid
+    )
 
 def _nim_frame_fallback_limit():
     raw = os.environ.get("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.environ.get("NIM_MAX_IMAGES_PER_PROMPT") or "5"
@@ -987,8 +993,8 @@ def _uses_native_video_url(model_id):
 
     # ── nim_local backend ───────────────────────────────────────────────────
     if INFERENCE_BACKEND == "nim_local":
-        if "cosmos-reason1" in mid:
-            return False  # frame fallback (May 2026 smoke sprint finding)
+        if _is_frames_fallback_nim(mid):
+            return False  # frame fallback for NIMs whose NVDEC video_url path rejects uploads
         return True
 
     # ── vllm + hf backends ──────────────────────────────────────────────────
@@ -1911,7 +1917,79 @@ def _load(model_id):
 
 
 # ── Frame extraction for NIM ───────────────────────────────────────────────────
-def _extract_frames_b64(video_path, fps=1, max_frames=None):
+def _pil_to_jpeg_b64(img, max_pixels=None):
+    try:
+        max_pixels = int(max_pixels or 0)
+    except Exception:
+        max_pixels = 0
+    if max_pixels > 0:
+        w, h = img.size
+        if w > 0 and h > 0 and (w * h) > max_pixels:
+            scale = (max_pixels / float(w * h)) ** 0.5
+            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+            try:
+                from PIL import Image as _PILImage
+                resample = _PILImage.Resampling.LANCZOS
+            except Exception:
+                resample = 1
+            img = img.resize(new_size, resample)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _frame_to_jpeg_b64(frame, max_pixels=None):
+    return _pil_to_jpeg_b64(frame.to_image().convert("RGB"), max_pixels=max_pixels)
+
+
+def _extract_frames_by_seek_b64(video_path, target_indices, frame_rate, max_pixels=None):
+    """Seek to sparse target positions instead of decoding the full clip."""
+    frames = []
+    for target_idx in sorted(target_indices):
+        container = None
+        try:
+            container = _av_module.open(video_path)
+            stream = container.streams.video[0]
+            target_s = max(0.0, float(target_idx) / max(frame_rate, 1.0))
+            if target_idx > 0:
+                if stream.time_base:
+                    container.seek(
+                        int(target_s / float(stream.time_base)),
+                        any_frame=False,
+                        backward=True,
+                        stream=stream,
+                    )
+                else:
+                    container.seek(
+                        int(target_s * 1_000_000),
+                        any_frame=False,
+                        backward=True,
+                    )
+
+            picked = None
+            for frame in container.decode(stream):
+                picked = frame
+                if frame.pts is None or not stream.time_base:
+                    break
+                frame_s = float(frame.pts * stream.time_base)
+                if frame_s + (0.5 / max(frame_rate, 1.0)) >= target_s:
+                    break
+            if picked is None:
+                return []
+            frames.append(_frame_to_jpeg_b64(picked, max_pixels=max_pixels))
+        except Exception as e:
+            print(f"[warn] seek frame extraction failed at frame {target_idx}: {e}", flush=True)
+            return []
+        finally:
+            try:
+                if container is not None:
+                    container.close()
+            except Exception:
+                pass
+    return frames
+
+
+def _extract_frames_b64(video_path, fps=1, max_frames=None, max_pixels=None):
     """Return list of base64 JPEG strings sampled from `video_path`.
 
     Standing rule (Alex 2026-05-08, all NIMs forever): no client-side cap.
@@ -1927,7 +2005,7 @@ def _extract_frames_b64(video_path, fps=1, max_frames=None):
     try:
         container = _av_module.open(video_path)
         stream = container.streams.video[0]
-        frame_rate = float(stream.average_rate) or 25.0
+        frame_rate = float(stream.average_rate) if stream.average_rate else 25.0
 
         # PyAV's stream.frames is reliable for most container formats; fall
         # back to duration*rate when it's 0 (some streaming codecs).
@@ -1955,13 +2033,26 @@ def _extract_frames_b64(video_path, fps=1, max_frames=None):
                     for j in range(n_to_take)
                 }
 
+        if max_frames is not None and target_count > max_frames and total_frames > (n_to_take * 8):
+            seek_frames = _extract_frames_by_seek_b64(
+                video_path,
+                target_indices,
+                frame_rate,
+                max_pixels=max_pixels,
+            )
+            if len(seek_frames) >= n_to_take:
+                container.close()
+                return seek_frames[:n_to_take]
+            print(
+                f"[warn] seek extraction returned {len(seek_frames)}/{n_to_take}; "
+                "falling back to linear decode",
+                flush=True,
+            )
+
         frames = []
         for i, frame in enumerate(container.decode(stream)):
             if i in target_indices:
-                img = frame.to_image().convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=80)
-                frames.append(base64.b64encode(buf.getvalue()).decode())
+                frames.append(_frame_to_jpeg_b64(frame, max_pixels=max_pixels))
                 if len(frames) >= n_to_take:
                     break
         container.close()
@@ -1972,7 +2063,7 @@ def _extract_frames_b64(video_path, fps=1, max_frames=None):
 
 
 # ── vLLM inference (OpenAI-compatible local server) ───────────────────────────
-def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None, is_image=False, temperature=0.0, top_p=1.0, rep_penalty=1.0):
+def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens, model_id, t_run_start=None, display_label=None, extra_note=None, is_image=False, temperature=0.0, top_p=1.0, rep_penalty=1.0):
     """Generator: (response_text, status_html, table_html) via local vLLM/NIM server."""
     steps = VLLM_STEPS
     if t_run_start is None:
@@ -2024,11 +2115,18 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
         # current staging stack, so cap fallback frames there.
         _max_frames = _nim_frame_fallback_limit() if INFERENCE_BACKEND == "nim_local" else None
         _cap_note = f"max_frames={_max_frames}" if _max_frames else "no client cap"
-        print(f"[vllm] Extracting frames fps={fps} ({_cap_note}; {reason})", flush=True)
-        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
+        _px_note = f"max_pixels={max_pixels}" if max_pixels else "native resolution"
+        _t_extract = time.time()
+        print(f"[vllm] Extracting frames fps={fps} ({_cap_note}; {_px_note}; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(
+            video_path,
+            fps=fps,
+            max_frames=_max_frames,
+            max_pixels=max_pixels,
+        )
         if not _frames_b64:
             raise RuntimeError("Could not extract frames (PyAV missing or video unreadable)")
-        print(f"[vllm] {len(_frames_b64)} frames extracted", flush=True)
+        print(f"[vllm] {len(_frames_b64)} frames extracted in {time.time() - _t_extract:.2f}s", flush=True)
         _content = [{"type": "text", "text": f"[Video — {len(_frames_b64)} frames at {fps}fps]\n{prompt}"}]
         for _fb64 in _frames_b64:
             _content.append({
@@ -2059,9 +2157,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
             try:
                 from PIL import Image as _pil_img
                 _img = _pil_img.open(video_path).convert("RGB")
-                _buf = io.BytesIO()
-                _img.save(_buf, format="JPEG", quality=85)
-                _img_b64 = base64.b64encode(_buf.getvalue()).decode()
+                _img_b64 = _pil_to_jpeg_b64(_img, max_pixels=max_pixels)
             except Exception as _img_err:
                 msg = f"[vLLM ERROR] Could not read image: {_img_err}"
                 _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
@@ -2512,7 +2608,7 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
         _srv_short = _effective_mid.split("/")[-1] if "/" in _effective_mid else _effective_mid
         _extra_note = f"vLLM serves {_srv_short}" if _srv_short != _req_short else None
         yield from _run_vllm_inference(
-            video_path, user_prompt, system_prompt, fps, max_new_tokens, _effective_mid,
+            video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, _effective_mid,
             t_run_start=t_run_start,
             display_label=display_label,
             extra_note=_extra_note,
@@ -3455,7 +3551,7 @@ with gr.Blocks(
 
         with gr.Row():
             fps_slider = gr.Slider(
-                minimum=1, maximum=60, step=1, value=_UI_DEFAULT_FPS,
+                minimum=1, maximum=60, step=1, value=_INITIAL_FPS,
                 label="Video sampling rate (fps)",
                 info=(
                     "Snaps to source fps on upload. Drag to override — no client-side cap."
@@ -3464,11 +3560,11 @@ with gr.Blocks(
             )
             maxpx_slider = gr.Slider(
                 minimum=64*(32**2), maximum=8192*(32**2), step=64*(32**2),
-                value=DEFAULT_MAX_PIXELS,
+                value=_INITIAL_MAX_PIXELS,
                 label="Max pixels per frame",
                 info=(
                     "Snaps to source W×H on upload. Drag to override — no client-side cap."
-                    + (" NIM server decides pixel budget regardless." if INFERENCE_BACKEND == "nim_local" else "")
+                    + (" Frame-fallback NIM paths downscale JPEG frames to this cap." if INFERENCE_BACKEND == "nim_local" else "")
                 ),
             )
             maxtok_slider = gr.Slider(
@@ -3535,7 +3631,7 @@ with gr.Blocks(
         with gr.Accordion("Request payload — live preview · editable", open=False):
             payload_warnings = gr.HTML(
                 value=_build_warnings_html(
-                    _UI_DEFAULT_FPS, DEFAULT_MAX_PIXELS, 131072,
+                    _INITIAL_FPS, _INITIAL_MAX_PIXELS, 131072,
                     (_NIM_DEFAULTS[0] if _nim_active else 0.0),
                     (_NIM_DEFAULTS[1] if _nim_active else 1.0),
                     (_NIM_DEFAULTS[2] if _nim_active else 1.05),
@@ -3546,7 +3642,7 @@ with gr.Blocks(
             payload_preview = gr.Code(
                 value=_build_payload_preview(
                     None, None, "", "",
-                    _UI_DEFAULT_FPS, DEFAULT_MAX_PIXELS, 131072,
+                    _INITIAL_FPS, _INITIAL_MAX_PIXELS, 131072,
                     (_NIM_DEFAULTS[0] if _nim_active else 0.0),
                     (_NIM_DEFAULTS[1] if _nim_active else 1.0),
                     (_NIM_DEFAULTS[2] if _nim_active else 1.05),
@@ -3676,10 +3772,9 @@ with gr.Blocks(
 
     # ── Event handlers ───────────────────────────────────────────────────────
     # Adaptive defaults: on media upload, snap fps + max_pixels sliders to the
-    # source media's native parameters. Slider RANGES are unchanged — only the
-    # suggested default value adapts. Users can drag freely. No client-side caps
-    # (per standing order: send the user's request; let the backend 4xx if it
-    # can't handle).
+    # source media's native parameters. For frame-fallback NIM paths, keep the
+    # model-size pixel cap as the suggested default; users can still drag higher
+    # deliberately for quality/stress testing.
     def _snap_sliders_to_source(path):
         if not path:
             return gr.update(), gr.update()
@@ -3688,6 +3783,8 @@ with gr.Blocks(
             return gr.update(), gr.update()
         src_fps = max(1, min(60, int(round(m.fps)))) if (m.fps and m.fps > 0) else None
         src_px = max(64*(32**2), min(8192*(32**2), int(m.width) * int(m.height)))
+        if INFERENCE_BACKEND == "nim_local" and not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
+            src_px = min(src_px, _INITIAL_MAX_PIXELS)
         fps_upd = gr.update(value=src_fps) if src_fps else gr.update()
         return fps_upd, gr.update(value=src_px)
 
@@ -3703,6 +3800,8 @@ with gr.Blocks(
         if not w or not h:
             return gr.update()
         src_px = max(64*(32**2), min(8192*(32**2), int(w) * int(h)))
+        if INFERENCE_BACKEND == "nim_local" and not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
+            src_px = min(src_px, _INITIAL_MAX_PIXELS)
         return gr.update(value=src_px)
 
     def on_upload(path, fps_val, disable_autocap):
@@ -3713,12 +3812,17 @@ with gr.Blocks(
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
         target   = max(1, int(m.duration_s * fps_val))
-        # Post-cap honesty: NIM and vLLM both consume the full video — the server
-        # / processor samples internally at the requested fps. No client-side cap
-        # on frames (per standing order: send the user's request; let the backend
-        # 4xx if it can't handle). HF transformers path keeps _MAX_HF_FRAMES as a
-        # memory-safety bound until that conversation is separately re-litigated.
         if INFERENCE_BACKEND == "nim_local":
+            if not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
+                n_frames = min(target, _nim_frame_fallback_limit())
+                src_px = max(64*(32**2), min(8192*(32**2), int(m.width) * int(m.height)))
+                cap_px = min(src_px, _INITIAL_MAX_PIXELS)
+                cap_note = f" (capped from {target})" if target > n_frames else ""
+                info_str = (
+                    f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
+                    f"{n_frames} JPEG frames sampled{cap_note} · ≤{cap_px:,} px/frame"
+                )
+                return info_str, gr.update(value=cap_px)
             info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                         f"video_url sent to NIM (server samples at ~{fps_val} fps → ~{target} frames)")
             return info_str, gr.update()
@@ -3754,10 +3858,8 @@ with gr.Blocks(
     video_input.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     fps_slider.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
     disable_autocap_chk.change(on_upload, inputs=[video_input, fps_slider, disable_autocap_chk], outputs=[clip_info, maxpx_slider])
-    # Adaptive defaults: snap fps + max_pixels sliders to the uploaded video's
-    # native parameters. Fires alongside on_upload — on_upload uses the OLD
-    # slider values for its first render, then fps_slider.change auto-re-fires
-    # on_upload with the new fps for an accurate clip_info on the next paint.
+    # Adaptive defaults fire alongside on_upload; frame-fallback NIMs keep the
+    # safer model-size pixel cap unless the user drags the slider higher.
     video_input.change(_snap_sliders_to_source, inputs=[video_input], outputs=[fps_slider, maxpx_slider])
 
     def on_image_upload(path, disable_autocap):
@@ -3948,7 +4050,7 @@ with gr.Blocks(
     if os.path.exists(SAMPLE_VIDEO):
         gr.Examples(
             examples=[[SAMPLE_VIDEO, DEFAULT_PROMPT, DEFAULT_SYSTEM,
-                       DEFAULT_FPS, DEFAULT_MAX_PIXELS, DEFAULT_MAX_TOKENS]],
+                       _INITIAL_FPS, _INITIAL_MAX_PIXELS, DEFAULT_MAX_TOKENS]],
             inputs=[video_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider],
             label="Sample video",
         )
