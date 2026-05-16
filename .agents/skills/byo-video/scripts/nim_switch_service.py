@@ -66,15 +66,68 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
+_PHASE_PROGRESS = {
+    "idle": 0,
+    "starting": 5,
+    "validating": 10,
+    "launching_nim": 15,
+    "pulling": 35,
+    "starting_container": 55,
+    "waiting_nim": 75,
+    "nim_ready": 88,
+    "restarting_gradio": 95,
+    "ready": 100,
+    "error": 100,
+    "unreachable": 0,
+}
+_ACTIVE_PHASES = {
+    "starting", "validating", "launching_nim", "pulling",
+    "starting_container", "waiting_nim", "nim_ready", "restarting_gradio",
+}
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "n/a"
+    seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {sec}s"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def _enrich_state(state: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    now = now or time.time()
+    phase = str(state.get("phase") or "idle")
+    started = state.get("started_at")
+    if started:
+        if phase in _ACTIVE_PHASES:
+            elapsed_s = max(0.0, now - float(started))
+        else:
+            elapsed_s = float(state.get("elapsed_s") or max(0.0, (state.get("updated_at") or now) - float(started)))
+    else:
+        elapsed_s = 0.0
+    progress_pct = int(_PHASE_PROGRESS.get(phase, 0))
+    eta_label = "Complete" if phase == "ready" else "Failed" if phase == "error" else "Unavailable during NIM pull/load"
+    state["elapsed_s"] = round(elapsed_s, 1)
+    state["elapsed_label"] = _format_duration(elapsed_s)
+    state["progress_pct"] = progress_pct
+    state["eta_s"] = 0 if phase == "ready" else None
+    state["eta_label"] = eta_label
+    return state
+
+
 def _write_state(update: Dict[str, Any]) -> Dict[str, Any]:
     with _STATE_LOCK:
         state = _read_json(STATE_FILE)
         now = time.time()
         state.update(update)
         state["updated_at"] = now
-        started = state.get("started_at")
-        state["elapsed_s"] = round(now - started, 1) if started else 0
         state["credentials_present"] = _credentials_present()
+        state = _enrich_state(state, now=now)
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
@@ -370,6 +423,27 @@ def _uv_python_cmd() -> list[str]:
     return [sys.executable, "-u", GRADIO_APP]
 
 
+def _model_size_for_target(target: Dict[str, Any]) -> Optional[str]:
+    short_id = str(target.get("short_id") or "").lower()
+    served = str(target.get("served_model_id") or "").lower()
+    token = f"{short_id} {served}"
+    if "cosmos-reason2-2b" in token:
+        return "2B"
+    if "cosmos-reason2-8b" in token:
+        return "8B"
+    if "cosmos-reason1-7b" in token:
+        return "CR1-7B"
+    if "nemotron-3-nano-omni-30b-a3b-reasoning" in token:
+        return "OMNI-30B"
+    if "nemotron-nano-12b-v2-vl" in token:
+        return "NEM-12B"
+    if "gemma-4-31b-it" in token:
+        return "GM-4-31B"
+    if "cosmos3-super-reasoner" in token:
+        return "C3-super"
+    return None
+
+
 def _restart_gradio(target: Dict[str, Any]) -> None:
     _phase("restarting_gradio", "Restarting Gradio with the selected served model")
     _kill_gradio()
@@ -388,8 +462,7 @@ def _restart_gradio(target: Dict[str, Any]) -> None:
         "PYTHONUNBUFFERED": "1",
         "SKIP_HF_PRELOAD": "1",
     })
-    if "MODEL_SIZE" not in env:
-        env["MODEL_SIZE"] = os.environ.get("MODEL_SIZE", "C3-super")
+    env["MODEL_SIZE"] = _model_size_for_target(target) or env.get("MODEL_SIZE") or "C3-super"
     GRADIO_LOG.parent.mkdir(parents=True, exist_ok=True)
     log_fh = GRADIO_LOG.open("w", encoding="utf-8")
     proc = subprocess.Popen(
@@ -470,11 +543,20 @@ body{{font-family:Inter,system-ui,sans-serif;margin:32px;background:#f8fafc;colo
 .card{{max-width:980px;margin:0 auto;background:white;border:1px solid #cbd5e1;border-radius:8px;padding:20px}}
 pre{{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;border-radius:6px;padding:12px;max-height:460px;overflow:auto}}
 .pill{{display:inline-block;background:#dbeafe;color:#1e3a8a;border-radius:999px;padding:2px 9px;margin-left:6px}}
+.progress{{height:12px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin:14px 0 6px}}
+.bar{{height:100%;width:0%;background:#22c55e;transition:width .4s ease}}
+.meta{{display:flex;gap:18px;flex-wrap:wrap;color:#475569;font-size:14px;margin-bottom:12px}}
 a{{color:#1d4ed8}}
 </style></head>
 <body><div class="card">
 <h1>BYO-video NIM Switch <span id="phase" class="pill">loading</span></h1>
 <p>Gradio: <a href="{PUBLIC_GRADIO_URL}">{PUBLIC_GRADIO_URL}</a></p>
+<div class="progress"><div id="progressBar" class="bar"></div></div>
+<div class="meta">
+  <span id="progressText">Progress: 0%</span>
+  <span id="elapsed">Elapsed: 0s</span>
+  <span id="eta">ETA: n/a</span>
+</div>
 <p id="message"></p>
 <pre id="state"></pre>
 <h2>Log</h2>
@@ -485,6 +567,11 @@ let offset = 0;
 async function tick(){{
   const s = await fetch("{state_url}").then(r => r.json());
   document.getElementById("phase").textContent = s.phase || "unknown";
+  const pct = Math.max(0, Math.min(100, Number(s.progress_pct || 0)));
+  document.getElementById("progressBar").style.width = pct + "%";
+  document.getElementById("progressText").textContent = "Progress: " + pct + "%";
+  document.getElementById("elapsed").textContent = "Elapsed: " + (s.elapsed_label || "0s");
+  document.getElementById("eta").textContent = "ETA: " + (s.eta_label || "n/a");
   document.getElementById("message").textContent = s.message || "";
   document.getElementById("state").textContent = JSON.stringify(s, null, 2);
   const l = await fetch("{log_url}?offset=" + offset).then(r => r.json());
@@ -528,6 +615,7 @@ class Handler(BaseHTTPRequestHandler):
             state = _read_json(STATE_FILE)
             state["current"] = _current_runtime()
             state["credentials_present"] = _credentials_present()
+            state = _enrich_state(state)
             self._json(200, state)
             return
         if parsed.path == "/api/log":

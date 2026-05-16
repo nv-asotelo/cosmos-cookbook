@@ -747,6 +747,20 @@ def _nim_switch_state():
     return payload if status == 200 else {"phase": "unreachable", "error": payload.get("error", "service unreachable")}
 
 
+def _format_nim_duration(seconds):
+    try:
+        seconds = max(0, int(round(float(seconds))))
+    except Exception:
+        return "0s"
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {sec}s"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
 def _nim_switch_panel_html(label, notice=""):
     nim = _nim_selected(label)
     state = _nim_switch_state() if INFERENCE_BACKEND == "nim_local" else {}
@@ -761,6 +775,9 @@ def _nim_switch_panel_html(label, notice=""):
     phase = _html.escape(str(state.get("phase") or "unknown"))
     message = _html.escape(str(state.get("message") or ""))
     error = _html.escape(str(state.get("error") or ""))
+    progress_pct = max(0, min(100, int(state.get("progress_pct") or 0)))
+    elapsed_label = _html.escape(str(state.get("elapsed_label") or _format_nim_duration(state.get("elapsed_s") or 0)))
+    eta_label = _html.escape(str(state.get("eta_label") or "n/a"))
     notes = _html.escape(str(getattr(nim, "notes", "") or ""))
     image = _html.escape(str(getattr(nim, "image", "") or ""))
     served = _html.escape(str(getattr(nim, "served_model_id", "") or ""))
@@ -794,6 +811,18 @@ def _nim_switch_panel_html(label, notice=""):
         f'<div style="margin-top:8px;color:#475569">{notes}</div>'
         if notes else ""
     )
+    progress_html = (
+        '<div style="margin-top:10px">'
+        '<div style="height:10px;background:#dbeafe;border-radius:999px;overflow:hidden">'
+        f'<div style="height:10px;width:{progress_pct}%;background:#22c55e"></div>'
+        '</div>'
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:5px;color:#475569;font-size:12px">'
+        f'<span>Progress: <b>{progress_pct}%</b></span>'
+        f'<span>Elapsed: <b>{elapsed_label}</b></span>'
+        f'<span>ETA: <b>{eta_label}</b></span>'
+        '</div>'
+        '</div>'
+    )
     return (
         f'<div style="{colors};border:1px solid;border-radius:6px;padding:12px 14px;'
         f'margin:8px 0;font-size:13px;line-height:1.45">'
@@ -805,6 +834,7 @@ def _nim_switch_panel_html(label, notice=""):
         f'Image: {_nim_code_pill(image or "current container")}<br>'
         f'Served model: {_nim_code_pill(served)}<br>'
         f'Min VRAM: {_nim_code_pill(str(vram) + " MiB" if vram else "current/custom")}</div>'
+        f'{progress_html}'
         f'<div style="margin-top:8px;color:#475569">Supervisor phase: '
         f'<b>{phase}</b>{(" - " + message) if message else ""}. '
         f'<a href="{_html.escape(service_url)}" target="_blank" style="color:#1d4ed8">'
