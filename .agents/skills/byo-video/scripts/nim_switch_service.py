@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -80,6 +81,19 @@ _PHASE_PROGRESS = {
     "error": 100,
     "unreachable": 0,
 }
+_STEP_DEFS = [
+    ("starting", "Request queued", "Switch request accepted and target recorded.", 5),
+    ("validating", "Validate target", "Resolve catalog metadata and inspect the currently running NIM.", 10),
+    ("launching_nim", "Launch helper", "Start nim_launch.sh with the selected image and served model id.", 15),
+    ("pulling", "Pull image", "Download or reuse the NIM container image from nvcr.io.", 35),
+    ("starting_container", "Start container", "Replace cosmos-nim and bind the OpenAI-compatible API on port 8000.", 55),
+    ("waiting_nim", "Wait for model API", "Poll /v1/models while NIM loads weights and builds its runtime profile.", 75),
+    ("nim_ready", "NIM ready", "Confirm /v1/models returns the selected served model.", 88),
+    ("restarting_gradio", "Restart Gradio", "Restart the Gradio UI so the dropdown defaults to the active NIM.", 95),
+    ("ready", "Ready", "Gradio and NIM are online.", 100),
+]
+_PHASE_INDEX = {phase: index for index, (phase, *_rest) in enumerate(_STEP_DEFS)}
+_DEFAULT_ESTIMATE_S = 643.0  # observed cosmos-reason2-8b switch on RTX PRO 6000 Blackwell
 _ACTIVE_PHASES = {
     "starting", "validating", "launching_nim", "pulling",
     "starting_container", "waiting_nim", "nim_ready", "restarting_gradio",
@@ -99,6 +113,62 @@ def _format_duration(seconds: Optional[float]) -> str:
     return f"{sec}s"
 
 
+def _estimate_total_s(state: Dict[str, Any]) -> float:
+    for key in ("last_success_elapsed_s", "estimated_total_s"):
+        try:
+            value = float(state.get(key) or 0)
+            if value > 0:
+                return value
+        except Exception:
+            pass
+    return _DEFAULT_ESTIMATE_S
+
+
+def _step_details(state: Dict[str, Any], phase: str) -> list[Dict[str, Any]]:
+    current_index = _PHASE_INDEX.get(phase, 0)
+    history = state.get("phase_history") or []
+    durations = {
+        item.get("phase"): item.get("duration_s")
+        for item in history
+        if isinstance(item, dict)
+    }
+    if phase in _ACTIVE_PHASES:
+        try:
+            durations[phase] = max(0.0, time.time() - float(state.get("phase_started_at") or time.time()))
+        except Exception:
+            pass
+    steps: list[Dict[str, Any]] = []
+    for index, (step_phase, title, detail, pct) in enumerate(_STEP_DEFS):
+        if phase == "error" and index >= current_index:
+            status = "error" if index == current_index else "pending"
+        elif phase == "ready" or index < current_index:
+            status = "done"
+        elif index == current_index:
+            status = "running" if phase in _ACTIVE_PHASES else "done"
+        else:
+            status = "pending"
+        step_detail = detail
+        if step_phase == "pulling":
+            done = int(state.get("pull_layers_done") or 0)
+            total = int(state.get("pull_layers_total") or 0)
+            if total:
+                step_detail = f"{detail} Layers complete: {done}/{total}."
+        elif step_phase == "waiting_nim":
+            wait_s = state.get("nim_wait_s")
+            if wait_s is not None:
+                step_detail = f"{detail} NIM wait elapsed: {_format_duration(float(wait_s))}."
+        steps.append({
+            "phase": step_phase,
+            "title": title,
+            "detail": step_detail,
+            "status": status,
+            "progress_pct": pct,
+            "duration_s": round(float(durations.get(step_phase) or 0), 1),
+            "duration_label": _format_duration(float(durations.get(step_phase) or 0)),
+        })
+    return steps
+
+
 def _enrich_state(state: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
     now = now or time.time()
     phase = str(state.get("phase") or "idle")
@@ -110,13 +180,33 @@ def _enrich_state(state: Dict[str, Any], now: Optional[float] = None) -> Dict[st
             elapsed_s = float(state.get("elapsed_s") or max(0.0, (state.get("updated_at") or now) - float(started)))
     else:
         elapsed_s = 0.0
-    progress_pct = int(_PHASE_PROGRESS.get(phase, 0))
-    eta_label = "Complete" if phase == "ready" else "Failed" if phase == "error" else "Unavailable during NIM pull/load"
+    estimate_s = _estimate_total_s(state)
+    elapsed_progress = int(min(95, max(0, elapsed_s / estimate_s * 100))) if estimate_s else 0
+    progress_pct = int(max(_PHASE_PROGRESS.get(phase, 0), elapsed_progress)) if phase in _ACTIVE_PHASES else int(_PHASE_PROGRESS.get(phase, 0))
+    if phase == "ready":
+        eta_s = 0.0
+        eta_label = "Complete"
+        if elapsed_s:
+            state["last_success_elapsed_s"] = round(elapsed_s, 1)
+            state["last_success_label"] = _format_duration(elapsed_s)
+    elif phase == "error":
+        eta_s = None
+        eta_label = "Failed"
+    elif phase in _ACTIVE_PHASES:
+        eta_s = max(0.0, estimate_s - elapsed_s)
+        eta_label = _format_duration(eta_s)
+    else:
+        eta_s = None
+        eta_label = "Waiting for switch"
     state["elapsed_s"] = round(elapsed_s, 1)
     state["elapsed_label"] = _format_duration(elapsed_s)
     state["progress_pct"] = progress_pct
-    state["eta_s"] = 0 if phase == "ready" else None
+    state["estimated_total_s"] = round(estimate_s, 1)
+    state["estimated_total_label"] = _format_duration(estimate_s)
+    state["eta_s"] = round(eta_s, 1) if eta_s is not None else None
     state["eta_label"] = eta_label
+    state["current_step"] = next((s["title"] for s in _step_details(state, phase) if s["status"] == "running"), "Ready" if phase == "ready" else phase)
+    state["steps"] = _step_details(state, phase)
     return state
 
 
@@ -124,6 +214,23 @@ def _write_state(update: Dict[str, Any]) -> Dict[str, Any]:
     with _STATE_LOCK:
         state = _read_json(STATE_FILE)
         now = time.time()
+        old_phase = state.get("phase")
+        new_phase = update.get("phase", old_phase)
+        if new_phase and new_phase != old_phase:
+            history = list(state.get("phase_history") or [])
+            previous_started = state.get("phase_started_at")
+            if old_phase and previous_started:
+                duration = max(0.0, now - float(previous_started))
+                history.append({
+                    "phase": old_phase,
+                    "started_at": previous_started,
+                    "ended_at": now,
+                    "duration_s": round(duration, 1),
+                    "duration_label": _format_duration(duration),
+                })
+                history = history[-20:]
+            state["phase_history"] = history
+            state["phase_started_at"] = now
         state.update(update)
         state["updated_at"] = now
         state["credentials_present"] = _credentials_present()
@@ -343,16 +450,43 @@ def _run_nim_launch(target: Dict[str, Any]) -> None:
         bufsize=1,
     )
     assert proc.stdout is not None
+    pull_seen: set[str] = set()
+    pull_done: set[str] = set()
     for line in proc.stdout:
         clean = line.rstrip()
         _append_log(f"nim_launch: {clean}")
         low = clean.lower()
+        layer_id = clean.split(":", 1)[0].strip() if ":" in clean else ""
         if "pulling " in low:
-            _write_state({"phase": "pulling", "message": clean})
+            if layer_id:
+                pull_seen.add(layer_id)
+            _write_state({
+                "phase": "pulling",
+                "message": clean,
+                "pull_layers_total": len(pull_seen),
+                "pull_layers_done": len(pull_done),
+            })
+        elif "pull complete" in low:
+            if layer_id:
+                pull_seen.add(layer_id)
+                pull_done.add(layer_id)
+            _write_state({
+                "phase": "pulling",
+                "message": clean,
+                "pull_layers_total": len(pull_seen),
+                "pull_layers_done": len(pull_done),
+            })
         elif "starting nim container" in low:
             _write_state({"phase": "starting_container", "message": clean})
         elif "waiting for nim" in low or "waiting for /v1/models" in low:
             _write_state({"phase": "waiting_nim", "message": clean})
+        elif "still waiting" in low:
+            match = re.search(r"(\d+)s elapsed", clean)
+            _write_state({
+                "phase": "waiting_nim",
+                "message": clean,
+                "nim_wait_s": int(match.group(1)) if match else None,
+            })
         elif "nim is ready" in low:
             _write_state({"phase": "nim_ready", "message": clean})
     rc = proc.wait()
@@ -492,6 +626,11 @@ def _switch_worker(target: Dict[str, Any]) -> None:
         _write_state({
             "phase": "starting",
             "started_at": time.time(),
+            "phase_started_at": time.time(),
+            "phase_history": [],
+            "pull_layers_total": 0,
+            "pull_layers_done": 0,
+            "nim_wait_s": 0,
             "target": target,
             "error": None,
             "message": f"Switch requested for {target['label']}",
@@ -540,30 +679,111 @@ def _html_page() -> bytes:
 <html><head><meta charset="utf-8"><title>BYO-video NIM Switch</title>
 <style>
 body{{font-family:Inter,system-ui,sans-serif;margin:32px;background:#f8fafc;color:#0f172a}}
-.card{{max-width:980px;margin:0 auto;background:white;border:1px solid #cbd5e1;border-radius:8px;padding:20px}}
+.card{{max-width:1100px;margin:0 auto;background:white;border:1px solid #cbd5e1;border-radius:8px;padding:24px}}
 pre{{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;border-radius:6px;padding:12px;max-height:460px;overflow:auto}}
-.pill{{display:inline-block;background:#dbeafe;color:#1e3a8a;border-radius:999px;padding:2px 9px;margin-left:6px}}
-.progress{{height:12px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin:14px 0 6px}}
+.pill{{display:inline-block;background:#dbeafe;color:#1e3a8a;border-radius:999px;padding:3px 10px;margin-left:6px;font-size:14px}}
+.progress{{height:16px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin:16px 0 8px}}
 .bar{{height:100%;width:0%;background:#22c55e;transition:width .4s ease}}
-.meta{{display:flex;gap:18px;flex-wrap:wrap;color:#475569;font-size:14px;margin-bottom:12px}}
+.meta{{display:flex;gap:18px;flex-wrap:wrap;color:#475569;font-size:14px;margin-bottom:16px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px;margin:16px 0}}
+.metric{{border:1px solid #cbd5e1;background:#f8fafc;border-radius:8px;padding:12px}}
+.metric .label{{color:#64748b;font-size:12px;text-transform:uppercase;letter-spacing:.04em}}
+.metric .value{{margin-top:5px;font-weight:700;font-size:18px;color:#0f172a;word-break:break-word}}
+.section{{margin-top:22px}}
+.section h2{{font-size:18px;margin:0 0 10px}}
+.steps{{display:grid;gap:8px}}
+.step{{display:grid;grid-template-columns:92px 1fr auto;gap:10px;align-items:start;border:1px solid #cbd5e1;border-radius:8px;padding:10px;background:#fff}}
+.step.done{{border-color:#86efac;background:#f0fdf4}}
+.step.running{{border-color:#60a5fa;background:#eff6ff}}
+.step.error{{border-color:#fca5a5;background:#fef2f2}}
+.status{{font-size:12px;font-weight:700;text-transform:uppercase;color:#475569}}
+.step.running .status{{color:#1d4ed8}}
+.step.done .status{{color:#15803d}}
+.step.error .status{{color:#b91c1c}}
+.step-title{{font-weight:700}}
+.step-detail{{color:#475569;font-size:13px;margin-top:2px}}
+.models{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
+.model{{border:1px solid #cbd5e1;border-radius:8px;padding:12px;background:#f8fafc}}
+.model b{{display:block;margin-bottom:6px}}
+details{{margin-top:14px}}
+summary{{cursor:pointer;color:#1d4ed8;font-weight:700}}
 a{{color:#1d4ed8}}
 </style></head>
 <body><div class="card">
 <h1>BYO-video NIM Switch <span id="phase" class="pill">loading</span></h1>
-<p>Gradio: <a href="{PUBLIC_GRADIO_URL}">{PUBLIC_GRADIO_URL}</a></p>
+<p>Progress page for backend swaps. Gradio: <a href="{PUBLIC_GRADIO_URL}">{PUBLIC_GRADIO_URL}</a></p>
 <div class="progress"><div id="progressBar" class="bar"></div></div>
 <div class="meta">
   <span id="progressText">Progress: 0%</span>
   <span id="elapsed">Elapsed: 0s</span>
   <span id="eta">ETA: n/a</span>
+  <span id="estimate">Estimate: n/a</span>
 </div>
 <p id="message"></p>
-<pre id="state"></pre>
-<h2>Log</h2>
-<pre id="log"></pre>
+<div class="grid">
+  <div class="metric"><div class="label">Current step</div><div id="currentStep" class="value">loading</div></div>
+  <div class="metric"><div class="label">Target</div><div id="targetModel" class="value">loading</div></div>
+  <div class="metric"><div class="label">Running model</div><div id="currentModel" class="value">loading</div></div>
+  <div class="metric"><div class="label">Container</div><div id="containerImage" class="value">loading</div></div>
+</div>
+<div class="section">
+  <h2>Steps</h2>
+  <div id="steps" class="steps"></div>
+</div>
+<div class="section">
+  <h2>Models</h2>
+  <div class="models">
+    <div class="model"><b>Selected target</b><div id="targetDetail">loading</div></div>
+    <div class="model"><b>Currently served</b><div id="currentDetail">loading</div></div>
+  </div>
+</div>
+<details>
+  <summary>Raw state JSON</summary>
+  <pre id="state"></pre>
+</details>
+<details>
+  <summary>Live supervisor log</summary>
+  <pre id="log"></pre>
+</details>
 </div>
 <script>
 let offset = 0;
+function esc(value){{
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[ch]));
+}}
+function short(value){{
+  value = String(value || "");
+  return value.length > 44 ? value.slice(0, 41) + "..." : value;
+}}
+function modelDetail(model){{
+  if (!model) return "n/a";
+  const bits = [];
+  if (model.label) bits.push("<div>" + esc(model.label) + "</div>");
+  if (model.served_model_id) bits.push("<div><code>" + esc(model.served_model_id) + "</code></div>");
+  if (model.image) bits.push("<div><code>" + esc(model.image) + "</code></div>");
+  if (model.min_vram_mb) bits.push("<div>Min VRAM: " + esc(model.min_vram_mb) + " MiB</div>");
+  return bits.join("");
+}}
+function currentDetail(current){{
+  if (!current) return "n/a";
+  return [
+    "<div><code>" + esc(current.served_model_id || "not ready") + "</code></div>",
+    "<div><code>" + esc(current.image || "unknown image") + "</code></div>",
+    "<div>Ready: " + esc(Boolean(current.ready)) + "</div>"
+  ].join("");
+}}
+function renderSteps(steps){{
+  const el = document.getElementById("steps");
+  el.innerHTML = (steps || []).map(s => {{
+    const status = s.status || "pending";
+    return '<div class="step ' + esc(status) + '">' +
+      '<div class="status">' + esc(status) + '</div>' +
+      '<div><div class="step-title">' + esc(s.title) + '</div>' +
+      '<div class="step-detail">' + esc(s.detail) + '</div></div>' +
+      '<div class="step-detail">' + esc(s.duration_label || "") + '</div>' +
+      '</div>';
+  }}).join("");
+}}
 async function tick(){{
   const s = await fetch("{state_url}").then(r => r.json());
   document.getElementById("phase").textContent = s.phase || "unknown";
@@ -572,7 +792,15 @@ async function tick(){{
   document.getElementById("progressText").textContent = "Progress: " + pct + "%";
   document.getElementById("elapsed").textContent = "Elapsed: " + (s.elapsed_label || "0s");
   document.getElementById("eta").textContent = "ETA: " + (s.eta_label || "n/a");
+  document.getElementById("estimate").textContent = "Estimate: " + (s.estimated_total_label || "n/a");
   document.getElementById("message").textContent = s.message || "";
+  document.getElementById("currentStep").textContent = s.current_step || s.phase || "unknown";
+  document.getElementById("targetModel").textContent = short((s.target && (s.target.label || s.target.served_model_id)) || "none");
+  document.getElementById("currentModel").textContent = short(s.current && s.current.served_model_id || "not ready");
+  document.getElementById("containerImage").textContent = short(s.current && s.current.image || "unknown");
+  document.getElementById("targetDetail").innerHTML = modelDetail(s.target);
+  document.getElementById("currentDetail").innerHTML = currentDetail(s.current);
+  renderSteps(s.steps || []);
   document.getElementById("state").textContent = JSON.stringify(s, null, 2);
   const l = await fetch("{log_url}?offset=" + offset).then(r => r.json());
   offset = l.next_offset || offset;

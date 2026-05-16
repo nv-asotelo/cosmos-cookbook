@@ -823,6 +823,29 @@ def _nim_switch_panel_html(label, notice=""):
         '</div>'
         '</div>'
     )
+    step_rows = []
+    for step in (state.get("steps") or []):
+        status = _html.escape(str(step.get("status") or "pending"))
+        title = _html.escape(str(step.get("title") or step.get("phase") or "step"))
+        duration = _html.escape(str(step.get("duration_label") or ""))
+        color = {
+            "done": "#15803d",
+            "running": "#1d4ed8",
+            "error": "#b91c1c",
+        }.get(status, "#64748b")
+        step_rows.append(
+            '<div style="display:grid;grid-template-columns:72px 1fr 54px;gap:8px;'
+            'padding:5px 0;border-top:1px solid rgba(71,85,105,.18)">'
+            f'<span style="color:{color};font-weight:700;font-size:11px;text-transform:uppercase">{status}</span>'
+            f'<span>{title}</span><span style="color:#64748b;text-align:right">{duration}</span>'
+            '</div>'
+        )
+    steps_html = (
+        '<div style="margin-top:10px;font-size:12px;color:#334155">'
+        + "".join(step_rows)
+        + '</div>'
+        if step_rows else ""
+    )
     return (
         f'<div style="{colors};border:1px solid;border-radius:6px;padding:12px 14px;'
         f'margin:8px 0;font-size:13px;line-height:1.45">'
@@ -835,6 +858,7 @@ def _nim_switch_panel_html(label, notice=""):
         f'Served model: {_nim_code_pill(served)}<br>'
         f'Min VRAM: {_nim_code_pill(str(vram) + " MiB" if vram else "current/custom")}</div>'
         f'{progress_html}'
+        f'{steps_html}'
         f'<div style="margin-top:8px;color:#475569">Supervisor phase: '
         f'<b>{phase}</b>{(" - " + message) if message else ""}. '
         f'<a href="{_html.escape(service_url)}" target="_blank" style="color:#1d4ed8">'
