@@ -230,6 +230,10 @@ def _enrich_state(state: Dict[str, Any], now: Optional[float] = None) -> Dict[st
     state["eta_label"] = eta_label
     state["current_step"] = next((s["title"] for s in _step_details(state, phase) if s["status"] == "running"), "Ready" if phase == "ready" else phase)
     state["steps"] = _step_details(state, phase)
+    previous_model = state.get("previous")
+    target_model = state.get("target")
+    if previous_model or target_model:
+        state["model_change"] = _infer_changelog(previous_model, target_model)
     return state
 
 
@@ -332,6 +336,20 @@ def _catalog() -> list[Any]:
         return []
 
 
+def _known_catalog() -> list[Any]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for path in (script_dir, "/tmp"):
+        if path and path not in sys.path:
+            sys.path.insert(0, path)
+    try:
+        from nim_catalog import KNOWN_VLM_NIMS  # type: ignore
+
+        return list(KNOWN_VLM_NIMS)
+    except Exception as exc:
+        _append_log(f"Known catalog load failed: {exc}")
+        return []
+
+
 def _nim_to_dict(nim: Any) -> Dict[str, Any]:
     try:
         data = asdict(nim)
@@ -342,6 +360,137 @@ def _nim_to_dict(nim: Any) -> Dict[str, Any]:
     if data.get("notes"):
         data["warnings"] = [data["notes"]]
     return data
+
+
+def _model_tokens(model: Optional[Dict[str, Any]]) -> set[str]:
+    if not model:
+        return set()
+    vals = [
+        model.get("short_id"),
+        model.get("served_model_id"),
+        model.get("label"),
+        model.get("image"),
+    ]
+    return {str(v).strip().lower() for v in vals if v}
+
+
+def _catalog_match(model: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    tokens = _model_tokens(model)
+    if not tokens:
+        return None
+    for nim in _known_catalog():
+        data = _nim_to_dict(nim)
+        if tokens & _model_tokens(data):
+            data["catalog_source"] = "BYO-video NIM catalog"
+            return data
+    return None
+
+
+def _runtime_model(runtime: Optional[Dict[str, Any]], label_prefix: str = "Current") -> Optional[Dict[str, Any]]:
+    if not runtime:
+        return None
+    base = {
+        "short_id": "",
+        "label": runtime.get("served_model_id") or f"{label_prefix} NIM",
+        "family": "Unknown/custom",
+        "served_model_id": runtime.get("served_model_id") or "",
+        "image": runtime.get("image") or "",
+        "min_vram_mb": 0,
+        "supports_video": True,
+        "switchable": False,
+        "env": {},
+        "notes": "Runtime NIM detected from docker inspect and /v1/models.",
+        "catalog_source": "runtime",
+    }
+    matched = _catalog_match(base)
+    if matched:
+        return matched
+    served = str(base["served_model_id"]).lower()
+    image = str(base["image"]).lower()
+    if "cosmos3-super-reasoner" in served or "cosmos3-super-reasoner" in image:
+        base.update({
+            "short_id": "custom-cosmos3-super-reasoner",
+            "label": "Current custom: nvidia/Cosmos3-Super-Reasoner",
+            "family": "Cosmos3 Super Reasoner",
+            "supports_video": True,
+            "notes": (
+                "Custom staged NIM image; not present in the public BYO-video "
+                "NIM catalog. Treated as video-capable because it was already "
+                "serving successfully on this target."
+            ),
+            "catalog_source": "runtime custom",
+        })
+    return base
+
+
+def _model_summary(model: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    model = model or {}
+    return {
+        "label": model.get("label") or model.get("served_model_id") or "unknown",
+        "family": model.get("family") or "unknown",
+        "short_id": model.get("short_id") or "",
+        "served_model_id": model.get("served_model_id") or "",
+        "image": model.get("image") or "",
+        "min_vram_mb": model.get("min_vram_mb") or 0,
+        "supports_video": bool(model.get("supports_video")),
+        "switchable": bool(model.get("switchable")),
+        "notes": model.get("notes") or "",
+        "catalog_source": model.get("catalog_source") or "BYO-video NIM catalog",
+    }
+
+
+def _sentence_from_note(note: str) -> str:
+    note = " ".join(str(note or "").split())
+    if not note:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", note)
+    return parts[0].strip()
+
+
+def _infer_changelog(previous: Optional[Dict[str, Any]], target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    prev = _model_summary(previous)
+    new = _model_summary(target)
+    changes: list[Dict[str, str]] = []
+
+    def add(title: str, detail: str, kind: str = "changed") -> None:
+        if detail:
+            changes.append({"title": title, "detail": detail, "kind": kind})
+
+    if not previous:
+        add("Previous NIM unknown", "This switch started before previous-NIM capture was added; future switches preserve it.", "warning")
+    elif prev["served_model_id"] != new["served_model_id"]:
+        add("Served model changed", f"{prev['served_model_id'] or prev['label']} -> {new['served_model_id'] or new['label']}")
+    else:
+        add("Served model unchanged", f"Still serving {new['served_model_id'] or new['label']}.", "same")
+
+    if prev["image"] != new["image"]:
+        add("Container image changed", f"{prev['image'] or 'unknown'} -> {new['image'] or 'unknown'}")
+    if prev["family"] != new["family"]:
+        add("Model family changed", f"{prev['family']} -> {new['family']}")
+    if prev["catalog_source"] != new["catalog_source"]:
+        add("Catalog status changed", f"{prev['catalog_source']} -> {new['catalog_source']}")
+    if prev["min_vram_mb"] != new["min_vram_mb"]:
+        old = f"{prev['min_vram_mb']} MiB" if prev["min_vram_mb"] else "unknown/custom"
+        new_vram = f"{new['min_vram_mb']} MiB" if new["min_vram_mb"] else "unknown/custom"
+        add("VRAM requirement changed", f"{old} -> {new_vram}")
+    if prev["supports_video"] != new["supports_video"]:
+        add("Video support changed", f"{prev['supports_video']} -> {new['supports_video']}")
+    elif new["supports_video"]:
+        add("Video support retained", "Both previous and selected NIM are treated as video-capable.", "same")
+    note = _sentence_from_note(new["notes"])
+    if note:
+        add("New NIM catalog note", note)
+    if "temperature" in str(new["notes"]).lower() or "<think>" in str(new["notes"]).lower():
+        add("Runtime parameter caution", "Catalog notes recommend temperature >= 0.3 for this NIM to avoid the greedy <think> termination issue.", "warning")
+    if not changes:
+        add("No catalog delta detected", "The selected target matches the previous runtime metadata.", "same")
+    return {
+        "title": f"{prev['label']} -> {new['label']}",
+        "previous": prev,
+        "target": new,
+        "items": changes,
+        "source": "Inferred from docker runtime metadata plus the BYO-video NIM catalog when available.",
+    }
 
 
 def _resolve_target(short_id: str) -> Optional[Dict[str, Any]]:
@@ -646,6 +795,8 @@ def _restart_gradio(target: Dict[str, Any]) -> None:
 
 def _switch_worker(target: Dict[str, Any]) -> None:
     try:
+        previous_runtime = _current_runtime()
+        previous_model = _runtime_model(previous_runtime, label_prefix="Previous")
         _write_state({
             "phase": "starting",
             "started_at": time.time(),
@@ -654,23 +805,25 @@ def _switch_worker(target: Dict[str, Any]) -> None:
             "pull_layers_total": 0,
             "pull_layers_done": 0,
             "nim_wait_s": 0,
+            "previous": previous_model,
+            "previous_runtime": previous_runtime,
             "target": target,
             "error": None,
             "message": f"Switch requested for {target['label']}",
         })
-        current = _current_runtime()
+        current = previous_runtime
         if target.get("custom_current") or (
             current.get("served_model_id") == target.get("served_model_id")
             and (not target.get("image") or current.get("image") == target.get("image"))
         ):
-            _phase("ready", "Selected NIM is already running", current=current)
+            _phase("ready", "Selected NIM is already running", current=current, previous=previous_model)
             return
-        _phase("validating", "Resolved catalog metadata", current=current)
+        _phase("validating", "Resolved catalog metadata", current=current, previous=previous_model)
         _run_nim_launch(target)
         current = _current_runtime()
-        _phase("nim_ready", "NIM /v1/models is serving", current=current)
+        _phase("nim_ready", "NIM /v1/models is serving", current=current, previous=previous_model)
         _restart_gradio(target)
-        _phase("ready", "Switch complete; Gradio is back online", current=_current_runtime())
+        _phase("ready", "Switch complete; Gradio is back online", current=_current_runtime(), previous=previous_model)
     except Exception as exc:
         _phase("error", str(exc), error=str(exc), current=_current_runtime())
     finally:
@@ -728,6 +881,12 @@ pre{{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;border-radius:6px;pad
 .models{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
 .model{{border:1px solid #cbd5e1;border-radius:8px;padding:12px;background:#f8fafc}}
 .model b{{display:block;margin-bottom:6px}}
+.changes{{display:grid;gap:8px}}
+.change{{border:1px solid #cbd5e1;border-radius:8px;padding:10px;background:#fff}}
+.change.warning{{border-color:#fbbf24;background:#fffbeb}}
+.change.same{{border-color:#86efac;background:#f0fdf4}}
+.change-title{{font-weight:700}}
+.change-detail{{color:#475569;font-size:13px;margin-top:3px}}
 details{{margin-top:14px}}
 summary{{cursor:pointer;color:#1d4ed8;font-weight:700}}
 a{{color:#1d4ed8}}
@@ -756,9 +915,15 @@ a{{color:#1d4ed8}}
 <div class="section">
   <h2>Models</h2>
   <div class="models">
+    <div class="model"><b>Previous NIM</b><div id="previousDetail">loading</div></div>
     <div class="model"><b>Selected target</b><div id="targetDetail">loading</div></div>
     <div class="model"><b>Currently served</b><div id="currentDetail">loading</div></div>
   </div>
+</div>
+<div class="section">
+  <h2>What changed</h2>
+  <div id="changeIntro" class="step-detail"></div>
+  <div id="changes" class="changes"></div>
 </div>
 <details>
   <summary>Raw state JSON</summary>
@@ -795,6 +960,23 @@ function currentDetail(current){{
     "<div>Ready: " + esc(Boolean(current.ready)) + "</div>"
   ].join("");
 }}
+function renderChanges(change){{
+  const intro = document.getElementById("changeIntro");
+  const el = document.getElementById("changes");
+  if (!change) {{
+    intro.textContent = "No previous/target comparison is available yet.";
+    el.innerHTML = "";
+    return;
+  }}
+  intro.textContent = (change.title || "Model change") + ". " + (change.source || "");
+  el.innerHTML = (change.items || []).map(item => {{
+    const kind = item.kind || "changed";
+    return '<div class="change ' + esc(kind) + '">' +
+      '<div class="change-title">' + esc(item.title) + '</div>' +
+      '<div class="change-detail">' + esc(item.detail) + '</div>' +
+      '</div>';
+  }}).join("");
+}}
 function renderSteps(steps){{
   const el = document.getElementById("steps");
   el.innerHTML = (steps || []).map(s => {{
@@ -821,8 +1003,10 @@ async function tick(){{
   document.getElementById("targetModel").textContent = short((s.target && (s.target.label || s.target.served_model_id)) || "none");
   document.getElementById("currentModel").textContent = short(s.current && s.current.served_model_id || "not ready");
   document.getElementById("containerImage").textContent = short(s.current && s.current.image || "unknown");
+  document.getElementById("previousDetail").innerHTML = modelDetail(s.previous || (s.model_change && s.model_change.previous));
   document.getElementById("targetDetail").innerHTML = modelDetail(s.target);
   document.getElementById("currentDetail").innerHTML = currentDetail(s.current);
+  renderChanges(s.model_change);
   renderSteps(s.steps || []);
   document.getElementById("state").textContent = JSON.stringify(s, null, 2);
   const l = await fetch("{log_url}?offset=" + offset).then(r => r.json());

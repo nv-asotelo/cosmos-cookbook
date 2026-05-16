@@ -846,6 +846,30 @@ def _nim_switch_panel_html(label, notice=""):
         + '</div>'
         if step_rows else ""
     )
+    change = state.get("model_change") or {}
+    change_items = []
+    for item in change.get("items") or []:
+        kind = str(item.get("kind") or "changed")
+        color = {"warning": "#92400e", "same": "#15803d"}.get(kind, "#1e3a8a")
+        title = _html.escape(str(item.get("title") or "Change"))
+        detail = _html.escape(str(item.get("detail") or ""))
+        change_items.append(
+            '<div style="border-top:1px solid rgba(71,85,105,.18);padding:6px 0">'
+            f'<div style="color:{color};font-weight:700">{title}</div>'
+            f'<div style="color:#475569;font-size:12px">{detail}</div>'
+            '</div>'
+        )
+    change_html = ""
+    if change_items:
+        change_html = (
+            '<div style="margin-top:10px">'
+            '<div style="font-weight:700;color:#1e293b">What changed</div>'
+            '<div style="color:#64748b;font-size:12px;margin:2px 0 4px">'
+            f'{_html.escape(str(change.get("source") or "Inferred from catalog metadata."))}'
+            '</div>'
+            + "".join(change_items)
+            + '</div>'
+        )
     return (
         f'<div style="{colors};border:1px solid;border-radius:6px;padding:12px 14px;'
         f'margin:8px 0;font-size:13px;line-height:1.45">'
@@ -859,6 +883,7 @@ def _nim_switch_panel_html(label, notice=""):
         f'Min VRAM: {_nim_code_pill(str(vram) + " MiB" if vram else "current/custom")}</div>'
         f'{progress_html}'
         f'{steps_html}'
+        f'{change_html}'
         f'<div style="margin-top:8px;color:#475569">Supervisor phase: '
         f'<b>{phase}</b>{(" - " + message) if message else ""}. '
         f'<a href="{_html.escape(service_url)}" target="_blank" style="color:#1d4ed8">'
