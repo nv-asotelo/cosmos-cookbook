@@ -122,7 +122,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   `INFERENCE_BACKEND=cosmos3_native` (auto-set when `MODEL_SIZE` is `C3-NANO-GEN` or `C3-SUPER-GEN`).
   See the "Cosmos3 OSS Backend Routing" section of the runbook.
 - `scripts/cosmos_deploy_monitor.py`: deployment monitor helper for legacy flows.
-- `scripts/nim_catalog.py` and `scripts/nim_launch.sh`: NIM model catalog and launch helpers.
+- `scripts/nim_catalog.py`, `scripts/nim_launch.sh`, and
+  `scripts/nim_switch_service.py`: NIM model catalog, launch helper, and
+  companion switch/status service for Gradio restarts.
 - `scripts/smoke_cr2_byo.py` and `scripts/smoke_nem_vl.py`: smoke tests.
 
 ## Operating Rules

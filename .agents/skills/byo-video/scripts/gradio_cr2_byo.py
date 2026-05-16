@@ -397,24 +397,89 @@ CHECKPOINT_PRESETS.append((f"NIM {MODEL_SIZE}", f"nim://{_nim_api_id}"))
 # (cross-referenced against KNOWN_VLM_NIMS in the bundled nim_catalog.py).
 # We skip the docker-manifest probe at module-load to keep Gradio startup snappy
 # — probing happens at switch time when the user actually wants to swap models.
+def _nim_target_vram_mb():
+    env_vram = os.environ.get("NIM_TARGET_VRAM_MB")
+    if env_vram and env_vram.isdigit():
+        return int(env_vram)
+    try:
+        if torch.cuda.is_available():
+            return int(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024))
+    except Exception:
+        pass
+    try:
+        out = _sp_cleanup.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            stderr=_sp_cleanup.DEVNULL,
+            timeout=5,
+        ).decode()
+        vals = [int(v.strip()) for v in out.splitlines() if v.strip().isdigit()]
+        return max(vals) if vals else None
+    except Exception:
+        return None
+
+
+def _nim_docker_image():
+    try:
+        return _sp_cleanup.check_output(
+            ["docker", "inspect", "-f", "{{.Config.Image}}", os.environ.get("CONTAINER_NAME", "cosmos-nim")],
+            stderr=_sp_cleanup.DEVNULL,
+            timeout=5,
+        ).decode().strip() or None
+    except Exception:
+        return os.environ.get("NIM_IMAGE") or None
+
+
 _NIM_CATALOG = []
+_NIM_BY_LABEL = {}
+_NIM_BY_SHORT_ID = {}
+_NIM_CURRENT_SHORT_ID = "__current__"
 if INFERENCE_BACKEND == "nim_local":
     try:
         # Catalog helper sits next to this script (and is also scp'd to /tmp/).
         for _p in (os.path.dirname(os.path.abspath(__file__)), "/tmp"):
             if _p and _p not in sys.path:
                 sys.path.insert(0, _p)
-        from nim_catalog import list_available_nims, KNOWN_VLM_NIMS  # type: ignore
-        _NIM_CATALOG = list_available_nims(
+        from nim_catalog import list_switchable_video_nims, KNOWN_VLM_NIMS, NimImage  # type: ignore
+        _target_vram = _nim_target_vram_mb()
+        _NIM_CATALOG = list_switchable_video_nims(
             ngc_api_key=NGC_API_KEY,
-            vram_mb=None,           # don't VRAM-filter at startup; show everything supported
+            vram_mb=_target_vram,   # show only NIMs that fit this GPU
             use_upstream=True,      # fetch docs.nvidia.com — this is the agent's source of truth
             do_probe=False,         # probe lazily on switch (avoids 10-30s startup penalty)
         )
         if not _NIM_CATALOG:
             # Network unreachable or upstream removed every family we know — fall
             # back to the static slug map so the user is not stranded.
-            _NIM_CATALOG = list(KNOWN_VLM_NIMS)
+            _NIM_CATALOG = [
+                n for n in KNOWN_VLM_NIMS
+                if n.supports_video
+                and getattr(n, "switchable", True)
+                and (not _target_vram or not n.min_vram_mb or n.min_vram_mb <= _target_vram)
+            ]
+        _current_image = _nim_docker_image()
+        if _SERVER_MODEL_ID and not any(n.served_model_id == _SERVER_MODEL_ID for n in _NIM_CATALOG):
+            # The current target may be a staged/private image that is not in the
+            # public docs catalog. Inject it and select it by default so the UI
+            # accurately reflects what inference is using.
+            _NIM_CATALOG.insert(0, NimImage(
+                _NIM_CURRENT_SHORT_ID,
+                _current_image or "",
+                "Current custom",
+                f"Current custom: {_SERVER_MODEL_ID}",
+                _SERVER_MODEL_ID,
+                min_vram_mb=0,
+                supports_video=True,
+                switchable=False,
+                notes="Currently running NIM on this instance; not present in the public catalog.",
+            ))
+        _deduped = []
+        _seen_served = set()
+        for _nim in _NIM_CATALOG:
+            if _nim.served_model_id in _seen_served:
+                continue
+            _seen_served.add(_nim.served_model_id)
+            _deduped.append(_nim)
+        _NIM_CATALOG = _deduped
         # NO `nim://` prefix in nim_local mode — that prefix routes
         # run_inference() to _run_nim_inference (the NVCF hosted-API path)
         # which skips models like CR2-2B that are not in the public NVCF
@@ -424,7 +489,9 @@ if INFERENCE_BACKEND == "nim_local":
         # _is_nim() returns False and routing falls through to the
         # vLLM-style path against VLLM_BASE_URL=http://localhost:8000/v1.
         CHECKPOINT_PRESETS = [(n.label, n.served_model_id) for n in _NIM_CATALOG]
-        print(f"[nim_local] catalog: {len(_NIM_CATALOG)} VLM NIMs from {len([n for n in _NIM_CATALOG])} entries", flush=True)
+        _NIM_BY_LABEL = {n.label: n for n in _NIM_CATALOG}
+        _NIM_BY_SHORT_ID = {n.short_id: n for n in _NIM_CATALOG}
+        print(f"[nim_local] catalog: {len(_NIM_CATALOG)} switchable/current video NIMs (target_vram={_target_vram})", flush=True)
     except Exception as _e:
         print(f"[nim_local] catalog fetch failed ({_e}); keeping default presets", flush=True)
 
@@ -574,6 +641,245 @@ def _nim_switch_help_html():
         "</li></ol>"
         "</div>"
     )
+
+
+def _nim_switch_public_url():
+    explicit = os.environ.get("NIM_SWITCH_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    host = os.environ.get("BYO_VIDEO_LOCAL_HOST") or os.environ.get("PUBLIC_HOST") or ""
+    if not host:
+        ssh_target = os.environ.get("BYO_VIDEO_SSH_TARGET", os.environ.get("SSH_TARGET", ""))
+        if "@" in ssh_target:
+            host = ssh_target.rsplit("@", 1)[-1].split(":", 1)[0]
+    port = int(os.environ.get("NIM_SWITCH_PORT", "7862"))
+    return f"http://{host}:{port}" if host else f"http://localhost:{port}"
+
+
+def _nim_switch_api_url(path=""):
+    port = int(os.environ.get("NIM_SWITCH_PORT", "7862"))
+    return f"http://127.0.0.1:{port}{path}"
+
+
+def _nim_http_json(method, path, payload=None, timeout=4):
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = _urlreq.Request(_nim_switch_api_url(path), data=data, headers=headers, method=method)
+    try:
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8") or "{}"
+            return resp.status, json.loads(body)
+    except _urlerr.HTTPError as err:
+        try:
+            body = json.loads(err.read().decode("utf-8") or "{}")
+        except Exception:
+            body = {"error": str(err)}
+        return err.code, body
+    except Exception as exc:
+        return 0, {"error": str(exc)}
+
+
+def _ensure_nim_switch_service():
+    if INFERENCE_BACKEND != "nim_local":
+        return False
+    status, _ = _nim_http_json("GET", "/api/state", timeout=1)
+    if status == 200:
+        return True
+    script = os.environ.get(
+        "NIM_SWITCH_SERVICE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "nim_switch_service.py"),
+    )
+    if not os.path.exists(script):
+        script = "/tmp/nim_switch_service.py"
+    if not os.path.exists(script):
+        print(f"[nim_switch] service script missing: {script}", flush=True)
+        return False
+    env = os.environ.copy()
+    env.update({
+        "NIM_SWITCH_URL": _nim_switch_public_url(),
+        "NIM_SWITCH_PORT": os.environ.get("NIM_SWITCH_PORT", "7862"),
+        "GRADIO_APP": os.path.abspath(__file__),
+        "GRADIO_PORT": str(PORT),
+        "NIM_LAUNCH_SCRIPT": os.environ.get("NIM_LAUNCH_SCRIPT", "/tmp/nim_launch.sh"),
+        "CONTAINER_NAME": os.environ.get("CONTAINER_NAME", "cosmos-nim"),
+        "INFERENCE_BACKEND": "nim_local",
+        "VLLM_BASE_URL": VLLM_BASE_URL,
+        "MODEL_SIZE": MODEL_SIZE,
+    })
+    try:
+        with open("/tmp/nim_switch_service_stdout.log", "a") as log:
+            proc = _sp_cleanup.Popen(
+                [sys.executable, "-u", script],
+                env=env,
+                stdout=log,
+                stderr=_sp_cleanup.STDOUT,
+                start_new_session=True,
+            )
+        with open("/tmp/nim_switch_service.pid", "w") as fh:
+            fh.write(str(proc.pid))
+        time.sleep(1.0)
+        status, _ = _nim_http_json("GET", "/api/state", timeout=2)
+        print(f"[nim_switch] service start pid={proc.pid} status={status}", flush=True)
+        return status == 200
+    except Exception as exc:
+        print(f"[nim_switch] service start failed: {exc}", flush=True)
+        return False
+
+
+def _nim_selected(label):
+    return _NIM_BY_LABEL.get(label or "")
+
+
+def _nim_is_current(nim):
+    return bool(nim) and (
+        getattr(nim, "short_id", "") == _NIM_CURRENT_SHORT_ID
+        or getattr(nim, "served_model_id", "") == (_SERVER_MODEL_ID or "")
+    )
+
+
+def _nim_switch_state():
+    status, payload = _nim_http_json("GET", "/api/state", timeout=2)
+    return payload if status == 200 else {"phase": "unreachable", "error": payload.get("error", "service unreachable")}
+
+
+def _nim_switch_panel_html(label, notice=""):
+    nim = _nim_selected(label)
+    state = _nim_switch_state() if INFERENCE_BACKEND == "nim_local" else {}
+    service_url = _nim_switch_public_url()
+    if not nim:
+        return (
+            '<div style="background:#fff7ed;border:1px solid #fb923c;border-radius:6px;'
+            'padding:12px;color:#7c2d12">Select a supported video NIM.</div>'
+        )
+    is_current = _nim_is_current(nim)
+    creds_ok = bool(state.get("credentials_present")) or bool(NGC_API_KEY)
+    phase = _html.escape(str(state.get("phase") or "unknown"))
+    message = _html.escape(str(state.get("message") or ""))
+    error = _html.escape(str(state.get("error") or ""))
+    notes = _html.escape(str(getattr(nim, "notes", "") or ""))
+    image = _html.escape(str(getattr(nim, "image", "") or ""))
+    served = _html.escape(str(getattr(nim, "served_model_id", "") or ""))
+    short_id = _html.escape(str(getattr(nim, "short_id", "") or ""))
+    vram = getattr(nim, "min_vram_mb", 0) or 0
+    badge = "running" if is_current else "staged"
+    colors = (
+        "background:#ecfdf5;border-color:#22c55e;color:#14532d"
+        if is_current
+        else "background:#eff6ff;border-color:#3b82f6;color:#1e3a8a"
+    )
+    cred_warning = ""
+    if not is_current and not creds_ok:
+        cred_warning = (
+            '<div style="margin-top:8px;color:#991b1b;background:#fee2e2;'
+            'border:1px solid #fecaca;border-radius:5px;padding:8px">'
+            'NGC credentials are not available to the switch supervisor. Paste the key once below; '
+            'it will be stored in a chmod 0600 env file on the target.</div>'
+        )
+    notice_html = (
+        f'<div style="margin-bottom:8px;color:#065f46;background:#d1fae5;'
+        f'border:1px solid #6ee7b7;border-radius:5px;padding:8px">{_html.escape(notice)}</div>'
+        if notice else ""
+    )
+    error_html = (
+        f'<div style="margin-top:8px;color:#991b1b;background:#fee2e2;'
+        f'border:1px solid #fecaca;border-radius:5px;padding:8px">{error}</div>'
+        if error else ""
+    )
+    notes_html = (
+        f'<div style="margin-top:8px;color:#475569">{notes}</div>'
+        if notes else ""
+    )
+    return (
+        f'<div style="{colors};border:1px solid;border-radius:6px;padding:12px 14px;'
+        f'margin:8px 0;font-size:13px;line-height:1.45">'
+        f'{notice_html}'
+        f'<b>NIM switch target</b> <span style="font-size:11px;border:1px solid currentColor;'
+        f'border-radius:999px;padding:1px 7px;margin-left:6px">{badge}</span><br>'
+        f'<div style="margin-top:6px">'
+        f'Short id: {_nim_code_pill(short_id)}<br>'
+        f'Image: {_nim_code_pill(image or "current container")}<br>'
+        f'Served model: {_nim_code_pill(served)}<br>'
+        f'Min VRAM: {_nim_code_pill(str(vram) + " MiB" if vram else "current/custom")}</div>'
+        f'<div style="margin-top:8px;color:#475569">Supervisor phase: '
+        f'<b>{phase}</b>{(" - " + message) if message else ""}. '
+        f'<a href="{_html.escape(service_url)}" target="_blank" style="color:#1d4ed8">'
+        f'Open progress page</a></div>'
+        f'{notes_html}'
+        f'{cred_warning}{error_html}'
+        f'</div>'
+    )
+
+
+def _nim_switch_button_update(label):
+    nim = _nim_selected(label)
+    state = _nim_switch_state()
+    creds_ok = bool(state.get("credentials_present")) or bool(NGC_API_KEY)
+    enabled = bool(nim) and not _nim_is_current(nim) and creds_ok
+    return gr.update(interactive=enabled)
+
+
+def _on_nim_dropdown_change(label):
+    return _nim_switch_panel_html(label), _nim_switch_button_update(label)
+
+
+def _save_nim_credentials(ngc_key, label):
+    key = (ngc_key or "").strip()
+    if not key:
+        return _nim_switch_panel_html(label, "No key entered."), gr.update(value=""), _nim_switch_button_update(label)
+    status, payload = _nim_http_json("POST", "/api/credentials", {"ngc_api_key": key}, timeout=8)
+    if status == 200:
+        return (
+            _nim_switch_panel_html(label, "NGC key stored for the switch supervisor."),
+            gr.update(value=""),
+            _nim_switch_button_update(label),
+        )
+    return (
+        _nim_switch_panel_html(label, payload.get("error", "Could not store key.")),
+        gr.update(value=""),
+        _nim_switch_button_update(label),
+    )
+
+
+def _request_nim_switch(label):
+    nim = _nim_selected(label)
+    if not nim:
+        yield _nim_switch_panel_html(label, "Select a supported video NIM first.")
+        return
+    if _nim_is_current(nim):
+        yield _nim_switch_panel_html(label, "That NIM is already running.")
+        return
+    status, payload = _nim_http_json(
+        "POST",
+        "/api/switch",
+        {"short_id": getattr(nim, "short_id", "")},
+        timeout=8,
+    )
+    if status not in (200, 202):
+        yield _nim_switch_panel_html(label, payload.get("error", "Switch request failed."))
+        return
+    for _ in range(900):
+        state = _nim_switch_state()
+        yield _nim_switch_panel_html(label)
+        phase = state.get("phase")
+        if phase in {"ready", "error"}:
+            return
+        if phase == "restarting_gradio":
+            yield _nim_switch_panel_html(
+                label,
+                "Gradio is restarting now. Keep the companion progress page open until it reports ready.",
+            )
+            return
+        time.sleep(2)
+
+
+_NIM_SWITCH_SERVICE_READY = (
+    _ensure_nim_switch_service() if INFERENCE_BACKEND == "nim_local" else False
+)
 
 DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
 DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
@@ -3555,22 +3861,35 @@ with gr.Blocks(
             vllm_swap_banner = gr.HTML(value="", visible=False)
             download_load_btn = gr.Button(visible=False)
 
-        # NIM runtime swap — handled out-of-band, not via a Gradio button. The
-        # earlier in-Gradio swap button (commit 4ed5951) attempted to stream
-        # `nim_launch.sh` output through the browser tunnel, but a 5-15 min
-        # docker pull plus 1-3 min vLLM warmup easily blows past Gradio's
-        # streaming heartbeat — the UI appeared to freeze even when the
-        # backend was making progress. Two reliable paths instead:
-        #   (a) Ask the runtime agent to swap — it has SSH and can
-        #       run the commands below, watch the logs, and report back.
-        #   (b) Run the commands manually on the host (instructions below).
-        # When the swap finishes, refresh this page — Gradio re-queries
-        # /v1/models on every reload and picks up the new served model id.
         if _is_nim_local:
-            gr.HTML(
-                _nim_switch_help_html(),
+            _initial_switch_state = _nim_switch_state()
+            _initial_creds = bool(_initial_switch_state.get("credentials_present")) or bool(NGC_API_KEY)
+            nim_switch_panel = gr.HTML(
+                _nim_switch_panel_html(_VLLM_DD_DEFAULT),
                 visible=True,
             )
+            with gr.Row():
+                nim_switch_btn = gr.Button(
+                    "Switch to selected NIM",
+                    variant="primary",
+                    interactive=bool(_nim_selected(_VLLM_DD_DEFAULT))
+                    and not _nim_is_current(_nim_selected(_VLLM_DD_DEFAULT))
+                    and _initial_creds,
+                )
+            with gr.Row(visible=not _initial_creds):
+                nim_ngc_key = gr.Textbox(
+                    label="NGC API key for NIM switches",
+                    type="password",
+                    placeholder="nvapi-...",
+                    lines=1,
+                    info="Stored on the target as /tmp/byo_video_nim_credentials.env with chmod 0600.",
+                )
+                nim_save_key_btn = gr.Button("Save key", variant="secondary", min_width=120)
+        else:
+            nim_switch_panel = gr.HTML(value="", visible=False)
+            nim_switch_btn = gr.Button(visible=False)
+            nim_ngc_key = gr.Textbox(visible=False)
+            nim_save_key_btn = gr.Button(visible=False)
 
         with gr.Row():
             fps_slider = gr.Slider(
@@ -4003,7 +4322,22 @@ with gr.Blocks(
             inputs=[checkpoint_dd],
             outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
         )
-    # nim_local: no click wiring — swap is done out-of-band (see info panel).
+    elif INFERENCE_BACKEND == "nim_local":
+        checkpoint_dd.change(
+            fn=_on_nim_dropdown_change,
+            inputs=[checkpoint_dd],
+            outputs=[nim_switch_panel, nim_switch_btn],
+        )
+        nim_switch_btn.click(
+            fn=_request_nim_switch,
+            inputs=[checkpoint_dd],
+            outputs=[nim_switch_panel],
+        )
+        nim_save_key_btn.click(
+            fn=_save_nim_credentials,
+            inputs=[nim_ngc_key, checkpoint_dd],
+            outputs=[nim_switch_panel, nim_ngc_key, nim_switch_btn],
+        )
 
     def resolve_model_id(ckpt_name, custom_val):
         if custom_val.strip():

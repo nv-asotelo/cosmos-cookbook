@@ -1,6 +1,8 @@
 #!/bin/bash
 # NIM launch script for any BYO-video supported VLM NIM on any host.
-# Run as: bash nim_launch.sh <NGC_API_KEY> [HF_TOKEN]
+# Run as: NGC_API_KEY=... bash nim_launch.sh
+# Backward-compatible positional args are still accepted, but automation should
+# pass credentials through env or a chmod-0600 NIM_CREDENTIAL_FILE.
 # Env overrides:
 #   MODEL            — short id from nim_catalog.py (default cosmos-reason2-8b)
 #   IMAGE            — full image override (otherwise resolved from nim_catalog.py)
@@ -11,12 +13,30 @@
 #   MAX_WAIT         — seconds to wait for /v1/models (default 1800; first-pull + first-load can be long)
 #   SHM_SIZE         — --shm-size value (default 32GB)
 #   NIM_EXTRA_ENV    — comma-separated KEY=VALUE pairs forwarded to docker run
+#   FORCE_RESTART    — 1/true forces replacement even if existing container is healthy
+#   NIM_CREDENTIAL_FILE — env file sourced before launch (default /tmp/byo_video_nim_credentials.env)
+#   RESOLVE_ONLY     — 1/true prints resolved MODEL/IMAGE/env and exits without Docker
 #
 # Output: detached container on $PORT serving OpenAI-compatible API at http://localhost:$PORT/v1.
 # Logs streamed to /tmp/nim_launch.log; container logs via `docker logs $CONTAINER_NAME`.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NIM_CREDENTIAL_FILE="${NIM_CREDENTIAL_FILE:-/tmp/byo_video_nim_credentials.env}"
+if [ -f "$NIM_CREDENTIAL_FILE" ]; then
+    _cred_mode=""
+    if stat -c %a "$NIM_CREDENTIAL_FILE" >/dev/null 2>&1; then
+        _cred_mode="$(stat -c %a "$NIM_CREDENTIAL_FILE")"
+    fi
+    if [ -n "$_cred_mode" ] && [ "$_cred_mode" != "600" ] && [ "$_cred_mode" != "400" ]; then
+        echo "ERROR: $NIM_CREDENTIAL_FILE must be chmod 0600 or 0400 before sourcing"
+        exit 1
+    fi
+    set -a
+    # shellcheck disable=SC1090
+    . "$NIM_CREDENTIAL_FILE"
+    set +a
+fi
 NGC_API_KEY="${1:-${NGC_API_KEY:-}}"
 HF_TOKEN="${2:-${HF_TOKEN:-}}"
 
@@ -29,6 +49,14 @@ NIM_CACHE_MODE="${NIM_CACHE_MODE:-internal}"
 NIM_EXTRA_ENV="${NIM_EXTRA_ENV:-}"
 MAX_WAIT="${MAX_WAIT:-1800}"
 SHM_SIZE="${SHM_SIZE:-32GB}"
+FORCE_RESTART="${FORCE_RESTART:-0}"
+
+_truthy() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 if [ -z "$IMAGE" ]; then
     _resolved="$(
@@ -91,6 +119,20 @@ fi
 
 IMAGE="${IMAGE:-nvcr.io/nim/nvidia/${MODEL}:latest}"
 
+if _truthy "${RESOLVE_ONLY:-0}"; then
+    echo "MODEL=$MODEL"
+    echo "IMAGE=$IMAGE"
+    if [ -n "${NIM_SERVED_MODEL_NAME:-}" ]; then
+        echo "NIM_SERVED_MODEL_NAME=$NIM_SERVED_MODEL_NAME"
+    fi
+    for _env_name in NIM_MAX_MODEL_LEN NIM_ENGINE NIM_MODEL_PROFILE NIM_MEDIA_IO_KWARGS NIM_MAX_IMAGES_PER_PROMPT NIM_NSPECT_ID; do
+        if [ -n "${!_env_name:-}" ]; then
+            echo "$_env_name=${!_env_name}"
+        fi
+    done
+    exit 0
+fi
+
 LOG=/tmp/nim_launch.log
 exec > >(tee -a "$LOG") 2>&1
 
@@ -101,11 +143,12 @@ echo "PORT=$PORT"
 echo "CONTAINER_NAME=$CONTAINER_NAME"
 echo "LOCAL_NIM_CACHE=$LOCAL_NIM_CACHE"
 echo "NIM_CACHE_MODE=$NIM_CACHE_MODE"
+echo "FORCE_RESTART=$FORCE_RESTART"
 echo "HOME=$HOME"
 
 if [ -z "$NGC_API_KEY" ]; then
-    echo "ERROR: NGC_API_KEY required as first argument or env var"
-    echo "Usage: bash nim_launch.sh <NGC_API_KEY> [HF_TOKEN]"
+    echo "ERROR: NGC_API_KEY required via env var or chmod-0600 $NIM_CREDENTIAL_FILE"
+    echo "Usage: NGC_API_KEY=... bash nim_launch.sh"
     exit 1
 fi
 export NGC_API_KEY
@@ -116,15 +159,20 @@ fi
 # 0. Idempotency: if a container of this name is already running AND /v1/models
 #    is healthy, reuse it. This protects in-progress first-run model downloads.
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    if curl -sf "http://localhost:${PORT}/v1/models" >/dev/null 2>&1; then
+    if _truthy "$FORCE_RESTART"; then
+        echo "FORCE_RESTART requested - replacing existing $CONTAINER_NAME."
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+    elif curl -sf "http://localhost:${PORT}/v1/models" >/dev/null 2>&1; then
         echo "Container $CONTAINER_NAME is already running and healthy on port $PORT — reusing."
         echo "API endpoint: http://localhost:${PORT}/v1"
         exit 0
     fi
-    echo "Container $CONTAINER_NAME is running but /v1/models not yet ready — leaving it alone."
-    echo "If you want to force a restart: docker rm -f $CONTAINER_NAME && rerun this script."
-    # Fall through to wait loop on the existing container.
-    SKIP_LAUNCH=1
+    if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+        echo "Container $CONTAINER_NAME is running but /v1/models not yet ready — leaving it alone."
+        echo "Set FORCE_RESTART=1 to replace it."
+        # Fall through to wait loop on the existing container.
+        SKIP_LAUNCH=1
+    fi
 fi
 
 # 1. Authenticate with nvcr.io (idempotent)

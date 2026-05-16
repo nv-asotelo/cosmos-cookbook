@@ -320,6 +320,9 @@ BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
 BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
 BATCH_INFERENCE_URL_FILE = "/tmp/byo_video_batch_inference_url.txt"
 BATCH_INFERENCE_LIVE_FLAG = "/tmp/byo_video_batch_inference_live.flag"
+NIM_SWITCH_PORT = int(os.environ.get("NIM_SWITCH_PORT", "7862"))
+NIM_SWITCH_SERVICE = os.environ.get("NIM_SWITCH_SERVICE", "/tmp/nim_switch_service.py")
+NIM_SWITCH_URL_FILE = "/tmp/nim_switch_url.txt"
 REASON_VITE_PORT = int(os.environ.get("REASON_VITE_PORT", os.environ.get("PORT", "5173")))
 REASON_VITE_APP_DIR = os.environ.get("REASON_VITE_APP_DIR", "/tmp/nvidia-build-reason-vite")
 REASON_VITE_URL_FILE = "/tmp/nvidia_build_reason_vite_url.txt"
@@ -1329,6 +1332,25 @@ def _detect_host_ip():
         pass
     return None
 
+_public_host_ip = _detect_host_ip()
+if _public_host_ip:
+    launch_env.setdefault("BYO_VIDEO_LOCAL_HOST", _public_host_ip)
+    launch_env.setdefault("GRADIO_PUBLIC_URL", f"http://{_public_host_ip}:{GRADIO_PORT}")
+    launch_env.setdefault("NIM_SWITCH_URL", f"http://{_public_host_ip}:{NIM_SWITCH_PORT}")
+else:
+    launch_env.setdefault("NIM_SWITCH_URL", f"http://localhost:{NIM_SWITCH_PORT}")
+launch_env.update({
+    "NIM_SWITCH_PORT": str(NIM_SWITCH_PORT),
+    "NIM_SWITCH_SERVICE": NIM_SWITCH_SERVICE,
+    "NIM_LAUNCH_SCRIPT": "/tmp/nim_launch.sh",
+    "NIM_CREDENTIAL_FILE": os.environ.get("NIM_CREDENTIAL_FILE", "/tmp/byo_video_nim_credentials.env"),
+})
+try:
+    with open(NIM_SWITCH_URL_FILE, "w") as f:
+        f.write(launch_env["NIM_SWITCH_URL"] + "\n")
+except Exception:
+    pass
+
 def _drain_stdout(fh, path):
     try:
         with open(path, "a") as f:
@@ -1357,6 +1379,11 @@ def _launch_gradio(sidecar=False):
         text=True,
         bufsize=1,
     )
+    try:
+        with open("/tmp/gradio_demo.pid", "w") as f:
+            f.write(str(proc.pid))
+    except Exception:
+        pass
 
     url = None
     local_url = None

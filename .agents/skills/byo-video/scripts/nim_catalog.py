@@ -67,6 +67,7 @@ class NimImage:
     served_model_id: str    # e.g. "nvidia/cosmos-reason2-8b" (best-effort)
     min_vram_mb: int = 0    # 0 if unknown
     supports_video: bool = True   # True = video frames; False = single image only
+    switchable: bool = True  # False = known private/allowlist-only/broken for self-serve swaps
     env: dict[str, str] = field(default_factory=dict)
     notes: str = ""
 
@@ -98,6 +99,7 @@ KNOWN_VLM_NIMS = [
     NimImage("cosmos-reason2-32b", "nvcr.io/nim/nvidia/cosmos-reason2-32b:latest",
              "Cosmos Reason2", "Cosmos Reason2 32B (NIM)",
              "nvidia/cosmos-reason2-32b", min_vram_mb=80000, supports_video=True,
+             switchable=False,
              notes="PRIVATE/PREVIEW: docker pull returns DENIED on default NGC API key "
                    "(verified 2026-05-07 on horde). Contact NIM team for allowlist. "
                    "Do not present as a self-serve option in /byo-video pickers."),
@@ -286,6 +288,32 @@ def list_video_nims() -> List["NimImage"]:
     Use this for /byo-video dropdown population — image-only NIMs would
     error out on the standard frame-extraction pipeline."""
     return [n for n in KNOWN_VLM_NIMS if n.supports_video]
+
+
+def list_switchable_video_nims(
+    ngc_api_key: Optional[str] = None,
+    vram_mb: Optional[int] = None,
+    use_upstream: bool = True,
+    do_probe: bool = True,
+) -> List["NimImage"]:
+    """Return video-capable NIMs that are safe to present for zero-touch swaps.
+
+    This is stricter than list_available_nims(): image-only models, explicit
+    private/allowlist-only entries, known broken target profiles, and models
+    above the target VRAM are removed. Callers may still inject the currently
+    running custom NIM separately, because a live container has already proven
+    that it is viable on the target.
+    """
+    nims = list_available_nims(
+        ngc_api_key=ngc_api_key,
+        vram_mb=vram_mb,
+        use_upstream=use_upstream,
+        do_probe=do_probe,
+    )
+    return [
+        n for n in nims
+        if n.supports_video and getattr(n, "switchable", True)
+    ]
 
 
 def _fetch_url_body(url: str, timeout: int = 10) -> str:
