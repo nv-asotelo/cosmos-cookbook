@@ -26,6 +26,7 @@ const app = express();
 app.use(express.json({ limit: "128mb" }));
 
 const EXAMPLE_MEDIA_HOSTS = new Set(["assets.ngc.nvidia.com"]);
+const DEFAULT_NIM_FRAME_FALLBACK_IMAGES = 5;
 const FRAME_EXTRACTOR_PY = String.raw`
 import json
 import os
@@ -34,6 +35,7 @@ import sys
 import av
 
 video_path, output_dir, fps_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+max_frames = int(float(sys.argv[4])) if len(sys.argv) > 4 and sys.argv[4] else 0
 fps = float(fps_raw)
 container = av.open(video_path)
 stream = container.streams.video[0]
@@ -44,6 +46,15 @@ if total_frames <= 0:
     total_frames = max(1, int(duration_s * frame_rate))
 interval = max(1, int(round(frame_rate / fps)))
 target_indices = set(range(0, total_frames, interval))
+if max_frames > 0 and len(target_indices) > max_frames:
+    ordered = sorted(target_indices)
+    if max_frames == 1:
+        target_indices = {ordered[0]}
+    else:
+        target_indices = {
+            ordered[int(round(i * (len(ordered) - 1) / (max_frames - 1)))]
+            for i in range(max_frames)
+        }
 paths = []
 for index, frame in enumerate(container.decode(stream)):
     if index in target_indices:
@@ -92,10 +103,31 @@ function usesNativeVideoUrl(model) {
   );
 }
 
-function runFrameExtractor(videoPath, outputDir, framesPerSecond) {
+function frameFallbackLimit() {
+  const raw = process.env.REASONER_FRAME_FALLBACK_MAX_IMAGES || process.env.NIM_MAX_IMAGES_PER_PROMPT || "";
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_NIM_FRAME_FALLBACK_IMAGES;
+}
+
+function nativeVideoFallbackMessage(message) {
+  return /video resolution or format not supported|cuvid|getdecodercaps|reconfiguredecoder|handlevideosequence|pynvvideocodec|at most \d+ image/i.test(
+    String(message || "")
+  );
+}
+
+function shouldRetryWithFrameFallback(prepared, resultOrError) {
+  const message =
+    resultOrError?.message ||
+    resultOrError?.raw?.error?.message ||
+    (resultOrError instanceof Error ? resultOrError.message : "");
+  return prepared?.media?.mode === "video_url" && backend === "nim_local" && nativeVideoFallbackMessage(message);
+}
+
+function runFrameExtractor(videoPath, outputDir, framesPerSecond, maxFrames) {
   const fps = Number.isFinite(Number(framesPerSecond)) ? Number(framesPerSecond) : 2;
+  const cap = Number.isFinite(Number(maxFrames)) && Number(maxFrames) > 0 ? String(Math.floor(Number(maxFrames))) : "";
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonForFrames(), ["-", videoPath, outputDir, String(fps)], {
+    const child = spawn(pythonForFrames(), ["-", videoPath, outputDir, String(fps), cap], {
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
@@ -122,7 +154,7 @@ function runFrameExtractor(videoPath, outputDir, framesPerSecond) {
   });
 }
 
-async function extractFrameDataUrls(mediaDataUrl, framesPerSecond) {
+async function extractFrameDataUrls(mediaDataUrl, framesPerSecond, maxFrames) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "reason-vite-frames-"));
   try {
     const { buffer } = dataUrlToBuffer(mediaDataUrl);
@@ -130,7 +162,7 @@ async function extractFrameDataUrls(mediaDataUrl, framesPerSecond) {
     const frameDir = path.join(tempDir, "frames");
     await fs.mkdir(frameDir);
     await fs.writeFile(videoPath, buffer);
-    const info = await runFrameExtractor(videoPath, frameDir, framesPerSecond);
+    const info = await runFrameExtractor(videoPath, frameDir, framesPerSecond, maxFrames);
     const frames = [];
     for (const framePath of info.frames || []) {
       const frame = await fs.readFile(framePath);
@@ -590,11 +622,12 @@ app.get("/api/example-media", async (request, response) => {
   }
 });
 
-async function prepareReasonRequest(body = {}) {
+async function prepareReasonRequest(body = {}, options = {}) {
   const prompt = body.prompt || body.userPrompt || "";
   const systemPrompt = body.systemPrompt || body.system_prompt || "";
   const selectedModel = body.model || defaultModel;
   const params = body.params || {};
+  const forceFrameFallback = Boolean(options.forceFrameFallback);
 
   let mediaDataUrl;
   let mediaKind = null;
@@ -613,8 +646,9 @@ async function prepareReasonRequest(body = {}) {
     mediaKind = body.mediaKind || null;
   }
 
-  if (mediaKind === "video" && mediaDataUrl && !usesNativeVideoUrl(selectedModel)) {
-    const extracted = await extractFrameDataUrls(mediaDataUrl, params.frames_per_second);
+  if (mediaKind === "video" && mediaDataUrl && (forceFrameFallback || !usesNativeVideoUrl(selectedModel))) {
+    const maxFrames = backend === "nim_local" || forceFrameFallback ? frameFallbackLimit() : undefined;
+    const extracted = await extractFrameDataUrls(mediaDataUrl, params.frames_per_second, maxFrames);
     mediaFrames = extracted.frames;
     frameTempDir = extracted.tempDir;
     frameCount = extracted.frameCount;
@@ -638,9 +672,31 @@ async function prepareReasonRequest(body = {}) {
     media: {
       mode: mediaMode,
       frame_count: frameCount || undefined,
-      fps: mediaFrames?.length ? params.frames_per_second : undefined
+      fps: mediaFrames?.length ? params.frames_per_second : undefined,
+      fallback_from: forceFrameFallback ? "video_url" : undefined,
+      fallback_error: forceFrameFallback ? options.fallbackError : undefined,
+      max_frames: forceFrameFallback || backend === "nim_local" ? frameFallbackLimit() : undefined
     }
   };
+}
+
+function preparedReasoningOptions(prepared) {
+  return {
+    model: prepared.selectedModel,
+    prompt: prepared.prompt,
+    systemPrompt: prepared.systemPrompt,
+    mediaDataUrl: prepared.mediaDataUrl,
+    mediaKind: prepared.mediaKind,
+    mediaFrames: prepared.mediaFrames,
+    framesPerSecond: prepared.params.frames_per_second,
+    params: prepared.params
+  };
+}
+
+async function submitPreparedReasoning(prepared) {
+  const result = await submitReasoning(preparedReasoningOptions(prepared));
+  result.media = prepared.media;
+  return result;
 }
 
 function sse(response, event, data) {
@@ -766,19 +822,20 @@ function emitFallback(response, result) {
 
 app.post("/api/reason", async (request, response) => {
   let prepared;
+  let fallbackPrepared;
   try {
     prepared = await prepareReasonRequest(request.body || {});
-    const result = await submitReasoning({
-      model: prepared.selectedModel,
-      prompt: prepared.prompt,
-      systemPrompt: prepared.systemPrompt,
-      mediaDataUrl: prepared.mediaDataUrl,
-      mediaKind: prepared.mediaKind,
-      mediaFrames: prepared.mediaFrames,
-      framesPerSecond: prepared.params.frames_per_second,
-      params: prepared.params
-    });
-    result.media = prepared.media;
+    let result = await submitPreparedReasoning(prepared);
+    if (result.status === "error" && shouldRetryWithFrameFallback(prepared, result)) {
+      console.warn(
+        `[vite-build-reason] native video_url rejected by NIM; retrying with ${frameFallbackLimit()} image frames`
+      );
+      fallbackPrepared = await prepareReasonRequest(request.body || {}, {
+        forceFrameFallback: true,
+        fallbackError: result.message
+      });
+      result = await submitPreparedReasoning(fallbackPrepared);
+    }
     const httpStatus = result.status === "error" ? 502 : 200;
     response.status(httpStatus).json(result);
   } catch (error) {
@@ -789,11 +846,13 @@ app.post("/api/reason", async (request, response) => {
     });
   } finally {
     if (prepared?.frameTempDir) await fs.rm(prepared.frameTempDir, { recursive: true, force: true });
+    if (fallbackPrepared?.frameTempDir) await fs.rm(fallbackPrepared.frameTempDir, { recursive: true, force: true });
   }
 });
 
 app.post("/api/reason/stream", async (request, response) => {
   let prepared;
+  let fallbackPrepared;
   const upstreamAbort = new AbortController();
   let clientClosed = false;
   let startedStreaming = false;
@@ -904,23 +963,23 @@ app.post("/api/reason/stream", async (request, response) => {
   } catch (error) {
     if (clientClosed || response.writableEnded) return;
     if (!startedStreaming && prepared) {
-      const fallback = await submitReasoning({
-        model: prepared.selectedModel,
-        prompt: prepared.prompt,
-        systemPrompt: prepared.systemPrompt,
-        mediaDataUrl: prepared.mediaDataUrl,
-        mediaKind: prepared.mediaKind,
-        mediaFrames: prepared.mediaFrames,
-        framesPerSecond: prepared.params.frames_per_second,
-        params: prepared.params
-      });
-      fallback.media = prepared.media;
+      if (shouldRetryWithFrameFallback(prepared, error)) {
+        console.warn(
+          `[vite-build-reason] native video_url stream rejected by NIM; retrying with ${frameFallbackLimit()} image frames`
+        );
+        fallbackPrepared = await prepareReasonRequest(request.body || {}, {
+          forceFrameFallback: true,
+          fallbackError: error instanceof Error ? error.message : "Native video_url rejected"
+        });
+      }
+      const fallback = await submitPreparedReasoning(fallbackPrepared || prepared);
       emitFallback(response, fallback);
     } else {
       sse(response, "error", { message: error instanceof Error ? error.message : "Backend stream failed" });
     }
   } finally {
     if (prepared?.frameTempDir) await fs.rm(prepared.frameTempDir, { recursive: true, force: true });
+    if (fallbackPrepared?.frameTempDir) await fs.rm(fallbackPrepared.frameTempDir, { recursive: true, force: true });
     if (!response.writableEnded) response.end();
   }
 });

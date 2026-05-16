@@ -453,6 +453,40 @@ def backend_label() -> str:
     return "vLLM / OpenAI-compatible"
 
 
+def _is_nim_backend() -> bool:
+    raw = " ".join(
+        [
+            os.environ.get("INFERENCE_BACKEND", ""),
+            os.environ.get("BYO_VIDEO_BACKEND", ""),
+            "nim" if os.environ.get("NIM_BASE_URL") or os.environ.get("NIM_API_KEY") else "",
+        ]
+    ).lower()
+    return "nim" in raw
+
+
+def _nim_frame_fallback_limit() -> int:
+    raw = os.environ.get("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.environ.get("NIM_MAX_IMAGES_PER_PROMPT") or "5"
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = 5
+    return max(1, value)
+
+
+def _is_video_decode_error(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(
+        needle in lower
+        for needle in (
+            "video resolution or format not supported",
+            "cuvid",
+            "handlevideosequence",
+            "pynvvideocodec",
+            "at most 5 image",
+        )
+    )
+
+
 def _normalize_prompt(prompt: str) -> str:
     return (prompt or "").strip()
 
@@ -500,7 +534,54 @@ def _media_part(path: str) -> Dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
 
 
-def _build_messages(upload: Any, user_prompt: str, system_prompt: str) -> List[Dict[str, Any]]:
+def _video_frame_parts(path: str, prompt: str, fps: float, max_frames: int) -> List[Dict[str, Any]]:
+    try:
+        import av
+        from io import BytesIO
+    except Exception as exc:
+        raise RuntimeError(f"PyAV is required for frame fallback: {exc}") from exc
+
+    frames: List[str] = []
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        frame_rate = float(stream.average_rate or 25.0)
+        total_frames = int(stream.frames or 0)
+        if total_frames <= 0:
+            duration_s = float(stream.duration * stream.time_base) if stream.duration else 0.0
+            total_frames = max(1, int(round(duration_s * frame_rate)))
+        interval = max(1, int(round(frame_rate / max(float(fps or 1.0), 0.1))))
+        target_indices = set(range(0, total_frames, interval))
+        if len(target_indices) > max_frames:
+            ordered = sorted(target_indices)
+            target_indices = {
+                ordered[int(round(i * (len(ordered) - 1) / max(max_frames - 1, 1)))]
+                for i in range(max_frames)
+            }
+        for index, frame in enumerate(container.decode(stream)):
+            if index not in target_indices:
+                continue
+            image = frame.to_image().convert("RGB")
+            buf = BytesIO()
+            image.save(buf, format="JPEG", quality=85)
+            frames.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+            if len(frames) >= len(target_indices):
+                break
+
+    if not frames:
+        raise RuntimeError("Could not extract frames from video")
+    content: List[Dict[str, Any]] = [{"type": "text", "text": f"[Video - {len(frames)} frames at {fps}fps]\n{prompt}"}]
+    content.extend({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}} for frame in frames)
+    return content
+
+
+def _build_messages(
+    upload: Any,
+    user_prompt: str,
+    system_prompt: str,
+    *,
+    fps: float = 4.0,
+    force_frame_fallback: bool = False,
+) -> List[Dict[str, Any]]:
     user_prompt = (user_prompt or "").strip()
     system_prompt = (system_prompt or "").strip()
     messages: List[Dict[str, Any]] = []
@@ -509,7 +590,11 @@ def _build_messages(upload: Any, user_prompt: str, system_prompt: str) -> List[D
 
     path = _file_path(upload)
     if path:
-        content: Any = [_media_part(path), {"type": "text", "text": user_prompt}]
+        ext = pathlib.Path(path).suffix.lower()
+        if force_frame_fallback and ext == ".mp4":
+            content = _video_frame_parts(path, user_prompt, fps, _nim_frame_fallback_limit())
+        else:
+            content = [_media_part(path), {"type": "text", "text": user_prompt}]
     else:
         content = user_prompt
 
@@ -694,21 +779,29 @@ def run_inference(
     yield "", f"Detected model: `{model}` ({source}). Preparing request...", preview
 
     try:
-        messages = _build_messages(upload, prompt, system_prompt)
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": int(max_tokens),
-            "temperature": float(temperature),
-            "top_p": float(top_p),
-            "repetition_penalty": float(repetition_penalty),
-            "seed": int(seed),
-            "top_k": int(top_k),
-            "stream": True,
-        }
         path = _file_path(upload)
-        if path and pathlib.Path(path).suffix.lower() == ".mp4":
-            body["media_io_kwargs"] = {"video": {"fps": float(fps)}}
+
+        def _build_body(messages: List[Dict[str, Any]], *, frame_fallback: bool = False) -> Dict[str, Any]:
+            body: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": float(temperature),
+                "top_p": float(top_p),
+                "stream": True,
+            }
+            if _is_nim_backend():
+                body["nvext"] = {"repetition_penalty": float(repetition_penalty)}
+            else:
+                body["max_tokens"] = int(max_tokens)
+                body["repetition_penalty"] = float(repetition_penalty)
+                body["seed"] = int(seed)
+                body["top_k"] = int(top_k)
+            if path and pathlib.Path(path).suffix.lower() == ".mp4" and not frame_fallback:
+                body["media_io_kwargs"] = {"video": {"fps": float(fps)}}
+            return body
+
+        messages = _build_messages(upload, prompt, system_prompt, fps=fps)
+        body = _build_body(messages)
 
         started = time.time()
         resp = requests.post(
@@ -718,6 +811,27 @@ def run_inference(
             stream=True,
             timeout=600,
         )
+        if resp.status_code in (400, 422) and path and pathlib.Path(path).suffix.lower() == ".mp4":
+            err_preview = resp.text[:2000]
+            if _is_video_decode_error(err_preview):
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                print(
+                    f"[NIM] video_url rejected ({resp.status_code}); retrying with "
+                    f"{_nim_frame_fallback_limit()} image frames. {err_preview[:500]}",
+                    flush=True,
+                )
+                messages = _build_messages(upload, prompt, system_prompt, fps=fps, force_frame_fallback=True)
+                body = _build_body(messages, frame_fallback=True)
+                resp = requests.post(
+                    f"{BASE_URL}/chat/completions",
+                    headers=_headers(),
+                    json=body,
+                    stream=True,
+                    timeout=600,
+                )
         if resp.status_code >= 400:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:2000]}")
 

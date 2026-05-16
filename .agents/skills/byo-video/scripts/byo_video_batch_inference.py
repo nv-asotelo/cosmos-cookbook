@@ -2347,12 +2347,26 @@ def model_prefers_file_url(model: str) -> bool:
 def model_prefers_video_data(model: str, backend: str = "") -> bool:
     lower = model.lower()
     backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
-    return "nim" in backend_lower or ("cosmos-reason" in lower and "nim" in lower)
+    return (
+        "nim" in backend_lower
+        or ("cosmos-reason" in lower and "nim" in lower)
+        or "cosmos3" in lower
+        or "cosmos-3" in lower
+    )
 
 
 def model_uses_native_video(model: str, backend: str = "") -> bool:
     backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
     return "nim" in backend_lower or model_prefers_file_url(model) or model_prefers_video_data(model, backend)
+
+
+def nim_frame_fallback_limit() -> int:
+    raw = os.getenv("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.getenv("NIM_MAX_IMAGES_PER_PROMPT") or "5"
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = 5
+    return max(1, value)
 
 
 def reasoning_profile_for_model(model: str, backend: str = "", requested: str = "auto") -> Dict[str, str]:
@@ -2398,7 +2412,12 @@ def bool_param(value: Any) -> bool:
 
 def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int, backend: str = "", force_frames: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta = get_video_meta(video_path)
-    plan = estimate_plan(meta, fps, max_pixels, max_frames, model if not force_frames else "", backend if not force_frames else "")
+    effective_max_frames = int(max_frames)
+    if force_frames and "nim" in (backend or os.getenv("INFERENCE_BACKEND", "")).lower():
+        fallback_limit = nim_frame_fallback_limit()
+        if effective_max_frames <= 0 or effective_max_frames > fallback_limit:
+            effective_max_frames = fallback_limit
+    plan = estimate_plan(meta, fps, max_pixels, effective_max_frames, model if not force_frames else "", backend if not force_frames else "")
     if not force_frames and model_uses_native_video(model, backend):
         mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
         data = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
@@ -2406,7 +2425,7 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_
             {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{data}"}},
             {"type": "text", "text": prompt},
         ], plan
-    frames = extract_frames_b64(video_path, fps=fps, max_frames=max_frames, max_pixels=max_pixels)
+    frames = extract_frames_b64(video_path, fps=fps, max_frames=effective_max_frames, max_pixels=max_pixels)
     if not frames:
         raise RuntimeError("No frames could be extracted from the video")
     content = [{"type": "text", "text": prompt}]

@@ -933,6 +933,14 @@ def _is_frames_fallback_nim(model_id):
     mid = (model_id or _SERVER_MODEL_ID or "").lower()
     return INFERENCE_BACKEND == "nim_local" and "cosmos-reason1" in mid
 
+def _nim_frame_fallback_limit():
+    raw = os.environ.get("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.environ.get("NIM_MAX_IMAGES_PER_PROMPT") or "5"
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = 5
+    return max(1, value)
+
 def _uses_native_video_url(model_id):
     """Backend-dynamic decision: which message shape does this backend+model accept?
 
@@ -1987,10 +1995,12 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_tokens, model_id, t
 
     def _build_frame_content_for_video(reason="fallback"):
         # Frame extraction fallback — known for Cosmos Reason1 7B and for OSS
-        # image-frame vLLM paths. No client cap: send duration x fps frames and
-        # let the model service reject oversized requests.
-        print(f"[vllm] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
-        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
+        # image-frame vLLM paths. NIM-local has a 5-image prompt limit on the
+        # current staging stack, so cap fallback frames there.
+        _max_frames = _nim_frame_fallback_limit() if INFERENCE_BACKEND == "nim_local" else None
+        _cap_note = f"max_frames={_max_frames}" if _max_frames else "no client cap"
+        print(f"[vllm] Extracting frames fps={fps} ({_cap_note}; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
         if not _frames_b64:
             raise RuntimeError("Could not extract frames (PyAV missing or video unreadable)")
         print(f"[vllm] {len(_frames_b64)} frames extracted", flush=True)
@@ -2267,8 +2277,9 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
 
     # Step 3: prepare media content
     def _build_hosted_frame_content(reason="fallback"):
-        print(f"[nim] Extracting frames fps={fps} (no client cap; {reason})", flush=True)
-        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=None)
+        _max_frames = _nim_frame_fallback_limit()
+        print(f"[nim] Extracting frames fps={fps} (max_frames={_max_frames}; {reason})", flush=True)
+        _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
         if not _frames_b64:
             raise RuntimeError("Could not extract frames from video (PyAV missing or video unreadable)")
         print(f"[nim] {len(_frames_b64)} frames extracted", flush=True)

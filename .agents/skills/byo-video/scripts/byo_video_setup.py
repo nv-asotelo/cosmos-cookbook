@@ -597,11 +597,24 @@ def _tower_label(towers):
 MODEL_TOWERS = _infer_model_towers(MODEL_SIZE, MODEL_ID, MODEL_NAME, _variant_labels)
 FRONTEND_TOWERS = _select_frontend_towers(MODEL_TOWERS)
 
+def _is_cosmos3_reasoner(model_size, towers, *names):
+    if "reasoning" not in towers or "generation" in towers:
+        return False
+    size = str(model_size or "").lower()
+    tokens = " ".join(str(n or "") for n in names).lower()
+    return (
+        size in {"c3-2b", "c3-8b", "c3-32b", "c3-super"}
+        or "cosmos3" in tokens
+        or "cosmos-3" in tokens
+    )
+
 def _build_playground_app(model_size, towers, *names):
     tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
     if "generation" in towers and "reasoning" not in towers:
         return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
     if "reasoning" in towers and "generation" not in towers:
+        if _is_cosmos3_reasoner(model_size, towers, *names):
+            return "/tmp/gradio_cr2_byo.py", "Cosmos3 classic BYO-video Gradio"
         return "/tmp/gradio_cosmos_reason_build.py", "Cosmos Reason Build-style playground"
     if "predict" in tokens or "video2world" in tokens or "text2world" in tokens:
         return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
@@ -618,7 +631,7 @@ else:
 USE_REASON_VITE = (
     FRONTEND == "nvidia_build"
     and "reasoning" in FRONTEND_TOWERS
-    and INFERENCE_BACKEND == "vllm"
+    and INFERENCE_BACKEND in {"vllm", "nim_local"}
     and MODEL_SIZE in {"C3-8B", "C3-super"}
 )
 USE_PREDICT_VITE = (
@@ -628,7 +641,12 @@ USE_PREDICT_VITE = (
 if USE_REASON_VITE and USE_PREDICT_VITE:
     _GRADIO_APP_LABEL = f"Cosmos Omni Gradio fallback for {MODEL_SIZE}"
 elif USE_REASON_VITE:
-    _GRADIO_APP_LABEL = f"Cosmos Reason Gradio fallback for {MODEL_SIZE}"
+    if GRADIO_APP.endswith("gradio_cr2_byo.py") and _is_cosmos3_reasoner(
+        MODEL_SIZE, FRONTEND_TOWERS, MODEL_ID, MODEL_NAME, _variant_labels
+    ):
+        _GRADIO_APP_LABEL = f"Cosmos3 classic Gradio fallback for {MODEL_SIZE}"
+    else:
+        _GRADIO_APP_LABEL = f"Cosmos Reason Gradio fallback for {MODEL_SIZE}"
 elif USE_PREDICT_VITE:
     _GRADIO_APP_LABEL = f"Cosmos Predict Gradio fallback for {MODEL_SIZE}"
 
