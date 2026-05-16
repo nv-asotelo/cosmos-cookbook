@@ -94,6 +94,17 @@ _STEP_DEFS = [
 ]
 _PHASE_INDEX = {phase: index for index, (phase, *_rest) in enumerate(_STEP_DEFS)}
 _DEFAULT_ESTIMATE_S = 643.0  # observed cosmos-reason2-8b switch on RTX PRO 6000 Blackwell
+_STEP_ESTIMATE_S = {
+    "starting": 2.0,
+    "validating": 2.0,
+    "launching_nim": 5.0,
+    "pulling": 70.0,
+    "starting_container": 8.0,
+    "waiting_nim": 540.0,
+    "nim_ready": 4.0,
+    "restarting_gradio": 12.0,
+    "ready": 0.0,
+}
 _ACTIVE_PHASES = {
     "starting", "validating", "launching_nim", "pulling",
     "starting_container", "waiting_nim", "nim_ready", "restarting_gradio",
@@ -132,6 +143,13 @@ def _step_details(state: Dict[str, Any], phase: str) -> list[Dict[str, Any]]:
         for item in history
         if isinstance(item, dict)
     }
+    using_estimated_durations = False
+    if not any(float(v or 0) > 0 for v in durations.values()) and phase in {"ready", "error"}:
+        total = float(state.get("last_success_elapsed_s") or state.get("elapsed_s") or _DEFAULT_ESTIMATE_S)
+        estimate_total = sum(_STEP_ESTIMATE_S.values()) or _DEFAULT_ESTIMATE_S
+        scale = total / estimate_total if estimate_total else 1.0
+        durations = {key: value * scale for key, value in _STEP_ESTIMATE_S.items()}
+        using_estimated_durations = True
     if phase in _ACTIVE_PHASES:
         try:
             durations[phase] = max(0.0, time.time() - float(state.get("phase_started_at") or time.time()))
@@ -164,7 +182,12 @@ def _step_details(state: Dict[str, Any], phase: str) -> list[Dict[str, Any]]:
             "status": status,
             "progress_pct": pct,
             "duration_s": round(float(durations.get(step_phase) or 0), 1),
-            "duration_label": _format_duration(float(durations.get(step_phase) or 0)),
+            "duration_label": (
+                f"~{_format_duration(float(durations.get(step_phase) or 0))}"
+                if using_estimated_durations and float(durations.get(step_phase) or 0) > 0
+                else _format_duration(float(durations.get(step_phase) or 0))
+            ),
+            "duration_estimated": using_estimated_durations,
         })
     return steps
 
