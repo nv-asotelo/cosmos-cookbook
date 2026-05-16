@@ -509,8 +509,8 @@ _WAREHOUSE_SYSTEM = "You are a helpful warehouse monitoring system."
 # (label, user_prompt, system_prompt, reasoning_on)
 # reasoning_on signals whether the prompt instructs the model to wrap its
 # chain-of-thought in <think>...</think>. The Gradio "Reasoning: ON/OFF"
-# badge reads this; the actual rendering of <think> blocks is handled by
-# _render_with_think() regardless.
+# control reads this and can append the same instruction to custom prompts;
+# the actual rendering of <think> blocks is handled by _render_with_think().
 DEMO_PROMPTS = [
     ("General description",
      "Describe what is happening in this video. What are the key actions, objects, and events?",
@@ -588,22 +588,47 @@ DEMO_PROMPTS = [
 ]
 
 
-def _reasoning_badge_html(reasoning_on):
-    """Inline pill rendered above the response area. NV-green for ON,
-    slate-300 for OFF — both readable on Gradio's light theme."""
-    if reasoning_on:
-        return (
-            '<div style="display:inline-flex;align-items:center;gap:6px;'
-            'background:#76b900;color:#0f172a;padding:4px 12px;'
-            'border-radius:14px;font-size:0.85em;font-weight:600;'
-            'margin-bottom:6px">🧠 Reasoning: ON</div>'
-        )
+REASONING_FORMAT_INSTRUCTION = (
+    "Answer the question using the following format:\n\n"
+    "<think>\n"
+    "Your reasoning.\n"
+    "</think>\n\n"
+    "Write your final answer immediately after the </think> tag."
+)
+_REASONING_FORMAT_SENTINEL = "Answer the question using the following format:"
+_REASONING_FINAL_SENTINEL = "Write your final answer immediately after the </think> tag"
+
+
+def _prompt_has_reasoning_instruction(prompt):
+    text = prompt or ""
     return (
-        '<div style="display:inline-flex;align-items:center;gap:6px;'
-        'background:#cbd5e1;color:#0f172a;padding:4px 12px;'
-        'border-radius:14px;font-size:0.85em;font-weight:600;'
-        'margin-bottom:6px">○ Reasoning: OFF</div>'
+        _REASONING_FORMAT_SENTINEL in text
+        and "<think>" in text
+        and "</think>" in text
+        and _REASONING_FINAL_SENTINEL in text
     )
+
+
+def _append_reasoning_instruction(prompt):
+    text = (prompt or "").rstrip()
+    if _prompt_has_reasoning_instruction(text):
+        return text
+    return f"{text}\n\n{REASONING_FORMAT_INSTRUCTION}".strip()
+
+
+def _remove_reasoning_instruction(prompt):
+    text = (prompt or "").rstrip()
+    if text.endswith(REASONING_FORMAT_INSTRUCTION):
+        return text[: -len(REASONING_FORMAT_INSTRUCTION)].rstrip()
+    return text
+
+
+def _reasoning_button_label(reasoning_on):
+    return "🧠 Reasoning: ON" if reasoning_on else "○ Reasoning: OFF"
+
+
+def _reasoning_button_update(reasoning_on):
+    return gr.update(value=_reasoning_button_label(reasoning_on))
 
 HF_STEPS = [
     "Resolve checkpoint & GPU",
@@ -3633,11 +3658,14 @@ with gr.Blocks(
     # ── Output row ───────────────────────────────────────────────────────────
     with gr.Row():
         with gr.Column(scale=2):
-            # Initial badge state matches the first DEMO_PROMPT (which is the
-            # default selection in the dropdown). Updated by on_demo().
-            reasoning_badge = gr.HTML(
-                value=_reasoning_badge_html(DEMO_PROMPTS[0][3]),
-                show_label=False,
+            # Initial control state matches the first DEMO_PROMPT (which is the
+            # default selection in the dropdown). Updated by on_demo() and
+            # direct user edits to the prompt.
+            reasoning_toggle = gr.Button(
+                value=_reasoning_button_label(DEMO_PROMPTS[0][3]),
+                size="sm",
+                variant="secondary",
+                elem_id="reasoning-toggle",
             )
             response_out = gr.HTML(label="Model Response", value="", show_label=True)
         with gr.Column(scale=1):
@@ -3804,17 +3832,39 @@ with gr.Blocks(
     )
 
     def on_demo(name):
-        """Pick a demo: populate user prompt + system prompt + Reasoning badge."""
+        """Pick a demo: populate user prompt + system prompt + Reasoning control."""
         for entry in DEMO_PROMPTS:
             if entry[0] == name:
                 _, user_p, system_p, reasoning_on = entry
-                return user_p, system_p, _reasoning_badge_html(reasoning_on)
-        return DEFAULT_PROMPT, DEFAULT_SYSTEM, _reasoning_badge_html(False)
+                return user_p, system_p, _reasoning_button_update(reasoning_on)
+        return DEFAULT_PROMPT, DEFAULT_SYSTEM, _reasoning_button_update(False)
 
     demo_picker.change(
         on_demo,
         inputs=[demo_picker],
-        outputs=[user_box, system_box, reasoning_badge],
+        outputs=[user_box, system_box, reasoning_toggle],
+    )
+
+    def _toggle_reasoning_prompt(prompt):
+        prompt = prompt or ""
+        if _prompt_has_reasoning_instruction(prompt):
+            next_prompt = _remove_reasoning_instruction(prompt)
+            next_on = _prompt_has_reasoning_instruction(next_prompt)
+            return next_prompt, _reasoning_button_update(next_on)
+        return _append_reasoning_instruction(prompt), _reasoning_button_update(True)
+
+    def _sync_reasoning_toggle(prompt):
+        return _reasoning_button_update(_prompt_has_reasoning_instruction(prompt))
+
+    reasoning_toggle.click(
+        _toggle_reasoning_prompt,
+        inputs=[user_box],
+        outputs=[user_box, reasoning_toggle],
+    )
+    user_box.change(
+        _sync_reasoning_toggle,
+        inputs=[user_box],
+        outputs=[reasoning_toggle],
     )
 
     if INFERENCE_BACKEND == "vllm":
