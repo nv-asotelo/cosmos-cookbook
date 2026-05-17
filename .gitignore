@@ -198,3 +198,8 @@ apps/**/.next/
 apps/**/dist/
 apps/**/.npm-cache/
 apps/**/*.tsbuildinfo
+
+# Sprint outputs (benchmark results, model output snapshots, decks/reports)
+# Local-only by policy: results of unreleased models must not land in a public
+# fork. Implementation code stays tracked; reports/numbers/artifacts do not.
+outputs/
