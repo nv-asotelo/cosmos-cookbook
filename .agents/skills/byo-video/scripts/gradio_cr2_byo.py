@@ -4154,6 +4154,7 @@ with gr.Blocks(
                     placeholder="Recent custom: nvidia/Cosmos3-Super-Reasoner",
                 )
                 custom_nim_register_btn = gr.Button("Add custom NIM to dropdown", variant="secondary")
+            nim_switch_refresh_timer = gr.Timer(value=2.0, active=True)
         else:
             nim_switch_panel = gr.HTML(value="", visible=False)
             nim_switch_btn = gr.Button(visible=False)
@@ -4163,6 +4164,7 @@ with gr.Blocks(
             custom_nim_served = gr.Textbox(visible=False)
             custom_nim_label = gr.Textbox(visible=False)
             custom_nim_register_btn = gr.Button(visible=False)
+            nim_switch_refresh_timer = None
 
         with gr.Row():
             fps_slider = gr.Slider(
@@ -4596,6 +4598,18 @@ with gr.Blocks(
             outputs=[vllm_swap_banner, download_load_btn, fps_slider, maxpx_slider],
         )
     elif INFERENCE_BACKEND == "nim_local":
+        def _refresh_nim_switch_panel(label):
+            return _nim_switch_panel_html(label), _nim_switch_button_update(label)
+
+        if nim_switch_refresh_timer is not None:
+            nim_switch_refresh_timer.tick(
+                fn=_refresh_nim_switch_panel,
+                inputs=[checkpoint_dd],
+                outputs=[nim_switch_panel, nim_switch_btn],
+                show_progress="hidden",
+                queue=False,
+                api_name=False,
+            )
         checkpoint_dd.change(
             fn=_on_nim_dropdown_change,
             inputs=[checkpoint_dd],
