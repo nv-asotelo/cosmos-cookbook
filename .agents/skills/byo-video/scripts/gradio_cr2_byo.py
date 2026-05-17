@@ -1216,6 +1216,11 @@ def _append_reasoning_instruction(prompt):
 
 def _remove_reasoning_instruction(prompt):
     text = (prompt or "").rstrip()
+    marker_index = text.find(_REASONING_FORMAT_SENTINEL)
+    if marker_index != -1:
+        reasoning_block = text[marker_index:]
+        if "<think>" in reasoning_block and "</think>" in reasoning_block:
+            return text[:marker_index].rstrip()
     if text.endswith(REASONING_FORMAT_INSTRUCTION):
         return text[: -len(REASONING_FORMAT_INSTRUCTION)].rstrip()
     return text
