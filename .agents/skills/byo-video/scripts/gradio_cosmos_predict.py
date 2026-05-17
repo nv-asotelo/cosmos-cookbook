@@ -57,7 +57,7 @@ NIM_IMAGE = os.environ.get("NIM_IMAGE") or os.environ.get("IMAGE") or ""
 IS_COSMOS3_GENERATOR = "cosmos3" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower() and "gen" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower()
 DEFAULT_COLLECTION = os.environ.get("COSMOS_MODEL_COLLECTION") or ("cosmos3" if IS_COSMOS3_GENERATOR else "cosmos-predict1")
 DEFAULT_GUIDANCE = float(os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if IS_COSMOS3_GENERATOR else "7"))
-DEFAULT_STEPS = int(os.environ.get("COSMOS_VIDEO_STEPS", "4" if IS_COSMOS3_GENERATOR else "35"))
+DEFAULT_STEPS = int(os.environ.get("COSMOS_VIDEO_STEPS", "35"))
 STAGED_CHECKPOINT_FILE = Path(os.environ.get("PREDICT_STAGED_MODEL_FILE", "/tmp/nvidia_build_predict_staged_model.json"))
 INFER_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1/infer"
 NIM_BASE_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1"
@@ -889,7 +889,7 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                 seed = gr.Number(label="Seed (-1 = random)", value=-1, precision=0)
                 gr.Markdown(
                     "Quick staging defaults are controlled by COSMOS_VIDEO_HEIGHT/WIDTH/FRAMES/FPS. "
-                    "For the Cosmos3 generator NIM, start with 256p, 25 frames, and low steps for smoke tests."
+                    "For the Cosmos3 generator NIM, start with 256p, 25 frames, and 35 steps for quality previews."
                 )
             submit = gr.Button("Generate New World", variant="primary")
         with gr.Column(scale=1):

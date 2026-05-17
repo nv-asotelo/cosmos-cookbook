@@ -1303,7 +1303,7 @@ launch_env = {
     "COSMOS_VIDEO_WIDTH": os.environ.get("COSMOS_VIDEO_WIDTH", "448" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "1280"),
     "COSMOS_VIDEO_FRAMES": os.environ.get("COSMOS_VIDEO_FRAMES", "25" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "121"),
     "COSMOS_VIDEO_FPS":   os.environ.get("COSMOS_VIDEO_FPS", "24"),
-    "COSMOS_VIDEO_STEPS": os.environ.get("COSMOS_VIDEO_STEPS", "4" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "35"),
+    "COSMOS_VIDEO_STEPS": os.environ.get("COSMOS_VIDEO_STEPS", "35"),
     "COSMOS_GUIDANCE_SCALE": os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "7"),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),

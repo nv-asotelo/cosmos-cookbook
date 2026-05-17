@@ -24,7 +24,7 @@ const QUICK_VIDEO_PARAMS = {
   aspect_ratio: "16,9",
   frames_count: 25,
   frames_per_sec: 24,
-  num_steps: 4,
+  num_steps: 35,
   guidance: 6
 };
 const ENABLE_ACTION_POLICY =
@@ -228,7 +228,7 @@ const GENERATOR_MODES: Array<{
   {
     id: "Text-to-Video",
     label: "Text-to-Video",
-    description: "Prompt-only generation with quick staging defaults.",
+    description: "Prompt-only generation with quality staging defaults.",
     icon: FileVideo,
     enabled: true,
     visible: true
