@@ -1221,6 +1221,121 @@ def _remove_reasoning_instruction(prompt):
     return text
 
 
+def _example_asset_path(name):
+    candidates = [
+        os.environ.get("BYO_VIDEO_EXAMPLES_DIR"),
+        "/tmp/byo_video_examples",
+        os.path.join(os.getcwd(), "apps/nvidia-build-reason-vite/public/examples"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../apps/nvidia-build-reason-vite/public/examples"),
+        os.path.expanduser("~/cosmos-reason2/apps/nvidia-build-reason-vite/public/examples"),
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        path = os.path.abspath(os.path.join(base, name))
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _classic_example_rows():
+    """Examples ported from the Reason Vite app, shaped for Gradio inputs."""
+    image_px = min(_INITIAL_MAX_PIXELS, 524288)
+    video_px = _INITIAL_MAX_PIXELS
+    agibot = _example_asset_path("agibot.mp4")
+    robot_tape = _example_asset_path("robot_tape.png")
+    rows = [
+        [
+            agibot,
+            None,
+            _append_reasoning_instruction("What can be the next immediate action?"),
+            _GENERIC_SYSTEM,
+            4,
+            video_px,
+            4096,
+            0.6,
+            0.95,
+            1.0,
+        ],
+        [
+            None,
+            robot_tape,
+            _append_reasoning_instruction(
+                'You are given the task "Move the tape into the basket". Specify the '
+                "2D trajectory your end effector should follow in pixel space. Return "
+                'the trajectory coordinates in JSON format like this: {"point_2d": [x, y], '
+                '"label": "gripper trajectory"}.'
+            ),
+            _GENERIC_SYSTEM,
+            2,
+            image_px,
+            4096,
+            0.3,
+            0.3,
+            1.2,
+        ],
+        [
+            "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_rejection_sampling.mp4",
+            None,
+            _append_reasoning_instruction(
+                "Approve or reject this generated video for inclusion in a dataset for "
+                "physical world model ai training. It must perfectly adhere to physics, "
+                "object permanence, and have no anomalies. Any issue or concern causes "
+                "rejection. Answer with Approve or Reject only."
+            ),
+            _GENERIC_SYSTEM,
+            4,
+            video_px,
+            4096,
+            0.3,
+            0.3,
+            1.2,
+        ],
+        [
+            "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_warehouse.mp4",
+            None,
+            _append_reasoning_instruction("Which worker picked up the dropped box?"),
+            _WAREHOUSE_SYSTEM,
+            2,
+            video_px,
+            4096,
+            0.3,
+            0.3,
+            1.2,
+        ],
+        [
+            None,
+            "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_forklift.jpg",
+            (
+                "Locate the bounding box of the load and determine if its size and "
+                "weight of load within the forklift's limits. Estimate weights. "
+                "Return all as json. Include json location, estimated weight of the "
+                "load, and if it's in the limit."
+            ),
+            _GENERIC_SYSTEM,
+            2,
+            image_px,
+            4096,
+            0.3,
+            0.3,
+            1.2,
+        ],
+        [
+            "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_mail_package.mp4",
+            None,
+            _append_reasoning_instruction("Is the person allowed to pick up the packages?"),
+            _GENERIC_SYSTEM,
+            2,
+            video_px,
+            4096,
+            0.3,
+            0.8,
+            1.2,
+        ],
+    ]
+    return [row for row in rows if row[0] or row[1]]
+
+
 def _reasoning_button_label(reasoning_on):
     return "🧠 Reasoning: ON" if reasoning_on else "○ Reasoning: OFF"
 
@@ -1762,9 +1877,93 @@ _REASONING_PANEL_CSS = """
   color: #8ed600;
   text-decoration: underline;
 }
+.byo-examples-trigger-wrap {
+  margin: -6px 0 14px 0;
+}
+.byo-examples-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #76b900;
+  font-weight: 800;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: inherit;
+}
+.byo-examples-trigger::after {
+  content: '▸';
+  font-size: 0.9em;
+}
+#byo-examples-modal {
+  display: none !important;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(2px);
+}
+body.byo-examples-open #byo-examples-modal {
+  display: flex !important;
+}
+#byo-examples-dialog {
+  width: min(1080px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--border-color-primary, #d1d5db);
+  border-radius: 8px;
+  background: var(--body-background-fill, #ffffff);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.32);
+}
+.byo-examples-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.byo-examples-title {
+  margin: 0;
+  color: var(--body-text-color, #111827);
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.byo-examples-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-color-primary, #d1d5db);
+  border-radius: 6px;
+  color: var(--body-text-color, #111827);
+  background: var(--button-secondary-background-fill, #f3f4f6);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.byo-examples-close:hover {
+  background: var(--button-secondary-background-fill-hover, #e5e7eb);
+}
+#byo-examples-dialog .examples {
+  margin-top: 0;
+}
 @media (max-width: 900px) {
   .active-model-box {
     grid-template-columns: 1fr;
+  }
+  #byo-examples-modal {
+    padding: 12px;
+  }
+  #byo-examples-dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
   }
 }
 .ap-overlay-frame {
@@ -2287,6 +2486,32 @@ def _active_model_details_html(details_url):
           <a class="active-model-link" href="{_html.escape(details_url)}" target="_blank" rel="noreferrer">Full JSON details</a>
         </div>
       </details>
+    </div>
+    """
+
+
+def _examples_modal_button_html():
+    return """
+    <div class="byo-examples-trigger-wrap">
+      <button
+        type="button"
+        class="byo-examples-trigger"
+        aria-haspopup="dialog"
+        onclick="document.body.classList.add('byo-examples-open')"
+      >View Examples</button>
+    </div>
+    """
+
+
+def _examples_modal_header_html():
+    return """
+    <div class="byo-examples-header">
+      <h2 class="byo-examples-title">Select an Example</h2>
+      <button
+        type="button"
+        class="byo-examples-close"
+        onclick="document.body.classList.remove('byo-examples-open')"
+      >Close</button>
     </div>
     """
 
@@ -3903,6 +4128,7 @@ with gr.Blocks(
         f"Select a checkpoint from the dropdown to load it into vLLM."
     )
     gr.HTML(_active_model_details_html("/api/active-model"))
+    gr.HTML(_examples_modal_button_html())
 
     # ── Input row ───────────────────────────────────────────────────────────
     with gr.Row():
@@ -4332,6 +4558,28 @@ with gr.Blocks(
                                              variant="stop", scale=0, min_width=220)
             disk_refresh_btn.click(fn=_disk_status_html,  inputs=[], outputs=[disk_status_out])
             clean_cache_btn.click( fn=_clean_hf_cache,    inputs=[], outputs=[disk_status_out])
+
+    with gr.Column(elem_id="byo-examples-modal", elem_classes=["byo-examples-modal"]):
+        with gr.Column(elem_id="byo-examples-dialog", elem_classes=["byo-examples-dialog"]):
+            gr.HTML(_examples_modal_header_html())
+            gr.Examples(
+                examples=_classic_example_rows(),
+                inputs=[
+                    video_input,
+                    image_input,
+                    user_box,
+                    system_box,
+                    fps_slider,
+                    maxpx_slider,
+                    maxtok_slider,
+                    temp_slider,
+                    top_p_slider,
+                    rep_penalty_slider,
+                ],
+                label="Examples",
+                examples_per_page=6,
+                cache_examples=False,
+            )
 
     # ── Output row ───────────────────────────────────────────────────────────
     with gr.Row():
