@@ -1,7 +1,12 @@
-// Shared server-side client for the Cosmos3 Ray Serve API.
+// Shared server-side client for Cosmos generation backends.
 //
 // Env var priority for the Ray Serve base URL:
 //   COSMOS3_BASE_URL > RAY_SERVE_BASE_URL > VLLM_BASE_URL > http://localhost:8000 (default).
+//
+// NIM-local mode:
+//   Set COSMOS3_BACKEND=nim_local or INFERENCE_BACKEND=nim_local and point
+//   NIM_BASE_URL/VLLM_BASE_URL at http://localhost:8000/v1. Requests are sent
+//   to POST /v1/infer using the staging Cosmos3 Generation NIM payload shape.
 //
 // The Ray Serve endpoint is a single POST /generate that accepts the Pydantic
 // `OmniSampleOverrides` shape. `vision_path` may be a local filesystem path on
@@ -97,6 +102,37 @@ function resolveBaseUrl() {
   ).replace(/\/$/, "");
 }
 
+function resolveBackend() {
+  const explicit = String(
+    process.env.COSMOS3_BACKEND ||
+      process.env.PREDICT_BACKEND ||
+      process.env.INFERENCE_BACKEND ||
+      ""
+  ).toLowerCase();
+  if (explicit.includes("nim")) return "nim";
+  if (process.env.NIM_INFER_URL || process.env.COSMOS3_INFER_URL) return "nim";
+  return "ray";
+}
+
+function resolveNimBaseUrl() {
+  const raw =
+    process.env.NIM_BASE_URL ||
+    process.env.VLLM_BASE_URL ||
+    process.env.COSMOS3_NIM_BASE_URL ||
+    process.env.PREDICT_BASE_URL ||
+    "http://localhost:8000/v1";
+  const trimmed = raw.replace(/\/$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+function resolveNimInferUrl() {
+  return (
+    process.env.NIM_INFER_URL ||
+    process.env.COSMOS3_INFER_URL ||
+    `${resolveNimBaseUrl()}/infer`
+  ).replace(/\/$/, "");
+}
+
 function parseDataUrl(dataUrl) {
   // data:<mime>;base64,<payload>
   const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(dataUrl || "");
@@ -120,6 +156,29 @@ async function persistUpload(dataUrl) {
   const filepath = path.join(UPLOAD_DIR, `${sha1}.${ext}`);
   await writeFile(filepath, buf);
   return filepath;
+}
+
+async function mediaFromDataUrl(dataUrl) {
+  const parsed = parseDataUrl(dataUrl);
+  if (!parsed) return null;
+  return {
+    mime: parsed.mime,
+    b64: parsed.buf.toString("base64")
+  };
+}
+
+async function mediaFromUrl(url) {
+  if (!/^https?:\/\//i.test(String(url || ""))) return null;
+  const response = await undiciFetch(url, {
+    ...(RAY_SERVE_AGENT ? { dispatcher: RAY_SERVE_AGENT } : {})
+  });
+  if (!response.ok) throw new Error(`Failed to fetch conditioning media (${response.status})`);
+  const arrayBuffer = await response.arrayBuffer();
+  const mime = response.headers.get("content-type")?.split(";")[0] || mimeForFile(url);
+  return {
+    mime,
+    b64: Buffer.from(arrayBuffer).toString("base64")
+  };
 }
 
 function mimeForFile(filepath) {
@@ -204,6 +263,173 @@ function checkRayServeBudget(params) {
   };
 }
 
+function parseAspectRatio(aspectRatio) {
+  const raw = String(aspectRatio || "16,9").replace(":", ",");
+  const [w, h] = raw.split(",").map((part) => Number(part.trim()));
+  if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) return [w, h];
+  return [16, 9];
+}
+
+function normalizeNimFrameCount(value) {
+  const requested = Math.max(25, Math.round(Number(value ?? 25)));
+  const remainder = (requested - 1) % 4;
+  if (remainder === 0) return requested;
+  return requested + (4 - remainder);
+}
+
+function payloadParamsForNim(params = {}) {
+  return {
+    resolution: String(params.resolution ?? "256"),
+    num_output_frames: normalizeNimFrameCount(params.num_frames ?? params.frames_count ?? 25),
+    fps: Math.max(1, Number(params.fps ?? params.frames_per_sec ?? 24))
+  };
+}
+
+async function resolveNimMedia({ mediaDataUrl, visionPath, mediaKind }) {
+  const media = mediaDataUrl ? await mediaFromDataUrl(mediaDataUrl) : await mediaFromUrl(visionPath);
+  if (!media) return null;
+  const field =
+    mediaKind === "video" || media.mime.startsWith("video/")
+      ? "video"
+      : "image";
+  return { ...media, field };
+}
+
+function firstString(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0);
+}
+
+function normalizeNimFiles(data) {
+  const files = [];
+  const b64Video = firstString(
+    data?.b64_video,
+    data?.video_b64,
+    data?.output_video,
+    data?.outputs?.b64_video,
+    data?.outputs?.video_b64,
+    data?.output?.b64_video
+  );
+  const b64Image = firstString(
+    data?.b64_image,
+    data?.image_b64,
+    data?.output_image,
+    data?.outputs?.b64_image,
+    data?.outputs?.image_b64,
+    data?.output?.b64_image
+  );
+  const assetUrl = firstString(data?.asset_url, data?.url, data?.video_url, data?.output?.asset_url);
+
+  if (b64Video) files.push({ path: "nim-output.mp4", b64: b64Video, mime: "video/mp4" });
+  if (b64Image) files.push({ path: "nim-output.jpg", b64: b64Image, mime: "image/jpeg" });
+  if (assetUrl) files.push({ path: assetUrl, b64: null, mime: mimeForFile(assetUrl), url: assetUrl });
+
+  if (Array.isArray(data?.files)) {
+    for (const file of data.files) {
+      const b64 = firstString(file?.b64, file?.base64, file?.data);
+      const url = firstString(file?.url, file?.asset_url);
+      if (b64 || url) {
+        files.push({
+          path: file?.path || file?.name || url || "nim-output",
+          b64: b64 || null,
+          mime: file?.mime || mimeForFile(file?.path || file?.name || url || "mp4"),
+          url
+        });
+      }
+    }
+  }
+  return files;
+}
+
+async function submitNimGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath } = {}) {
+  const p = params || {};
+  let media = null;
+  try {
+    media = await resolveNimMedia({ mediaDataUrl, visionPath, mediaKind });
+  } catch (error) {
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : "Failed to prepare NIM conditioning media",
+      files: [],
+      payload: { vision_path: visionPath || null }
+    };
+  }
+
+  const payload = {
+    prompt: prompt || "",
+    guidance_scale: Number(p.guidance ?? 6),
+    steps: Number(p.num_steps ?? 4),
+    ...payloadParamsForNim(p)
+  };
+  const seed = Number(p.seed);
+  if (Number.isFinite(seed) && seed >= 0) payload.seed = Math.floor(seed);
+  if (p.negative_prompt) payload.negative_prompt = p.negative_prompt;
+  if (process.env.NIM_INCLUDE_MODEL === "1") {
+    payload.model = process.env.NIM_SERVED_MODEL_NAME || model || process.env.MODEL_NAME;
+  }
+  if (media?.field === "video") {
+    return {
+      status: "error",
+      message: "The staging Cosmos3 Generation NIM currently supports prompt-only T2V and image-conditioned I2V through /v1/infer.",
+      files: [],
+      payload: { ...payload, vision_path: visionPath || null }
+    };
+  }
+  if (media) payload[media.field] = media.b64;
+
+  const inferUrl = resolveNimInferUrl();
+  let response;
+  try {
+    response = await undiciFetch(inferUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      ...(RAY_SERVE_AGENT ? { dispatcher: RAY_SERVE_AGENT } : {})
+    });
+  } catch (error) {
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : "NIM /v1/infer request failed",
+      files: [],
+      payload: { ...payload, image: payload.image ? "<base64 omitted>" : undefined, video: payload.video ? "<base64 omitted>" : undefined }
+    };
+  }
+
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
+  const redactedPayload = {
+    ...payload,
+    image: payload.image ? `<${payload.image.length} base64 chars>` : undefined,
+    video: payload.video ? `<${payload.video.length} base64 chars>` : undefined
+  };
+
+  if (!response.ok) {
+    return {
+      status: "error",
+      message: data?.message || data?.error || `NIM /v1/infer returned HTTP ${response.status}`,
+      files: [],
+      payload: redactedPayload,
+      raw: data
+    };
+  }
+
+  const files = normalizeNimFiles(data);
+  return {
+    status: data?.status || (files.length ? "success" : "error"),
+    message: data?.message || (files.length ? "" : "NIM returned no video, image, or asset URL"),
+    files,
+    content: data?.content || data?.output || null,
+    action: data?.action || data?.output?.action || null,
+    payload: redactedPayload,
+    raw: data,
+    backend: "nim_local"
+  };
+}
+
 async function resolveRayOutputDir(baseUrl) {
   const envOutputDir = process.env.COSMOS3_OUTPUT_DIR || process.env.RAY_SERVE_OUTPUT_DIR || process.env.COSMOS3_RAY_OUTPUT_DIR;
   if (envOutputDir) return envOutputDir;
@@ -280,6 +506,10 @@ async function encodeOutputFile(filepath, { baseUrl, outputDir } = {}) {
 }
 
 export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath } = {}) {
+  if (resolveBackend() === "nim") {
+    return submitNimGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath });
+  }
+
   const baseUrl = resolveBaseUrl();
   const p = params || {};
   void mediaKind;

@@ -10,7 +10,7 @@ the hosted OpenAPI request preview.
 
 Self-hosted NIM compatibility is preserved through POST /v1/infer:
   payload: {"prompt", "video"|"image" (base64), "seed", "guidance_scale",
-            "steps", "video_params": {...}}
+            "steps", "resolution", "num_output_frames", "fps"}
   response: {"b64_video": "<base64 mp4>", "seed": <int>}
 
 Hosted Build OpenAPI schema observed 2026-05-12:
@@ -45,9 +45,20 @@ NIM_HOST = os.environ.get("NIM_HOST", "localhost")
 NIM_PORT = int(os.environ.get("NIM_PORT", "8000"))
 GRADIO_PORT = int(os.environ.get("GRADIO_PORT", "7860"))
 GRADIO_SHARE = os.environ.get("GRADIO_SHARE", "true").lower() in {"1", "true", "yes", "on"}
-DEFAULT_COLLECTION = os.environ.get("COSMOS_MODEL_COLLECTION", "cosmos-predict1")
-DEFAULT_MODEL_ID = os.environ.get("COSMOS_MODEL_ID", "nvidia/cosmos-predict1-7b-video2world")
+DEFAULT_MODEL_ID = (
+    os.environ.get("COSMOS_MODEL_ID")
+    or os.environ.get("NIM_SERVED_MODEL_NAME")
+    or os.environ.get("MODEL_NAME")
+    or os.environ.get("MODEL_ID")
+    or "nvidia/cosmos-predict1-7b-video2world"
+)
 DEFAULT_SCHEMA = os.environ.get("COSMOS_PREDICT_BACKEND_SCHEMA", "local_nim")
+NIM_IMAGE = os.environ.get("NIM_IMAGE") or os.environ.get("IMAGE") or ""
+IS_COSMOS3_GENERATOR = "cosmos3" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower() and "gen" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower()
+DEFAULT_COLLECTION = os.environ.get("COSMOS_MODEL_COLLECTION") or ("cosmos3" if IS_COSMOS3_GENERATOR else "cosmos-predict1")
+DEFAULT_GUIDANCE = float(os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if IS_COSMOS3_GENERATOR else "7"))
+DEFAULT_STEPS = int(os.environ.get("COSMOS_VIDEO_STEPS", "4" if IS_COSMOS3_GENERATOR else "35"))
+STAGED_CHECKPOINT_FILE = Path(os.environ.get("PREDICT_STAGED_MODEL_FILE", "/tmp/nvidia_build_predict_staged_model.json"))
 INFER_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1/infer"
 NIM_BASE_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1"
 BUILD_MODEL_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b"
@@ -62,7 +73,7 @@ COLLECTION_CHOICES = [
 ]
 
 MODEL_HINTS = {
-    "cosmos3": "nvidia/cosmos-3",
+    "cosmos3": DEFAULT_MODEL_ID if "cosmos3" in DEFAULT_MODEL_ID.lower() or "cosmos3" in NIM_IMAGE.lower() else "nvidia/cosmos-3",
     "nvidia-cosmos-2": "nvidia/cosmos-2",
     "cosmos-predict25": "nvidia/cosmos-predict2.5",
     "cosmos-reason1": "nvidia/cosmos-reason1",
@@ -71,10 +82,10 @@ MODEL_HINTS = {
 }
 
 LOCAL_VIDEO_PARAMS = {
-    "height": 704,
-    "width": 1280,
-    "frames_count": 121,
-    "frames_per_sec": 24,
+    "height": int(os.environ.get("COSMOS_VIDEO_HEIGHT", "704")),
+    "width": int(os.environ.get("COSMOS_VIDEO_WIDTH", "1280")),
+    "frames_count": int(os.environ.get("COSMOS_VIDEO_FRAMES", "121")),
+    "frames_per_sec": int(os.environ.get("COSMOS_VIDEO_FPS", "24")),
 }
 
 BUILD_VIDEO_SPEC = {
@@ -289,7 +300,7 @@ def _image_data_url(path: str) -> str:
 
 
 def _progress_frame_sources(world_mode: str, video_file, image_file) -> list[str]:
-    if world_mode == "Image-to-World":
+    if world_mode in {"Image-to-World", "Image-to-Video"}:
         image_path = _input_path(image_file)
         if not image_path or not Path(image_path).exists():
             return []
@@ -450,6 +461,25 @@ def build_openapi_payload(prompt: str, input_image_index: int, seed: int | float
     return payload
 
 
+def _is_cosmos3_generator() -> bool:
+    return IS_COSMOS3_GENERATOR
+
+
+def _nim_resolution_key() -> str:
+    height = int(LOCAL_VIDEO_PARAMS["height"])
+    if height <= 256:
+        return "256"
+    if height <= 480:
+        return "480"
+    return "720"
+
+
+def _nim_frame_count(value: int | float) -> int:
+    requested = max(25, round(float(value)))
+    remainder = (requested - 1) % 4
+    return requested if remainder == 0 else requested + (4 - remainder)
+
+
 def build_local_payload(
     world_mode: str,
     media_b64: str,
@@ -458,14 +488,31 @@ def build_local_payload(
     steps: int,
     seed: int | float | None,
 ) -> dict:
-    media_field = "video" if world_mode == "Video-to-World" else "image"
+    if _is_cosmos3_generator():
+        payload = {
+            "prompt": prompt or "",
+            "guidance_scale": min(7.0, max(1.0, float(guidance_scale))),
+            "steps": int(steps),
+            "resolution": _nim_resolution_key(),
+            "num_output_frames": _nim_frame_count(LOCAL_VIDEO_PARAMS["frames_count"]),
+            "fps": float(LOCAL_VIDEO_PARAMS["frames_per_sec"]),
+        }
+        if media_b64:
+            payload["image"] = media_b64
+        seed_int = _seed_value(seed)
+        if seed_int is not None:
+            payload["seed"] = seed_int
+        return payload
+
     payload = {
         "prompt": prompt or "",
-        media_field: media_b64,
         "guidance_scale": float(guidance_scale),
         "steps": int(steps),
         "video_params": LOCAL_VIDEO_PARAMS,
     }
+    if media_b64:
+        media_field = "video" if world_mode in {"Video-to-World", "Video-to-Video"} else "image"
+        payload[media_field] = media_b64
     seed_int = _seed_value(seed)
     if seed_int is not None:
         payload["seed"] = seed_int
@@ -530,14 +577,34 @@ def generate(
     backend_schema: str,
 ):
     prep_info = ""
-    source_path = _input_path(video_file if world_mode == "Video-to-World" else image_file)
-    source_name = Path(source_path).name if source_path else "conditioning media"
-    frame_sources = _progress_frame_sources(world_mode, video_file, image_file)
+    if world_mode == "Text-to-Video":
+        source_path = ""
+        source_name = "prompt only"
+        frame_sources = []
+    else:
+        source_path = _input_path(video_file if world_mode == "Video-to-World" else image_file)
+        source_name = Path(source_path).name if source_path else "conditioning media"
+        frame_sources = _progress_frame_sources(world_mode, video_file, image_file)
+
+    if _is_cosmos3_generator() and world_mode == "Video-to-World":
+        yield _progress_html(0, [], "unsupported mode", "error"), None, _diagnostic_markdown(
+            "frontend",
+            "The staged Cosmos3 generator NIM supports Text-to-Video and Image-to-Video.",
+            "Video-to-World is not exposed by this /v1/infer contract.",
+            "The selected backend is the staging cosmos3-gen NIM, whose OpenAPI schema accepts prompt plus optional image.",
+            ["Switch to Text-to-Video or Image-to-Video."],
+            INFER_URL,
+        ), None
+        return
+
     yield _progress_html(5, frame_sources, source_name), None, (
         "**The autoregressive model is working:** Preparing conditioning media."
     ), None
 
-    if world_mode == "Video-to-World":
+    if world_mode == "Text-to-Video":
+        media_b64 = ""
+        prep_info = "Prompt-only generation; no conditioning media included."
+    elif world_mode == "Video-to-World":
         if not source_path:
             yield _progress_html(0, [], "missing video", "error"), None, _diagnostic_markdown(
                 "frontend",
@@ -553,10 +620,10 @@ def generate(
         if not source_path:
             yield _progress_html(0, [], "missing image", "error"), None, _diagnostic_markdown(
                 "frontend",
-                "Upload an image for Image-to-World mode.",
+                f"Upload an image for {world_mode} mode.",
                 "No conditioning image was included in the request.",
                 "Generate was pressed before an image was loaded.",
-                ["Upload a JPEG/PNG input or choose Video-to-World and upload an MP4."]
+                ["Upload a JPEG/PNG input or choose Text-to-Video."]
             ), None
             return
         media_b64 = _b64_file(source_path)
@@ -661,6 +728,8 @@ def generate(
 
 
 def update_inputs(mode):
+    if mode == "Text-to-Video":
+        return gr.update(visible=False), gr.update(visible=False), gr.update(value=0)
     if mode == "Video-to-World":
         return gr.update(visible=True), gr.update(visible=False), gr.update(value=0)
     return gr.update(visible=False), gr.update(visible=True), gr.update(value=0)
@@ -672,17 +741,20 @@ def update_model_hint(collection: str):
 
 def hero_markup(model_id: str) -> str:
     display_model = html.escape(model_id or DEFAULT_MODEL_ID)
+    image_badge = f'<span class="nv-badge">Staged image: {html.escape(NIM_IMAGE.split("/")[-1])}</span>' if NIM_IMAGE else ""
     return f"""
 <div class="nv-hero">
   <p class="nv-eyebrow">nvidia</p>
   <h1 class="nv-title">{display_model}</h1>
-  <p class="nv-copy">Generates future frames of a physics-aware world state based on an image or short video prompt for physical AI development.</p>
+  <p class="nv-copy">Generates physics-aware video from a text prompt or conditioning image for physical AI development.</p>
   <div class="nv-badges">
     <span class="nv-badge nv-badge-green">Free Endpoint</span>
     <span class="nv-badge">Physical AI</span>
     <span class="nv-badge">robotics</span>
-    <span class="nv-badge">video-to-world</span>
+    <span class="nv-badge">text-to-video</span>
+    <span class="nv-badge">image-to-video</span>
     <span class="nv-badge">NIM local: {NIM_BASE_URL}</span>
+    {image_badge}
   </div>
 </div>
 """
@@ -699,7 +771,9 @@ def schema_note(backend_schema: str):
             "Build OpenAPI preview: prompt, input_image_index, seed; response asset_url. "
             "Generation still posts local base64 media to the self-hosted NIM."
         )
-    return "Local NIM: prompt plus base64 video/image, guidance, steps, seed, and video_params."
+    if _is_cosmos3_generator():
+        return "Local Cosmos3 Generator NIM: prompt plus optional base64 image, guidance, steps, seed, resolution, num_output_frames, and fps."
+    return "Local NIM: prompt plus optional base64 image/video, guidance, steps, seed, and video_params."
 
 
 def _write_launch_markers(launch_result) -> None:
@@ -731,9 +805,28 @@ def _write_initial_launch_markers() -> None:
     Path("/tmp/gradio_live.flag").write_text(local_url + "\n", encoding="utf-8")
 
 
+def _remember_staged_checkpoint() -> None:
+    if not NIM_IMAGE:
+        return
+    payload = {
+        "image": NIM_IMAGE,
+        "served_model": DEFAULT_MODEL_ID,
+        "backend": "nim_local",
+        "base_url": NIM_BASE_URL,
+        "infer_url": INFER_URL,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        STAGED_CHECKPOINT_FILE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        STAGED_CHECKPOINT_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
 _gpu_name, _free_mib = _gpu_info()
 if DEFAULT_COLLECTION not in COLLECTION_CHOICES:
     COLLECTION_CHOICES.append(DEFAULT_COLLECTION)
+_remember_staged_checkpoint()
 
 with gr.Blocks(title=DEFAULT_MODEL_ID, css=CSS) as demo:
     hero = gr.Markdown(hero_markup(DEFAULT_MODEL_ID))
@@ -759,16 +852,16 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                 info="Shown for routing/context; local NIM selection still happens in setup.",
             )
             world_mode = gr.Radio(
-                choices=["Video-to-World", "Image-to-World"],
-                value="Video-to-World",
+                choices=["Text-to-Video", "Image-to-Video", "Video-to-World"],
+                value="Text-to-Video",
                 label="World Creation Mode",
-                info="Video-to-World uses the first 9 frames; Image-to-World uses a first-frame image."
+                info="Text-to-Video is prompt-only; Image-to-Video uses one conditioning image."
             )
-            video_in = gr.Video(label="Input Video (mp4)", visible=True)
+            video_in = gr.Video(label="Input Video (mp4)", visible=False)
             image_in = gr.Image(label="Input Image", type="filepath", visible=False)
             prompt = gr.Textbox(
                 label="Prompt",
-                value="A first person view from a robot working in a chemical plant.",
+                value="A smooth first-person robot manipulation video in a greenhouse. The robot arm reaches toward a ripe red apple, gently grasps it, twists, and places it into a harvest bin. Natural daylight, stable camera, realistic physics.",
                 lines=3,
                 max_lines=5,
             )
@@ -791,12 +884,12 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                     info="Hosted schema field. 0 is the first input image/frame; max is 1.",
                 )
             with gr.Accordion("Generation parameters", open=True):
-                guidance = gr.Slider(1.0, 10.0, value=7.0, step=0.5, label="Guidance scale (CFG)")
-                steps = gr.Slider(1, 50, value=35, step=1, label="Steps")
+                guidance = gr.Slider(1.0, 10.0, value=DEFAULT_GUIDANCE, step=0.5, label="Guidance scale (CFG)")
+                steps = gr.Slider(1, 50, value=DEFAULT_STEPS, step=1, label="Steps")
                 seed = gr.Number(label="Seed (-1 = random)", value=-1, precision=0)
                 gr.Markdown(
-                    "Build card reference: 1024x640 output, video conditioning from the first 9 frames, "
-                    "image conditioning from the first frame. Local NIM compatibility keeps 1280x704/121-frame preprocessing."
+                    "Quick staging defaults are controlled by COSMOS_VIDEO_HEIGHT/WIDTH/FRAMES/FPS. "
+                    "For the Cosmos3 generator NIM, start with 256p, 25 frames, and low steps for smoke tests."
                 )
             submit = gr.Button("Generate New World", variant="primary")
         with gr.Column(scale=1):

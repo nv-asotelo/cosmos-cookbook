@@ -22,7 +22,7 @@ const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/co
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
-  frames_count: 24,
+  frames_count: 25,
   frames_per_sec: 24,
   num_steps: 4,
   guidance: 6
@@ -49,6 +49,7 @@ const HERO_TAGS = [
   "future state generation"
 ];
 const MODEL_CHOICES = [
+  "nvidia/cosmos3-gen",
   "nvidia/cosmos-predict1-5b",
   "nvidia/cosmos-predict1-7b-video2world",
   "nvidia/cosmos-predict2-5-2b",
@@ -132,9 +133,17 @@ type BackendInfo = {
   vram_free_gib?: number;
   vram_total_gib?: number;
   base_url?: string;
+  infer_url?: string;
+  image?: string;
   output_dir?: string;
   warning?: string;
   capabilities?: Record<string, boolean>;
+  staged_checkpoint?: {
+    image?: string;
+    served_model?: string;
+    updated_at?: string;
+    [key: string]: unknown;
+  } | null;
   environment?: {
     cosmos3_version?: string;
     commit_sha?: string;
@@ -264,6 +273,20 @@ function shortSha(sha?: string | null) {
   return sha ? sha.slice(0, 12) : "unknown";
 }
 
+function nimFrameCount(frames: number) {
+  const requested = Math.max(25, Math.round(frames));
+  const remainder = (requested - 1) % 4;
+  return remainder === 0 ? requested : requested + (4 - remainder);
+}
+
+function nimRequestParams(resolution: string | number, frames: number, fps: number) {
+  return {
+    resolution: String(resolution),
+    num_output_frames: nimFrameCount(frames),
+    fps
+  };
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -356,7 +379,7 @@ function resultAssetUrl(result: ApiResult | null) {
 
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [collection, setCollection] = useState("cosmos-predict1");
+  const [collection, setCollection] = useState("cosmos3");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>(MODEL_CHOICES);
   const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
@@ -394,6 +417,10 @@ export default function Page() {
   const mediaRequired = generatorMode !== "Text-to-Video";
   const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
   const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
+  const isNimBackend = useMemo(
+    () => String(backendInfo?.backend || "").toLowerCase().includes("nim"),
+    [backendInfo?.backend]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -502,6 +529,25 @@ export default function Page() {
       };
     }
 
+    if (isNimBackend) {
+      const payload: Record<string, unknown> = {
+        prompt,
+        guidance_scale: guidanceScale,
+        steps,
+        ...nimRequestParams(resolution, numFrames, fps),
+        seed
+      };
+      if (generatorMode === "Image-to-Video") payload.image = visionPath ? "<base64 image omitted>" : undefined;
+      if (generatorMode === "Action Policy") payload.video = visionPath ? "<base64 video omitted>" : undefined;
+      return {
+        endpoint: `POST ${backendInfo?.infer_url || "/v1/infer"}`,
+        collection,
+        model,
+        mode: generatorMode,
+        payload
+      };
+    }
+
     return {
       endpoint: "POST /generate",
       collection,
@@ -517,10 +563,12 @@ export default function Page() {
     };
   }, [
     activeExample.params,
+    backendInfo?.infer_url,
     collection,
     fps,
     generatorMode,
     guidanceScale,
+    isNimBackend,
     media?.dataUrl,
     media?.sourceUrl,
     model,
@@ -599,7 +647,7 @@ export default function Page() {
   }
 
   function reset() {
-    setCollection("cosmos-predict1");
+    setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
     setGeneratorMode("Text-to-Video");
     setSchemaMode("local_nim");
@@ -879,7 +927,7 @@ export default function Page() {
                     {media.kind === "image" ? <img src={media.previewUrl} alt="" /> : <video src={media.previewUrl} muted playsInline />}
                     <span>
                       <strong>{media.name}</strong>
-                      <small>{media.sourceUrl ? "Remote example asset" : "Upload staged for Ray Serve"}</small>
+                      <small>{media.sourceUrl ? "Remote example asset" : `Upload staged for ${isNimBackend ? "NIM" : "Ray Serve"}`}</small>
                     </span>
                   </span>
                 ) : (
@@ -895,7 +943,7 @@ export default function Page() {
                 <FileVideo size={22} />
                 <div>
                   <strong>Prompt-only generation</strong>
-                  <span>Cosmos3 receives this request without a vision_path.</span>
+                  <span>{isNimBackend ? "NIM receives this request without conditioning media." : "Cosmos3 receives this request without a vision_path."}</span>
                 </div>
               </div>
             )}
@@ -1019,7 +1067,7 @@ export default function Page() {
             <label>
               Contract
               <select value={schemaMode} onChange={(event) => setSchemaMode(event.target.value as SchemaMode)}>
-                <option value="local_nim">Cosmos3 Ray Serve /generate</option>
+                <option value="local_nim">Local NIM /v1/infer</option>
                 <option value="build_openapi">NVIDIA Build OpenAPI preview</option>
               </select>
             </label>
@@ -1311,6 +1359,9 @@ function RuntimeBar({
 }) {
   const environment = backendInfo?.environment;
   const commitSha = environment?.commit_sha;
+  const isNim = String(backendInfo?.backend || "").toLowerCase().includes("nim");
+  const staged = backendInfo?.staged_checkpoint;
+  const nimImage = backendInfo?.image || staged?.image;
   const capabilities = backendInfo?.capabilities
     ? Object.entries(backendInfo.capabilities)
         .filter(([, enabled]) => enabled)
@@ -1336,14 +1387,26 @@ function RuntimeBar({
           {displayValue(backendInfo?.backend || "cosmos3-generate")} at {displayValue(backendInfo?.base_url)}
         </span>
       </div>
+      {nimImage ? (
+        <div className="runtimeMetric wideRuntimeMetric">
+          <span className="runtimeLabel">NIM Image</span>
+          <span className="runtimeValue">{displayValue(nimImage)}</span>
+        </div>
+      ) : null}
+      {backendInfo?.infer_url ? (
+        <div className="runtimeMetric">
+          <span className="runtimeLabel">Infer URL</span>
+          <span className="runtimeValue">{displayValue(backendInfo.infer_url)}</span>
+        </div>
+      ) : null}
       <div className="runtimeMetric">
         <span className="runtimeLabel">Cosmos3</span>
         <span className="runtimeValue">{displayValue(backendInfo?.cosmos3_version || environment?.cosmos3_version)}</span>
       </div>
       <div className="runtimeMetric">
-        <span className="runtimeLabel">Ray Commit</span>
+        <span className="runtimeLabel">{isNim ? "Staged Model" : "Ray Commit"}</span>
         <span className="runtimeValue">
-          <code>{shortSha(commitSha)}</code>
+          {isNim ? displayValue(staged?.served_model || backendInfo?.checkpoint) : <code>{shortSha(commitSha)}</code>}
         </span>
       </div>
       <div className="runtimeMetric">

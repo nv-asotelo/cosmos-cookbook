@@ -658,7 +658,7 @@ ok(f"MODEL_SIZE: {MODEL_SIZE}  |  variants: {_variant_labels}")
 ok(f"Model frontend capability: {_tower_label(MODEL_TOWERS)}")
 ok(f"Serving frontend tower: {_tower_label(FRONTEND_TOWERS)}")
 ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
-if USE_REASON_VITE:
+if USE_REASON_VITE or USE_PREDICT_VITE:
     ok(f"Primary Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
 if USE_PREDICT_VITE:
     ok(f"Primary Predict Vite app: {PREDICT_VITE_APP_DIR} on port {PREDICT_VITE_PORT}")
@@ -1294,6 +1294,17 @@ launch_env = {
     "GRADIO_PREFILL_TPS": str(prefill_tps),
     "INFERENCE_BACKEND":  INFERENCE_BACKEND,
     "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+    "NIM_BASE_URL":       os.environ.get("NIM_BASE_URL", os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")),
+    "NIM_IMAGE":          os.environ.get("NIM_IMAGE", os.environ.get("IMAGE", "")),
+    "NIM_SERVED_MODEL_NAME": os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME),
+    "COSMOS_MODEL_ID":    os.environ.get("COSMOS_MODEL_ID", os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME)),
+    "COSMOS_MODEL_COLLECTION": os.environ.get("COSMOS_MODEL_COLLECTION", "cosmos3" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "cosmos-predict1"),
+    "COSMOS_VIDEO_HEIGHT": os.environ.get("COSMOS_VIDEO_HEIGHT", "256" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "704"),
+    "COSMOS_VIDEO_WIDTH": os.environ.get("COSMOS_VIDEO_WIDTH", "448" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "1280"),
+    "COSMOS_VIDEO_FRAMES": os.environ.get("COSMOS_VIDEO_FRAMES", "25" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "121"),
+    "COSMOS_VIDEO_FPS":   os.environ.get("COSMOS_VIDEO_FPS", "24"),
+    "COSMOS_VIDEO_STEPS": os.environ.get("COSMOS_VIDEO_STEPS", "4" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "35"),
+    "COSMOS_GUIDANCE_SCALE": os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "7"),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
     "FLASHINFER_DISABLE_VERSION_CHECK": "1",
@@ -1531,17 +1542,28 @@ def _launch_reason_vite():
 
 def _launch_predict_vite():
     run(f"Starting Cosmos Predict Vite Build skin on port {PREDICT_VITE_PORT}")
+    _predict_base = os.environ.get(
+        "COSMOS3_BASE_URL",
+        os.environ.get("RAY_SERVE_BASE_URL", "http://localhost:8000"),
+    )
+    _nim_base = os.environ.get("NIM_BASE_URL", os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"))
+    if INFERENCE_BACKEND == "nim_local":
+        os.environ.setdefault("COSMOS3_BACKEND", "nim_local")
+        os.environ.setdefault("NIM_BASE_URL", _nim_base)
     vite_env = {
         **launch_env,
         "PORT": str(PREDICT_VITE_PORT),
         "MODEL_ID": MODEL_ID,
         "MODEL_NAME": MODEL_NAME or MODEL_ID,
-        "COSMOS3_BASE_URL": os.environ.get(
-            "COSMOS3_BASE_URL",
-            os.environ.get("RAY_SERVE_BASE_URL", "http://localhost:8000"),
-        ),
+        "COSMOS3_BACKEND": os.environ.get("COSMOS3_BACKEND", INFERENCE_BACKEND),
+        "COSMOS3_BASE_URL": _predict_base,
+        "NIM_BASE_URL": os.environ.get("NIM_BASE_URL", _nim_base),
+        "NIM_INFER_URL": os.environ.get("NIM_INFER_URL", ""),
+        "NIM_IMAGE": os.environ.get("NIM_IMAGE", os.environ.get("IMAGE", "")),
+        "NIM_SERVED_MODEL_NAME": os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME or MODEL_ID),
+        "PREDICT_STAGED_MODEL_FILE": os.environ.get("PREDICT_STAGED_MODEL_FILE", "/tmp/nvidia_build_predict_staged_model.json"),
         "COSMOS3_CLIENT_REQUIRE_ROOT": PREDICT_VITE_APP_DIR,
-        "VITE_COSMOS3_INFO_URL": "/api/models",
+        "VITE_COSMOS3_INFO_URL": "/api/active-model",
     }
     proc = subprocess.Popen(
         ["npm", "run", "dev"],

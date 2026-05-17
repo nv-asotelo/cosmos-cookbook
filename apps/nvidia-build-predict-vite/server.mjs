@@ -1,4 +1,5 @@
 import express from "express";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,9 +12,11 @@ const port = Number(process.env.PORT || 5175);
 // Backwards-compat env: the shared client checks
 // COSMOS3_BASE_URL → RAY_SERVE_BASE_URL → VLLM_BASE_URL → localhost:8000.
 // If a legacy PREDICT_BASE_URL or NIM_BASE_URL is the only thing set we
-// forward it as RAY_SERVE_BASE_URL (stripping the /v1 suffix the old NIM
-// shape carries) so the new client picks it up cleanly.
+// forward it as RAY_SERVE_BASE_URL for Ray mode. In NIM mode the shared client
+// uses NIM_BASE_URL/VLLM_BASE_URL directly as an OpenAI-compatible /v1 root.
 (function forwardLegacyBaseUrl() {
+  const backend = String(process.env.COSMOS3_BACKEND || process.env.PREDICT_BACKEND || process.env.INFERENCE_BACKEND || "").toLowerCase();
+  if (backend.includes("nim")) return;
   if (process.env.COSMOS3_BASE_URL || process.env.RAY_SERVE_BASE_URL) return;
   const legacy =
     process.env.PREDICT_BASE_URL ||
@@ -22,20 +25,39 @@ const port = Number(process.env.PORT || 5175);
   if (legacy) process.env.RAY_SERVE_BASE_URL = legacy.replace(/\/v1\/?$/, "");
 })();
 
-const advertisedBaseUrl =
-  process.env.COSMOS3_BASE_URL ||
-  process.env.RAY_SERVE_BASE_URL ||
-  process.env.PREDICT_BASE_URL ||
-  process.env.NIM_BASE_URL ||
-  process.env.VLLM_BASE_URL ||
-  "http://localhost:8000";
+function activeBackend() {
+  const explicit = String(process.env.COSMOS3_BACKEND || process.env.PREDICT_BACKEND || process.env.INFERENCE_BACKEND || "").toLowerCase();
+  if (explicit.includes("nim")) return "nim_local";
+  if (process.env.NIM_INFER_URL || process.env.NIM_BASE_URL) return "nim_local";
+  return "cosmos3-generate";
+}
 
-const defaultModel = process.env.MODEL_NAME || "Cosmos3-Nano";
+function ensureV1(url) {
+  const trimmed = String(url || "http://localhost:8000").replace(/\/$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+const backend = activeBackend();
+const advertisedBaseUrl =
+  backend === "nim_local"
+    ? ensureV1(process.env.NIM_BASE_URL || process.env.VLLM_BASE_URL || process.env.PREDICT_BASE_URL || "http://localhost:8000/v1")
+    : process.env.COSMOS3_BASE_URL ||
+      process.env.RAY_SERVE_BASE_URL ||
+      process.env.PREDICT_BASE_URL ||
+      "http://localhost:8000";
+
+const nimInferUrl = process.env.NIM_INFER_URL || `${advertisedBaseUrl.replace(/\/$/, "")}/infer`;
+const defaultModel =
+  process.env.NIM_SERVED_MODEL_NAME ||
+  process.env.MODEL_NAME ||
+  process.env.MODEL_ID ||
+  (backend === "nim_local" ? "nvidia/cosmos3-gen" : "Cosmos3-Nano");
+const stagedModelFile = process.env.PREDICT_STAGED_MODEL_FILE || "/tmp/nvidia_build_predict_staged_model.json";
 
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
-  frames_count: 24,
+  frames_count: 25,
   frames_per_sec: 24,
   num_steps: 4,
   guidance: 6
@@ -44,7 +66,77 @@ const QUICK_VIDEO_PARAMS = {
 const app = express();
 app.use(express.json({ limit: "128mb" }));
 
+async function rememberStagedModel(info) {
+  const image = process.env.NIM_IMAGE || process.env.IMAGE || null;
+  if (!image || !image.includes("nvstaging")) return null;
+  const staged = {
+    image,
+    served_model: info?.models?.[0] || process.env.NIM_SERVED_MODEL_NAME || defaultModel,
+    backend,
+    base_url: advertisedBaseUrl,
+    infer_url: nimInferUrl,
+    updated_at: new Date().toISOString()
+  };
+  try {
+    await fs.writeFile(stagedModelFile, `${JSON.stringify(staged, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // Best-effort marker only; the live backend probe is still authoritative.
+  }
+  return staged;
+}
+
+async function readStagedModel() {
+  try {
+    return JSON.parse(await fs.readFile(stagedModelFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 async function getModelInfo() {
+  if (backend === "nim_local") {
+    const v1Url = `${advertisedBaseUrl.replace(/\/$/, "")}/models`;
+    try {
+      const apiKey = process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "";
+      const upstream = await fetch(v1Url, {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+      });
+      if (!upstream.ok) throw new Error(`Model probe failed with HTTP ${upstream.status}`);
+      const data = await upstream.json();
+      const models = Array.isArray(data?.data) ? data.data.map((model) => model.id).filter(Boolean) : [];
+      const info = {
+        backend,
+        baseUrl: advertisedBaseUrl,
+        inferUrl: nimInferUrl,
+        models: models.length > 0 ? models : [defaultModel],
+        image: process.env.NIM_IMAGE || process.env.IMAGE,
+        capabilities: {
+          text_to_video: true,
+          image_to_video: true,
+          action_policy: false
+        }
+      };
+      const staged = await rememberStagedModel(info);
+      return { ...info, staged_checkpoint: staged || (await readStagedModel()) };
+    } catch (v1Error) {
+      const warning = v1Error instanceof Error ? v1Error.message : "Unable to reach NIM model endpoint";
+      return {
+        backend,
+        baseUrl: advertisedBaseUrl,
+        inferUrl: nimInferUrl,
+        models: [defaultModel],
+        image: process.env.NIM_IMAGE || process.env.IMAGE,
+        staged_checkpoint: await readStagedModel(),
+        warning,
+        capabilities: {
+          text_to_video: true,
+          image_to_video: true,
+          action_policy: false
+        }
+      };
+    }
+  }
+
   const rayInfoUrl = `${advertisedBaseUrl.replace(/\/$/, "")}/info`;
   try {
     const upstream = await fetch(rayInfoUrl);
@@ -56,6 +148,7 @@ async function getModelInfo() {
         ? data.filter(Boolean)
         : [];
     return {
+      backend,
       baseUrl: advertisedBaseUrl,
       models: models.length > 0 ? models : [defaultModel],
       output_dir: data?.output_dir,
@@ -70,13 +163,15 @@ async function getModelInfo() {
   } catch (rayError) {
     const v1Url = `${(process.env.VLLM_BASE_URL || process.env.NIM_BASE_URL || advertisedBaseUrl).replace(/\/$/, "")}/v1/models`;
     try {
+      const apiKey = process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "";
       const upstream = await fetch(v1Url, {
-        headers: { Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}` }
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
       });
       if (!upstream.ok) throw new Error(`Model probe failed with HTTP ${upstream.status}`);
       const data = await upstream.json();
       const models = Array.isArray(data?.data) ? data.data.map((model) => model.id).filter(Boolean) : [];
       return {
+        backend: "vllm-compatible",
         baseUrl: advertisedBaseUrl,
         models: models.length > 0 ? models : [defaultModel],
         capabilities: {
@@ -93,6 +188,7 @@ async function getModelInfo() {
             ? v1Error.message
             : "Unable to reach model endpoint";
       return {
+        backend,
         baseUrl: advertisedBaseUrl,
         models: [defaultModel],
         warning,
@@ -116,8 +212,11 @@ app.get("/api/active-model", async (_request, response) => {
   response.json({
     checkpoint,
     display_name: checkpoint,
-    backend: "cosmos3-generate",
-    base_url: advertisedBaseUrl,
+    backend: info.backend || backend,
+    base_url: info.baseUrl || advertisedBaseUrl,
+    infer_url: info.inferUrl,
+    image: info.image,
+    staged_checkpoint: info.staged_checkpoint,
     cosmos3_version: info.cosmos3_version,
     environment: info.environment,
     output_dir: info.output_dir,
@@ -176,7 +275,8 @@ app.post("/api/predict", async (request, response) => {
     resolution: String(body.resolution || QUICK_VIDEO_PARAMS.resolution),
     aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
     fps: finiteNumber(body.fps, QUICK_VIDEO_PARAMS.frames_per_sec),
-    vision_path: body.visionPath || null
+    vision_path: body.visionPath || null,
+    model_mode: mode === "Image-to-Video" ? "image2video" : mode === "Action Policy" ? "policy" : "text2video"
   };
   if (Number.isFinite(seed) && seed >= 0) params.seed = seed;
   if (process.env.PREDICT_NEGATIVE_PROMPT) params.negative_prompt = process.env.PREDICT_NEGATIVE_PROMPT;
@@ -229,12 +329,12 @@ app.post("/api/predict", async (request, response) => {
         error: result?.message || "Cosmos3 generation failed.",
         diagnostic: {
           layer: "backend",
-          issue: result?.message || "Ray Serve returned a non-success status.",
+          issue: result?.message || "Generation backend returned a non-success status.",
           stack_trace: result?.stack_trace || null,
-          likelyCause: "The Cosmos3 Ray Serve handler raised before producing outputs.",
+          likelyCause: "The configured generation service raised before producing outputs.",
           suggestions: [
-            "Check the Ray Serve logs on the GPU host for the matching `name` field.",
-            "Confirm the requested model is currently mounted by Ray Serve."
+            "Check the backend logs on the GPU host for the matching request.",
+            "Confirm the requested model is currently mounted by the live backend."
           ],
           raw: result?.raw
         },
@@ -278,14 +378,14 @@ app.post("/api/predict", async (request, response) => {
   } catch (error) {
     clearInterval(heartbeat);
     const payload = {
-      error: "Cosmos3 Ray Serve transport threw before returning.",
+      error: "Generation backend transport threw before returning.",
       diagnostic: {
         layer: "backend",
         issue: error instanceof Error ? error.message : "Unknown transport error.",
-        likelyCause: "The shared Cosmos3 client could not complete the round-trip to /generate.",
+        likelyCause: "The shared Cosmos3 client could not complete the round-trip to the configured generation endpoint.",
         suggestions: [
-          "Confirm the Ray Serve replica is up: curl http://localhost:8000/generate on the GPU host.",
-          "Check that COSMOS3_BASE_URL or RAY_SERVE_BASE_URL resolves from this process."
+          "Confirm the backend is healthy from the GPU host.",
+          "Check that COSMOS3_BACKEND and the backend base URL resolve from this process."
         ]
       },
       files: []
