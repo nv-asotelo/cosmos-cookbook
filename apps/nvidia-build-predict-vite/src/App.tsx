@@ -16,9 +16,15 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
+const BUILD_PREDICT_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b/modelcard";
+const BUILD_PREDICT_SYSTEM_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b/systemcard";
+const PAGE_TITLE = "Image-to-World";
+const PAGE_TAGLINE = "Generates future frames based upon an image and text input.";
+const MODEL_CARD_LEAD =
+  "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
@@ -45,7 +51,7 @@ const HERO_TAGS = [
   "simulation",
   "synthetic data generation",
   "text-to-video",
-  "image-to-video",
+  "image-to-world",
   "future state generation"
 ];
 const MODEL_CHOICES = [
@@ -69,6 +75,7 @@ const ETA_BASELINE_SECONDS = 5;
 const ETA_OPS_PER_SECOND = 10_000_000;
 
 type GeneratorMode = "Text-to-Video" | "Image-to-Video" | "Action Policy";
+type SectionTab = "Experience" | "Model Card" | "System Card";
 type SchemaMode = "local_nim" | "build_openapi";
 type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
@@ -103,6 +110,19 @@ type ExampleItem = {
     domainName?: string;
     actionMode?: string;
   };
+};
+type ContentSelectItem = {
+  id: string;
+  title: string;
+  mediaLabel: string;
+  prompt?: string;
+  thumbnailUrl?: string;
+  driveUrl?: string;
+};
+type ContentSelectGroup = {
+  title: string;
+  summary: string;
+  items: ContentSelectItem[];
 };
 type ApiResult = {
   videoDataUrl?: string;
@@ -151,14 +171,22 @@ type BackendInfo = {
   };
 };
 
+function driveFileUrl(id: string) {
+  return `https://drive.google.com/file/d/${id}/view`;
+}
+
+function driveThumbnailUrl(id: string) {
+  return `https://drive.google.com/thumbnail?id=${id}&sz=w1200`;
+}
+
 const EXAMPLES: ExampleItem[] = [
   {
     id: "omni-t2v",
-    label: "Robotic Fruit Picking",
+    label: "Robotic Arm Ingredient Sorting",
     eyebrow: "T2V",
     mode: "Text-to-Video",
     prompt:
-      "A smooth first-person robot manipulation video in a greenhouse. The robot arm reaches toward a ripe red apple, gently grasps it, twists, and places it into a harvest bin. Natural daylight, stable camera, realistic physics.",
+      "A robotic arm interacts with various objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a red tomato with green leaves, a piece of salmon with a pinkish-orange hue, and a small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the salmon. It lifts the carrot slightly off the board, moves it towards the orange bowl, and releases it, causing the salmon to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.",
     params: {
       resolution: QUICK_VIDEO_PARAMS.resolution,
       numFrames: QUICK_VIDEO_PARAMS.frames_count,
@@ -217,6 +245,79 @@ const EXAMPLES: ExampleItem[] = [
 ];
 const DEFAULT_PROMPT = EXAMPLES[0].prompt;
 
+const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
+  {
+    title: "Robotics",
+    summary: "Joshua selected 007, 001, and 005 as the primary robotics samples.",
+    items: [
+      {
+        id: "007",
+        title: "Robot arm ingredient sorting",
+        mediaLabel: "007_robot_039",
+        prompt: EXAMPLES[0].prompt,
+        thumbnailUrl: driveThumbnailUrl("15UC7IryZY6KmWIFaD5xreH4Sa_JoWvdr"),
+        driveUrl: driveFileUrl("15UC7IryZY6KmWIFaD5xreH4Sa_JoWvdr")
+      },
+      {
+        id: "001",
+        title: "Pear placement into bowl",
+        mediaLabel: "001_visual_reasoning_0036",
+        prompt: "The robotic arm picks up the pear and place it in the dark-color bowl",
+        thumbnailUrl: driveThumbnailUrl("1XVCPigO63YNIfOduAnLiaIQv6bGLAg0H"),
+        driveUrl: driveFileUrl("1XVCPigO63YNIfOduAnLiaIQv6bGLAg0H")
+      },
+      {
+        id: "005",
+        title: "Bok choy tabletop manipulation",
+        mediaLabel: "005_spatial_relationship_0040",
+        prompt: "The robotic hand picks up the bok choy and places it to the left of the frying pan",
+        thumbnailUrl: driveThumbnailUrl("1eal6fNfYQtcrct-PIA3p5eXtD6lA5yn3"),
+        driveUrl: driveFileUrl("1eal6fNfYQtcrct-PIA3p5eXtD6lA5yn3")
+      }
+    ]
+  },
+  {
+    title: "Autonomous Vehicles",
+    summary: "The AV row follows the new order with 009, 021, and 022.",
+    items: [
+      {
+        id: "009",
+        title: "Residential intersection turn",
+        mediaLabel: "009_av",
+        prompt:
+          "The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.",
+        thumbnailUrl: driveThumbnailUrl("1UTIArhXMT1bZZ3l9DhbyZHlgjrkJ0OG7"),
+        driveUrl: driveFileUrl("1UTIArhXMT1bZZ3l9DhbyZHlgjrkJ0OG7")
+      },
+      {
+        id: "021",
+        title: "Autonomous vehicle sample 021",
+        mediaLabel: "021_av_1",
+        thumbnailUrl: driveThumbnailUrl("1-HCt9xaWK27Ftb0SEbXSgIvRteQM_-u1"),
+        driveUrl: driveFileUrl("1-HCt9xaWK27Ftb0SEbXSgIvRteQM_-u1")
+      },
+      {
+        id: "022",
+        title: "Autonomous vehicle sample 022",
+        mediaLabel: "022_av_2",
+        thumbnailUrl: driveThumbnailUrl("13Rx96XVYvboghdzDShSqhnnk2EKg8Jpq"),
+        driveUrl: driveFileUrl("13Rx96XVYvboghdzDShSqhnnk2EKg8Jpq")
+      }
+    ]
+  },
+  {
+    title: "Industrial Smart Spaces",
+    summary: "Slot reserved for the smart-spaces selects once Joshua marks the final assets.",
+    items: [
+      {
+        id: "TBD",
+        title: "Smart spaces content pending",
+        mediaLabel: "TBD"
+      }
+    ]
+  }
+];
+
 const GENERATOR_MODES: Array<{
   id: GeneratorMode;
   label: string;
@@ -236,7 +337,7 @@ const GENERATOR_MODES: Array<{
   {
     id: "Image-to-Video",
     label: "Image-to-Video",
-    description: "Animate one conditioning image plus a prompt.",
+    description: "Image-to-World generation from one image plus text.",
     icon: ImageIcon,
     enabled: true,
     visible: true
@@ -379,6 +480,7 @@ function resultAssetUrl(result: ApiResult | null) {
 
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
   const [collection, setCollection] = useState("cosmos3");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>(MODEL_CHOICES);
@@ -457,8 +559,8 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    document.title = `${model} Model by NVIDIA | NVIDIA NIM`;
-  }, [model]);
+    document.title = `${PAGE_TITLE} Model by NVIDIA | NVIDIA NIM`;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -646,6 +748,26 @@ export default function Page() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function applyContentSelect(item: ContentSelectItem) {
+    if (!item.prompt) return;
+    setGeneratorMode("Text-to-Video");
+    setPrompt(item.prompt);
+    setResolution(QUICK_VIDEO_PARAMS.resolution);
+    setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
+    setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
+    setSteps(QUICK_VIDEO_PARAMS.num_steps);
+    setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
+    setSeed(0);
+    setMedia(null);
+    setResult(null);
+    setProgressPercent(0);
+    setProgressFrames([]);
+    setStatus(`${item.id} prompt loaded`);
+    setOutputTab("preview");
+    setMobilePanel("input");
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
   function reset() {
     setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
@@ -825,15 +947,13 @@ export default function Page() {
             nvidia
           </a>
           <div className="titleLine">
-            <h1>{model}</h1>
+            <h1>{PAGE_TITLE}</h1>
             <div className="heroMeta">
               <span>Downloadable</span>
             </div>
           </div>
-          <p>
-            Cosmos Generator stages fast text-to-video and image-to-video predictions for physical AI simulation and
-            synthetic data workflows.
-          </p>
+          <p>{PAGE_TAGLINE}</p>
+          <div className="heroModelName">Active model: {model}</div>
           <div className="tagRow">
             {HERO_TAGS.map((tag, index) => (
               <span className={index > 1 ? "desktopOnlyTag" : ""} key={tag}>
@@ -854,10 +974,33 @@ export default function Page() {
       />
 
       <div className="tabs" role="tablist" aria-label="Model sections">
-        <button className="active">Experience</button>
+        {(["Experience", "Model Card", "System Card"] as SectionTab[]).map((tab) => {
+          const id = tab.toLowerCase().replace(/\s+/g, "-");
+          return (
+            <button
+              aria-controls={`tabpanel-${id}`}
+              aria-selected={activeTab === tab}
+              className={activeTab === tab ? "active" : ""}
+              id={`tab-${id}`}
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              role="tab"
+              tabIndex={activeTab === tab ? 0 : -1}
+            >
+              {tab}
+            </button>
+          );
+        })}
       </div>
 
-      <section className="experience">
+      <section
+        aria-labelledby={`tab-${activeTab.toLowerCase().replace(/\s+/g, "-")}`}
+        className="experience"
+        id={`tabpanel-${activeTab.toLowerCase().replace(/\s+/g, "-")}`}
+        role="tabpanel"
+      >
+        {activeTab === "Experience" ? (
+          <>
         <div className="aiNotice">
           <Info size={16} />
           <span className="noticeDesktop">
@@ -1035,6 +1178,8 @@ export default function Page() {
           </section>
         </div>
 
+        <ContentSelects groups={CONTENT_SELECT_GROUPS} onApply={applyContentSelect} />
+
         <aside className="apiPanel">
           <div className="apiTopline">API request</div>
           <div className="apiButtons">
@@ -1075,12 +1220,235 @@ export default function Page() {
           <pre className="codeBlock">{JSON.stringify(requestPreview, null, 2)}</pre>
           {backendInfo?.warning ? <p className="backendWarning">{backendInfo.warning}</p> : null}
         </aside>
+          </>
+        ) : (
+          <StaticTab backendInfo={backendInfo} model={model} tab={activeTab} />
+        )}
       </section>
 
       {examplesOpen ? (
         <ExampleModal examples={visibleExamples} onClose={() => setExamplesOpen(false)} onSelect={applyExample} />
       ) : null}
     </main>
+  );
+}
+
+function ContentSelects({
+  groups,
+  onApply
+}: {
+  groups: ContentSelectGroup[];
+  onApply: (item: ContentSelectItem) => void;
+}) {
+  return (
+    <section className="contentSelects" aria-label="Content selects">
+      <div className="contentSelectsHeader">
+        <div>
+          <p>Content Selects</p>
+          <h2>Generator examples by domain</h2>
+        </div>
+        <span>Robotics, Autonomous Vehicles, Industrial Smart Spaces</span>
+      </div>
+      <div className="contentGroupGrid">
+        {groups.map((group) => (
+          <article className="contentGroup" key={group.title}>
+            <div className="contentGroupTopline">
+              <h3>{group.title}</h3>
+              <p>{group.summary}</p>
+            </div>
+            <div className="contentCardGrid">
+              {group.items.map((item) => (
+                <div className={`contentCard ${item.id === "TBD" ? "contentCardPending" : ""}`} key={`${group.title}-${item.id}`}>
+                  <div
+                    aria-hidden="true"
+                    className="contentThumb"
+                    style={item.thumbnailUrl ? { backgroundImage: `url("${item.thumbnailUrl}")` } : undefined}
+                  >
+                    <span>{item.id}</span>
+                  </div>
+                  <div className="contentCardBody">
+                    <span className="contentMediaLabel">{item.mediaLabel}</span>
+                    <strong>{item.title}</strong>
+                    <p>{item.prompt || "Final prompt and asset are pending."}</p>
+                  </div>
+                  <div className="contentActions">
+                    {item.prompt ? (
+                      <button type="button" onClick={() => onApply(item)}>
+                        Load prompt
+                      </button>
+                    ) : null}
+                    {item.driveUrl ? (
+                      <a href={item.driveUrl} rel="noreferrer" target="_blank">
+                        Open asset <ExternalLink size={13} />
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StaticTab({
+  backendInfo,
+  model,
+  tab
+}: {
+  backendInfo: BackendInfo | null;
+  model: string;
+  tab: SectionTab;
+}) {
+  if (tab === "Model Card") {
+    return (
+      <div className="staticPanel">
+        <p className="staticEyebrow">Overview</p>
+        <h2>{PAGE_TITLE}</h2>
+        <p className="staticLead">{MODEL_CARD_LEAD}</p>
+
+        <StaticSection title="Title">
+          <p>
+            <strong>Image-to-World</strong> {PAGE_TAGLINE}
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Description">
+          <p>
+            The Vite Generator stages Text-to-Video and Image-to-Video requests for Cosmos3 generation while preserving
+            the NVIDIA Build dark control styling, active model details, examples modal, preview/JSON output tabs, and
+            quick staging controls.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Input">
+          <dl>
+            <dt>Text-to-Video</dt>
+            <dd>Text prompt only.</dd>
+            <dt>Image-to-World</dt>
+            <dd>Image plus text prompt.</dd>
+            <dt>Formats</dt>
+            <dd>.jpg, .jpeg, .png, .webp for image conditioning.</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Output">
+          <dl>
+            <dt>Type</dt>
+            <dd>MP4 video when the backend returns inline media, or an asset URL when hosted output is returned.</dd>
+            <dt>Review</dt>
+            <dd>Use the Preview and JSON tabs together before promoting generated content into datasets.</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Content Selects">
+          <p>Domain order is Robotics, Autonomous Vehicles, then Industrial Smart Spaces.</p>
+          <dl>
+            <dt>Robotics</dt>
+            <dd>007, 001, 005</dd>
+            <dt>Autonomous Vehicles</dt>
+            <dd>009, 021, 022</dd>
+            <dt>Industrial Smart Spaces</dt>
+            <dd>TBD</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Software Integration">
+          <RuntimeDetails backendInfo={backendInfo} model={model} />
+        </StaticSection>
+
+        <StaticSection title="Ethical Considerations">
+          <p>
+            Generated future frames can be inaccurate, biased, unsafe, or physically inconsistent. Keep human review in
+            the loop for simulation, training, safety, and dataset approval workflows.
+          </p>
+        </StaticSection>
+
+        <a className="staticLink" href={BUILD_PREDICT_MODEL_CARD_URL} rel="noreferrer" target="_blank">
+          NVIDIA Build model-card reference <ExternalLink size={16} />
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="staticPanel">
+      <p className="staticEyebrow">System Card</p>
+      <h2>NVIDIA Cosmos Generator</h2>
+      <p className="staticLead">{MODEL_CARD_LEAD}</p>
+
+      <StaticSection title="Cosmos Model Family">
+        <p>
+          Cosmos generation models support physical AI development by creating future video rollouts from text or image
+          conditioning. This staging surface is focused on the Generator path and keeps robot policy hidden until a live
+          backend advertises support.
+        </p>
+      </StaticSection>
+
+      <StaticSection title="Governing Terms / Terms of Use">
+        <p>
+          Use is subject to the license, NIM image terms, and deployment environment attached to the active backend.
+          Confirm commercial rights, data handling, and redistribution requirements before production use.
+        </p>
+      </StaticSection>
+
+      <StaticSection title="Specific Risk Areas and Mitigations">
+        <ul>
+          <li>Generated frames may violate physics or object permanence; validate outputs against source intent.</li>
+          <li>Robotics and AV workflows can carry safety consequences; require domain expert review.</li>
+          <li>Record prompts, parameters, model details, and backend warnings for repeatable evaluations.</li>
+        </ul>
+      </StaticSection>
+
+      <StaticSection title="Deployment">
+        <RuntimeDetails backendInfo={backendInfo} model={model} />
+      </StaticSection>
+
+      <StaticSection title="Content Order">
+        <p>Robotics appears first, followed by Autonomous Vehicles, followed by Industrial Smart Spaces.</p>
+      </StaticSection>
+
+      <a className="staticLink" href={BUILD_PREDICT_SYSTEM_CARD_URL} rel="noreferrer" target="_blank">
+        NVIDIA Build system-card reference <ExternalLink size={16} />
+      </a>
+    </div>
+  );
+}
+
+function StaticSection({ children, title }: { children: ReactNode; title: string }) {
+  return (
+    <section className="staticSection">
+      <h3>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | null; model: string }) {
+  const capabilities = backendInfo?.capabilities
+    ? Object.entries(backendInfo.capabilities)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key.replace(/_/g, "-"))
+        .join(", ")
+    : "";
+
+  return (
+    <dl className="runtimeDetailsList">
+      <dt>Live model</dt>
+      <dd>{displayValue(backendInfo?.display_name || backendInfo?.checkpoint || model)}</dd>
+      <dt>Backend</dt>
+      <dd>{displayValue(backendInfo?.backend || "cosmos3-generate")}</dd>
+      <dt>Base URL</dt>
+      <dd>{displayValue(backendInfo?.base_url)}</dd>
+      <dt>Infer URL</dt>
+      <dd>{displayValue(backendInfo?.infer_url)}</dd>
+      <dt>NIM image</dt>
+      <dd>{displayValue(backendInfo?.image || backendInfo?.staged_checkpoint?.image)}</dd>
+      <dt>Capabilities</dt>
+      <dd>{displayValue(capabilities)}</dd>
+    </dl>
   );
 }
 
