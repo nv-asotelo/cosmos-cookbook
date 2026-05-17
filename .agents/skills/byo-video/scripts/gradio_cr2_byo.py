@@ -858,7 +858,8 @@ def _nim_switch_panel_html(label, notice=""):
         )
     is_current = _nim_is_current(nim)
     creds_ok = bool(state.get("credentials_present")) or bool(NGC_API_KEY)
-    phase = _html.escape(str(state.get("phase") or "unknown"))
+    raw_phase = str(state.get("phase") or "unknown")
+    phase = _html.escape(raw_phase)
     message = _html.escape(str(state.get("message") or ""))
     error = _html.escape(str(state.get("error") or ""))
     progress_pct = max(0, min(100, int(state.get("progress_pct") or 0)))
@@ -897,6 +898,33 @@ def _nim_switch_panel_html(label, notice=""):
         f'<div style="margin-top:8px;color:#475569">{notes}</div>'
         if notes else ""
     )
+    should_collapse = (
+        is_current
+        and raw_phase in {"idle", "ready"}
+        and not notice
+        and not error
+    )
+    if should_collapse:
+        return (
+            f'<details style="{colors};border:1px solid;border-radius:6px;'
+            f'padding:9px 12px;margin:8px 0;font-size:13px;line-height:1.45">'
+            '<summary style="cursor:pointer;list-style:none;display:flex;gap:10px;'
+            'align-items:center;flex-wrap:wrap">'
+            '<b>NIM switch status</b>'
+            '<span style="font-size:11px;border:1px solid currentColor;border-radius:999px;'
+            f'padding:1px 7px">{badge}</span>'
+            f'<span>Served model: {_nim_code_pill(served)}</span>'
+            f'<span style="color:#475569">Phase: <b>{phase}</b></span>'
+            '</summary>'
+            f'<div style="margin-top:8px">'
+            f'Short id: {_nim_code_pill(short_id)}<br>'
+            f'Image: {_nim_code_pill(image or "current container")}<br>'
+            f'Min VRAM: {_nim_code_pill(str(vram) + " MiB" if vram else "current/custom")}<br>'
+            f'<a href="{_html.escape(service_url)}" target="_blank" style="color:#1d4ed8">'
+            'Open progress page</a>'
+            f'{notes_html}</div>'
+            '</details>'
+        )
     progress_html = (
         '<div style="margin-top:10px">'
         '<div style="height:10px;background:#dbeafe;border-radius:999px;overflow:hidden">'
