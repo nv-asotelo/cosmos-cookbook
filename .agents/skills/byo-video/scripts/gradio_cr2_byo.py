@@ -1878,21 +1878,31 @@ _REASONING_PANEL_CSS = """
   text-decoration: underline;
 }
 .byo-examples-trigger-wrap {
-  margin: -6px 0 14px 0;
+  margin: -6px 0 14px 0 !important;
 }
 .byo-examples-trigger {
+  display: inline-flex !important;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+}
+.byo-examples-trigger button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
   color: #76b900;
   font-weight: 800;
-  padding: 0;
+  width: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
   background: transparent;
-  border: 0;
+  border: 0 !important;
+  box-shadow: none !important;
   font: inherit;
 }
-.byo-examples-trigger::after {
+.byo-examples-trigger button::after {
   content: '▸';
   font-size: 0.9em;
 }
@@ -1935,6 +1945,11 @@ body.byo-examples-open #byo-examples-modal {
   line-height: 1.2;
 }
 .byo-examples-close {
+  display: inline-flex !important;
+  flex: 0 0 auto !important;
+  width: auto !important;
+}
+.byo-examples-close button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1948,7 +1963,7 @@ body.byo-examples-open #byo-examples-modal {
   font-weight: 700;
   cursor: pointer;
 }
-.byo-examples-close:hover {
+.byo-examples-close button:hover {
   background: var(--button-secondary-background-fill-hover, #e5e7eb);
 }
 #byo-examples-dialog .examples {
@@ -2490,28 +2505,10 @@ def _active_model_details_html(details_url):
     """
 
 
-def _examples_modal_button_html():
-    return """
-    <div class="byo-examples-trigger-wrap">
-      <button
-        type="button"
-        class="byo-examples-trigger"
-        aria-haspopup="dialog"
-        onclick="document.body.classList.add('byo-examples-open')"
-      >View Examples</button>
-    </div>
-    """
-
-
 def _examples_modal_header_html():
     return """
     <div class="byo-examples-header">
       <h2 class="byo-examples-title">Select an Example</h2>
-      <button
-        type="button"
-        class="byo-examples-close"
-        onclick="document.body.classList.remove('byo-examples-open')"
-      >Close</button>
     </div>
     """
 
@@ -4128,7 +4125,14 @@ with gr.Blocks(
         f"Select a checkpoint from the dropdown to load it into vLLM."
     )
     gr.HTML(_active_model_details_html("/api/active-model"))
-    gr.HTML(_examples_modal_button_html())
+    with gr.Row(elem_classes=["byo-examples-trigger-wrap"]):
+        examples_open_btn = gr.Button(
+            "View Examples",
+            elem_classes=["byo-examples-trigger"],
+            variant="secondary",
+            size="sm",
+            min_width=0,
+        )
 
     # ── Input row ───────────────────────────────────────────────────────────
     with gr.Row():
@@ -4561,7 +4565,15 @@ with gr.Blocks(
 
     with gr.Column(elem_id="byo-examples-modal", elem_classes=["byo-examples-modal"]):
         with gr.Column(elem_id="byo-examples-dialog", elem_classes=["byo-examples-dialog"]):
-            gr.HTML(_examples_modal_header_html())
+            with gr.Row(elem_classes=["byo-examples-header"]):
+                gr.HTML(_examples_modal_header_html())
+                examples_close_btn = gr.Button(
+                    "Close",
+                    elem_classes=["byo-examples-close"],
+                    variant="secondary",
+                    size="sm",
+                    min_width=0,
+                )
             gr.Examples(
                 examples=_classic_example_rows(),
                 inputs=[
@@ -4601,6 +4613,21 @@ with gr.Blocks(
     results_table = gr.HTML(_table_html(), label="Benchmark Log", show_progress="hidden")
 
     # ── Event handlers ───────────────────────────────────────────────────────
+    examples_open_btn.click(
+        fn=None,
+        inputs=[],
+        outputs=[],
+        js="() => { document.body.classList.add('byo-examples-open'); return []; }",
+        show_progress="hidden",
+    )
+    examples_close_btn.click(
+        fn=None,
+        inputs=[],
+        outputs=[],
+        js="() => { document.body.classList.remove('byo-examples-open'); return []; }",
+        show_progress="hidden",
+    )
+
     # Adaptive defaults: on media upload, snap fps + max_pixels sliders to the
     # source media's native parameters. For frame-fallback NIM paths, keep the
     # model-size pixel cap as the suggested default; users can still drag higher
