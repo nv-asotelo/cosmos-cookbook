@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
-"""Runtime-agent frontend for Cosmos BYO-video inference.
+"""Batch-inference frontend for Cosmos BYO-video inference.
 
 This is intentionally self-contained: it serves a small browser UI, loads video
 samples from a public Hugging Face dataset through FiftyOne when available, and
 runs selected videos concurrently against the OpenAI-compatible vLLM/NIM server
 that the BYO-video setup script starts.
+
+Two views are exposed in the UI:
+- Basic View: per-video inference against a Hugging Face dataset with prompt
+  presets, parameter sliders, and FiftyOne integration (preserved from the
+  original tool).
+- Benchmark View: 1000-row LingoQA Q/A benchmark against a reasoning-capable
+  NIM (e.g. Cosmos3-Super-Reasoner / cosmos-reason2-*), scored by the official
+  wayveai/Lingo-Judge (DeBERTa-v3-base) and rendered in an arxiv-2312.14115
+  style report. Implements the NIM Message-Shape standing order verbatim:
+  base64 data: URL image_url[] content array, auto-detected served model name,
+  no max_tokens / max_frames / max_pixels client-side caps in the benchmark
+  path. Lingo-Judge runs in-process; weights are pulled lazily on first use.
 """
 
 from __future__ import annotations
@@ -1585,7 +1597,7 @@ def json_safe(value: Any, depth: int = 4, max_text: int = 1200) -> Any:
 def compact_dataset_row(row: Dict[str, Any]) -> Dict[str, Any]:
     keep: Dict[str, Any] = {}
     for key, value in row.items():
-        if key.startswith("runtime_agent_") or key in {"frames"}:
+        if key.startswith("batch_inference_") or key in {"frames"}:
             continue
         if key.startswith("_") and key not in {"_id", "_media_type"}:
             continue
@@ -3062,26 +3074,26 @@ def write_fiftyone_result(video: Dict[str, Any], result: Dict[str, Any]) -> None
 
         dataset = fo.load_dataset(snap["fo_dataset_name"])
         schema = dataset.get_field_schema()
-        if "runtime_agent_correct" not in schema:
-            dataset.add_sample_field("runtime_agent_correct", fo.BooleanField)
-        if "runtime_agent_error" not in schema:
-            dataset.add_sample_field("runtime_agent_error", fo.StringField)
+        if "batch_inference_correct" not in schema:
+            dataset.add_sample_field("batch_inference_correct", fo.BooleanField)
+        if "batch_inference_error" not in schema:
+            dataset.add_sample_field("batch_inference_error", fo.StringField)
         sample = dataset[video["sample_id"]]
-        sample["runtime_agent_response"] = result.get("response") or ""
-        sample["runtime_agent_plan"] = result.get("plan") or {}
-        sample["runtime_agent_params"] = result.get("params") or {}
-        sample["runtime_agent_metrics"] = result.get("metrics") or {}
-        sample["runtime_agent_expected"] = result.get("expected") or {}
-        sample["runtime_agent_evaluation"] = result.get("evaluation") or {}
+        sample["batch_inference_response"] = result.get("response") or ""
+        sample["batch_inference_plan"] = result.get("plan") or {}
+        sample["batch_inference_params"] = result.get("params") or {}
+        sample["batch_inference_metrics"] = result.get("metrics") or {}
+        sample["batch_inference_expected"] = result.get("expected") or {}
+        sample["batch_inference_evaluation"] = result.get("evaluation") or {}
         if (result.get("evaluation") or {}).get("has_expected"):
-            sample["runtime_agent_correct"] = bool((result.get("evaluation") or {}).get("is_correct"))
+            sample["batch_inference_correct"] = bool((result.get("evaluation") or {}).get("is_correct"))
         if result.get("json") is not None:
-            sample["runtime_agent_json"] = result["json"]
+            sample["batch_inference_json"] = result["json"]
             label = result["json"].get("prediction_label")
             if label:
-                sample["runtime_agent_prediction"] = fo.Classification(label=str(label))
+                sample["batch_inference_prediction"] = fo.Classification(label=str(label))
         if result.get("error"):
-            sample["runtime_agent_error"] = str(result["error"])
+            sample["batch_inference_error"] = str(result["error"])
         sample.save()
     except Exception as exc:
         log(f"Could not write result back to FiftyOne: {exc}")
@@ -3967,12 +3979,768 @@ def detect_host_ip() -> Optional[str]:
     return None
 
 
+# ============================================================================
+# Benchmark View — LingoQA evaluation engine
+# ============================================================================
+#
+# Design contract (NIM Message-Shape Standing Order, NO client-side caps):
+# - Outbound payload mirrors build.nvidia.com cosmos-reason2-8b verbatim:
+#   one user message, content = [image_url, image_url, ..., text]; each
+#   image_url.url is a base64 data: URL ("data:image/jpeg;base64,<b64>").
+# - Model id is auto-detected from /v1/models on each run start; never
+#   hardcoded.
+# - NO max_tokens / max_completion_tokens / temperature / top_p sent unless
+#   the user explicitly overrides. Server's max_model_len governs.
+# - Lingo-Judge runs in-process: AutoModelForSequenceClassification on the
+#   wayveai/Lingo-Judge checkpoint (DeBERTa-v3-base, 184M params). Two
+#   reference answers per question; final score is max of the two sigmoids.
+# - Streaming endpoint emits a 1-byte SSE comment every ~15s to keep long
+#   fetches alive (multi-hour 1000-row eval). Partial results are flushed
+#   to disk every 10 rows so a crash mid-run is recoverable.
+
+LINGOQA_DATA_ROOTS = [
+    Path(p) for p in (
+        os.getenv("LINGOQA_DATA_ROOT") or "",
+        "/home/horde/lingoqa-data",
+        "/tmp/lingoqa-data",
+    ) if p
+]
+BENCHMARK_RUN_ROOT = Path(os.getenv("BENCHMARK_RUN_ROOT", "/tmp/benchmark-runs"))
+BENCHMARK_RUN_ROOT.mkdir(parents=True, exist_ok=True)
+
+LINGOQA_CATEGORY_KEYWORDS: List[Tuple[str, List[str]]] = [
+    ("counting", ["how many", " count", "number of"]),
+    ("action", ["what is the vehicle doing", "what action", "what is the ego", "what is the car doing", "what are you doing"]),
+    ("justification", ["why ", "what is the reason", "justify"]),
+    ("attention", ["pay attention", "what should you pay", "focus on", "watch out", "be aware"]),
+    ("anticipation", ["about to", "going to happen", "next", "anticipate", "predict"]),
+    ("reasoning_counterfactuals", ["if ", "would you", "what if", "instead", "counterfactual", "suppose"]),
+    ("localisation", ["where ", "which lane", "left", "right", "position of", "located"]),
+    ("identification", ["which ", "identify", "what kind", "what type", "what color", "what colour"]),
+    ("description", ["describe", "what can you see", "what do you see", "what is visible"]),
+]
+LINGOQA_CATEGORY_ORDER = [
+    "action",
+    "justification",
+    "attention",
+    "identification",
+    "localisation",
+    "description",
+    "counting",
+    "anticipation",
+    "reasoning_counterfactuals",
+]
+
+BENCHMARK_STATE: Dict[str, Any] = {
+    "runs": {},  # run_id -> snapshot dict
+    "judge_loaded": False,
+    "judge_error": None,
+    "lingoqa_loaded": False,
+    "lingoqa_count": 0,
+}
+BENCHMARK_LOCK = threading.Lock()
+
+# Module-level handles for the lazily-loaded judge.
+_JUDGE_TOKENIZER = None
+_JUDGE_MODEL = None
+_JUDGE_DEVICE = None
+
+
+def _lingoqa_dataset_dir() -> Optional[Path]:
+    for root in LINGOQA_DATA_ROOTS:
+        if not root.exists():
+            continue
+        # Two on-disk layouts are tolerated:
+        # 1. <root>/evaluation/val.parquet + <root>/evaluation/images/images/val/...
+        # 2. <root>/val.parquet + <root>/images/val/...
+        for candidate in (root / "evaluation", root):
+            parquet = candidate / "val.parquet"
+            if parquet.exists():
+                return candidate
+    return None
+
+
+def _lingoqa_image_root(base: Path) -> Path:
+    # MANIFEST: parquet paths are relative to "<base>/images/" (note doubled
+    # images/ wrapper after unzip).
+    doubled = base / "images"
+    if doubled.exists():
+        return doubled
+    return base
+
+
+def categorize_lingoqa_question(question: str) -> str:
+    q = question.lower()
+    for cat, needles in LINGOQA_CATEGORY_KEYWORDS:
+        for needle in needles:
+            if needle in q:
+                return cat
+    return "uncategorized"
+
+
+def load_lingoqa(parquet_path: Optional[Path] = None, image_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Read LingoQA val.parquet and yield one record per row.
+
+    Returns list of dicts: {question_id, segment_id, images: [absolute paths],
+    question, answer, category}. Images-per-row is 5 (uniform); two reference
+    answers exist per unique question_id and both rows are returned.
+    """
+    base = parquet_path.parent if parquet_path else _lingoqa_dataset_dir()
+    if base is None:
+        raise FileNotFoundError(
+            "LingoQA val.parquet not found. Stage data at /home/horde/lingoqa-data "
+            "or /tmp/lingoqa-data with the manifest layout."
+        )
+    parquet = parquet_path or (base / "val.parquet")
+    img_root = image_root or _lingoqa_image_root(base)
+
+    try:
+        import pyarrow.parquet as pq
+    except Exception as exc:
+        raise RuntimeError(f"pyarrow required to read LingoQA parquet: {exc}") from exc
+
+    table = pq.read_table(parquet)
+    rows = table.to_pylist()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        raw_images = row.get("images")
+        if hasattr(raw_images, "tolist"):
+            raw_images = raw_images.tolist()
+        if raw_images is None:
+            raw_images = []
+        images: List[str] = []
+        for rel in raw_images:
+            rel_str = str(rel)
+            candidate = img_root / rel_str
+            if not candidate.exists():
+                # Try without leading "images/" (the parquet sometimes prefixes it).
+                stripped = rel_str.split("/", 1)[1] if "/" in rel_str else rel_str
+                alt = img_root / stripped
+                candidate = alt if alt.exists() else candidate
+            images.append(str(candidate))
+        question = str(row.get("question") or "")
+        out.append({
+            "question_id": str(row.get("question_id") or ""),
+            "segment_id": str(row.get("segment_id") or ""),
+            "images": images,
+            "question": question,
+            "answer": str(row.get("answer") or ""),
+            "category": categorize_lingoqa_question(question),
+        })
+    with BENCHMARK_LOCK:
+        BENCHMARK_STATE["lingoqa_loaded"] = True
+        BENCHMARK_STATE["lingoqa_count"] = len(out)
+    return out
+
+
+def group_lingoqa_by_question(samples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse two-reference rows into one record per question_id.
+
+    Returns dicts: {question_id, segment_id, images, question, references: [a,b], category}.
+    """
+    bucket: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for s in samples:
+        qid = s["question_id"]
+        if qid not in bucket:
+            bucket[qid] = {
+                "question_id": qid,
+                "segment_id": s["segment_id"],
+                "images": s["images"],
+                "question": s["question"],
+                "references": [],
+                "category": s["category"],
+            }
+            order.append(qid)
+        bucket[qid]["references"].append(s["answer"])
+    return [bucket[qid] for qid in order]
+
+
+def _ensure_judge() -> None:
+    """Lazy-load wayveai/Lingo-Judge. Holds in memory after first call."""
+    global _JUDGE_TOKENIZER, _JUDGE_MODEL, _JUDGE_DEVICE
+    if _JUDGE_MODEL is not None:
+        return
+    try:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        import torch
+    except Exception as exc:
+        with BENCHMARK_LOCK:
+            BENCHMARK_STATE["judge_error"] = f"transformers import failed: {exc}"
+        raise
+    log("Loading Lingo-Judge (wayveai/Lingo-Judge, base=microsoft/deberta-v3-base)")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-base")
+    model = AutoModelForSequenceClassification.from_pretrained("wayveai/Lingo-Judge")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.eval()
+    model.to(device)
+    _JUDGE_TOKENIZER = tokenizer
+    _JUDGE_MODEL = model
+    _JUDGE_DEVICE = device
+    with BENCHMARK_LOCK:
+        BENCHMARK_STATE["judge_loaded"] = True
+        BENCHMARK_STATE["judge_error"] = None
+    log(f"Lingo-Judge ready on {device}")
+
+
+def lingo_judge_score(question: str, reference: str, prediction: str) -> float:
+    """Run a single (q, ref, pred) triple through Lingo-Judge.
+
+    Returns sigmoid probability in [0, 1]; > 0.5 is judged correct.
+    """
+    _ensure_judge()
+    import torch
+
+    text = f"[CLS]\nQuestion: {question}\nAnswer: {reference}\nStudent: {prediction}"
+    encoded = _JUDGE_TOKENIZER(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+        padding=False,
+    ).to(_JUDGE_DEVICE)
+    with torch.no_grad():
+        out = _JUDGE_MODEL(**encoded)
+    logit = out.logits.squeeze().detach().cpu().float().item()
+    return float(1.0 / (1.0 + pow(2.718281828, -logit)))
+
+
+def lingo_judge_score_max(question: str, references: List[str], prediction: str) -> Tuple[float, int]:
+    """Return (max_score, index_of_winning_reference)."""
+    scores = [lingo_judge_score(question, ref, prediction) for ref in references]
+    if not scores:
+        return 0.0, -1
+    best = max(range(len(scores)), key=scores.__getitem__)
+    return scores[best], best
+
+
+def _strip_think_block(text: str) -> str:
+    """Strip <think>...</think> and any <answer>...</answer> wrapper for the
+    final-answer surfaced to Lingo-Judge.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    m = re.search(r"<answer>\s*([\s\S]*?)\s*</answer>", cleaned, flags=re.IGNORECASE)
+    if m:
+        cleaned = m.group(1)
+    return cleaned.strip()
+
+
+def _extract_think_block(text: str) -> str:
+    m = re.search(r"<think>([\s\S]*?)</think>", text or "", flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def benchmark_nim_base_url() -> str:
+    return (
+        os.getenv("BENCHMARK_NIM_BASE_URL")
+        or os.getenv("VLLM_BASE_URL")
+        or "http://localhost:8000/v1"
+    )
+
+
+def benchmark_nim_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    key = os.environ.get("NIM_API_KEY") or os.environ.get("NVIDIA_API_KEY") or os.environ.get("VLLM_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def benchmark_detect_model() -> str:
+    """Probe /v1/models on the live NIM and return the served model id."""
+    base = benchmark_nim_base_url().rstrip("/")
+    url = base + "/models"
+    resp = requests.get(url, headers=benchmark_nim_headers(), timeout=10)
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    if not data:
+        raise RuntimeError(f"NIM /v1/models returned no entries: {url}")
+    return data[0].get("id") or data[0].get("root") or ""
+
+
+def run_one_image_qa(
+    sample: Dict[str, Any],
+    model: str,
+    base_url: str,
+    headers: Dict[str, str],
+    *,
+    system_prompt: Optional[str] = None,
+    timeout: float = 600.0,
+) -> Dict[str, Any]:
+    """LingoQA image-Q/A inference primitive.
+
+    Mirrors run_one for video; uses the build.nvidia.com canonical shape:
+    one user message, content = [image_url ... image_url, text]. Sends
+    NO max_tokens, NO temperature, NO top_p — Alex standing order.
+    Captures latency, model id, raw response, and parses <think>/<answer>.
+    """
+    if requests is None:
+        raise RuntimeError(f"requests import failed: {REQUESTS_IMPORT_ERROR}")
+
+    images = sample.get("images") or []
+    content: List[Dict[str, Any]] = []
+    for path in images:
+        try:
+            with open(path, "rb") as fh:
+                b64 = base64.b64encode(fh.read()).decode("ascii")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"LingoQA image missing on disk: {path}")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    content.append({"type": "text", "text": sample["question"]})
+
+    system_text = system_prompt or (
+        "You are a helpful assistant analyzing driving-scene images. "
+        "Answer the question in 1-2 sentences. Think step-by-step inside "
+        "<think>...</think> tags first if reasoning helps; place the final "
+        "answer after the closing </think> tag (or inside <answer>...</answer>)."
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": content},
+        ],
+        # NO max_tokens / temperature / top_p — standing order.
+    }
+    url = base_url.rstrip("/") + "/chat/completions"
+    started = time.monotonic()
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    elapsed = time.monotonic() - started
+    if resp.status_code >= 400:
+        raise RuntimeError(f"NIM {resp.status_code}: {resp.text[:600]}")
+    body = resp.json()
+    raw_text = ""
+    try:
+        raw_text = body["choices"][0]["message"]["content"] or ""
+    except Exception:
+        raw_text = json.dumps(body)[:1000]
+    return {
+        "question_id": sample["question_id"],
+        "segment_id": sample["segment_id"],
+        "question": sample["question"],
+        "category": sample.get("category") or "uncategorized",
+        "model": model,
+        "raw_response": raw_text,
+        "reasoning_trace": _extract_think_block(raw_text),
+        "prediction": _strip_think_block(raw_text) or raw_text.strip(),
+        "latency_seconds": elapsed,
+        "usage": body.get("usage") or {},
+        "images": images,
+    }
+
+
+def _benchmark_run_dir(run_id: str) -> Path:
+    path = BENCHMARK_RUN_ROOT / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _benchmark_snapshot_save(run_id: str, snap: Dict[str, Any]) -> None:
+    path = _benchmark_run_dir(run_id) / "results.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(snap, default=str, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def benchmark_get(run_id: str) -> Optional[Dict[str, Any]]:
+    with BENCHMARK_LOCK:
+        snap = BENCHMARK_STATE["runs"].get(run_id)
+        return json.loads(json.dumps(snap, default=str)) if snap else None
+
+
+def _benchmark_update(rid: str, **fields: Any) -> Dict[str, Any]:
+    with BENCHMARK_LOCK:
+        snap = BENCHMARK_STATE["runs"].setdefault(rid, {})
+        snap.update(fields)
+        snap["updated_epoch"] = time.time()
+        snap.setdefault("run_id", rid)
+        return json.loads(json.dumps(snap, default=str))
+
+
+def _benchmark_append_result(rid: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    with BENCHMARK_LOCK:
+        snap = BENCHMARK_STATE["runs"].setdefault(rid, {})
+        results = snap.setdefault("results", [])
+        results.append(record)
+        snap["progress"] = {
+            "done": len(results),
+            "total": snap.get("total") or 0,
+            "errors": sum(1 for r in results if r.get("error")),
+        }
+        snap["updated_epoch"] = time.time()
+        return json.loads(json.dumps(snap, default=str))
+
+
+def _benchmark_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
+    results = [r for r in (snap.get("results") or []) if not r.get("error")]
+    total = len(results)
+    correct = sum(1 for r in results if r.get("judge_correct"))
+    by_cat: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        cat = r.get("category") or "uncategorized"
+        bucket = by_cat.setdefault(cat, {"total": 0, "correct": 0, "scores": []})
+        bucket["total"] += 1
+        if r.get("judge_correct"):
+            bucket["correct"] += 1
+        if r.get("judge_score") is not None:
+            bucket["scores"].append(r["judge_score"])
+    per_category = []
+    for cat in LINGOQA_CATEGORY_ORDER + [c for c in by_cat if c not in LINGOQA_CATEGORY_ORDER]:
+        if cat not in by_cat:
+            continue
+        b = by_cat[cat]
+        acc = (b["correct"] / b["total"]) if b["total"] else 0.0
+        avg = (sum(b["scores"]) / len(b["scores"])) if b["scores"] else None
+        per_category.append({
+            "category": cat,
+            "total": b["total"],
+            "correct": b["correct"],
+            "accuracy": acc,
+            "average_score": avg,
+        })
+    latencies = [r.get("latency_seconds") for r in results if r.get("latency_seconds") is not None]
+    avg_latency = (sum(latencies) / len(latencies)) if latencies else None
+    answer_lens = [len((r.get("prediction") or "").split()) for r in results]
+    avg_len = (sum(answer_lens) / len(answer_lens)) if answer_lens else None
+    reasoning_pct = (sum(1 for r in results if r.get("reasoning_trace")) / total) if total else 0.0
+    return {
+        "total_predictions": total,
+        "correct": correct,
+        "overall_accuracy": (correct / total) if total else 0.0,
+        "per_category": per_category,
+        "average_latency_seconds": avg_latency,
+        "average_answer_words": avg_len,
+        "reasoning_trace_pct": reasoning_pct,
+    }
+
+
+def run_lingoqa_benchmark(
+    run_id: str,
+    dataset_id: str,
+    judge_id: str,
+    sample_size: int,
+    concurrency: int,
+    seed: int,
+) -> None:
+    """Benchmark worker thread. Mutates BENCHMARK_STATE['runs'][run_id]."""
+    started = time.time()
+    try:
+        _benchmark_update(
+            run_id,
+            dataset=dataset_id,
+            judge=judge_id,
+            sample_size=sample_size,
+            concurrency=concurrency,
+            seed=seed,
+            started_epoch=started,
+            status="loading_dataset",
+        )
+
+        if dataset_id != "lingoqa-official":
+            raise RuntimeError(f"Unsupported dataset id: {dataset_id}")
+        samples = load_lingoqa()
+        questions = group_lingoqa_by_question(samples)
+
+        if sample_size and sample_size < len(questions):
+            import random as _random
+            rng = _random.Random(seed)
+            questions = rng.sample(questions, sample_size)
+
+        _benchmark_update(
+            run_id,
+            total=len(questions),
+            status="probing_model",
+            results=[],
+        )
+
+        model = benchmark_detect_model()
+        base = benchmark_nim_base_url()
+        headers = benchmark_nim_headers()
+        _benchmark_update(run_id, model=model, base_url=base, status="loading_judge")
+
+        if judge_id == "lingo-judge":
+            _ensure_judge()
+        else:
+            raise RuntimeError(f"Unsupported judge id: {judge_id}")
+
+        _benchmark_update(run_id, status="running")
+        log(f"[benchmark {run_id}] model={model} questions={len(questions)} concurrency={concurrency}")
+
+        flush_every = 10
+        results_collected = 0
+
+        # ThreadPoolExecutor for model inference; judge runs serially after
+        # each inference to avoid GPU contention.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = {
+                ex.submit(run_one_image_qa, q, model, base, headers): q
+                for q in questions
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                q = futures[fut]
+                try:
+                    result = fut.result()
+                    score, ref_idx = lingo_judge_score_max(
+                        q["question"], q["references"], result["prediction"]
+                    )
+                    result["judge_score"] = score
+                    result["judge_correct"] = bool(score > 0.5)
+                    result["judge_winning_reference_index"] = ref_idx
+                    result["references"] = q["references"]
+                    result["error"] = None
+                except Exception as exc:
+                    log(f"[benchmark {run_id}] error on q={q.get('question_id')}: {exc}")
+                    result = {
+                        "question_id": q["question_id"],
+                        "segment_id": q["segment_id"],
+                        "question": q["question"],
+                        "category": q.get("category"),
+                        "references": q["references"],
+                        "error": str(exc),
+                        "judge_score": None,
+                        "judge_correct": False,
+                        "prediction": "",
+                        "raw_response": "",
+                        "reasoning_trace": "",
+                        "latency_seconds": None,
+                        "images": q.get("images") or [],
+                        "model": model,
+                    }
+                snap = _benchmark_append_result(run_id, result)
+                results_collected += 1
+                if results_collected % flush_every == 0 or results_collected == len(questions):
+                    summary = _benchmark_summarize(snap)
+                    snap = _benchmark_update(run_id, summary=summary)
+                    _benchmark_snapshot_save(run_id, snap)
+
+        final = _benchmark_update(
+            run_id,
+            status="complete",
+            finished_epoch=time.time(),
+            wall_seconds=time.time() - started,
+            summary=_benchmark_summarize(benchmark_get(run_id) or {}),
+        )
+        _benchmark_snapshot_save(run_id, final)
+        log(f"[benchmark {run_id}] complete in {final['wall_seconds']:.1f}s")
+    except Exception as exc:
+        log(f"[benchmark {run_id}] FAILED: {exc}")
+        final = _benchmark_update(
+            run_id,
+            status="error",
+            error=str(exc),
+            finished_epoch=time.time(),
+        )
+        try:
+            _benchmark_snapshot_save(run_id, final)
+        except Exception:
+            pass
+
+
+def benchmark_render_report(run_id: str) -> str:
+    """Render the in-app HTML report (arxiv-2312.14115 12-section layout)."""
+    snap = benchmark_get(run_id) or {}
+    summary = snap.get("summary") or _benchmark_summarize(snap) or {}
+    results = [r for r in (snap.get("results") or []) if not r.get("error")]
+    model = snap.get("model") or ""
+    judge = snap.get("judge") or ""
+    overall = summary.get("overall_accuracy") or 0.0
+    correct = summary.get("correct") or 0
+    total = summary.get("total_predictions") or 0
+
+    # Pick qualitative examples.
+    by_correct = [r for r in results if r.get("judge_correct")]
+    by_wrong = [r for r in results if not r.get("judge_correct")]
+    by_reasoning = sorted(
+        [r for r in results if r.get("reasoning_trace")],
+        key=lambda r: len(r.get("reasoning_trace") or ""),
+        reverse=True,
+    )
+    qual_correct = by_correct[:2]
+    qual_wrong = by_wrong[:2]
+    qual_reasoning = by_reasoning[:2]
+
+    per_cat = summary.get("per_category") or []
+    max_bar_acc = max([c["accuracy"] for c in per_cat] + [0.01])
+
+    def _esc(s: Any) -> str:
+        return html.escape(str(s or ""))
+
+    def _row(question: str, label: str, prediction: str, score: float, correct: bool) -> str:
+        klass = "ok" if correct else "bad"
+        score_pct = f"{score * 100:.1f}%" if isinstance(score, (int, float)) else ""
+        return (
+            "<tr>"
+            f"<td>{_esc(question)}</td>"
+            f"<td>{_esc(label)}</td>"
+            f"<td>{_esc(prediction)}</td>"
+            f"<td class='{klass}'>{score_pct}</td>"
+            f"<td class='{klass}'>{'correct' if correct else 'miss'}</td>"
+            "</tr>"
+        )
+
+    bars_html = "".join(
+        f"<div class='cat-row'><div class='cat-name'>{_esc(c['category'])} (n={c['total']})</div>"
+        f"<div class='cat-bar'><div class='cat-fill' style='width:{c['accuracy'] * 100:.1f}%'></div></div>"
+        f"<div class='cat-pct'>{c['accuracy'] * 100:.1f}%</div></div>"
+        for c in per_cat
+    )
+
+    qualitative_rows = "".join(
+        _row(r["question"], (r.get("references") or [""])[0], r["prediction"], r.get("judge_score") or 0.0, bool(r.get("judge_correct")))
+        for r in (qual_correct + qual_wrong)
+    )
+
+    reasoning_blocks = "".join(
+        f"<div class='trace'>"
+        f"<div class='trace-q'><strong>Question:</strong> {_esc(r['question'])}</div>"
+        f"<div class='trace-gt'><strong>GT-A:</strong> {_esc((r.get('references') or [''])[0])}</div>"
+        f"<div class='trace-gt'><strong>GT-B:</strong> {_esc((r.get('references') or ['', ''])[1] if len(r.get('references') or []) > 1 else '')}</div>"
+        f"<div class='trace-cot'><strong>Reasoning trace:</strong><pre>{_esc(r['reasoning_trace'])}</pre></div>"
+        f"<div class='trace-ans'><strong>Final answer:</strong> {_esc(r['prediction'])}</div>"
+        f"<div class='trace-verdict'>Lingo-Judge: <strong>{'True' if r.get('judge_correct') else 'False'}</strong> (prob {(r.get('judge_score') or 0.0):.3f})</div>"
+        f"</div>"
+        for r in qual_reasoning
+    )
+
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>LingoQA Benchmark Report — {_esc(run_id)}</title>
+<style>
+:root {{ --green:#76B900; --dark:#1A1A1A; --bg:#fff; --soft:#F0F5E8; }}
+body {{ margin:0; font-family:Inter,system-ui,sans-serif; color:var(--dark); background:var(--bg); font-size:18px; line-height:1.5; }}
+.slide {{ max-width:1100px; margin:0 auto; padding:48px 32px; border-bottom:1px solid #e5e7eb; }}
+.slide-title {{ font-size:32px; font-weight:700; margin:0 0 16px; color:var(--dark); }}
+.slide-sub {{ font-size:20px; color:#475569; margin-bottom:24px; }}
+.hero {{ font-size:120px; font-weight:800; color:var(--green); line-height:1; }}
+.hero-sub {{ font-size:32px; margin:8px 0 16px; }}
+.definition {{ background:var(--soft); border-left:6px solid var(--green); padding:16px 20px; font-size:18px; }}
+.tile-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; }}
+.tile {{ border:1px solid #cbd5e1; border-left:6px solid var(--green); border-radius:8px; padding:18px; background:#fff; }}
+.tile h4 {{ margin:0 0 8px; font-size:16px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }}
+.tile .val {{ font-size:28px; font-weight:700; }}
+.cat-row {{ display:grid; grid-template-columns:240px 1fr 80px; gap:12px; align-items:center; margin:8px 0; }}
+.cat-name {{ font-size:18px; }}
+.cat-bar {{ background:#e5e7eb; height:18px; border-radius:9px; overflow:hidden; border:1px solid #cbd5e1; }}
+.cat-fill {{ background:var(--green); height:100%; }}
+.cat-pct {{ text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }}
+table.qual {{ width:100%; border-collapse:collapse; margin-top:16px; }}
+table.qual th, table.qual td {{ padding:12px; border-bottom:1px solid #e5e7eb; vertical-align:top; text-align:left; font-size:17px; }}
+table.qual th {{ background:var(--dark); color:#fff; font-weight:600; }}
+table.qual td.ok {{ background:#ECFDF5; }}
+table.qual td.bad {{ background:#FEF2F2; }}
+.trace {{ background:#f8fafc; border:1px solid #cbd5e1; border-left:6px solid var(--green); padding:18px; margin:12px 0; border-radius:8px; }}
+.trace pre {{ background:var(--soft); padding:12px; border-radius:6px; white-space:pre-wrap; font-size:16px; }}
+.ref-bar {{ display:flex; flex-wrap:wrap; gap:12px; margin-top:16px; font-size:18px; }}
+.ref-bar .pill {{ background:#fff; border:1px solid #cbd5e1; border-radius:999px; padding:6px 14px; }}
+.ref-bar .pill.us {{ background:var(--green); color:#fff; border-color:var(--green); }}
+.kv {{ display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; }}
+.kv div:nth-child(odd) {{ color:#64748b; }}
+</style></head><body>
+<section class='slide' style='background:var(--dark); color:#fff;'>
+  <div style='border-left:6px solid var(--green); padding-left:20px;'>
+    <h1 style='font-size:44px; margin:0 0 12px; color:#fff;'>Cosmos3-Super-Reasoner on LingoQA</h1>
+    <div style='font-size:24px; color:var(--green);'>Visual Question Answering for Autonomous Driving — {total}-row benchmark</div>
+    <div style='font-size:16px; opacity:0.7; margin-top:24px;'>Run: {_esc(run_id)} · {_esc(time.strftime('%Y-%m-%d', time.localtime(snap.get('started_epoch') or time.time())))}</div>
+    <div style='font-size:14px; opacity:0.5; margin-top:8px;'>Benchmark: Marcu et al., arXiv:2312.14115 (Wayve, 2024)</div>
+  </div>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>TL;DR</h2>
+  <div class='tile-grid'>
+    <div class='tile'><h4>Headline</h4><div class='val'>{overall * 100:.1f}%</div><div>Lingo-Judge accuracy on {total} predictions. Human ceiling 96.6%, LingoQA Baseline 60.8%, GPT-4V 59.6%.</div></div>
+    <div class='tile'><h4>Reasoning behavior</h4><div class='val'>{(summary.get('average_answer_words') or 0):.1f} words</div><div>Avg answer length. Reasoning traces on {(summary.get('reasoning_trace_pct') or 0) * 100:.1f}% of questions.</div></div>
+    <div class='tile'><h4>Per-category spread</h4><div class='val'>{(max([c['accuracy'] for c in per_cat] + [0]) - min([c['accuracy'] for c in per_cat] + [1])) * 100:.1f} pts</div><div>Gap between best and worst competency.</div></div>
+  </div>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Headline Metric — Lingo-Judge</h2>
+  <div class='hero'>{overall * 100:.1f}%</div>
+  <div class='hero-sub'>{correct}/{total} predictions classified correct</div>
+  <div class='definition'>Lingo-Judge is a DeBERTa-v3 classifier fine-tuned with LoRA. Score = max F_Judge(prediction, GT_j) over j in {{0,1}}. Judge does not see the images — pure text classification against human-written labels.</div>
+  <div class='ref-bar'>
+    <div class='pill'>Human (multi-frame) 96.6</div>
+    <div class='pill'>Human (single-frame) 81.8</div>
+    <div class='pill us'>This run {overall * 100:.1f}</div>
+    <div class='pill'>LingoQA Baseline 60.8</div>
+    <div class='pill'>GPT-4V 59.6</div>
+    <div class='pill'>LLaVA-FT 59.0</div>
+    <div class='pill'>BLIP-2-FT 52.2</div>
+  </div>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Per-Category Breakdown</h2>
+  <div>{bars_html}</div>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Qualitative Examples</h2>
+  <table class='qual'><thead><tr><th>Question</th><th>Label</th><th>Prediction</th><th>L-J Prob.</th><th>L-J Class.</th></tr></thead>
+  <tbody>{qualitative_rows}</tbody></table>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Reasoning Trace Examples</h2>
+  {reasoning_blocks or '<p>No reasoning traces emitted in this run.</p>'}
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Methodology</h2>
+  <div class='kv'>
+    <div>Model</div><div>{_esc(model)}</div>
+    <div>Served via</div><div>NIM OpenAI-compat /v1/chat/completions ({_esc(snap.get('base_url') or '')})</div>
+    <div>Message shape</div><div>build.nvidia.com canonical: one user message, content = image_url[] (base64 data: URL) + text. No max_tokens.</div>
+    <div>Frame count</div><div>5 frames per question (LingoQA uniform)</div>
+    <div>Eval set</div><div>LingoQA val.parquet, 500 unique questions × 2 references = 1000 rows</div>
+    <div>Metric</div><div>{_esc(judge)} (DeBERTa-v3-base, sigmoid &gt; 0.5)</div>
+    <div>Total wall</div><div>{(snap.get('wall_seconds') or 0):.1f}s ({total} predictions, avg {(summary.get('average_latency_seconds') or 0):.2f}s/pred)</div>
+  </div>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Judge Calibration</h2>
+  <p>Lingo-Judge (paper Table 1): 95.0% validation accuracy, 0.950 Spearman, 0.993 Pearson — measured against human evaluators across 17 candidate models.</p>
+  <p>Known failure mode: judge over-rates long-form incorrect answers (FUYU 45.4% judge vs 17.69% human). This run averages {(summary.get('average_answer_words') or 0):.1f} words/answer — flag if &gt; 30.</p>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Limitations</h2>
+  <ul>
+    <li>Zero-shot: model was not fine-tuned on LingoQA training data — peer is the paper's zero-shot row, not fine-tuned baseline.</li>
+    <li>1,000 rows total (500 questions × 2 refs); ±3% per-category swings are noise.</li>
+    <li>English-only, UK driving scenes, front-camera-only.</li>
+    <li>Judge is out-of-distribution for reasoning-model answer styles; results should be spot-audited for verbose over-rating.</li>
+  </ul>
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Appendix — Reproducibility</h2>
+  <div class='kv'>
+    <div>Run id</div><div>{_esc(run_id)}</div>
+    <div>NIM endpoint</div><div>{_esc(snap.get('base_url') or '')}</div>
+    <div>Model id</div><div>{_esc(model)}</div>
+    <div>Sample size</div><div>{_esc(snap.get('sample_size'))}</div>
+    <div>Seed</div><div>{_esc(snap.get('seed'))}</div>
+    <div>Started</div><div>{_esc(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(snap.get('started_epoch') or time.time())))}</div>
+    <div>Results JSON</div><div>/benchmark/results/{_esc(run_id)}.json</div>
+  </div>
+</section>
+</body></html>"""
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Cosmos BYO Video Batch Inference</title>
+<meta name="description" content="Cosmos BYO Video Batch Inference with Basic View and LingoQA Benchmark View" />
 <style>
 :root { color-scheme: light; --ink:#1f2937; --muted:#6b7280; --line:#d8dee8; --panel:#ffffff; --bg:#f5f7fb; --accent:#0f766e; --warn:#b45309; --bad:#b91c1c; }
 * { box-sizing: border-box; }
@@ -4039,7 +4807,47 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 #serverPill { max-width:min(52vw, 560px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .progress { height:8px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
 .progress div { height:100%; width:0; background:var(--accent); transition:width .2s ease; }
-@media (min-width: 1440px) { main { width:calc(100% - 40px); } }
+/* Tab switcher (Basic / Benchmark) */
+.tabs { display:flex; gap:0; padding:0 28px; border-bottom:1px solid var(--line); background:#fff; }
+.tab-btn { background:transparent; color:#475569; border:0; border-bottom:3px solid transparent; padding:14px 22px; font-weight:650; cursor:pointer; font-size:14px; border-radius:0; }
+.tab-btn.active { color:#76B900; border-bottom-color:#76B900; }
+.tab-pane { display:none; }
+.tab-pane.active { display:block; }
+/* Benchmark View */
+.bench-wrap { width:min(100% - 32px, 1680px); margin:0 auto; padding:24px 0; }
+.bench-grid { display:grid; grid-template-columns:repeat(2, minmax(320px, 1fr)); gap:18px; }
+.bench-card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; }
+.bench-card h3 { margin:0 0 12px; font-size:14px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
+.bench-card label { font-size:12px; color:#64748b; }
+.bench-card select, .bench-card input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+.bench-section { margin-top:18px; background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; }
+.bench-section h3 { margin:0 0 14px; font-size:14px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
+.bench-hero { display:flex; align-items:center; gap:24px; flex-wrap:wrap; }
+.bench-hero .num { font-size:64px; font-weight:800; color:#76B900; line-height:1; }
+.bench-hero .ref-row { display:flex; flex-wrap:wrap; gap:8px; }
+.bench-hero .ref-row span { background:#f8fafc; border:1px solid var(--line); border-radius:999px; padding:4px 12px; font-size:12px; color:#475569; }
+.cat-chips { display:flex; flex-wrap:wrap; gap:8px; }
+.cat-chip { background:#fff; border:1px solid var(--line); border-radius:999px; padding:6px 12px; font-size:12px; }
+.cat-chip strong { color:#1A1A1A; }
+.cat-chip.high { border-color:#76B900; background:#F0F5E8; }
+.cat-chip.low { border-color:#FECACA; background:#FEF2F2; }
+.bench-progress { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin:8px 0; }
+.bench-progress div { height:100%; background:#76B900; width:0; transition:width .2s ease; }
+.sample-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; }
+.sample-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8fafc; cursor:pointer; transition:border-color .15s; }
+.sample-card:hover { border-color:#76B900; }
+.sample-card .verdict { font-weight:700; }
+.sample-card.ok { border-left:4px solid #76B900; }
+.sample-card.bad { border-left:4px solid #DC2626; }
+.sample-card .q { font-size:13px; margin:6px 0; color:#1A1A1A; }
+.sample-card .pred { font-size:12px; color:#475569; }
+.sample-card img { width:100%; height:120px; object-fit:cover; border-radius:4px; background:#e5e7eb; }
+.bench-shape { background:#0f172a; color:#d1fae5; padding:12px; border-radius:6px; font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap; max-height:220px; overflow:auto; margin-top:8px; }
+.bench-modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:1000; align-items:center; justify-content:center; padding:24px; }
+.bench-modal.open { display:flex; }
+.bench-modal-inner { background:#fff; max-width:900px; max-height:90vh; overflow:auto; border-radius:12px; padding:24px; }
+.bench-modal pre { background:#F0F5E8; padding:12px; border-radius:6px; white-space:pre-wrap; font-size:13px; max-height:240px; overflow:auto; }
+@media (min-width: 1440px) { main { width:calc(100% - 40px); } .bench-wrap { width:calc(100% - 40px); } }
 @media (max-width: 900px) {
   header { padding:14px; align-items:flex-start; flex-direction:column; }
   #serverPill { max-width:100%; }
@@ -4057,6 +4865,11 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   <h1>Cosmos BYO Video Batch Inference</h1>
   <span class="pill" id="serverPill">checking backend</span>
 </header>
+<div class="tabs" role="tablist">
+  <button class="tab-btn active" data-tab="basic" role="tab">Basic View</button>
+  <button class="tab-btn" data-tab="benchmark" role="tab">Benchmark View</button>
+</div>
+<div id="basicPane" class="tab-pane active">
 <main>
 <aside>
   <div class="guide">
@@ -4161,6 +4974,109 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   </div>
 </section>
 </main>
+</div><!-- end basicPane -->
+<div id="benchmarkPane" class="tab-pane">
+  <div class="bench-wrap">
+    <div class="bench-grid">
+      <div class="bench-card">
+        <h3>Dataset</h3>
+        <label>Source</label>
+        <select id="benchDataset"><option value="lingoqa-official">LingoQA (official, GDrive local cache)</option></select>
+        <label style="margin-top:10px;">Custom GDrive URL (future)</label>
+        <input id="benchCustomGDrive" disabled placeholder="https://drive.google.com/drive/folders/... (coming soon)" />
+        <label style="margin-top:10px;">Custom Hugging Face dataset (future)</label>
+        <input id="benchCustomHF" disabled placeholder="owner/dataset (coming soon)" />
+        <p class="hint" id="benchDatasetStatus">Probing dataset...</p>
+      </div>
+      <div class="bench-card">
+        <h3>Eval Method</h3>
+        <label>Judge</label>
+        <select id="benchJudge"><option value="lingo-judge">Lingo-Judge (DeBERTa-v3-base, Wayve)</option></select>
+        <p class="hint" id="benchJudgeStatus">Probing judge...</p>
+      </div>
+      <div class="bench-card">
+        <h3>Model (auto-detected)</h3>
+        <label>Served model id</label>
+        <input id="benchModel" readonly value="probing /v1/models..." />
+        <p class="hint">Auto-detected from the live NIM /v1/models endpoint. Never hardcoded.</p>
+        <details><summary>Run Anywhere shape (build.nvidia.com canonical)</summary>
+        <pre class="bench-shape">POST /v1/chat/completions
+{
+  "model": "&lt;served_id&gt;",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,&lt;b64_frame_1&gt;"}},
+      ...
+      {"type": "text", "text": "&lt;LingoQA question&gt;"}
+    ]
+  }]
+  /* NO max_tokens, NO temperature, NO top_p — Alex standing order */
+}</pre></details>
+      </div>
+      <div class="bench-card">
+        <h3>Run Configuration</h3>
+        <label>Sample size: <span id="benchSampleSizeVal">1000</span></label>
+        <input id="benchSampleSize" type="range" min="10" max="1000" step="10" value="1000" />
+        <label style="margin-top:10px;">Concurrency: <span id="benchConcurrencyVal">8</span></label>
+        <input id="benchConcurrency" type="range" min="1" max="16" step="1" value="8" />
+        <label style="margin-top:10px;">Seed: <span id="benchSeedVal">42</span></label>
+        <input id="benchSeed" type="number" value="42" style="font:inherit;" />
+        <div class="actions" style="margin-top:14px;">
+          <button id="benchRunBtn" style="background:#76B900;">RUN BENCHMARK</button>
+          <button class="secondary" id="benchSmokeBtn">Smoke (5 rows)</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="bench-section">
+      <h3>Live results</h3>
+      <div class="bench-progress"><div id="benchBar"></div></div>
+      <div class="kv" id="benchProgressKv" style="margin-bottom:12px;"></div>
+      <div class="bench-hero">
+        <div>
+          <div class="num" id="benchAccuracy">--</div>
+          <div style="font-size:14px; color:#475569;">Lingo-Judge Accuracy</div>
+        </div>
+        <div class="ref-row">
+          <span>Human (multi-frame) 96.6</span>
+          <span>Human (single-frame) 81.8</span>
+          <span>LingoQA Baseline 60.8</span>
+          <span>GPT-4V 59.6</span>
+          <span>LLaVA-FT 59.0</span>
+        </div>
+      </div>
+      <div style="margin-top:18px;">
+        <h4 style="margin:0 0 8px; font-size:13px; color:#475569;">Per-category accuracy</h4>
+        <div class="cat-chips" id="benchCats"></div>
+      </div>
+    </div>
+
+    <div class="bench-section">
+      <h3>Recent samples</h3>
+      <p class="hint">Click a sample to expand the reasoning trace and judge details.</p>
+      <div class="sample-grid" id="benchSamples"></div>
+    </div>
+
+    <div class="bench-section">
+      <h3>Report</h3>
+      <p class="hint">Live arxiv-2312.14115-style report. Opens once a run completes (or partially mid-run).</p>
+      <div class="actions">
+        <a id="benchReportLink" class="export-link" href="#" target="_blank">Open report</a>
+        <a id="benchJsonLink" class="export-link" href="#" target="_blank">Download results.json</a>
+      </div>
+    </div>
+  </div>
+  <div id="benchModal" class="bench-modal" role="dialog">
+    <div class="bench-modal-inner">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 id="benchModalTitle" style="margin:0;">Sample detail</h3>
+        <button class="secondary" id="benchModalClose">Close</button>
+      </div>
+      <div id="benchModalBody"></div>
+    </div>
+  </div>
+</div><!-- end benchmarkPane -->
 <script>
 let state = null;
 let initialized = false;
@@ -4348,6 +5264,159 @@ document.querySelectorAll('.exportBtn').forEach(btn=>{ btn.onclick = ()=>exportA
 document.getElementById('allBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=true); };
 document.getElementById('noneBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=false); };
 poll(); setInterval(poll, 1500);
+
+// ====================================================================
+// Benchmark View
+// ====================================================================
+let benchRunId = null;
+let benchPollTimer = null;
+let benchLastResults = [];
+
+function benchSwitchTab(name){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
+  document.getElementById('basicPane').classList.toggle('active', name==='basic');
+  document.getElementById('benchmarkPane').classList.toggle('active', name==='benchmark');
+  if(name==='benchmark'){ benchProbeDataset(); benchProbeJudge(); benchProbeModel(); }
+}
+document.querySelectorAll('.tab-btn').forEach(b=>{ b.onclick = ()=>benchSwitchTab(b.dataset.tab); });
+
+async function benchProbeDataset(){
+  try{
+    const r = await fetch('/benchmark/datasets'); const j = await r.json();
+    const lq = (j||[])[0] || {};
+    el('benchDatasetStatus').textContent = lq.ready ? `LingoQA ready at ${lq.path} (1000 rows)` : 'LingoQA data not staged on this host. scp the dataset to /home/horde/lingoqa-data/.';
+  }catch(e){ el('benchDatasetStatus').textContent = 'Probe failed: '+e.message; }
+}
+async function benchProbeJudge(){
+  try{
+    const r = await fetch('/benchmark/judges'); const j = await r.json();
+    const lj = (j||[])[0] || {};
+    el('benchJudgeStatus').textContent = lj.loaded ? 'Lingo-Judge loaded (DeBERTa-v3-base)' : 'Lingo-Judge will lazy-load on first run (~600 MB download, ~30s warm-up).';
+  }catch(e){ el('benchJudgeStatus').textContent = 'Probe failed: '+e.message; }
+}
+async function benchProbeModel(){
+  try{
+    const r = await fetch('/benchmark/model'); const j = await r.json();
+    el('benchModel').value = j.model || ('error: '+(j.error||'unknown'));
+  }catch(e){ el('benchModel').value = 'probe failed: '+e.message; }
+}
+
+function benchClipText(s, max=180){ s=String(s||''); return s.length>max ? s.slice(0,max-1)+'...' : s; }
+function benchPct(v){ return (Number(v||0)*100).toFixed(1)+'%'; }
+
+function benchRenderSnap(snap){
+  const summary = snap.summary || {};
+  const progress = snap.progress || {done:0,total:0,errors:0};
+  const total = progress.total || snap.total || 0;
+  const done = progress.done || 0;
+  const pct = total ? Math.round(100*done/total) : 0;
+  el('benchBar').style.width = pct+'%';
+  const elapsed = snap.started_epoch ? (((snap.finished_epoch||Date.now()/1000) - snap.started_epoch)) : 0;
+  const eta = (done>0 && total>done) ? ((total-done) * (elapsed/done)) : null;
+  const etaStr = eta ? (eta>60 ? `${Math.floor(eta/60)}m ${Math.round(eta%60)}s` : Math.round(eta)+'s') : '';
+  const rows = [
+    ['run id', snap.run_id||''],
+    ['status', snap.status||''],
+    ['model', snap.model||''],
+    ['progress', `${done}/${total} (${pct}%)`],
+    ['errors', String(progress.errors||0)],
+    ['elapsed', Math.round(elapsed)+'s'],
+    ['ETA', etaStr],
+    ['avg latency', summary.average_latency_seconds ? summary.average_latency_seconds.toFixed(2)+'s' : ''],
+    ['reasoning trace', summary.reasoning_trace_pct!==undefined ? benchPct(summary.reasoning_trace_pct) : ''],
+  ];
+  el('benchProgressKv').innerHTML = rows.filter(([_,v])=>v).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
+  const acc = summary.overall_accuracy;
+  el('benchAccuracy').textContent = acc !== undefined && acc !== null ? (acc*100).toFixed(1)+'%' : '--';
+  // Per-category chips
+  const cats = summary.per_category || [];
+  const chipsHtml = cats.map(c=>{
+    const a = c.accuracy||0;
+    const cls = a>=0.7 ? 'high' : (a<=0.3 ? 'low' : '');
+    return `<div class="cat-chip ${cls}"><strong>${esc(c.category)}</strong> ${(a*100).toFixed(1)}% (n=${c.total})</div>`;
+  }).join('');
+  el('benchCats').innerHTML = chipsHtml || '<div class="hint" style="color:#94a3b8;">no completed predictions yet</div>';
+  // Sample grid
+  const recent = snap.recent_results || [];
+  benchLastResults = recent.slice();
+  el('benchSamples').innerHTML = recent.map((r, idx)=>{
+    const cls = r.judge_correct ? 'ok' : 'bad';
+    const verdict = r.error ? 'ERROR' : (r.judge_correct ? '✅ correct' : '❌ miss');
+    const score = r.judge_score!==null && r.judge_score!==undefined ? (r.judge_score*100).toFixed(0)+'%' : '';
+    return `<div class="sample-card ${cls}" data-idx="${idx}">
+      <div class="verdict">${verdict} <span style="float:right; color:#475569;">${score}</span></div>
+      <div class="q">${esc(benchClipText(r.question,90))}</div>
+      <div class="pred"><strong>pred:</strong> ${esc(benchClipText(r.prediction||r.error||'',120))}</div>
+      <div class="pred"><strong>gt:</strong> ${esc(benchClipText((r.references||[''])[0],120))}</div>
+    </div>`;
+  }).join('') || '<div class="hint" style="color:#94a3b8;">no samples yet</div>';
+  // Wire detail modal clicks
+  document.querySelectorAll('.sample-card').forEach(c=>{ c.onclick = ()=>benchOpenSample(Number(c.dataset.idx)); });
+  // Report + download links
+  if(snap.run_id){
+    el('benchReportLink').href = '/benchmark/report/'+snap.run_id;
+    el('benchJsonLink').href = '/benchmark/results/'+snap.run_id+'.json';
+  }
+}
+
+function benchOpenSample(idx){
+  const r = benchLastResults[idx]; if(!r) return;
+  el('benchModalTitle').textContent = r.judge_correct ? 'Correct: '+(r.category||'') : 'Miss: '+(r.category||'');
+  el('benchModalBody').innerHTML = `
+    <div class="kv">
+      <div>question</div><div>${esc(r.question||'')}</div>
+      <div>GT-A</div><div>${esc((r.references||[''])[0])}</div>
+      <div>GT-B</div><div>${esc((r.references||['',''])[1]||'')}</div>
+      <div>prediction</div><div>${esc(r.prediction||'')}</div>
+      <div>judge score</div><div>${r.judge_score!==null && r.judge_score!==undefined ? r.judge_score.toFixed(4) : 'n/a'}</div>
+      <div>verdict</div><div>${r.judge_correct ? 'correct (sigmoid &gt; 0.5)' : 'miss'}</div>
+      <div>latency</div><div>${r.latency_seconds ? r.latency_seconds.toFixed(2)+'s' : ''}</div>
+    </div>
+    ${r.reasoning_trace ? `<h4 style="margin-top:16px;">Reasoning trace</h4><pre>${esc(r.reasoning_trace)}</pre>` : ''}
+    <h4 style="margin-top:16px;">Raw response</h4>
+    <pre>${esc(r.raw_response||'')}</pre>
+  `;
+  el('benchModal').classList.add('open');
+}
+document.getElementById('benchModalClose').onclick = ()=>el('benchModal').classList.remove('open');
+document.getElementById('benchModal').addEventListener('click', (e)=>{ if(e.target.id==='benchModal') el('benchModal').classList.remove('open'); });
+
+async function benchPoll(){
+  if(!benchRunId) return;
+  try{
+    const r = await fetch('/benchmark/status/'+benchRunId); const snap = await r.json();
+    benchRenderSnap(snap);
+    if(snap.status === 'complete' || snap.status === 'error'){
+      clearInterval(benchPollTimer); benchPollTimer = null;
+    }
+  }catch(e){ console.error('benchPoll', e); }
+}
+
+async function benchStart(sample_size){
+  try{
+    const body = {
+      dataset: el('benchDataset').value,
+      judge: el('benchJudge').value,
+      sample_size: sample_size!==undefined ? sample_size : Number(el('benchSampleSize').value),
+      concurrency: Number(el('benchConcurrency').value),
+      seed: Number(el('benchSeed').value),
+    };
+    const j = await api('/benchmark/run', body);
+    benchRunId = j.run_id;
+    el('benchAccuracy').textContent = '--';
+    el('benchBar').style.width = '0%';
+    if(benchPollTimer) clearInterval(benchPollTimer);
+    benchPollTimer = setInterval(benchPoll, 1500);
+    benchPoll();
+  }catch(e){ alert(e.message); }
+}
+document.getElementById('benchRunBtn').onclick = ()=>benchStart();
+document.getElementById('benchSmokeBtn').onclick = ()=>benchStart(5);
+['benchSampleSize','benchConcurrency','benchSeed'].forEach(id=>{
+  const s = document.getElementById(id); if(!s) return;
+  const vid = id+'Val'; const v = document.getElementById(vid);
+  if(v){ s.oninput = ()=>{ v.textContent = s.value; }; }
+});
 </script>
 </body>
 </html>
@@ -4379,6 +5448,94 @@ class Handler(BaseHTTPRequestHandler):
                 return
             content_type = EXPORT_CONTENT_TYPES.get(export_path.suffix.lstrip(".").lower(), mimetypes.guess_type(str(export_path))[0] or "application/octet-stream")
             self.send_file(export_path, content_type, download_name=export_path.name)
+        elif self.path == "/benchmark/datasets":
+            base = _lingoqa_dataset_dir()
+            ready = base is not None and (base / "val.parquet").exists()
+            self.send_json([{
+                "id": "lingoqa-official",
+                "name": "LingoQA (1000 rows)",
+                "rows": 1000,
+                "ready": bool(ready),
+                "path": str(base) if base else None,
+            }])
+        elif self.path == "/benchmark/judges":
+            self.send_json([{
+                "id": "lingo-judge",
+                "name": "Lingo-Judge (DeBERTa-v3-base, Wayve)",
+                "loaded": bool(BENCHMARK_STATE.get("judge_loaded")),
+                "error": BENCHMARK_STATE.get("judge_error"),
+            }])
+        elif self.path == "/benchmark/model":
+            try:
+                model = benchmark_detect_model()
+                self.send_json({"model": model, "base_url": benchmark_nim_base_url()})
+            except Exception as exc:
+                self.send_json({"model": None, "error": str(exc), "base_url": benchmark_nim_base_url()})
+        elif self.path.startswith("/benchmark/status/"):
+            run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+            snap = benchmark_get(run_id)
+            if not snap:
+                self.send_error(404)
+                return
+            # Trim results in the status payload — full results available at
+            # /benchmark/results/<run_id>.json. Keep the last 12 rows for the
+            # live sample-grid view.
+            light = dict(snap)
+            results = light.get("results") or []
+            light["recent_results"] = results[-12:]
+            light["results"] = None
+            light["result_count"] = len(results)
+            self.send_json(light)
+        elif self.path.startswith("/benchmark/results/") and self.path.endswith(".json"):
+            run_id = self.path.rsplit("/", 1)[-1][:-5]
+            snap = benchmark_get(run_id)
+            if not snap:
+                self.send_error(404)
+                return
+            self.send_json(snap)
+        elif self.path.startswith("/benchmark/report/"):
+            run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+            if not benchmark_get(run_id):
+                self.send_error(404)
+                return
+            self.send_text(benchmark_render_report(run_id), "text/html")
+        elif self.path.startswith("/benchmark/stream/"):
+            # Keepalive SSE stream for the live run panel. Emits a comment byte
+            # every ~15s + a JSON status snapshot every poll.
+            run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+            if not benchmark_get(run_id):
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                last_emit = 0.0
+                while True:
+                    snap = benchmark_get(run_id) or {}
+                    status = snap.get("status") or "unknown"
+                    payload = json.dumps({
+                        "status": status,
+                        "progress": snap.get("progress") or {},
+                        "summary": snap.get("summary") or {},
+                        "model": snap.get("model"),
+                    })
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    if status in ("complete", "error"):
+                        break
+                    # Keepalive comment every 15s to keep upstream proxies happy.
+                    end = time.monotonic() + 5
+                    while time.monotonic() < end:
+                        time.sleep(1)
+                        if time.monotonic() - last_emit > 15:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                            last_emit = time.monotonic()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         else:
             self.send_error(404)
 
@@ -4473,6 +5630,39 @@ class Handler(BaseHTTPRequestHandler):
                     "filename": path.name,
                     "url": "/api/export/" + urllib.parse.quote(path.name),
                     "bytes": path.stat().st_size,
+                })
+            elif self.path == "/benchmark/run":
+                dataset_id = str(payload.get("dataset") or "lingoqa-official")
+                judge_id = str(payload.get("judge") or "lingo-judge")
+                sample_size = int(payload.get("sample_size") or 1000)
+                concurrency = int(payload.get("concurrency") or 8)
+                seed = int(payload.get("seed") or 42)
+                run_id = f"lingoqa-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+                _benchmark_update(
+                    run_id,
+                    status="queued",
+                    dataset=dataset_id,
+                    judge=judge_id,
+                    sample_size=sample_size,
+                    concurrency=concurrency,
+                    seed=seed,
+                    results=[],
+                    progress={"done": 0, "total": 0, "errors": 0},
+                )
+                thread = threading.Thread(
+                    target=run_lingoqa_benchmark,
+                    args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed),
+                    daemon=True,
+                )
+                thread.start()
+                self.send_json({
+                    "ok": True,
+                    "run_id": run_id,
+                    "dataset": dataset_id,
+                    "judge": judge_id,
+                    "sample_size": sample_size,
+                    "concurrency": concurrency,
+                    "seed": seed,
                 })
             else:
                 self.send_error(404)
