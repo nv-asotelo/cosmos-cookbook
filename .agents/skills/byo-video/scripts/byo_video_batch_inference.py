@@ -4570,6 +4570,69 @@ def _extract_think_block(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _extract_final_answer(prediction: str) -> str:
+    """Strip every `<think>...</think>` block (incl. tags) from a prediction.
+
+    Edge cases handled per Phase J amendment:
+      - No `<think>` tag → return prediction.strip()
+      - Unclosed `<think>` (no closing tag) → return everything AFTER the
+        opening `<think>` tag (or empty string if nothing follows). This
+        preserves the model's *attempt* at an answer instead of dropping it.
+      - Multiple `<think>` blocks → strip all of them.
+      - Leading/trailing whitespace stripped.
+
+    The returned string is the "answer-only" payload sent to Lingo-Judge in
+    `judge_mode="answer-only"` / `judge_mode="both"`. Goal: brief, gt-A/gt-B-
+    style text so the judge's 512-token window holds the entire final answer.
+    """
+    if not prediction:
+        return ""
+    text = prediction
+    has_open = re.search(r"<think>", text, flags=re.IGNORECASE)
+    has_close = re.search(r"</think>", text, flags=re.IGNORECASE)
+    if has_open and not has_close:
+        # Unclosed: keep everything after the FIRST <think> opener.
+        m = re.search(r"<think>([\s\S]*)", text, flags=re.IGNORECASE)
+        text = m.group(1) if m else ""
+    else:
+        # Strip every closed block (greedy across all of them).
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    # If the model also wrapped its answer in <answer>...</answer>, unwrap it.
+    m = re.search(r"<answer>\s*([\s\S]*?)\s*</answer>", text, flags=re.IGNORECASE)
+    if m:
+        text = m.group(1)
+    return text.strip()
+
+
+# DeBERTa-v3-base (the Lingo-Judge backbone) hard-truncates inputs at 512
+# tokens — see lingo_judge_score(). Reasoning-style models that emit long
+# <think> chains can blow past this; we surface an approximate token count
+# per row so the UI can call out "judge couldn't see the final answer."
+#
+# Heuristic: ~4 chars per token for English. Exact tokenizer counts would
+# be nicer but adding tiktoken as a dep is out of scope — the goal here is
+# directional, not precise.
+JUDGE_MAX_TOKENS = 512
+
+
+def _judge_text_tokens(question: str, reference: str, prediction: str) -> int:
+    """Estimate the token count of the exact string the judge tokenizes:
+    `[CLS]\\nQuestion: <q>\\nAnswer: <ref>\\nStudent: <pred>`.
+    Uses a 4-char-per-token heuristic — directional, not exact.
+    """
+    full = f"[CLS]\nQuestion: {question or ''}\nAnswer: {reference or ''}\nStudent: {prediction or ''}"
+    return max(1, len(full) // 4)
+
+
+def _judge_text_for_row(question: str, reference: str, prediction: str) -> str:
+    """The literal string fed to Lingo-Judge for one (q, ref, pred) triple.
+
+    Surfaced in the detail panel so a reader can see WHAT the judge actually
+    saw — including how a 1024-token reasoning trace gets clipped to 512.
+    """
+    return f"[CLS]\nQuestion: {question or ''}\nAnswer: {reference or ''}\nStudent: {prediction or ''}"
+
+
 def benchmark_nim_base_url() -> str:
     return (
         os.getenv("BENCHMARK_NIM_BASE_URL")
@@ -4974,6 +5037,34 @@ def _benchmark_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
     answer_lens = [len((r.get("prediction") or "").split()) for r in results]
     avg_len = (sum(answer_lens) / len(answer_lens)) if answer_lens else None
     reasoning_pct = (sum(1 for r in results if r.get("reasoning_trace")) / total) if total else 0.0
+    # Judge-input truncation rate. A row is "truncated" if EITHER reference's
+    # [CLS]\nQuestion:\nAnswer:\nStudent: string exceeded the judge's 512-token
+    # window. Surfaced in the Recent Samples header so we can spot reasoning
+    # models being silently under-scored at the population level.
+    truncated_rows = sum(
+        1 for r in results
+        if r.get("judge_truncated_a") or r.get("judge_truncated_b")
+    )
+    truncated_rows_answer_only = sum(
+        1 for r in results
+        if r.get("judge_truncated_a_answer_only") or r.get("judge_truncated_b_answer_only")
+    )
+    # ---- Dual judge-mode A/B summary (Phase J amendment) ----
+    # When the run is in mode "both" each row carries both judge_correct_*
+    # fields. Surface side-by-side accuracy + delta so the UI tile can show
+    # the headline "is the long-think prediction costing us X.Xpp?" finding.
+    std_rows = [r for r in results if r.get("judge_correct_standard") is not None]
+    ao_rows = [r for r in results if r.get("judge_correct_answer_only") is not None]
+    acc_std = (sum(1 for r in std_rows if r.get("judge_correct_standard")) / len(std_rows)) if std_rows else None
+    acc_ao = (sum(1 for r in ao_rows if r.get("judge_correct_answer_only")) / len(ao_rows)) if ao_rows else None
+    delta_pp = ((acc_ao - acc_std) * 100.0) if (acc_std is not None and acc_ao is not None) else None
+    # Count divergent rows (verdicts disagree between the two modes).
+    divergent_rows = sum(
+        1 for r in results
+        if r.get("judge_correct_standard") is not None
+        and r.get("judge_correct_answer_only") is not None
+        and bool(r.get("judge_correct_standard")) != bool(r.get("judge_correct_answer_only"))
+    )
     return {
         "total_predictions": total,
         "correct": correct,
@@ -4982,6 +5073,15 @@ def _benchmark_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
         "average_latency_seconds": avg_latency,
         "average_answer_words": avg_len,
         "reasoning_trace_pct": reasoning_pct,
+        "judge_truncated_rows": truncated_rows,
+        "judge_truncated_pct": (truncated_rows / total) if total else 0.0,
+        "judge_truncated_rows_answer_only": truncated_rows_answer_only,
+        "judge_truncated_pct_answer_only": (truncated_rows_answer_only / total) if total else 0.0,
+        "judge_max_tokens": JUDGE_MAX_TOKENS,
+        "accuracy_standard": acc_std,
+        "accuracy_answer_only": acc_ao,
+        "accuracy_delta_pp": delta_pp,
+        "divergent_rows": divergent_rows,
     }
 
 
@@ -4993,19 +5093,34 @@ def run_lingoqa_benchmark(
     concurrency: int,
     seed: int,
     source_config: Optional[Dict[str, Any]] = None,
+    judge_mode: str = "standard",
 ) -> None:
     """Benchmark worker thread. Mutates BENCHMARK_STATE['runs'][run_id].
 
     Despite the historical name, this worker now drives any dataset
     dispatched by load_dataset_by_id — not just LingoQA. The function name
     is kept for backwards compatibility with the API handler call site.
+
+    judge_mode (Phase J amendment — dual judge-mode A/B):
+      - "standard"    : judge sees result["prediction"] (default; back-compat).
+      - "answer-only" : judge sees _extract_final_answer(prediction). The
+                        <think>...</think> chain is removed before scoring so
+                        the brief final answer fits in DeBERTa's 512-token
+                        window — mirrors the brief gt-A/gt-B reference style.
+      - "both"        : runs both scorers per row. Each result captures
+                        judge_score_{standard,answer_only} and
+                        judge_correct_{standard,answer_only}. The verdict
+                        used for headline accuracy aliases to "standard" so
+                        existing dashboards keep working.
     """
+    judge_mode = judge_mode if judge_mode in ("standard", "answer-only", "both") else "standard"
     started = time.time()
     try:
         _benchmark_update(
             run_id,
             dataset=dataset_id,
             judge=judge_id,
+            judge_mode=judge_mode,
             sample_size=sample_size,
             concurrency=concurrency,
             seed=seed,
@@ -5059,13 +5174,82 @@ def run_lingoqa_benchmark(
                 q = futures[fut]
                 try:
                     result = fut.result()
-                    score, ref_idx = lingo_judge_score_max(
-                        q["question"], q["references"], result["prediction"]
-                    )
-                    result["judge_score"] = score
-                    result["judge_correct"] = bool(score > 0.5)
-                    result["judge_winning_reference_index"] = ref_idx
+                    refs = q.get("references") or []
+                    pred_standard = result.get("prediction") or ""
+                    pred_answer_only = _extract_final_answer(pred_standard)
+                    # Capture the answer-only string for UI transparency even
+                    # in standard mode — surfaces "what would have been sent"
+                    # in the detail panel without re-running the judge.
+                    result["prediction_answer_only"] = pred_answer_only
+                    # ---- Run judge in requested mode(s) ----
+                    score_standard = score_answer_only = None
+                    ref_idx_standard = ref_idx_answer_only = -1
+                    if judge_mode in ("standard", "both"):
+                        score_standard, ref_idx_standard = lingo_judge_score_max(
+                            q["question"], q["references"], pred_standard
+                        )
+                    if judge_mode in ("answer-only", "both"):
+                        score_answer_only, ref_idx_answer_only = lingo_judge_score_max(
+                            q["question"], q["references"], pred_answer_only
+                        )
+                    # ---- Headline (back-compat) fields: alias to the active
+                    # mode for "standard" / "answer-only", or to standard when
+                    # mode is "both" (Phase J amendment: A/B summary surfaces
+                    # delta but existing dashboards keep reading judge_score).
+                    if judge_mode == "answer-only":
+                        primary_score, primary_idx = score_answer_only, ref_idx_answer_only
+                    else:
+                        primary_score, primary_idx = score_standard, ref_idx_standard
+                    result["judge_mode"] = judge_mode
+                    result["judge_score"] = primary_score
+                    result["judge_correct"] = bool((primary_score or 0) > 0.5)
+                    result["judge_winning_reference_index"] = primary_idx
+                    # Dual fields (populated when computed; None otherwise).
+                    result["judge_score_standard"] = score_standard
+                    result["judge_correct_standard"] = bool((score_standard or 0) > 0.5) if score_standard is not None else None
+                    result["judge_winning_reference_index_standard"] = ref_idx_standard if score_standard is not None else None
+                    result["judge_score_answer_only"] = score_answer_only
+                    result["judge_correct_answer_only"] = bool((score_answer_only or 0) > 0.5) if score_answer_only is not None else None
+                    result["judge_winning_reference_index_answer_only"] = ref_idx_answer_only if score_answer_only is not None else None
                     result["references"] = q["references"]
+                    # ---- Token-count transparency for BOTH judge-input strings
+                    # so the UI can show whether the answer-only mode actually
+                    # fit under the 512-token window (the whole point of the
+                    # A/B). Per-row fields:
+                    #   judge_input_tokens_a, _b            -> standard mode
+                    #   judge_input_tokens_a_answer_only, _b_answer_only
+                    #   judge_truncated_a, _b                -> standard mode
+                    #   judge_truncated_a_answer_only, _b_answer_only
+                    n_a_std = _judge_text_tokens(q["question"], refs[0] if len(refs) > 0 else "", pred_standard)
+                    n_b_std = _judge_text_tokens(q["question"], refs[1], pred_standard) if len(refs) > 1 else None
+                    n_a_ao = _judge_text_tokens(q["question"], refs[0] if len(refs) > 0 else "", pred_answer_only)
+                    n_b_ao = _judge_text_tokens(q["question"], refs[1], pred_answer_only) if len(refs) > 1 else None
+                    result["judge_input_tokens_a"] = n_a_std
+                    result["judge_input_tokens_b"] = n_b_std
+                    result["judge_truncated_a"] = n_a_std > JUDGE_MAX_TOKENS
+                    result["judge_truncated_b"] = bool(n_b_std and n_b_std > JUDGE_MAX_TOKENS)
+                    result["judge_input_tokens_a_answer_only"] = n_a_ao
+                    result["judge_input_tokens_b_answer_only"] = n_b_ao
+                    result["judge_truncated_a_answer_only"] = n_a_ao > JUDGE_MAX_TOKENS
+                    result["judge_truncated_b_answer_only"] = bool(n_b_ao and n_b_ao > JUDGE_MAX_TOKENS)
+                    result["judge_max_tokens"] = JUDGE_MAX_TOKENS
+                    # Verbatim judge-input strings (both modes) so the detail
+                    # panel can show A/B exactly. NOTE: not truncated for
+                    # display by the producer — UI clips for rendering only.
+                    result["judge_input_text_a"] = _judge_text_for_row(
+                        q["question"], refs[0] if len(refs) > 0 else "", pred_standard
+                    )
+                    result["judge_input_text_b"] = (
+                        _judge_text_for_row(q["question"], refs[1], pred_standard)
+                        if len(refs) > 1 else None
+                    )
+                    result["judge_input_text_a_answer_only"] = _judge_text_for_row(
+                        q["question"], refs[0] if len(refs) > 0 else "", pred_answer_only
+                    )
+                    result["judge_input_text_b_answer_only"] = (
+                        _judge_text_for_row(q["question"], refs[1], pred_answer_only)
+                        if len(refs) > 1 else None
+                    )
                     result["error"] = None
                 except Exception as exc:
                     log(f"[benchmark {run_id}] error on q={q.get('question_id')}: {exc}")
@@ -5076,9 +5260,15 @@ def run_lingoqa_benchmark(
                         "category": q.get("category"),
                         "references": q["references"],
                         "error": str(exc),
+                        "judge_mode": judge_mode,
                         "judge_score": None,
                         "judge_correct": False,
+                        "judge_score_standard": None,
+                        "judge_correct_standard": None,
+                        "judge_score_answer_only": None,
+                        "judge_correct_answer_only": None,
                         "prediction": "",
+                        "prediction_answer_only": "",
                         "raw_response": "",
                         "reasoning_trace": "",
                         "latency_seconds": None,
@@ -5946,6 +6136,32 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 .sample-card .q { font-size:13px; margin:6px 0; color:#1A1A1A; }
 .sample-card .pred { font-size:12px; color:#475569; }
 .sample-card img { width:100%; height:120px; object-fit:cover; border-radius:4px; background:#e5e7eb; }
+/* Inline frame thumbnails on Recent Samples cards (Phase D — Lingo-Judge traceability) */
+.sample-card .frame-thumbnails { display:flex; gap:3px; margin:6px 0 8px; overflow:hidden; }
+.sample-card .frame-thumbnails .frame-thumbnail { width:80px; height:45px; object-fit:cover; border-radius:3px; background:#e5e7eb; border:1px solid #cbd5e1; display:block; flex:0 0 auto; }
+.sample-card .frame-thumbnails .frame-thumbnail:hover { border-color:#76B900; }
+.sample-card .frame-thumbnails .image-tag { font-size:11px; color:#475569; padding:2px 6px; background:#e5e7eb; border-radius:3px; }
+.sample-card .details-toggle { font-size:11px; color:#475569; margin-top:6px; cursor:pointer; user-select:none; }
+.sample-card .details-toggle:hover { color:#76B900; }
+.sample-card .trunc-flag { display:inline-block; font-size:10px; padding:1px 5px; border-radius:3px; background:#FEF3C7; color:#92400E; border:1px solid #FDE68A; margin-left:4px; vertical-align:middle; }
+/* Per-row detail panel inside the modal */
+.detail-frame-strip { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+.detail-frame-strip figure { margin:0; }
+.detail-frame-strip img { width:160px; height:90px; object-fit:cover; border-radius:4px; border:1px solid #cbd5e1; display:block; }
+.detail-frame-strip figcaption { font-size:11px; color:#475569; text-align:center; margin-top:2px; }
+.judge-breakdown { background:#F0F5E8; border:1px solid #c5e0a6; border-radius:6px; padding:12px; margin-top:12px; }
+.judge-breakdown h4 { margin:0 0 8px; font-size:13px; color:#1A1A1A; text-transform:uppercase; letter-spacing:0.04em; }
+.judge-breakdown .ref-block { background:#fff; border:1px solid var(--line); border-radius:4px; padding:8px 10px; margin-bottom:8px; }
+.judge-breakdown .ref-block.winning { border-left:4px solid #76B900; }
+.judge-breakdown .ref-block .ref-meta { font-size:12px; color:#475569; margin-bottom:4px; }
+.judge-breakdown pre { background:#0f172a; color:#d1fae5; padding:8px; border-radius:4px; font-size:11px; max-height:160px; overflow:auto; white-space:pre-wrap; margin:4px 0; font-family:ui-monospace,Menlo,monospace; }
+.judge-breakdown .trunc-marker { color:#fbbf24; font-weight:700; }
+.trunc-callout { background:#FEF3C7; border:1px solid #FDE68A; border-left:4px solid #F59E0B; border-radius:4px; padding:10px 12px; margin:10px 0; font-size:13px; color:#78350F; }
+.trunc-callout strong { color:#92400E; }
+.trunc-summary-callout { background:#FEF3C7; border:1px solid #FDE68A; border-left:4px solid #F59E0B; border-radius:6px; padding:10px 14px; margin:10px 0; font-size:13px; color:#78350F; }
+.provenance-footer { font-size:11px; color:#94a3b8; margin-top:12px; padding-top:8px; border-top:1px solid var(--line); font-family:ui-monospace,Menlo,monospace; }
+.provenance-footer a { color:#76B900; text-decoration:none; }
+.provenance-footer a:hover { text-decoration:underline; }
 .bench-shape { background:#0f172a; color:#d1fae5; padding:12px; border-radius:6px; font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap; max-height:220px; overflow:auto; margin-top:8px; }
 .bench-modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:1000; align-items:center; justify-content:center; padding:24px; }
 .bench-modal.open { display:flex; }
@@ -6161,6 +6377,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
           <label>Judge</label>
           <select id="benchJudge"><option value="lingo-judge">Lingo-Judge (DeBERTa-v3-base, Wayve)</option></select>
           <p class="hint" id="benchJudgeStatus">Probing judge...</p>
+          <label style="margin-top:10px;">Judge mode</label>
+          <div id="benchJudgeMode" style="display:flex; flex-direction:column; gap:4px; font-size:13px;">
+            <label><input type="radio" name="benchJudgeMode" value="standard" checked /> Standard <span style="color:#94a3b8;">— judge sees full prediction (incl. &lt;think&gt;)</span></label>
+            <label><input type="radio" name="benchJudgeMode" value="answer-only" /> Answer-only <span style="color:#94a3b8;">— strip &lt;think&gt; before judging</span></label>
+            <label><input type="radio" name="benchJudgeMode" value="both" /> Both (A/B) <span style="color:#94a3b8;">— score twice; surface delta</span></label>
+          </div>
+          <p class="hint">Brief gt-A/gt-B references favor short answers. Long &lt;think&gt; chains can push the judge past its 512-token window. Use "Both" to A/B the bias.</p>
         </div>
         <div class="bench-card">
           <h3>Model (auto-detected)</h3>
@@ -6231,7 +6454,8 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 
     <div class="bench-section">
       <h3>Recent samples</h3>
-      <p class="hint">Click a sample to expand the reasoning trace and judge details.</p>
+      <p class="hint">Click a sample to expand the reasoning trace, frame strip, and judge breakdown. Frame thumbnails are clickable for full-res.</p>
+      <div id="benchTruncStats"></div>
       <div class="sample-grid" id="benchSamples"></div>
     </div>
 
@@ -6516,21 +6740,104 @@ function benchRenderSnap(snap){
     return `<div class="cat-chip ${cls}"><strong>${esc(c.category)}</strong> ${(a*100).toFixed(1)}% (n=${c.total})</div>`;
   }).join('');
   el('benchCats').innerHTML = chipsHtml || '<div class="hint" style="color:#94a3b8;">no completed predictions yet</div>';
-  // Sample grid
+  // Aggregate truncation callout — surface when a meaningful fraction of rows
+  // would have been clipped by the judge's 512-token window. >5% suggests a
+  // re-judge sprint with shortened prompts is warranted.
+  const truncRows = summary.judge_truncated_rows || 0;
+  const truncPct = summary.judge_truncated_pct || 0;
+  const totalRows = summary.total_predictions || 0;
+  const truncEl = el('benchTruncStats');
+  if(truncEl){
+    let html = '';
+    if(totalRows > 0 && truncRows > 0){
+      const pctStr = (truncPct*100).toFixed(1);
+      const warn = truncPct > 0.05;
+      html += warn
+        ? `<div class="trunc-summary-callout"><strong>⚠️ ${truncRows} / ${totalRows} (${pctStr}%) judge inputs truncated</strong> at ${summary.judge_max_tokens||512} tokens. Reasoning-style models with long &lt;think&gt; chains may be under-rated — consider a shortened-prompt re-judge sprint as follow-up.</div>`
+        : `<div class="hint" style="color:#94a3b8; font-size:12px;">Judge truncation: ${truncRows} / ${totalRows} rows (${pctStr}%) exceeded ${summary.judge_max_tokens||512} tokens.</div>`;
+    }
+    // A/B summary tile — only when in "both" mode (both accuracies computed).
+    if(summary.accuracy_standard !== null && summary.accuracy_standard !== undefined
+       && summary.accuracy_answer_only !== null && summary.accuracy_answer_only !== undefined){
+      const aStd = (summary.accuracy_standard*100).toFixed(1);
+      const aAo  = (summary.accuracy_answer_only*100).toFixed(1);
+      const delta = summary.accuracy_delta_pp;
+      const deltaStr = (delta>=0?'+':'') + delta.toFixed(1) + 'pp';
+      const aoTruncPct = (summary.judge_truncated_pct_answer_only||0)*100;
+      const aoTruncRows = summary.judge_truncated_rows_answer_only || 0;
+      const divergent = summary.divergent_rows || 0;
+      const tileBg = Math.abs(delta) > 5 ? '#FEF3C7' : '#F0F5E8';
+      const tileBorder = Math.abs(delta) > 5 ? '#F59E0B' : '#76B900';
+      html += `<div style="background:${tileBg};border:1px solid ${tileBorder};border-left:4px solid ${tileBorder};border-radius:6px;padding:10px 14px;margin:8px 0;font-size:13px;">
+        <strong>Judge mode A/B:</strong>
+        Standard accuracy: <strong>${aStd}%</strong> ·
+        Answer-only accuracy: <strong>${aAo}%</strong> ·
+        Δ: <strong>${deltaStr}</strong> ·
+        Divergent rows: ${divergent} / ${totalRows} ·
+        Answer-only truncation: ${aoTruncRows} (${aoTruncPct.toFixed(1)}%)
+      </div>`;
+      if(Math.abs(delta) > 5){
+        html += `<div class="trunc-summary-callout"><strong>Reasoning model: judge-input format may be biasing the score by ${deltaStr}.</strong> The answer-only mode strips &lt;think&gt; before scoring; a Δ &gt; 5pp suggests the long reasoning chain is materially affecting judge verdicts (positive Δ = answer-only scored higher = the reasoning chain was hurting the verdict).</div>`;
+      }
+    }
+    truncEl.innerHTML = html;
+  }
+  // Sample grid — Phase D: inline frame thumbnails on every row so the user
+  // can SEE what the model + judge worked from. LingoQA rows have segment_id
+  // and use /lingoqa-frames/<seg>/<idx>.jpg; non-LingoQA rows fall back to a
+  // tiny "📷 N images" tag (or first 1-3 inline images if accessible).
   const recent = snap.recent_results || [];
   benchLastResults = recent.slice();
   el('benchSamples').innerHTML = recent.map((r, idx)=>{
-    const cls = r.judge_correct ? 'ok' : 'bad';
-    const verdict = r.error ? 'ERROR' : (r.judge_correct ? '✅ correct' : '❌ miss');
-    const score = r.judge_score!==null && r.judge_score!==undefined ? (r.judge_score*100).toFixed(0)+'%' : '';
+    // Color the card border based on STD verdict (current behavior). In
+    // "both" mode the ans-only verdict is shown as a small extra dot.
+    const stdCorrect = (r.judge_correct_standard !== null && r.judge_correct_standard !== undefined)
+      ? r.judge_correct_standard : r.judge_correct;
+    const cls = stdCorrect ? 'ok' : 'bad';
+    const hasBoth = (r.judge_score_standard !== null && r.judge_score_standard !== undefined)
+                 && (r.judge_score_answer_only !== null && r.judge_score_answer_only !== undefined);
+    let verdict, score;
+    if(r.error){ verdict = 'ERROR'; score = ''; }
+    else if(hasBoth){
+      const stdPct = (r.judge_score_standard*100).toFixed(0)+'%';
+      const aoPct  = (r.judge_score_answer_only*100).toFixed(0)+'%';
+      const stdMark = r.judge_correct_standard ? '✅' : '❌';
+      const aoMark  = r.judge_correct_answer_only ? '✅' : '❌';
+      const aoDotColor = r.judge_correct_answer_only ? '#76B900' : '#DC2626';
+      const aoDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${aoDotColor};margin:0 4px;" title="answer-only verdict"></span>`;
+      verdict = `${stdMark} ${stdPct} std ${aoDot}/ ${aoMark} ${aoPct} ans-only`;
+      score = '';
+    } else {
+      verdict = r.judge_correct ? '✅ correct' : '❌ miss';
+      score = r.judge_score!==null && r.judge_score!==undefined ? (r.judge_score*100).toFixed(0)+'%' : '';
+    }
+    const truncFlag = (r.judge_truncated_a || r.judge_truncated_b)
+      ? '<span class="trunc-flag" title="Judge input (standard mode) was truncated to 512 tokens — final answer may not have reached the judge.">⚠️ trunc</span>'
+      : '';
+    let thumbs = '';
+    if(r.segment_id){
+      const seg = encodeURIComponent(r.segment_id);
+      const t = [];
+      for(let i=0;i<5;i++){
+        t.push(`<a href="/lingoqa-frames/${seg}/${i}.jpg" target="_blank" onclick="event.stopPropagation()"><img loading="lazy" class="frame-thumbnail" src="/lingoqa-frames/${seg}/${i}.jpg" alt="frame ${i}"/></a>`);
+      }
+      thumbs = `<div class="frame-thumbnails">${t.join('')}</div>`;
+    } else if(Array.isArray(r.images) && r.images.length){
+      // Non-LingoQA datasets: just show an image count tag (paths are local
+      // disk and not currently served — future hook for /benchmark/artifact).
+      thumbs = `<div class="frame-thumbnails"><span class="image-tag">📷 ${r.images.length} image${r.images.length>1?'s':''}</span></div>`;
+    }
     return `<div class="sample-card ${cls}" data-idx="${idx}">
-      <div class="verdict">${verdict} <span style="float:right; color:#475569;">${score}</span></div>
+      <div class="verdict">${verdict} ${truncFlag} <span style="float:right; color:#475569;">${score}</span></div>
       <div class="q">${esc(benchClipText(r.question,90))}</div>
+      ${thumbs}
       <div class="pred"><strong>pred:</strong> ${esc(benchClipText(r.prediction||r.error||'',120))}</div>
       <div class="pred"><strong>gt:</strong> ${esc(benchClipText((r.references||[''])[0],120))}</div>
+      <div class="details-toggle">▾ Details</div>
     </div>`;
   }).join('') || '<div class="hint" style="color:#94a3b8;">no samples yet</div>';
-  // Wire detail modal clicks
+  // Wire detail modal clicks. Anchors inside thumbnails stop propagation so a
+  // click on a frame opens the full-res jpg without also opening the modal.
   document.querySelectorAll('.sample-card').forEach(c=>{ c.onclick = ()=>benchOpenSample(Number(c.dataset.idx)); });
   // Report + download links
   if(snap.run_id){
@@ -6542,19 +6849,120 @@ function benchRenderSnap(snap){
 function benchOpenSample(idx){
   const r = benchLastResults[idx]; if(!r) return;
   el('benchModalTitle').textContent = r.judge_correct ? 'Correct: '+(r.category||'') : 'Miss: '+(r.category||'');
+  // ---- Full 5-frame strip (LingoQA rows; lazy + clickable to full-res) ----
+  let frameStripHtml = '';
+  if(r.segment_id){
+    const seg = encodeURIComponent(r.segment_id);
+    const figs = [];
+    for(let i=0;i<5;i++){
+      figs.push(`<figure><a href="/lingoqa-frames/${seg}/${i}.jpg" target="_blank"><img loading="lazy" src="/lingoqa-frames/${seg}/${i}.jpg" alt="Frame ${i}"/></a><figcaption>Frame ${i}</figcaption></figure>`);
+    }
+    frameStripHtml = `<h4 style="margin-top:0;">Input frames</h4><div class="detail-frame-strip">${figs.join('')}</div>`;
+  } else if(Array.isArray(r.images) && r.images.length){
+    frameStripHtml = `<h4 style="margin-top:0;">Input</h4><div class="hint" style="font-size:12px;color:#94a3b8;">${r.images.length} image${r.images.length>1?'s':''} (paths only, see provenance footer).</div>`;
+  }
+  // ---- Token-count + truncation surfacing ----
+  const reasoningText = r.reasoning_trace || '';
+  const finalAnswer = r.prediction || '';
+  // Char-based estimate of (think + answer) tokens — directional only.
+  const combinedChars = reasoningText.length + finalAnswer.length;
+  const approxTokens = Math.max(1, Math.floor(combinedChars / 4));
+  const maxTok = r.judge_max_tokens || 512;
+  const overMax = approxTokens > maxTok;
+  const tokFlag = overMax ? ' <span class="trunc-flag">⚠️ TRUNCATED BY JUDGE</span>' : '';
+  // ---- Judge breakdown per reference ----
+  const refs = r.references || [];
+  const winIdx = (r.judge_winning_reference_index !== undefined && r.judge_winning_reference_index !== null) ? r.judge_winning_reference_index : -1;
+  function refBlock(label, refText, refIdx, judgeTextRaw, nTokens, truncated){
+    if(!refText && refText !== '') return '';
+    const isWin = refIdx === winIdx;
+    const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\n' : '';
+    // Clip the literal judge-input string for display at roughly 4*maxTok chars
+    // so we render about what the tokenizer actually saw.
+    const safeJudge = String(judgeTextRaw || '');
+    const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\n[...truncated for display]' : safeJudge;
+    const meta = `${label}${isWin?' <strong style="color:#76B900;">← winning ref</strong>':''} · ~${nTokens||0} tokens${truncated?' · TRUNCATED':''}`;
+    return `<div class="ref-block ${isWin?'winning':''}">
+      <div class="ref-meta">${meta}</div>
+      <div style="font-size:12px; margin-bottom:4px;"><strong>Ref:</strong> ${esc(refText)}</div>
+      <pre>${truncMarker}${esc(clip)}</pre>
+    </div>`;
+  }
+  const score = (r.judge_score!==null && r.judge_score!==undefined) ? r.judge_score.toFixed(3) : 'n/a';
+  const scoreLine = `judge score: <strong>${score}</strong> → ${r.judge_correct?'<span style="color:#76B900;">correct (&gt;0.5)</span>':'<span style="color:#DC2626;">miss (&le;0.5)</span>'}`;
+  // ---- Build judge breakdown: standard mode (always shown), then answer-only
+  // mode if it was scored (judge_mode "answer-only" or "both"). When both
+  // are present the two panels render side-by-side so the A/B is visible.
+  const stdBlock = `
+    <div class="judge-breakdown">
+      <h4>Judge breakdown — standard${r.judge_score_standard !== null && r.judge_score_standard !== undefined ? ` (score ${r.judge_score_standard.toFixed(3)} → ${r.judge_correct_standard?'<span style=\"color:#76B900;\">correct</span>':'<span style=\"color:#DC2626;\">miss</span>'})` : ''}</h4>
+      <div style="font-size:12px; margin-bottom:8px; color:#475569;">judge sees full prediction (incl. &lt;think&gt;)${winIdx>=0?` · winning ref index: <strong>${winIdx}</strong>`:''}</div>
+      ${refBlock('GT-A', refs[0]||'', 0, r.judge_input_text_a, r.judge_input_tokens_a, r.judge_truncated_a)}
+      ${refs.length>1 ? refBlock('GT-B', refs[1]||'', 1, r.judge_input_text_b, r.judge_input_tokens_b, r.judge_truncated_b) : ''}
+    </div>`;
+  let aoBlock = '';
+  if(r.judge_score_answer_only !== null && r.judge_score_answer_only !== undefined){
+    const aoWinIdx = (r.judge_winning_reference_index_answer_only !== undefined && r.judge_winning_reference_index_answer_only !== null) ? r.judge_winning_reference_index_answer_only : -1;
+    function aoRefBlock(label, refText, refIdx, judgeTextRaw, nTokens, truncated){
+      const isWin = refIdx === aoWinIdx;
+      const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\n' : '';
+      const safeJudge = String(judgeTextRaw || '');
+      const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\n[...truncated for display]' : safeJudge;
+      const meta = `${label}${isWin?' <strong style="color:#76B900;">← winning ref</strong>':''} · ~${nTokens||0} tokens${truncated?' · TRUNCATED':''}`;
+      return `<div class="ref-block ${isWin?'winning':''}">
+        <div class="ref-meta">${meta}</div>
+        <div style="font-size:12px; margin-bottom:4px;"><strong>Ref:</strong> ${esc(refText)}</div>
+        <pre>${truncMarker}${esc(clip)}</pre>
+      </div>`;
+    }
+    aoBlock = `
+    <div class="judge-breakdown">
+      <h4>Judge breakdown — answer-only (score ${r.judge_score_answer_only.toFixed(3)} → ${r.judge_correct_answer_only?'<span style="color:#76B900;">correct</span>':'<span style="color:#DC2626;">miss</span>'})</h4>
+      <div style="font-size:12px; margin-bottom:8px; color:#475569;">judge sees only the final answer (&lt;think&gt; stripped) — mirrors brief gt-A/gt-B style</div>
+      ${aoRefBlock('GT-A', refs[0]||'', 0, r.judge_input_text_a_answer_only, r.judge_input_tokens_a_answer_only, r.judge_truncated_a_answer_only)}
+      ${refs.length>1 ? aoRefBlock('GT-B', refs[1]||'', 1, r.judge_input_text_b_answer_only, r.judge_input_tokens_b_answer_only, r.judge_truncated_b_answer_only) : ''}
+    </div>`;
+  }
+  // A/B divergence callout: when both modes scored and verdicts disagree.
+  let abCallout = '';
+  if(r.judge_correct_standard !== null && r.judge_correct_standard !== undefined
+     && r.judge_correct_answer_only !== null && r.judge_correct_answer_only !== undefined
+     && Boolean(r.judge_correct_standard) !== Boolean(r.judge_correct_answer_only)){
+    abCallout = `<div class="trunc-callout"><strong>A/B disagreement on this row.</strong> Standard verdict: ${r.judge_correct_standard?'correct':'miss'} (${r.judge_score_standard.toFixed(3)}) · Answer-only verdict: ${r.judge_correct_answer_only?'correct':'miss'} (${r.judge_score_answer_only.toFixed(3)}). The judge's input format changed the answer — a strong signal that long &lt;think&gt; chains are biasing the score.</div>`;
+  }
+  const judgeHtml = (aoBlock
+    ? `<div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">${stdBlock}${aoBlock}</div>${abCallout}`
+    : stdBlock + abCallout);
+  // ---- Truncation callout (yellow) on a miss when truncation happened ----
+  const truncCallout = ((r.judge_truncated_a || r.judge_truncated_b) && !r.judge_correct)
+    ? `<div class="trunc-callout"><strong>⚠️ Judge input was truncated to ${maxTok} tokens.</strong> The model's final answer may not have been visible to the judge — a known failure mode for reasoning-style models with long &lt;think&gt; chains. Consider a shortened-prompt re-judge for this row.</div>`
+    : '';
+  // ---- Reasoning + final answer block ----
+  const reasoningBlock = reasoningText
+    ? `<h4 style="margin-top:14px;">Reasoning trace + answer <span style="font-weight:400; color:#475569;">(~${approxTokens} tokens${tokFlag})</span></h4>
+       <pre style="max-height:280px;">${esc('<think>\n'+reasoningText+'\n</think>\n\n'+finalAnswer)}</pre>`
+    : `<h4 style="margin-top:14px;">Final answer <span style="font-weight:400; color:#475569;">(~${approxTokens} tokens${tokFlag})</span></h4>
+       <pre>${esc(finalAnswer)}</pre>`;
+  // ---- Provenance footer ----
+  const provenance = `<div class="provenance-footer">
+    question_id: ${esc(r.question_id||'')} · segment_id: ${esc(r.segment_id||'(none)')} · model: ${esc(r.model||'')} · latency: ${r.latency_seconds?r.latency_seconds.toFixed(2)+'s':'n/a'}
+    ${r.segment_id?` · <a href="/lingoqa-frames/${encodeURIComponent(r.segment_id)}/0.jpg" target="_blank">open frame 0 →</a>`:''}
+  </div>`;
   el('benchModalBody').innerHTML = `
-    <div class="kv">
+    ${frameStripHtml}
+    <div class="kv" style="margin-top:8px;">
       <div>question</div><div>${esc(r.question||'')}</div>
       <div>GT-A</div><div>${esc((r.references||[''])[0])}</div>
       <div>GT-B</div><div>${esc((r.references||['',''])[1]||'')}</div>
-      <div>prediction</div><div>${esc(r.prediction||'')}</div>
-      <div>judge score</div><div>${r.judge_score!==null && r.judge_score!==undefined ? r.judge_score.toFixed(4) : 'n/a'}</div>
-      <div>verdict</div><div>${r.judge_correct ? 'correct (sigmoid &gt; 0.5)' : 'miss'}</div>
+      <div>verdict</div><div>${r.judge_correct ? 'correct (sigmoid &gt; 0.5)' : 'miss (sigmoid &le; 0.5)'}</div>
       <div>latency</div><div>${r.latency_seconds ? r.latency_seconds.toFixed(2)+'s' : ''}</div>
     </div>
-    ${r.reasoning_trace ? `<h4 style="margin-top:16px;">Reasoning trace</h4><pre>${esc(r.reasoning_trace)}</pre>` : ''}
-    <h4 style="margin-top:16px;">Raw response</h4>
+    ${truncCallout}
+    ${reasoningBlock}
+    ${judgeHtml}
+    <h4 style="margin-top:14px;">Raw response</h4>
     <pre>${esc(r.raw_response||'')}</pre>
+    ${provenance}
   `;
   el('benchModal').classList.add('open');
 }
@@ -6583,9 +6991,13 @@ async function benchStart(sample_size){
     if(benchUrlResolution && benchUrlResolution.dataset_config && benchUrlResolution.dataset_config.id === dsValue){
       source_config = benchUrlResolution.dataset_config;
     }
+    // Phase J amendment: dual judge-mode A/B.
+    const jmRadio = document.querySelector('input[name="benchJudgeMode"]:checked');
+    const judge_mode = jmRadio ? jmRadio.value : 'standard';
     const body = {
       dataset: dsValue,
       judge: el('benchJudge').value,
+      judge_mode: judge_mode,
       sample_size: sample_size!==undefined ? sample_size : Number(el('benchSampleSize').value),
       concurrency: Number(el('benchConcurrency').value),
       seed: Number(el('benchSeed').value),
@@ -7165,6 +7577,11 @@ class Handler(BaseHTTPRequestHandler):
                 sample_size = int(payload.get("sample_size") or 1000)
                 concurrency = int(payload.get("concurrency") or 8)
                 seed = int(payload.get("seed") or 42)
+                # Phase J amendment: dual judge-mode A/B. Default "standard"
+                # for backward compatibility.
+                judge_mode = str(payload.get("judge_mode") or "standard")
+                if judge_mode not in ("standard", "answer-only", "both"):
+                    judge_mode = "standard"
                 # source_config is the dataset_config dict the frontend got
                 # back from /benchmark/resolve_url. Forwarded so the loader
                 # can use repo_id, download paths, judge hints, etc.
@@ -7177,6 +7594,7 @@ class Handler(BaseHTTPRequestHandler):
                     status="queued",
                     dataset=dataset_id,
                     judge=judge_id,
+                    judge_mode=judge_mode,
                     sample_size=sample_size,
                     concurrency=concurrency,
                     seed=seed,
@@ -7187,6 +7605,7 @@ class Handler(BaseHTTPRequestHandler):
                 thread = threading.Thread(
                     target=run_lingoqa_benchmark,
                     args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
+                    kwargs={"judge_mode": judge_mode},
                     daemon=True,
                 )
                 thread.start()
@@ -7195,6 +7614,7 @@ class Handler(BaseHTTPRequestHandler):
                     "run_id": run_id,
                     "dataset": dataset_id,
                     "judge": judge_id,
+                    "judge_mode": judge_mode,
                     "sample_size": sample_size,
                     "concurrency": concurrency,
                     "seed": seed,
@@ -7218,12 +7638,18 @@ class Handler(BaseHTTPRequestHandler):
                 source_config = prior_snap.get("source_config")
                 if not isinstance(source_config, dict):
                     source_config = None
+                # Carry the judge_mode forward from the prior run when
+                # available; default to standard otherwise.
+                judge_mode = str(prior_snap.get("judge_mode") or hist.get("judge_mode") or "standard")
+                if judge_mode not in ("standard", "answer-only", "both"):
+                    judge_mode = "standard"
                 new_run_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
                 _benchmark_update(
                     new_run_id,
                     status="queued",
                     dataset=dataset_id,
                     judge=judge_id,
+                    judge_mode=judge_mode,
                     sample_size=sample_size,
                     concurrency=concurrency,
                     seed=seed,
@@ -7235,6 +7661,7 @@ class Handler(BaseHTTPRequestHandler):
                 thread = threading.Thread(
                     target=run_lingoqa_benchmark,
                     args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
+                    kwargs={"judge_mode": judge_mode},
                     daemon=True,
                 )
                 thread.start()
@@ -7244,6 +7671,7 @@ class Handler(BaseHTTPRequestHandler):
                     "rerun_of": old_run_id,
                     "dataset": dataset_id,
                     "judge": judge_id,
+                    "judge_mode": judge_mode,
                     "sample_size": sample_size,
                     "concurrency": concurrency,
                     "seed": seed,
