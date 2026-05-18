@@ -1140,8 +1140,33 @@ _NIM_SWITCH_SERVICE_READY = (
     _ensure_nim_switch_service() if INFERENCE_BACKEND == "nim_local" else False
 )
 
-DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
-DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
+ALPAMAYO_SYSTEM = (
+    "You are Alpamayo 1.5, a vision-language-action model analyzing ego-camera "
+    "driving clips. In this BYO-video UI, answer as VQA/captioning from visible "
+    "evidence in the sampled frames."
+)
+ALPAMAYO_PROMPT = (
+    "Analyze this ego-camera driving clip. Describe the scene, important road "
+    "users, lane and traffic-control context, visible hazards, and the likely "
+    "immediate ego-vehicle behavior. If the clip is not a driving scene, caption "
+    "the visible activity instead."
+)
+_ALPAMAYO_PROMPTS_ACTIVE = (
+    INFERENCE_BACKEND == "alpamayo"
+    or MODEL_SIZE == "ALPAMAYO"
+    or "alpamayo" in (MODEL_NAME or "").lower()
+    or "alpamayo" in os.environ.get("ALPAMAYO_MODEL_ID", "").lower()
+)
+DEFAULT_SYSTEM = (
+    ALPAMAYO_SYSTEM
+    if _ALPAMAYO_PROMPTS_ACTIVE
+    else "You are a helpful assistant that analyzes videos."
+)
+DEFAULT_PROMPT = (
+    ALPAMAYO_PROMPT
+    if _ALPAMAYO_PROMPTS_ACTIVE
+    else "Describe what is happening in this video. What are the key actions, objects, and events?"
+)
 ALPAMAYO_ADAPTER_FRAMES = int(os.environ.get("ALPAMAYO_FRAMES", "4"))
 ALPAMAYO_MAX_DECODED_VIDEO_FRAMES = int(os.environ.get("ALPAMAYO_MAX_DECODED_VIDEO_FRAMES", "96"))
 
@@ -1228,6 +1253,33 @@ DEMO_PROMPTS = [
      "Answer with Approve or Reject only.",
      _GENERIC_SYSTEM, True),
 ]
+
+if _ALPAMAYO_PROMPTS_ACTIVE:
+    DEMO_PROMPTS = [
+        ("Alpamayo: ego-driving caption", ALPAMAYO_PROMPT, ALPAMAYO_SYSTEM, False),
+        ("Alpamayo: next ego action",
+         "From the ego camera view, what is the next immediate action the ego vehicle should take? "
+         "Briefly cite the visible road context, hazards, and traffic actors that support the answer.",
+         ALPAMAYO_SYSTEM, False),
+        ("Alpamayo: hazards and intent",
+         "Describe the driving scene and identify any visible hazards or interactions that could affect the ego vehicle. "
+         "Then state the likely intent or next motion of the ego vehicle.",
+         ALPAMAYO_SYSTEM, False),
+    ] + DEMO_PROMPTS
+
+
+def _checkpoint_uses_alpamayo_prompts(label=""):
+    tokens = [label or "", MODEL_SIZE or "", MODEL_NAME or "", os.environ.get("ALPAMAYO_MODEL_ID", "")]
+    meta = _VLLM_DD_META.get(label or "") if "_VLLM_DD_META" in globals() else None
+    if meta:
+        tokens.extend(str(part or "") for part in meta)
+    return "alpamayo" in " ".join(tokens).lower()
+
+
+def _checkpoint_prompt_updates(label=""):
+    if not _checkpoint_uses_alpamayo_prompts(label):
+        return gr.update(), gr.update(), gr.update()
+    return ALPAMAYO_PROMPT, ALPAMAYO_SYSTEM, _reasoning_button_update(False)
 
 
 REASONING_FORMAT_INSTRUCTION = (
@@ -4678,6 +4730,11 @@ with gr.Blocks(
         _sync_reasoning_toggle,
         inputs=[user_box],
         outputs=[reasoning_toggle],
+    )
+    checkpoint_dd.change(
+        fn=_checkpoint_prompt_updates,
+        inputs=[checkpoint_dd],
+        outputs=[user_box, system_box, reasoning_toggle],
     )
 
     if INFERENCE_BACKEND == "vllm":
