@@ -1015,13 +1015,16 @@ select:focus,
 }
 
 .worldPreview {
+  display: grid;
+  align-content: center;
+  justify-items: center;
   min-height: 620px;
-  border: 2px solid var(--green);
+  border: 1px solid var(--line-soft);
   border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(118, 185, 0, 0.12), transparent 38%),
-    #0c0c0c;
-  padding: 20px;
+  background: #050505;
+  color: var(--muted);
+  padding: 32px;
+  text-align: center;
 }
 
 .worldFrameGrid {
@@ -1057,16 +1060,17 @@ select:focus,
 
 .worldPreview h3 {
   color: var(--text);
-  font-size: 24px;
-  line-height: 1.2;
+  font-size: 20px;
+  line-height: 26px;
+  margin-top: 14px;
 }
 
 .worldPreview p {
   max-width: 620px;
   margin-top: 10px;
-  color: #d7d7d7;
-  font-size: 15px;
-  line-height: 1.55;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 21px;
 }
 
 .resultVideo {

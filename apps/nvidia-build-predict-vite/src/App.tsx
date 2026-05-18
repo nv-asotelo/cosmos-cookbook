@@ -1071,14 +1071,6 @@ export default function Page() {
         </div>
       </section>
 
-      <RuntimeDetailsToggle
-        backendInfo={backendInfo}
-        detailsUrl={`${window.location.origin}/api/active-model`}
-        model={model}
-        open={runtimeOpen}
-        setOpen={setRuntimeOpen}
-      />
-
       <div className="tabs" role="tablist" aria-label="Model sections">
         {(["Experience", "Model Card", "System Card"] as SectionTab[]).map((tab) => {
           const id = tab.toLowerCase().replace(/\s+/g, "-");
@@ -1642,21 +1634,14 @@ function GenerationProgress({
 }
 
 function WorldPreview({ isNimBackend, mode }: { isNimBackend: boolean; mode: GeneratorMode }) {
-  const labels = mode === "Text-to-Video" ? ["Prompt", "Latent rollout", "Video"] : ["Condition", "Latent rollout", "Future frames"];
   return (
     <article className="worldPreview">
-      <div className="worldFrameGrid">
-        {labels.map((label, index) => (
-          <div className="worldFrame" key={label}>
-            <span>{String(index + 1).padStart(2, "0")}</span>
-            <strong>{label}</strong>
-          </div>
-        ))}
-      </div>
-      <h3>Generated Future World</h3>
+      <FileVideo size={28} />
+      <h3>Output will appear here.</h3>
       <p>
-        Run a T2V prompt or add an I2V conditioning image. The active {isNimBackend ? "NIM" : "Ray Serve"} backend returns
-        a generated MP4 plus raw JSON for diagnostics.
+        {mode === "Text-to-Video"
+          ? `Submit a prompt to generate a video with the active ${isNimBackend ? "NIM" : "Ray Serve"} backend.`
+          : `Upload a conditioning ${mode === "Image-to-Video" ? "image" : "asset"} or choose an example, then generate a video with the active ${isNimBackend ? "NIM" : "Ray Serve"} backend.`}
       </p>
     </article>
   );
