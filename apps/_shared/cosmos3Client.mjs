@@ -226,7 +226,7 @@ const RAY_SERVE_SERVER_TIMEOUT_SECONDS = 300; // cosmos3.ray.serve:178 hardcoded
 export function estimateRayServeWallSeconds({ resolution, num_frames, num_steps } = {}) {
   const px = RAY_SERVE_PIXELS_BY_RESOLUTION[String(resolution ?? 480)] || RAY_SERVE_PIXELS_BY_RESOLUTION["480"];
   const f = Math.max(1, Number(num_frames ?? 121));
-  const s = Math.max(1, Number(num_steps ?? 35));
+  const s = Math.max(1, Number(num_steps ?? 50));
   return Math.ceil(RAY_SERVE_BASELINE_SECONDS + (px * f * s) / RAY_SERVE_OPS_PER_SECOND);
 }
 
@@ -257,7 +257,7 @@ function checkRayServeBudget(params) {
     requested: {
       resolution: String(params.resolution ?? 480),
       num_frames: Number(params.num_frames ?? 121),
-      num_steps: Number(params.num_steps ?? 35)
+      num_steps: Number(params.num_steps ?? 50)
     },
     suggestions: suggestSafeParams(params)
   };
@@ -271,7 +271,7 @@ function parseAspectRatio(aspectRatio) {
 }
 
 function normalizeNimFrameCount(value) {
-  const requested = Math.max(25, Math.round(Number(value ?? 25)));
+  const requested = Math.max(25, Math.round(Number(value ?? 121)));
   const remainder = (requested - 1) % 4;
   if (remainder === 0) return requested;
   return requested + (4 - remainder);
@@ -280,7 +280,7 @@ function normalizeNimFrameCount(value) {
 function payloadParamsForNim(params = {}) {
   return {
     resolution: String(params.resolution ?? "256"),
-    num_output_frames: normalizeNimFrameCount(params.num_frames ?? params.frames_count ?? 25),
+    num_output_frames: normalizeNimFrameCount(params.num_frames ?? params.frames_count ?? 121),
     fps: Math.max(1, Number(params.fps ?? params.frames_per_sec ?? 24))
   };
 }
@@ -357,7 +357,7 @@ async function submitNimGeneration({ prompt, mediaDataUrl, mediaKind, params, mo
   const payload = {
     prompt: prompt || "",
     guidance_scale: Number(p.guidance ?? 6),
-    steps: Number(p.num_steps ?? 4),
+    steps: Number(p.num_steps ?? 50),
     ...payloadParamsForNim(p)
   };
   const seed = Number(p.seed);
@@ -561,7 +561,7 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
     resolution: String(p.resolution ?? 480),
     aspect_ratio: p.aspect_ratio ?? "16,9",
     fps: p.fps,
-    num_steps: p.num_steps ?? 35,
+    num_steps: p.num_steps ?? 50,
     guidance: p.guidance ?? 6.0,
     seed: p.seed ?? null,
     model_mode: p.model_mode,

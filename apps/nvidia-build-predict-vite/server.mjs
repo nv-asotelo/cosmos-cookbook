@@ -57,9 +57,9 @@ const stagedModelFile = process.env.PREDICT_STAGED_MODEL_FILE || "/tmp/nvidia_bu
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
-  frames_count: 25,
+  frames_count: 121,
   frames_per_sec: 24,
-  num_steps: 35,
+  num_steps: 50,
   guidance: 6
 };
 

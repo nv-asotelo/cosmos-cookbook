@@ -21,16 +21,16 @@ import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, u
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
 const BUILD_PREDICT_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b/modelcard";
 const BUILD_PREDICT_SYSTEM_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b/systemcard";
-const PAGE_TITLE = "Image-to-World";
+const MODEL_CARD_TITLE = "Image-to-World";
 const PAGE_TAGLINE = "Generates future frames based upon an image and text input.";
 const MODEL_CARD_LEAD =
   "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
-  frames_count: 25,
+  frames_count: 121,
   frames_per_sec: 24,
-  num_steps: 35,
+  num_steps: 50,
   guidance: 6
 };
 const ENABLE_ACTION_POLICY =
@@ -73,6 +73,8 @@ const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
 };
 const ETA_BASELINE_SECONDS = 5;
 const ETA_OPS_PER_SECOND = 10_000_000;
+const NIM_ETA_BASELINE_SECONDS = 24;
+const NIM_ETA_OPS_PER_SECOND = 2_500_000;
 
 type GeneratorMode = "Text-to-Video" | "Image-to-Video" | "Action Policy";
 type SectionTab = "Experience" | "Model Card" | "System Card";
@@ -114,10 +116,11 @@ type ExampleItem = {
 type ContentSelectItem = {
   id: string;
   title: string;
-  mediaLabel: string;
-  prompt?: string;
-  thumbnailUrl?: string;
-  driveUrl?: string;
+  domain: string;
+  description: string;
+  prompt: string;
+  mediaUrl: string;
+  mediaName: string;
 };
 type ContentSelectGroup = {
   title: string;
@@ -170,14 +173,6 @@ type BackendInfo = {
     [key: string]: unknown;
   };
 };
-
-function driveFileUrl(id: string) {
-  return `https://drive.google.com/file/d/${id}/view`;
-}
-
-function driveThumbnailUrl(id: string) {
-  return `https://drive.google.com/thumbnail?id=${id}&sz=w1200`;
-}
 
 const EXAMPLES: ExampleItem[] = [
   {
@@ -243,80 +238,108 @@ const EXAMPLES: ExampleItem[] = [
     }
   }
 ];
-const DEFAULT_PROMPT = EXAMPLES[0].prompt;
-
 const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
   {
     title: "Robotics",
-    summary: "Joshua selected 007, 001, and 005 as the primary robotics samples.",
+    summary: "Robot manipulation scenes with tabletop objects, grippers, and goal-directed motion.",
     items: [
       {
-        id: "007",
-        title: "Robot arm ingredient sorting",
-        mediaLabel: "007_robot_039",
-        prompt: EXAMPLES[0].prompt,
-        thumbnailUrl: driveThumbnailUrl("15UC7IryZY6KmWIFaD5xreH4Sa_JoWvdr"),
-        driveUrl: driveFileUrl("15UC7IryZY6KmWIFaD5xreH4Sa_JoWvdr")
+        id: "robot-ingredient-sorting",
+        title: "Robot Arm Ingredient Sorting",
+        domain: "Robotics",
+        description: "A tabletop robot scene with food items, a bowl, and a gripper poised for manipulation.",
+        prompt:
+          "Animate the robotic arm as it carefully reaches toward the tabletop objects, grasps one item, and places it into the bowl. Preserve the tabletop layout, camera angle, workshop lighting, and realistic contact physics.",
+        mediaUrl: "/examples/robot_apple.png",
+        mediaName: "Robot Arm Ingredient Sorting.png"
       },
       {
-        id: "001",
-        title: "Pear placement into bowl",
-        mediaLabel: "001_visual_reasoning_0036",
-        prompt: "The robotic arm picks up the pear and place it in the dark-color bowl",
-        thumbnailUrl: driveThumbnailUrl("1XVCPigO63YNIfOduAnLiaIQv6bGLAg0H"),
-        driveUrl: driveFileUrl("1XVCPigO63YNIfOduAnLiaIQv6bGLAg0H")
+        id: "robot-tabletop-motion",
+        title: "Robot Tabletop Motion",
+        domain: "Robotics",
+        description: "A robot-hand view over a workbench with a raised platform and object targets.",
+        prompt:
+          "Animate the robot hand with small, precise motions toward the tabletop target. Keep the original scene geometry, camera position, and lab lighting stable while the end effector moves naturally.",
+        mediaUrl: "/examples/robot_tabletop.jpg",
+        mediaName: "Robot Tabletop Motion.jpg"
       },
       {
-        id: "005",
-        title: "Bok choy tabletop manipulation",
-        mediaLabel: "005_spatial_relationship_0040",
-        prompt: "The robotic hand picks up the bok choy and places it to the left of the frying pan",
-        thumbnailUrl: driveThumbnailUrl("1eal6fNfYQtcrct-PIA3p5eXtD6lA5yn3"),
-        driveUrl: driveFileUrl("1eal6fNfYQtcrct-PIA3p5eXtD6lA5yn3")
+        id: "robot-tape-placement",
+        title: "Robot Tape Placement",
+        domain: "Robotics",
+        description: "Two robot hands observe tape and a basket from a first-person manipulation setup.",
+        prompt:
+          "Animate the robot hands reaching toward the blue tape, lifting it from the table, and placing it into the basket. Preserve object identity, hand geometry, and the tabletop perspective.",
+        mediaUrl: "/examples/robot_tape.png",
+        mediaName: "Robot Tape Placement.png"
       }
     ]
   },
   {
     title: "Autonomous Vehicles",
-    summary: "The AV row follows the new order with 009, 021, and 022.",
+    summary: "Forward-facing driving scenes that exercise road layout, ego motion, and traffic context.",
     items: [
       {
-        id: "009",
-        title: "Residential intersection turn",
-        mediaLabel: "009_av",
+        id: "residential-intersection-turn",
+        title: "Residential Intersection Turn",
+        domain: "Autonomous Vehicles",
+        description: "An ego-vehicle view at an urban intersection under clear daylight.",
         prompt:
-          "The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.",
-        thumbnailUrl: driveThumbnailUrl("1UTIArhXMT1bZZ3l9DhbyZHlgjrkJ0OG7"),
-        driveUrl: driveFileUrl("1UTIArhXMT1bZZ3l9DhbyZHlgjrkJ0OG7")
+          "Animate the ego vehicle rolling forward slowly through the intersection while preserving lane geometry, crosswalk markings, parked cars, building facades, and bright daylight. Keep the camera fixed to the vehicle and maintain realistic traffic motion.",
+        mediaUrl: "/examples/av_intersection.jpg",
+        mediaName: "Residential Intersection Turn.jpg"
       },
       {
-        id: "021",
-        title: "Autonomous vehicle sample 021",
-        mediaLabel: "021_av_1",
-        thumbnailUrl: driveThumbnailUrl("1-HCt9xaWK27Ftb0SEbXSgIvRteQM_-u1"),
-        driveUrl: driveFileUrl("1-HCt9xaWK27Ftb0SEbXSgIvRteQM_-u1")
+        id: "rainy-night-traffic",
+        title: "Rainy Night Traffic",
+        domain: "Autonomous Vehicles",
+        description: "A low-light roadway scene with wet pavement, vehicles, and headlight reflections.",
+        prompt:
+          "Animate the vehicle queue inching forward on the wet road at night. Preserve headlight reflections, road boundaries, vehicle spacing, and low-light atmosphere with smooth ego-camera motion.",
+        mediaUrl: "/examples/av_rainy_night.jpg",
+        mediaName: "Rainy Night Traffic.jpg"
       },
       {
-        id: "022",
-        title: "Autonomous vehicle sample 022",
-        mediaLabel: "022_av_2",
-        thumbnailUrl: driveThumbnailUrl("13Rx96XVYvboghdzDShSqhnnk2EKg8Jpq"),
-        driveUrl: driveFileUrl("13Rx96XVYvboghdzDShSqhnnk2EKg8Jpq")
+        id: "race-car-track",
+        title: "Race Car Track",
+        domain: "Autonomous Vehicles",
+        description: "A high-speed driving condition with track context and strong forward motion.",
+        prompt:
+          "Animate a forward driving rollout on the track with smooth ego motion, stable road boundaries, and realistic vehicle dynamics. Preserve the original camera framing and lighting.",
+        mediaUrl: "/examples/av_race_car.jpg",
+        mediaName: "Race Car Track.jpg"
       }
     ]
   },
   {
     title: "Industrial Smart Spaces",
-    summary: "Slot reserved for the smart-spaces selects once Joshua marks the final assets.",
+    summary: "Warehouse and facility scenes for physical AI simulation and smart-space monitoring.",
     items: [
       {
-        id: "TBD",
-        title: "Smart spaces content pending",
-        mediaLabel: "TBD"
+        id: "warehouse-camera-grid",
+        title: "Warehouse Camera Grid",
+        domain: "Industrial Smart Spaces",
+        description: "A multi-camera warehouse overview with shelves, floor lanes, and varied lighting.",
+        prompt:
+          "Animate the smart-space warehouse scene with subtle worker and equipment movement across camera views. Preserve the multi-camera structure, shelves, floor markings, and lighting consistency.",
+        mediaUrl: "/examples/warehouse_grid.jpg",
+        mediaName: "Warehouse Camera Grid.jpg"
+      },
+      {
+        id: "warehouse-summary",
+        title: "Warehouse Summary View",
+        domain: "Industrial Smart Spaces",
+        description: "A wide warehouse monitoring view with spatial context for goods and aisles.",
+        prompt:
+          "Animate the warehouse monitoring view with realistic small movements in the aisles while preserving camera perspective, object permanence, shelving, and traffic lanes.",
+        mediaUrl: "/examples/warehouse_summary.png",
+        mediaName: "Warehouse Summary View.png"
       }
     ]
   }
 ];
+const DEFAULT_CONTENT_ITEM = CONTENT_SELECT_GROUPS[0].items[0];
+const DEFAULT_PROMPT = DEFAULT_CONTENT_ITEM.prompt;
 
 const GENERATOR_MODES: Array<{
   id: GeneratorMode;
@@ -352,11 +375,13 @@ const GENERATOR_MODES: Array<{
   }
 ];
 
-function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number): number {
+function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number, isNimBackend: boolean): number {
   const px = ETA_PIXELS_BY_RESOLUTION[String(resolution)] || ETA_PIXELS_BY_RESOLUTION["480"];
   const f = Math.max(1, numFrames);
   const s = Math.max(1, numSteps);
-  return Math.ceil(ETA_BASELINE_SECONDS + (px * f * s) / ETA_OPS_PER_SECOND);
+  const baseline = isNimBackend ? NIM_ETA_BASELINE_SECONDS : ETA_BASELINE_SECONDS;
+  const opsPerSecond = isNimBackend ? NIM_ETA_OPS_PER_SECOND : ETA_OPS_PER_SECOND;
+  return Math.ceil(baseline + (px * f * s) / opsPerSecond);
 }
 
 function formatDuration(seconds: number): string {
@@ -478,6 +503,25 @@ function resultAssetUrl(result: ApiResult | null) {
   return result.assetUrl || result.files?.find((file) => file.url)?.url || null;
 }
 
+function contentItemToMedia(item: ContentSelectItem): MediaState {
+  return {
+    name: item.mediaName,
+    kind: "image",
+    previewUrl: item.mediaUrl,
+    sourceUrl: item.mediaUrl
+  };
+}
+
+function absoluteMediaUrl(url?: string | null) {
+  if (!url) return undefined;
+  if (/^https?:\/\//i.test(url)) return url;
+  return new URL(url, window.location.origin).href;
+}
+
+function findContentItem(groups: ContentSelectGroup[], id: string) {
+  return groups.flatMap((group) => group.items).find((item) => item.id === id) ?? groups[0].items[0];
+}
+
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
@@ -486,9 +530,9 @@ export default function Page() {
   const [models, setModels] = useState<string[]>(MODEL_CHOICES);
   const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
-  const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Text-to-Video");
+  const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Image-to-Video");
   const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
-  const [media, setMedia] = useState<MediaState | null>(null);
+  const [media, setMedia] = useState<MediaState | null>(() => contentItemToMedia(DEFAULT_CONTENT_ITEM));
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [resolution, setResolution] = useState(QUICK_VIDEO_PARAMS.resolution);
   const [numFrames, setNumFrames] = useState(QUICK_VIDEO_PARAMS.frames_count);
@@ -509,12 +553,12 @@ export default function Page() {
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
+  const [selectedContentItemId, setSelectedContentItemId] = useState(DEFAULT_CONTENT_ITEM.id);
 
   const activeExample = useMemo(
     () => EXAMPLES.find((example) => example.id === selectedExampleId) ?? EXAMPLES[0],
     [selectedExampleId]
   );
-  const visibleExamples = useMemo(() => EXAMPLES.filter((example) => !example.hidden), []);
   const visibleModes = useMemo(() => GENERATOR_MODES.filter((mode) => mode.visible), []);
   const mediaRequired = generatorMode !== "Text-to-Video";
   const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
@@ -559,8 +603,8 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    document.title = `${PAGE_TITLE} Model by NVIDIA | NVIDIA NIM`;
-  }, []);
+    document.title = `${model} Model by NVIDIA | NVIDIA NIM`;
+  }, [model]);
 
   useEffect(() => {
     let cancelled = false;
@@ -580,7 +624,10 @@ export default function Page() {
     };
   }, [media]);
 
-  const etaSeconds = useMemo(() => estimateWallSeconds(resolution, numFrames, steps), [numFrames, resolution, steps]);
+  const etaSeconds = useMemo(
+    () => estimateWallSeconds(resolution, numFrames, steps, isNimBackend),
+    [isNimBackend, numFrames, resolution, steps]
+  );
 
   useEffect(() => {
     if (!isRunning || submittedAt === null) return () => undefined;
@@ -596,7 +643,7 @@ export default function Page() {
   }, [isRunning, submittedAt, etaSeconds]);
 
   const requestPreview = useMemo(() => {
-    const visionPath = media?.sourceUrl ?? (media?.dataUrl ? "<written to /tmp/uploads/...>" : null);
+    const visionPath = absoluteMediaUrl(media?.sourceUrl) ?? (media?.dataUrl ? "<written to /tmp/uploads/...>" : null);
     const params: Record<string, unknown> = {
       num_frames: numFrames,
       resolution,
@@ -712,7 +759,7 @@ export default function Page() {
 
   function setMode(mode: GeneratorMode) {
     setGeneratorMode(mode);
-    setMedia(null);
+    setMedia(mode === "Image-to-Video" ? contentItemToMedia(findContentItem(CONTENT_SELECT_GROUPS, selectedContentItemId)) : null);
     setProgressFrames([]);
     setProgressPercent(0);
     setResult(null);
@@ -749,8 +796,8 @@ export default function Page() {
   }
 
   function applyContentSelect(item: ContentSelectItem) {
-    if (!item.prompt) return;
-    setGeneratorMode("Text-to-Video");
+    setSelectedContentItemId(item.id);
+    setGeneratorMode("Image-to-Video");
     setPrompt(item.prompt);
     setResolution(QUICK_VIDEO_PARAMS.resolution);
     setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
@@ -758,11 +805,11 @@ export default function Page() {
     setSteps(QUICK_VIDEO_PARAMS.num_steps);
     setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
     setSeed(0);
-    setMedia(null);
+    setMedia(contentItemToMedia(item));
     setResult(null);
     setProgressPercent(0);
     setProgressFrames([]);
-    setStatus(`${item.id} prompt loaded`);
+    setStatus(`${item.title} loaded`);
     setOutputTab("preview");
     setMobilePanel("input");
     if (inputRef.current) inputRef.current.value = "";
@@ -771,9 +818,9 @@ export default function Page() {
   function reset() {
     setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
-    setGeneratorMode("Text-to-Video");
+    setGeneratorMode("Image-to-Video");
     setSchemaMode("local_nim");
-    setMedia(null);
+    setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
     setResolution(QUICK_VIDEO_PARAMS.resolution);
     setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
@@ -782,6 +829,7 @@ export default function Page() {
     setSteps(QUICK_VIDEO_PARAMS.num_steps);
     setSeed(0);
     setSelectedExampleId(EXAMPLES[0].id);
+    setSelectedContentItemId(DEFAULT_CONTENT_ITEM.id);
     setStatus("Ready");
     setProgressPercent(0);
     setProgressFrames([]);
@@ -832,7 +880,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mediaDataUrl: media?.dataUrl,
-          visionPath: media?.sourceUrl,
+          visionPath: absoluteMediaUrl(media?.sourceUrl),
           mediaKind: media?.kind,
           mode: generatorMode,
           prompt,
@@ -947,13 +995,13 @@ export default function Page() {
             nvidia
           </a>
           <div className="titleLine">
-            <h1>{PAGE_TITLE}</h1>
+            <h1>{model}</h1>
             <div className="heroMeta">
               <span>Downloadable</span>
             </div>
           </div>
           <p>{PAGE_TAGLINE}</p>
-          <div className="heroModelName">Active model: {model}</div>
+          <div className="heroModelName">{MODEL_CARD_TITLE}</div>
           <div className="tagRow">
             {HERO_TAGS.map((tag, index) => (
               <span className={index > 1 ? "desktopOnlyTag" : ""} key={tag}>
@@ -1104,7 +1152,7 @@ export default function Page() {
               <SelectField label="Resolution" value={resolution} options={["256", "480", "720", "1080"]} onChange={setResolution} />
               <NumberField label="Guidance" value={guidanceScale} min={1} max={12} step={0.5} onChange={setGuidanceScale} />
               <NumberField label="Steps" value={steps} min={1} max={80} step={1} onChange={setSteps} />
-              <NumberField label="Frames" value={numFrames} min={8} max={121} step={1} onChange={setNumFrames} />
+              <NumberField label="Frames" value={numFrames} min={25} max={241} step={4} onChange={setNumFrames} />
               <NumberField label="FPS" value={fps} min={1} max={30} step={1} onChange={setFps} />
               <NumberField label="Seed" value={seed} min={-1} max={2147483647} step={1} onChange={setSeed} />
             </div>
@@ -1116,9 +1164,9 @@ export default function Page() {
               </button>
               <span
                 className="etaBadge"
-                title={`Estimator from RTX PRO 6000 Blackwell smoke runs. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
+                title={`${isNimBackend ? "NIM staging" : "Ray Serve"} estimator. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
               >
-                Est. wall ~{formatDuration(etaSeconds)}
+                {isNimBackend ? "NIM est." : "Est. wall"} ~{formatDuration(etaSeconds)}
               </span>
               <button className="runButton" onClick={run} disabled={isRunning || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
@@ -1172,7 +1220,7 @@ export default function Page() {
                   <ExternalLink size={15} />
                 </a>
               ) : (
-                <WorldPreview mode={generatorMode} />
+                <WorldPreview isNimBackend={isNimBackend} mode={generatorMode} />
               )}
             </div>
           </section>
@@ -1227,7 +1275,15 @@ export default function Page() {
       </section>
 
       {examplesOpen ? (
-        <ExampleModal examples={visibleExamples} onClose={() => setExamplesOpen(false)} onSelect={applyExample} />
+        <ExampleModal
+          groups={CONTENT_SELECT_GROUPS}
+          selectedId={selectedContentItemId}
+          onClose={() => setExamplesOpen(false)}
+          onSelect={(item) => {
+            applyContentSelect(item);
+            setExamplesOpen(false);
+          }}
+        />
       ) : null}
     </main>
   );
@@ -1258,30 +1314,23 @@ function ContentSelects({
             </div>
             <div className="contentCardGrid">
               {group.items.map((item) => (
-                <div className={`contentCard ${item.id === "TBD" ? "contentCardPending" : ""}`} key={`${group.title}-${item.id}`}>
+                <div className="contentCard" key={`${group.title}-${item.id}`}>
                   <div
                     aria-hidden="true"
                     className="contentThumb"
-                    style={item.thumbnailUrl ? { backgroundImage: `url("${item.thumbnailUrl}")` } : undefined}
+                    style={{ backgroundImage: `url("${item.mediaUrl}")` }}
                   >
-                    <span>{item.id}</span>
+                    <span>{item.domain}</span>
                   </div>
                   <div className="contentCardBody">
-                    <span className="contentMediaLabel">{item.mediaLabel}</span>
+                    <span className="contentMediaLabel">{item.domain}</span>
                     <strong>{item.title}</strong>
-                    <p>{item.prompt || "Final prompt and asset are pending."}</p>
+                    <p>{item.description}</p>
                   </div>
                   <div className="contentActions">
-                    {item.prompt ? (
-                      <button type="button" onClick={() => onApply(item)}>
-                        Load prompt
-                      </button>
-                    ) : null}
-                    {item.driveUrl ? (
-                      <a href={item.driveUrl} rel="noreferrer" target="_blank">
-                        Open asset <ExternalLink size={13} />
-                      </a>
-                    ) : null}
+                    <button type="button" onClick={() => onApply(item)}>
+                      Use image
+                    </button>
                   </div>
                 </div>
               ))}
@@ -1306,12 +1355,12 @@ function StaticTab({
     return (
       <div className="staticPanel">
         <p className="staticEyebrow">Overview</p>
-        <h2>{PAGE_TITLE}</h2>
+        <h2>{MODEL_CARD_TITLE}</h2>
         <p className="staticLead">{MODEL_CARD_LEAD}</p>
 
         <StaticSection title="Title">
           <p>
-            <strong>Image-to-World</strong> {PAGE_TAGLINE}
+            <strong>{MODEL_CARD_TITLE}</strong> {PAGE_TAGLINE}
           </p>
         </StaticSection>
 
@@ -1347,11 +1396,11 @@ function StaticTab({
           <p>Domain order is Robotics, Autonomous Vehicles, then Industrial Smart Spaces.</p>
           <dl>
             <dt>Robotics</dt>
-            <dd>007, 001, 005</dd>
+            <dd>Robot Arm Ingredient Sorting, Robot Tabletop Motion, Robot Tape Placement</dd>
             <dt>Autonomous Vehicles</dt>
-            <dd>009, 021, 022</dd>
+            <dd>Residential Intersection Turn, Rainy Night Traffic, Race Car Track</dd>
             <dt>Industrial Smart Spaces</dt>
-            <dd>TBD</dd>
+            <dd>Warehouse Camera Grid, Warehouse Summary View</dd>
           </dl>
         </StaticSection>
 
@@ -1558,7 +1607,13 @@ function GenerationProgress({
 
           return (
             <figure className="generatedFrame" style={style} key={`${src || "fallback"}-${index}`}>
-              {src ? <img src={src} alt="" /> : <div className="generatedFrameFallback" />}
+              {src ? (
+                <img src={src} alt="" />
+              ) : (
+                <div className="generatedFrameFallback">
+                  <span>Latent</span>
+                </div>
+              )}
               <figcaption>Frame {frameNumber}</figcaption>
             </figure>
           );
@@ -1571,7 +1626,7 @@ function GenerationProgress({
   );
 }
 
-function WorldPreview({ mode }: { mode: GeneratorMode }) {
+function WorldPreview({ isNimBackend, mode }: { isNimBackend: boolean; mode: GeneratorMode }) {
   const labels = mode === "Text-to-Video" ? ["Prompt", "Latent rollout", "Video"] : ["Condition", "Latent rollout", "Future frames"];
   return (
     <article className="worldPreview">
@@ -1585,8 +1640,8 @@ function WorldPreview({ mode }: { mode: GeneratorMode }) {
       </div>
       <h3>Generated Future World</h3>
       <p>
-        Run a quick T2V prompt or add an I2V conditioning image. The local Ray Serve path returns an inline video when
-        output files are readable, plus raw JSON for diagnostics.
+        Run a T2V prompt or add an I2V conditioning image. The active {isNimBackend ? "NIM" : "Ray Serve"} backend returns
+        a generated MP4 plus raw JSON for diagnostics.
       </p>
     </article>
   );
@@ -1794,14 +1849,19 @@ function RuntimeBar({
 }
 
 function ExampleModal({
-  examples,
+  groups,
   onClose,
-  onSelect
+  onSelect,
+  selectedId
 }: {
-  examples: ExampleItem[];
+  groups: ContentSelectGroup[];
   onClose: () => void;
-  onSelect: (example: ExampleItem) => void;
+  onSelect: (example: ContentSelectItem) => void;
+  selectedId: string;
 }) {
+  const [pendingId, setPendingId] = useState(selectedId);
+  const pending = findContentItem(groups, pendingId);
+
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
       <div
@@ -1813,34 +1873,51 @@ function ExampleModal({
       >
         <div className="modalHeader">
           <div>
-            <p>Examples</p>
-            <h2 id="examples-title">Cosmos3 Generator presets</h2>
+            <h2 id="examples-title">Select an Example</h2>
+            <p>Select an image and prompt from the examples below.</p>
           </div>
           <button className="iconButton" aria-label="Close examples" onClick={onClose}>
             <X size={18} />
           </button>
         </div>
-        <div className="exampleList">
-          {examples.map((example) => (
-            <button key={example.id} className="exampleItem" onClick={() => onSelect(example)}>
-              <div className="exampleThumb">
-                {example.mediaUrl ? (
-                  example.mediaKind === "video" ? (
-                    <video src={example.mediaUrl} muted playsInline />
-                  ) : (
-                    <img src={example.mediaUrl} alt="" />
-                  )
-                ) : (
-                  <FileVideo size={28} />
-                )}
+        <div className="exampleDomainList">
+          {groups.map((group) => (
+            <section className="exampleDomain" key={group.title}>
+              <div className="exampleDomainHeader">
+                <h3>{group.title}</h3>
+                <p>{group.summary}</p>
               </div>
-              <div className="exampleText">
-                <span>{example.eyebrow}</span>
-                <strong>{example.label}</strong>
-                <p>{example.prompt}</p>
+              <div className="exampleGrid">
+                {group.items.map((item) => (
+                  <button
+                    aria-pressed={pendingId === item.id}
+                    className={pendingId === item.id ? "exampleImageCard selectedExample" : "exampleImageCard"}
+                    key={item.id}
+                    onClick={() => setPendingId(item.id)}
+                    type="button"
+                  >
+                    <img src={item.mediaUrl} alt="" />
+                    <span>{item.title}</span>
+                  </button>
+                ))}
               </div>
-            </button>
+            </section>
           ))}
+        </div>
+        <div className="modalFooter">
+          <div className="selectedExampleSummary">
+            <span>{pending.domain}</span>
+            <strong>{pending.title}</strong>
+            <p>{pending.description}</p>
+          </div>
+          <div className="modalFooterActions">
+            <button className="cancelButton" onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button className="selectButton" onClick={() => onSelect(pending)} type="button">
+              Select
+            </button>
+          </div>
         </div>
       </div>
     </div>
