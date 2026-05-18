@@ -76,7 +76,7 @@ const ETA_OPS_PER_SECOND = 10_000_000;
 const NIM_ETA_BASELINE_SECONDS = 24;
 const NIM_ETA_OPS_PER_SECOND = 2_500_000;
 
-type GeneratorMode = "Text-to-Video" | "Image-to-Video" | "Action Policy";
+type GeneratorMode = "Image-to-Video" | "Action Policy";
 type SectionTab = "Experience" | "Model Card" | "System Card";
 type SchemaMode = "local_nim" | "build_openapi";
 type OutputTab = "preview" | "json";
@@ -175,22 +175,6 @@ type BackendInfo = {
 };
 
 const EXAMPLES: ExampleItem[] = [
-  {
-    id: "omni-t2v",
-    label: "Robotic Arm Ingredient Sorting",
-    eyebrow: "T2V",
-    mode: "Text-to-Video",
-    prompt:
-      "A robotic arm interacts with various objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a red tomato with green leaves, a piece of salmon with a pinkish-orange hue, and a small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the salmon. It lifts the carrot slightly off the board, moves it towards the orange bowl, and releases it, causing the salmon to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.",
-    params: {
-      resolution: QUICK_VIDEO_PARAMS.resolution,
-      numFrames: QUICK_VIDEO_PARAMS.frames_count,
-      fps: QUICK_VIDEO_PARAMS.frames_per_sec,
-      steps: QUICK_VIDEO_PARAMS.num_steps,
-      guidance: QUICK_VIDEO_PARAMS.guidance,
-      seed: 0
-    }
-  },
   {
     id: "omni-i2v",
     label: "Robot Tabletop Motion",
@@ -340,40 +324,6 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
 ];
 const DEFAULT_CONTENT_ITEM = CONTENT_SELECT_GROUPS[0].items[0];
 const DEFAULT_PROMPT = DEFAULT_CONTENT_ITEM.prompt;
-
-const GENERATOR_MODES: Array<{
-  id: GeneratorMode;
-  label: string;
-  description: string;
-  icon: typeof FileVideo;
-  enabled: boolean;
-  visible: boolean;
-}> = [
-  {
-    id: "Text-to-Video",
-    label: "Text-to-Video",
-    description: "Prompt-only generation with quality staging defaults.",
-    icon: FileVideo,
-    enabled: true,
-    visible: true
-  },
-  {
-    id: "Image-to-Video",
-    label: "Image-to-Video",
-    description: "Image-to-World generation from one image plus text.",
-    icon: ImageIcon,
-    enabled: true,
-    visible: true
-  },
-  {
-    id: "Action Policy",
-    label: "Action Policy",
-    description: "Robot action scaffold, hidden until backend smoke passes.",
-    icon: FileVideo,
-    enabled: false,
-    visible: ENABLE_ACTION_POLICY
-  }
-];
 
 function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number, isNimBackend: boolean): number {
   const px = ETA_PIXELS_BY_RESOLUTION[String(resolution)] || ETA_PIXELS_BY_RESOLUTION["480"];
@@ -574,9 +524,8 @@ export default function Page() {
     () => EXAMPLES.find((example) => example.id === selectedExampleId) ?? EXAMPLES[0],
     [selectedExampleId]
   );
-  const visibleModes = useMemo(() => GENERATOR_MODES.filter((mode) => mode.visible), []);
-  const mediaRequired = generatorMode !== "Text-to-Video";
-  const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
+  const mediaRequired = true;
+  const accepts = ".jpg,.jpeg,.png,.webp";
   const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
   const isContentLoading = loadingContentItemId !== null;
   const isNimBackend = useMemo(
@@ -778,17 +727,6 @@ export default function Page() {
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     await loadFile(event.target.files?.[0] ?? null);
-  }
-
-  function setMode(mode: GeneratorMode) {
-    contentLoadTokenRef.current += 1;
-    setLoadingContentItemId(null);
-    setGeneratorMode(mode);
-    setMedia(mode === "Image-to-Video" ? contentItemToMedia(findContentItem(CONTENT_SELECT_GROUPS, selectedContentItemId)) : null);
-    setProgressFrames([]);
-    setProgressPercent(0);
-    setResult(null);
-    if (inputRef.current) inputRef.current.value = "";
   }
 
   function applyExample(example: ExampleItem) {
@@ -1127,25 +1065,6 @@ export default function Page() {
               </button>
             </div>
 
-            <label className="fieldLabel">World Creation Mode</label>
-            <div className="modeGrid">
-              {visibleModes.map((mode) => {
-                const Icon = mode.icon;
-                return (
-                  <button
-                    className={`${generatorMode === mode.id ? "active" : ""} ${!mode.enabled ? "disabledMode" : ""}`}
-                    key={mode.id}
-                    onClick={() => mode.enabled && setMode(mode.id)}
-                    disabled={!mode.enabled}
-                  >
-                    <Icon size={16} />
-                    <span>{mode.label}</span>
-                    <small>{mode.description}</small>
-                  </button>
-                );
-              })}
-            </div>
-
             <label className="fieldLabel">Input</label>
             {mediaRequired ? (
               <button
@@ -1174,7 +1093,7 @@ export default function Page() {
                 ) : (
                   <>
                     <Upload size={22} />
-                    <span>{generatorMode === "Image-to-Video" ? "Drop source image here" : "Drop conditioning asset here"}</span>
+                    <span>Drop source image here</span>
                     <small>{accepts}</small>
                   </>
                 )}
@@ -1273,7 +1192,7 @@ export default function Page() {
                   <ExternalLink size={15} />
                 </a>
               ) : (
-                <WorldPreview isNimBackend={isNimBackend} mode={generatorMode} />
+                <WorldPreview isNimBackend={isNimBackend} />
               )}
             </div>
           </section>
@@ -1364,16 +1283,13 @@ function StaticTab({
 
         <StaticSection title="Description">
           <p>
-            The Vite Generator stages Text-to-Video and Image-to-Video requests for Cosmos3 generation while preserving
-            the NVIDIA Build dark control styling, active model details, examples modal, preview/JSON output tabs, and
-            quick staging controls.
+            The Vite Generator stages Image-to-World requests for Cosmos3 generation while preserving the NVIDIA Build
+            dark control styling, examples modal, preview/JSON output tabs, and quick staging controls.
           </p>
         </StaticSection>
 
         <StaticSection title="Input">
           <dl>
-            <dt>Text-to-Video</dt>
-            <dd>Text prompt only.</dd>
             <dt>Image-to-World</dt>
             <dd>Image plus text prompt.</dd>
             <dt>Formats</dt>
@@ -1633,15 +1549,14 @@ function GenerationProgress({
   );
 }
 
-function WorldPreview({ isNimBackend, mode }: { isNimBackend: boolean; mode: GeneratorMode }) {
+function WorldPreview({ isNimBackend }: { isNimBackend: boolean }) {
   return (
     <article className="worldPreview">
       <FileVideo size={28} />
       <h3>Output will appear here.</h3>
       <p>
-        {mode === "Text-to-Video"
-          ? `Submit a prompt to generate a video with the active ${isNimBackend ? "NIM" : "Ray Serve"} backend.`
-          : `Upload a conditioning ${mode === "Image-to-Video" ? "image" : "asset"} or choose an example, then generate a video with the active ${isNimBackend ? "NIM" : "Ray Serve"} backend.`}
+        Upload a conditioning image or choose an example, then generate a video with the active{" "}
+        {isNimBackend ? "NIM" : "Ray Serve"} backend.
       </p>
     </article>
   );

@@ -244,8 +244,17 @@ function finiteNumber(value, fallback) {
 
 app.post("/api/predict", async (request, response) => {
   const body = request.body || {};
-  const mode = body.mode || body.worldMode || "Text-to-Video";
-  const requiresVision = mode !== "Text-to-Video";
+  const mode = body.mode || body.worldMode || "Image-to-Video";
+  if (mode === "Text-to-Video") {
+    sendError(response, 400, "Text-to-Video is not staged for this Generator page yet.", {
+      layer: "parameters",
+      issue: "The current Vite Generator direction is Image-to-World only.",
+      likelyCause: "A stale client or manual request submitted mode=Text-to-Video.",
+      suggestions: ["Choose an image example or upload a JPG/PNG/WebP conditioning image before generating."]
+    });
+    return;
+  }
+  const requiresVision = true;
   const hasVision = Boolean(body.mediaDataUrl || body.visionPath);
 
   // Early validation errors return instantly — no keepalive needed.
@@ -276,7 +285,7 @@ app.post("/api/predict", async (request, response) => {
     aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
     fps: finiteNumber(body.fps, QUICK_VIDEO_PARAMS.frames_per_sec),
     vision_path: body.visionPath || null,
-    model_mode: mode === "Image-to-Video" ? "image2video" : mode === "Action Policy" ? "policy" : "text2video"
+    model_mode: mode === "Action Policy" ? "policy" : "image2video"
   };
   if (Number.isFinite(seed) && seed >= 0) params.seed = seed;
   if (process.env.PREDICT_NEGATIVE_PROMPT) params.negative_prompt = process.env.PREDICT_NEGATIVE_PROMPT;
