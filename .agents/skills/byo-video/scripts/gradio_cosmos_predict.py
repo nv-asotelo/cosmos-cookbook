@@ -285,6 +285,70 @@ def _b64_file(path: str) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
+SERVER_MEDIA_EXTENSIONS = {".mp4", ".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _is_url_source(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _is_file_url_source(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("file://")
+
+
+def _path_from_file_url(value: str) -> str:
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(str(value or ""))
+    return urllib.parse.unquote(parsed.path or "")
+
+
+def _source_suffix(value: str) -> str:
+    text = str(value or "").strip()
+    if _is_url_source(text) or _is_file_url_source(text):
+        import urllib.parse
+
+        text = urllib.parse.urlparse(text).path
+    return Path(text).suffix.lower()
+
+
+def _resolve_server_source(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    suffix = _source_suffix(text)
+    if suffix not in SERVER_MEDIA_EXTENSIONS:
+        raise ValueError(f"Unsupported server media extension: {suffix or '<none>'}")
+    if _is_url_source(text):
+        return text
+    if _is_file_url_source(text):
+        text = _path_from_file_url(text)
+    path = Path(text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Server media path does not exist: {path}")
+    return str(path)
+
+
+def _server_example_choices() -> list[tuple[str, str]]:
+    roots = os.environ.get("BYO_VIDEO_SERVER_EXAMPLE_DIRS", "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples")
+    choices: list[tuple[str, str]] = [("None", "")]
+    for raw_root in [part for part in roots.split(":") if part.strip()]:
+        root = Path(raw_root).expanduser()
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if path.is_file() and path.suffix.lower() in SERVER_MEDIA_EXTENSIONS:
+                choices.append((f"{root.name}/{path.name}", str(path)))
+    return choices[:40]
+
+
+def _b64_source(source: str) -> str:
+    if _is_url_source(source):
+        with urllib.request.urlopen(source, timeout=120) as response:
+            return base64.b64encode(response.read()).decode("ascii")
+    return _b64_file(source)
+
+
 def _input_path(file_obj) -> str:
     if isinstance(file_obj, str):
         return file_obj
@@ -569,6 +633,7 @@ def generate(
     world_mode: str,
     video_file,
     image_file,
+    server_source: str,
     prompt: str,
     input_image_index: int,
     guidance_scale: float,
@@ -582,9 +647,20 @@ def generate(
         source_name = "prompt only"
         frame_sources = []
     else:
-        source_path = _input_path(video_file if world_mode == "Video-to-World" else image_file)
-        source_name = Path(source_path).name if source_path else "conditioning media"
-        frame_sources = _progress_frame_sources(world_mode, video_file, image_file)
+        try:
+            source_path = _resolve_server_source(server_source)
+        except Exception as exc:
+            yield _progress_html(0, [], "bad server source", "error"), None, f"Server media source error: {exc}", None
+            return
+        if not source_path:
+            source_path = _input_path(video_file if world_mode == "Video-to-World" else image_file)
+        if _is_url_source(source_path):
+            import urllib.parse
+
+            source_name = Path(urllib.parse.urlparse(source_path).path).name or "server URL"
+        else:
+            source_name = Path(source_path).name if source_path else "conditioning media"
+        frame_sources = [] if _is_url_source(source_path) else _progress_frame_sources(world_mode, source_path if world_mode == "Video-to-World" else None, source_path if world_mode != "Video-to-World" else None)
 
     if _is_cosmos3_generator() and world_mode == "Video-to-World":
         yield _progress_html(0, [], "unsupported mode", "error"), None, _diagnostic_markdown(
@@ -614,8 +690,12 @@ def generate(
                 ["Upload an MP4 input or choose Image-to-World and upload an image."],
             ), None
             return
-        prep_path, prep_info = _preprocess_video(source_path)
-        media_b64 = _b64_file(prep_path)
+        if _is_url_source(source_path):
+            prep_info = "Server URL video fetched by Gradio; browser upload skipped."
+            media_b64 = _b64_source(source_path)
+        else:
+            prep_path, prep_info = _preprocess_video(source_path)
+            media_b64 = _b64_file(prep_path)
     else:
         if not source_path:
             yield _progress_html(0, [], "missing image", "error"), None, _diagnostic_markdown(
@@ -626,7 +706,7 @@ def generate(
                 ["Upload a JPEG/PNG input or choose Text-to-Video."]
             ), None
             return
-        media_b64 = _b64_file(source_path)
+        media_b64 = _b64_source(source_path)
 
     yield _progress_html(24, frame_sources, source_name), None, (
         f"{prep_info or 'Conditioning media prepared.'}\n\nBuilding Cosmos Predict request."
@@ -859,6 +939,19 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
             )
             video_in = gr.Video(label="Input Video (mp4)", visible=False)
             image_in = gr.Image(label="Input Image", type="filepath", visible=False)
+            with gr.Accordion("Server media source", open=False):
+                server_example = gr.Dropdown(
+                    label="Server example",
+                    choices=_server_example_choices(),
+                    value="",
+                    info="Choose media already staged on this machine.",
+                )
+                server_source = gr.Textbox(
+                    label="URL or local path",
+                    value="",
+                    placeholder="/tmp/nvidia-build-reason-vite/public/examples/lingoqa-red-light-slowdown.mp4",
+                    info="Server source wins over uploaded media and avoids browser upload.",
+                )
             prompt = gr.Textbox(
                 label="Prompt",
                 value="A smooth first-person robot manipulation video in a greenhouse. The robot arm reaches toward a ripe red apple, gently grasps it, twists, and places it into a harvest bin. Natural daylight, stable camera, realistic physics.",
@@ -902,6 +995,7 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
     model_id.change(hero_markup, model_id, hero)
     world_mode.change(update_inputs, world_mode, [video_in, image_in, input_image_index])
     backend_schema.change(schema_note, backend_schema, schema_status)
+    server_example.change(lambda value: value or "", server_example, server_source)
     preview_inputs = [
         collection,
         model_id,
@@ -923,6 +1017,7 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                      world_mode,
                      video_in,
                      image_in,
+                     server_source,
                      prompt,
                      input_image_index,
                      guidance,

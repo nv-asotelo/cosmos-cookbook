@@ -1441,14 +1441,26 @@ def _build_payload_preview(video_path, image_path, user_prompt, system_prompt,
     mode = _video_transmission_mode(video_path, image_path, is_image, effective_model)
 
     if mode == "video_url_base64":
+        if video_path and (_is_url_source(video_path) or _is_file_url_source(video_path)):
+            video_url = video_path
+        elif video_path and INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(video_path)):
+            video_url = _file_url_for_path(video_path)
+        else:
+            video_url = "data:video/mp4;base64,<...uploaded video bytes...>"
         media_parts = [{
             "type": "video_url",
-            "video_url": {"url": "data:video/mp4;base64,<...uploaded video bytes...>"},
+            "video_url": {"url": video_url},
         }]
     elif mode == "image_url_base64":
+        if image_path and (_is_url_source(image_path) or _is_file_url_source(image_path)):
+            image_url = image_path
+        elif image_path and INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(image_path)):
+            image_url = _file_url_for_path(image_path)
+        else:
+            image_url = "data:image/jpeg;base64,<...uploaded image bytes...>"
         media_parts = [{
             "type": "image_url",
-            "image_url": {"url": "data:image/jpeg;base64,<...uploaded image bytes...>"},
+            "image_url": {"url": image_url},
         }]
     elif mode == "image_url_frames":
         media_parts = [
@@ -1646,7 +1658,7 @@ def get_video_meta(path):
     class _M:
         width = height = fps = duration_s = 0
     m = _M()
-    if not _AV_OK or not path:
+    if not _AV_OK or not path or _is_url_source(path) or str(path).startswith("file://"):
         return m
     try:
         container = _av_module.open(path)
@@ -1660,6 +1672,123 @@ def get_video_meta(path):
     except Exception:
         pass
     return m
+
+
+_SERVER_MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _server_media_roots():
+    raw = os.environ.get("BYO_VIDEO_SERVER_MEDIA_ROOTS", "")
+    roots = [part for part in raw.split(":") if part.strip()]
+    roots.extend([
+        "/tmp",
+        HOME,
+        os.getcwd(),
+        "/home/horde",
+        "/mnt",
+        "/data",
+    ])
+    resolved = []
+    for root in roots:
+        try:
+            path = os.path.abspath(os.path.expanduser(root))
+            if os.path.isdir(path) and path not in resolved:
+                resolved.append(path)
+        except Exception:
+            pass
+    return resolved
+
+
+def _is_url_source(value):
+    text = str(value or "").strip().lower()
+    return text.startswith(("http://", "https://"))
+
+
+def _is_file_url_source(value):
+    return str(value or "").strip().lower().startswith("file://")
+
+
+def _file_url_for_path(path):
+    from urllib.parse import quote
+
+    return "file://" + quote(os.path.abspath(path))
+
+
+def _path_from_file_url(value):
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(str(value or ""))
+    return unquote(parsed.path or "")
+
+
+def _source_extension(value):
+    text = str(value or "").strip()
+    if _is_url_source(text) or _is_file_url_source(text):
+        from urllib.parse import urlparse
+
+        text = urlparse(text).path
+    return os.path.splitext(text)[1].lower()
+
+
+def _is_image_source(value):
+    return _source_extension(value) in {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _safe_server_path(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if _is_file_url_source(text):
+        text = _path_from_file_url(text)
+    path = os.path.abspath(os.path.expanduser(text))
+    if not os.path.isfile(path):
+        raise ValueError(f"Server media path does not exist: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _SERVER_MEDIA_EXTS:
+        raise ValueError(f"Unsupported server media extension: {ext or '<none>'}")
+    if os.environ.get("BYO_VIDEO_ALLOW_ANY_SERVER_MEDIA_PATH", "").lower() in {"1", "true", "yes", "on"}:
+        return path
+    roots = _server_media_roots()
+    if not any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+        root_text = ", ".join(roots[:6])
+        raise ValueError(f"Server media path must be under an allowed root ({root_text})")
+    return path
+
+
+def _resolve_server_media_source(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    ext = _source_extension(text)
+    if ext not in _SERVER_MEDIA_EXTS:
+        raise ValueError(f"Unsupported server media extension: {ext or '<none>'}")
+    if _is_url_source(text):
+        return text
+    return _safe_server_path(text)
+
+
+def _server_example_choices(limit=40):
+    raw = os.environ.get(
+        "BYO_VIDEO_SERVER_EXAMPLE_DIRS",
+        "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples:/home/horde/examples",
+    )
+    choices = [("None", "")]
+    seen = set()
+    for directory in [part for part in raw.split(":") if part.strip()]:
+        root = os.path.abspath(os.path.expanduser(directory))
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in _SERVER_MEDIA_EXTS or not os.path.isfile(path) or path in seen:
+                continue
+            label = f"{os.path.basename(root)}/{name}"
+            choices.append((label, path))
+            seen.add(path)
+            if len(choices) >= limit:
+                return choices
+    return choices
 
 
 def get_free_vram_mib():
@@ -2859,15 +2988,13 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
                            {"model_id": model_id, "elapsed_s": _elapsed(), "backend": _be_label},
                            steps=steps), gr.update()
 
-    # Step 3: prepare media content
-    # Per NIM Message-Shape standing order (~/.claude/CLAUDE.md): always send
-    # media as base64 data URLs to match build.nvidia.com snippets. file://
-    # URLs are banned — vLLM gates them behind --allowed-local-media-path
-    # (a flag the official snippets don't set), causing HTTP 400 on default
-    # NIM/vLLM deployments.
-    # Images: single image_url, base64 data URL for ALL models.
-    # Videos: NIM/vLLM-native models use base64 video_url first; only known
-    # frame-fallback NIMs (currently Cosmos Reason1 7B) use JPEG frames.
+    # Step 3: prepare media content. For standard NIM/vLLM uploads we keep the
+    # build.nvidia.com-compatible base64 data URL shape. Alpamayo's local
+    # adapter can read server-side file:// sources, so staged examples/local
+    # paths bypass both browser upload and Gradio base64 repost there.
+    # Images: single image_url for native-media models.
+    # Videos: native models use one video_url item; known frame-fallback NIMs
+    # (currently Cosmos Reason1 7B) use JPEG frames.
     _native_video = _uses_native_video_url(model_id) or _uses_native_video_url(_SERVER_MODEL_ID or "")
 
     def _build_frame_content_for_video(reason="fallback"):
@@ -2898,22 +3025,36 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
 
     if is_image:
         if _native_video:
-            try:
-                with open(video_path, "rb") as _imf:
-                    _ib64 = base64.b64encode(_imf.read()).decode("ascii")
-                _ext  = video_path.lower().rsplit(".", 1)[-1] if "." in video_path else "jpeg"
-                _mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(_ext, "jpeg")
-            except Exception as _img_err:
-                msg = f"[vLLM ERROR] Could not read image: {_img_err}"
-                _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
-                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
-                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
-                return
-            content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/{_mime};base64,{_ib64}"}},
-                {"type": "text", "text": prompt},
-            ]
-            print(f"[vllm/image] base64 data:image/{_mime} ({len(_ib64)//1000} KB)", flush=True)
+            if _is_url_source(video_path) or _is_file_url_source(video_path) or (
+                INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(video_path))
+            ):
+                _image_url = (
+                    video_path
+                    if _is_url_source(video_path) or _is_file_url_source(video_path)
+                    else _file_url_for_path(video_path)
+                )
+                content = [
+                    {"type": "image_url", "image_url": {"url": _image_url}},
+                    {"type": "text", "text": prompt},
+                ]
+                print(f"[vllm/image] direct image_url source ({_source_extension(_image_url) or 'url'})", flush=True)
+            else:
+                try:
+                    with open(video_path, "rb") as _imf:
+                        _ib64 = base64.b64encode(_imf.read()).decode("ascii")
+                    _ext  = video_path.lower().rsplit(".", 1)[-1] if "." in video_path else "jpeg"
+                    _mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(_ext, "jpeg")
+                except Exception as _img_err:
+                    msg = f"[vLLM ERROR] Could not read image: {_img_err}"
+                    _log_run(model_id, total_s=_elapsed(), status="image-error", display_label=display_label)
+                    yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                            {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+                    return
+                content = [
+                    {"type": "image_url", "image_url": {"url": f"data:image/{_mime};base64,{_ib64}"}},
+                    {"type": "text", "text": prompt},
+                ]
+                print(f"[vllm/image] base64 data:image/{_mime} ({len(_ib64)//1000} KB)", flush=True)
         else:
             try:
                 from PIL import Image as _pil_img
@@ -2931,24 +3072,37 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
             ]
             print(f"[vllm/image] base64 image prepared", flush=True)
     elif _native_video:
-        # Per NIM Message-Shape standing order: send the video as a base64
-        # data URL, NOT file://. file:// requires --allowed-local-media-path
-        # on vLLM (which build.nvidia.com snippets do not set) and is never
-        # accepted by build.nvidia.com's hosted API. base64 works everywhere.
-        try:
-            with open(video_path, "rb") as _vf:
-                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
-        except Exception as _vread_err:
-            msg = f"[vLLM ERROR] Could not read video: {_vread_err}"
-            _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
-            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
-                                    {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
-            return
-        content = [
-            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
-            {"type": "text", "text": prompt},
-        ]
-        print(f"[{_be_label}] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
+        # Standard NIM/vLLM deployments still get base64 unless the user gave a
+        # direct URL. Alpamayo gets file:// for local staged media because the
+        # adapter runs beside Gradio and enforces its own allowed media roots.
+        if _is_url_source(video_path) or _is_file_url_source(video_path) or (
+            INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(video_path))
+        ):
+            _video_url = (
+                video_path
+                if _is_url_source(video_path) or _is_file_url_source(video_path)
+                else _file_url_for_path(video_path)
+            )
+            content = [
+                {"type": "video_url", "video_url": {"url": _video_url}},
+                {"type": "text", "text": prompt},
+            ]
+            print(f"[{_be_label}] video_url: direct server source ({_source_extension(_video_url) or 'url'})", flush=True)
+        else:
+            try:
+                with open(video_path, "rb") as _vf:
+                    _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+            except Exception as _vread_err:
+                msg = f"[vLLM ERROR] Could not read video: {_vread_err}"
+                _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
+                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+                return
+            content = [
+                {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
+                {"type": "text", "text": prompt},
+            ]
+            print(f"[{_be_label}] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
     else:
         try:
             content = _build_frame_content_for_video("selected path")
@@ -4099,6 +4253,24 @@ with gr.Blocks(
                         sources=["upload"],
                         height=250,
                     )
+            with gr.Accordion("Server media source", open=_is_alpamayo_mode()):
+                server_example = gr.Dropdown(
+                    label="Server example",
+                    choices=_server_example_choices(),
+                    value="",
+                    info="Choose a clip already staged on this machine; avoids browser upload.",
+                )
+                server_media_source = gr.Textbox(
+                    label="URL or local path",
+                    value="",
+                    placeholder="/tmp/nvidia-build-reason-vite/public/examples/lingoqa-red-light-slowdown.mp4",
+                    info=(
+                        "Use http(s) URLs, file:// URLs, or local paths under BYO_VIDEO_SERVER_MEDIA_ROOTS. "
+                        "Server source wins over uploaded media."
+                    ),
+                    lines=1,
+                )
+                server_source_status = gr.Markdown("*Upload media, or choose a server source to avoid browser upload.*")
             clip_info = gr.Markdown("*Upload a video or image to see info*")
 
         with gr.Column(scale=1):
@@ -4685,25 +4857,72 @@ with gr.Blocks(
     # Adaptive default: snap max_pixels slider to image's native W×H on upload.
     image_input.change(_snap_maxpx_to_image, inputs=[image_input], outputs=[maxpx_slider])
 
+    def _describe_server_source(raw):
+        if not raw:
+            return "*Upload media, or choose a server source to avoid browser upload.*"
+        try:
+            source = _resolve_server_media_source(raw)
+        except Exception as exc:
+            return f"❌ {exc}"
+        if _is_url_source(source):
+            return f"✓ Using server URL source: `{source}`"
+        media_type = "image" if _is_image_source(source) else "video"
+        size_mb = os.path.getsize(source) / (1024 * 1024)
+        suffix = ""
+        if media_type == "video":
+            meta = get_video_meta(source)
+            if meta.width:
+                suffix = f" · {meta.width}×{meta.height} · {meta.fps:.1f} fps · {meta.duration_s:.1f}s"
+        direct_note = "Alpamayo will receive file:// and read the clip locally." if INFERENCE_BACKEND == "alpamayo" else "Upload is skipped; backend transport may still encode bytes if required."
+        return f"✓ Using server {media_type}: `{source}` · {size_mb:.1f} MB{suffix}. {direct_note}"
+
+    def _pick_server_example(value):
+        return value or "", _describe_server_source(value)
+
+    server_example.change(
+        _pick_server_example,
+        inputs=[server_example],
+        outputs=[server_media_source, server_source_status],
+    )
+    server_media_source.change(
+        _describe_server_source,
+        inputs=[server_media_source],
+        outputs=[server_source_status],
+    )
+
     # ── Live payload preview wiring ─────────────────────────────────────────
     # Any parameter change → rebuild the JSON preview + warnings panel.
     # JSON edit (interactive=True on gr.Code) → parse → snap sliders back.
     # Ping-pong dies after one bounce because _parse_payload_edit returns
     # gr.update() when parsed values equal current slider values.
-    def _refresh_preview(video_path, image_path, user_p, system_p,
+    def _refresh_preview(video_path, image_path, server_source, user_p, system_p,
                         fps_val, mp_val, mt_val, t_val, p_val, r_val):
+        try:
+            source = _resolve_server_media_source(server_source)
+        except Exception:
+            source = ""
+        effective_video = video_path
+        effective_image = image_path
+        if source:
+            if _is_image_source(source):
+                effective_video = None
+                effective_image = source
+            else:
+                effective_video = source
+                effective_image = None
         json_text = _build_payload_preview(
-            video_path, image_path, user_p, system_p,
+            effective_video, effective_image, user_p, system_p,
             fps_val, mp_val, mt_val, t_val, p_val, r_val,
             model_id=_SERVER_MODEL_ID,
+            is_image=bool(effective_image and not effective_video),
         )
-        mode = _video_transmission_mode(video_path, image_path, False,
+        mode = _video_transmission_mode(effective_video, effective_image, bool(effective_image and not effective_video),
                                         _SERVER_MODEL_ID or "")
         warn_html = _build_warnings_html(fps_val, mp_val, mt_val, t_val, p_val, r_val, mode)
         return json_text, warn_html
 
     _preview_inputs = [
-        video_input, image_input, user_box, system_box,
+        video_input, image_input, server_media_source, user_box, system_box,
         fps_slider, maxpx_slider, maxtok_slider,
         temp_slider, top_p_slider, rep_penalty_slider,
     ]
@@ -4813,16 +5032,25 @@ with gr.Blocks(
                 return mid
         return CHECKPOINT_PRESETS[0][1]
 
-    def _run(video_path, image_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
+    def _run(video_path, image_path, server_source, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
              ckpt_name, custom_val, disable_autocap, temperature, top_p, rep_penalty, style_mode):
         model_id  = resolve_model_id(ckpt_name, custom_val)
-        media     = video_path
+        media     = None
         is_image  = False
+        try:
+            media = _resolve_server_media_source(server_source)
+        except Exception as exc:
+            yield f"Server media source error: {exc}", _status_html(["wait"] * 5), gr.update()
+            return
+        if media:
+            is_image = _is_image_source(media)
+        else:
+            media = video_path
         if media is None and image_path is not None:
             media    = image_path
             is_image = True
         # Style mode only meaningful with a video; image inputs skip the overlay.
-        overlay_video = video_path if not is_image else None
+        overlay_video = media if (media and not is_image and not _is_url_source(media) and not _is_file_url_source(media)) else None
         for text, status, tbl in run_inference(
             media, user_prompt, system_prompt,
             fps, max_pixels, max_new_tokens, model_id,
@@ -4839,24 +5067,29 @@ with gr.Blocks(
                 user_prompt=user_prompt,
             ), status, tbl
 
-    def _run_all(video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
+    def _run_all(video_path, server_source, user_prompt, system_prompt, fps, max_pixels, max_new_tokens,
                  disable_autocap, reload_vllm, style_mode):
+        try:
+            media = _resolve_server_media_source(server_source) or video_path
+        except Exception as exc:
+            yield f"Server media source error: {exc}", _status_html(["wait"] * 5), gr.update()
+            return
         for combined, status, tbl in run_all_variants(
-            video_path, user_prompt, system_prompt,
+            media, user_prompt, system_prompt,
             fps, max_pixels, max_new_tokens,
             disable_autocap=disable_autocap,
             reload_vllm=reload_vllm,
         ):
             yield _render_with_think(
                 combined,
-                video_path=video_path,
+                video_path=media if (media and not _is_url_source(media) and not _is_file_url_source(media)) else None,
                 style_mode=bool(style_mode),
                 user_prompt=user_prompt,
             ), status, tbl
 
     run_btn.click(
         fn=_run,
-        inputs=[video_input, image_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
+        inputs=[video_input, image_input, server_media_source, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
                 checkpoint_dd, custom_ckpt, disable_autocap_chk,
                 temp_slider, top_p_slider, rep_penalty_slider, style_mode_chk],
         outputs=[response_out, status_panel, results_table],
@@ -4864,7 +5097,7 @@ with gr.Blocks(
 
     all_btn.click(
         fn=_run_all,
-        inputs=[video_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
+        inputs=[video_input, server_media_source, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider,
                 disable_autocap_chk, reload_vllm_chk, style_mode_chk],
         outputs=[response_out, status_panel, results_table],
     )

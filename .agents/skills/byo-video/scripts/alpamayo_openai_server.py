@@ -19,6 +19,7 @@ import os
 import re
 import time
 import urllib.request
+from urllib.parse import unquote, urlparse
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -191,6 +192,40 @@ def fetch_url(url: str) -> tuple[str, bytes]:
         return mime, response.read()
 
 
+def _media_roots() -> list[str]:
+    raw = os.getenv("ALPAMAYO_MEDIA_ROOTS") or os.getenv("BYO_VIDEO_SERVER_MEDIA_ROOTS") or ""
+    roots = [part for part in raw.split(":") if part.strip()]
+    roots.extend(["/tmp", os.path.expanduser("~"), "/home/horde", "/mnt", "/data"])
+    resolved: list[str] = []
+    for root in roots:
+        path = os.path.abspath(os.path.expanduser(root))
+        if os.path.isdir(path) and path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+def fetch_file_url(url: str) -> tuple[str, bytes]:
+    parsed = urlparse(url)
+    path = unquote(parsed.path or url)
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise ValueError(f"Media file does not exist: {path}")
+    if os.getenv("ALPAMAYO_ALLOW_ANY_FILE_URL", "").lower() not in {"1", "true", "yes", "on"}:
+        roots = _media_roots()
+        if not any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+            raise ValueError("Media file is outside ALPAMAYO_MEDIA_ROOTS/BYO_VIDEO_SERVER_MEDIA_ROOTS.")
+    ext = os.path.splitext(path)[1].lower()
+    mime = {
+        ".mp4": "video/mp4",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
+    with open(path, "rb") as handle:
+        return mime, handle.read()
+
+
 def media_from_url(raw_url: str, kind: str) -> MediaItem:
     decoded = decode_data_url(raw_url)
     if decoded is not None:
@@ -199,7 +234,10 @@ def media_from_url(raw_url: str, kind: str) -> MediaItem:
     if raw_url.startswith(("http://", "https://")):
         mime, data = fetch_url(raw_url)
         return MediaItem(mime=mime, data=data, kind=kind)
-    raise ValueError("Only data:, http:, and https: media URLs are supported.")
+    if raw_url.startswith("file://") or raw_url.startswith("/"):
+        mime, data = fetch_file_url(raw_url)
+        return MediaItem(mime=mime, data=data, kind=kind)
+    raise ValueError("Only data:, file:, http:, https:, and absolute local media URLs are supported.")
 
 
 def value_url(value: Any, key: str) -> str | None:

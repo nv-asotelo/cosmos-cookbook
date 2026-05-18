@@ -76,17 +76,86 @@ def _b64_file(path: str) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
-def generate(rgb_video, control_video, control_modality, prompt,
+SERVER_MEDIA_EXTENSIONS = {".mp4", ".mov", ".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _is_url_source(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _is_file_url_source(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("file://")
+
+
+def _path_from_file_url(value: str) -> str:
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(str(value or ""))
+    return urllib.parse.unquote(parsed.path or "")
+
+
+def _source_suffix(value: str) -> str:
+    text = str(value or "").strip()
+    if _is_url_source(text) or _is_file_url_source(text):
+        import urllib.parse
+
+        text = urllib.parse.urlparse(text).path
+    return Path(text).suffix.lower()
+
+
+def _resolve_server_source(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    suffix = _source_suffix(text)
+    if suffix not in SERVER_MEDIA_EXTENSIONS:
+        raise ValueError(f"Unsupported server media extension: {suffix or '<none>'}")
+    if _is_url_source(text):
+        return text
+    if _is_file_url_source(text):
+        text = _path_from_file_url(text)
+    path = Path(text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Server media path does not exist: {path}")
+    return str(path)
+
+
+def _b64_source(source: str) -> str:
+    if _is_url_source(source):
+        with urllib.request.urlopen(source, timeout=120) as response:
+            return base64.b64encode(response.read()).decode("ascii")
+    return _b64_file(source)
+
+
+def _server_example_choices() -> list[tuple[str, str]]:
+    roots = os.environ.get("BYO_VIDEO_SERVER_EXAMPLE_DIRS", "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples")
+    choices: list[tuple[str, str]] = [("None", "")]
+    for raw_root in [part for part in roots.split(":") if part.strip()]:
+        root = Path(raw_root).expanduser()
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if path.is_file() and path.suffix.lower() in SERVER_MEDIA_EXTENSIONS:
+                choices.append((f"{root.name}/{path.name}", str(path)))
+    return choices[:40]
+
+
+def generate(rgb_video, control_video, rgb_server_source, control_server_source, control_modality, prompt,
              guidance, edge_w, seg_w, depth_w, vis_w, seed):
-    if not rgb_video:
+    try:
+        rgb_source = _resolve_server_source(rgb_server_source) or rgb_video
+        ctrl_source = _resolve_server_source(control_server_source) or control_video
+    except Exception as exc:
+        return None, f"❌ Server media source error: {exc}", None, None
+    if not rgb_source:
         return None, "❌ Upload an RGB video.", None, None
     payload = {
         "prompt": prompt or "",
-        "input_video": _b64_file(rgb_video),
+        "input_video": _b64_source(rgb_source),
         "guidance": float(guidance),
     }
-    if control_video and control_modality and control_modality != "none":
-        ctrl_b64 = _b64_file(control_video)
+    if ctrl_source and control_modality and control_modality != "none":
+        ctrl_b64 = _b64_source(ctrl_source)
         # Per docs, each modality is its own block with control_weight + control_path.
         # control_path here is the b64 payload (NIM may accept either path or b64).
         payload[control_modality] = {
@@ -140,6 +209,29 @@ with gr.Blocks(title=_TITLE) as demo:
         with gr.Column(scale=1):
             rgb_in = gr.Video(label="RGB source video (mp4)")
             ctrl_in = gr.Video(label="Control video (optional)")
+            with gr.Accordion("Server media source", open=False):
+                rgb_example = gr.Dropdown(
+                    label="RGB server example",
+                    choices=_server_example_choices(),
+                    value="",
+                    info="Choose media already staged on this machine.",
+                )
+                rgb_server = gr.Textbox(
+                    label="RGB URL or local path",
+                    value="",
+                    placeholder="/tmp/source.mp4",
+                    info="Server source wins over uploaded media and avoids browser upload.",
+                )
+                ctrl_example = gr.Dropdown(
+                    label="Control server example",
+                    choices=_server_example_choices(),
+                    value="",
+                )
+                ctrl_server = gr.Textbox(
+                    label="Control URL or local path",
+                    value="",
+                    placeholder="/tmp/control.mp4",
+                )
             ctrl_mod = gr.Radio(
                 choices=["none", "edge", "seg", "depth", "vis"],
                 value="none",
@@ -165,9 +257,11 @@ with gr.Blocks(title=_TITLE) as demo:
             status = gr.Markdown()
             improved = gr.Textbox(label="AI-improved prompt", lines=3, interactive=False)
             response = gr.Code(label="Response (JSON, video stripped)", language="json")
+    rgb_example.change(lambda value: value or "", rgb_example, rgb_server)
+    ctrl_example.change(lambda value: value or "", ctrl_example, ctrl_server)
     submit.click(
         generate,
-        [rgb_in, ctrl_in, ctrl_mod, prompt, guidance, edge_w, seg_w, depth_w, vis_w, seed],
+        [rgb_in, ctrl_in, rgb_server, ctrl_server, ctrl_mod, prompt, guidance, edge_w, seg_w, depth_w, vis_w, seed],
         [video_out, status, response, improved],
     )
 

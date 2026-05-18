@@ -519,10 +519,93 @@ def _file_path(upload: Any) -> Optional[str]:
     return None
 
 
+SERVER_MEDIA_EXTENSIONS = {".mp4", ".jpg", ".jpeg", ".png"}
+
+
+def _is_url_source(value: Any) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _is_file_url_source(value: Any) -> bool:
+    return str(value or "").strip().lower().startswith("file://")
+
+
+def _path_from_file_url(value: Any) -> str:
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(str(value or ""))
+    return unquote(parsed.path or "")
+
+
+def _file_url_for_path(path: str) -> str:
+    from urllib.parse import quote
+
+    return "file://" + quote(str(pathlib.Path(path).expanduser().resolve()))
+
+
+def _is_alpamayo_backend() -> bool:
+    raw = " ".join([
+        os.environ.get("INFERENCE_BACKEND", ""),
+        os.environ.get("BYO_VIDEO_BACKEND", ""),
+        os.environ.get("MODEL_NAME", ""),
+        os.environ.get("MODEL_ID", ""),
+        BASE_URL,
+    ]).lower()
+    return "alpamayo" in raw
+
+
+def _source_suffix(value: Any) -> str:
+    text = str(value or "").strip()
+    if _is_url_source(text) or _is_file_url_source(text):
+        from urllib.parse import urlparse
+
+        text = urlparse(text).path
+    return pathlib.Path(text).suffix.lower()
+
+
+def _resolve_server_source(raw: str) -> Optional[str]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    suffix = _source_suffix(text)
+    if suffix not in SERVER_MEDIA_EXTENSIONS:
+        raise ValueError(f"Unsupported server media extension: {suffix or '<none>'}")
+    if _is_url_source(text):
+        return text
+    if _is_file_url_source(text):
+        text = _path_from_file_url(text)
+    path = pathlib.Path(text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Server media path does not exist: {path}")
+    return str(path)
+
+
+def _server_example_choices() -> List[Tuple[str, str]]:
+    roots = os.environ.get("BYO_VIDEO_SERVER_EXAMPLE_DIRS", "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples")
+    choices: List[Tuple[str, str]] = [("None", "")]
+    for raw_root in [part for part in roots.split(":") if part.strip()]:
+        root = pathlib.Path(raw_root).expanduser()
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if path.is_file() and path.suffix.lower() in SERVER_MEDIA_EXTENSIONS:
+                choices.append((f"{root.name}/{path.name}", str(path)))
+    return choices[:40]
+
+
 def _media_part(path: str) -> Dict[str, Any]:
-    ext = pathlib.Path(path).suffix.lower()
+    ext = _source_suffix(path)
     if ext not in ALLOWED_EXTENSIONS:
         raise ValueError("Supported uploads are .mp4, .jpg, .jpeg, and .png")
+    if _is_url_source(path):
+        if ext == ".mp4":
+            return {"type": "video_url", "video_url": {"url": path}}
+        return {"type": "image_url", "image_url": {"url": path}}
+    if _is_alpamayo_backend() and pathlib.Path(path).expanduser().is_file():
+        file_url = _file_url_for_path(path)
+        if ext == ".mp4":
+            return {"type": "video_url", "video_url": {"url": file_url}}
+        return {"type": "image_url", "image_url": {"url": file_url}}
 
     with open(path, "rb") as fh:
         encoded = base64.b64encode(fh.read()).decode("ascii")
@@ -590,7 +673,7 @@ def _build_messages(
 
     path = _file_path(upload)
     if path:
-        ext = pathlib.Path(path).suffix.lower()
+        ext = _source_suffix(path)
         if force_frame_fallback and ext == ".mp4":
             content = _video_frame_parts(path, user_prompt, fps, _nim_frame_fallback_limit())
         else:
@@ -617,9 +700,15 @@ def _request_preview(
 ) -> str:
     path = _file_path(upload)
     if path:
-        ext = pathlib.Path(path).suffix.lower()
+        ext = _source_suffix(path)
         media_type = "video_url" if ext == ".mp4" else "image_url"
-        media_obj = {media_type: {"url": f"data:{'video/mp4' if ext == '.mp4' else 'image/...'};base64,<uploaded-file>"}}
+        if _is_url_source(path):
+            media_url = path
+        elif _is_alpamayo_backend() and pathlib.Path(path).expanduser().is_file():
+            media_url = _file_url_for_path(path)
+        else:
+            media_url = f"data:{'video/mp4' if ext == '.mp4' else 'image/...'};base64,<uploaded-file>"
+        media_obj = {media_type: {"url": media_url}}
         user_content: Any = [{"type": media_type, **media_obj}, {"type": "text", "text": user_prompt}]
     else:
         user_content = user_prompt
@@ -638,13 +727,14 @@ def _request_preview(
         "top_k": top_k,
         "stream": True,
     }
-    if path and pathlib.Path(path).suffix.lower() == ".mp4":
+    if path and _source_suffix(path) == ".mp4":
         body["media_io_kwargs"] = {"video": {"fps": fps}}
     return json.dumps(body, indent=2)
 
 
 def _preview_for_current(
     upload: Any,
+    server_source: str,
     user_prompt: str,
     system_prompt: str,
     max_tokens: int,
@@ -659,8 +749,9 @@ def _preview_for_current(
 ) -> str:
     model, _source = detect_model(timeout=timeout)
     prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else _normalize_prompt(user_prompt)
+    media = _resolve_server_source(server_source) or upload
     return _request_preview(
-        model, upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        model, media, prompt, system_prompt, max_tokens, temperature, top_p,
         repetition_penalty, top_k, seed, fps
     )
 
@@ -668,6 +759,7 @@ def _preview_for_current(
 def toggle_reasoning_prompt(
     user_prompt: str,
     use_reasoning: bool,
+    server_source: str,
     upload: Any,
     system_prompt: str,
     max_tokens: int,
@@ -680,7 +772,7 @@ def toggle_reasoning_prompt(
 ) -> Tuple[str, str]:
     prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else _remove_reasoning_suffix(user_prompt)
     preview = _preview_for_current(
-        upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        upload, server_source, prompt, system_prompt, max_tokens, temperature, top_p,
         repetition_penalty, top_k, seed, fps, use_reasoning=False
     )
     return prompt, preview
@@ -688,6 +780,7 @@ def toggle_reasoning_prompt(
 
 def update_preview(
     upload: Any,
+    server_source: str,
     user_prompt: str,
     system_prompt: str,
     max_tokens: int,
@@ -700,7 +793,7 @@ def update_preview(
     use_reasoning: bool,
 ) -> str:
     return _preview_for_current(
-        upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+        upload, server_source, user_prompt, system_prompt, max_tokens, temperature, top_p,
         repetition_penalty, top_k, seed, fps, use_reasoning
     )
 
@@ -708,6 +801,7 @@ def update_preview(
 def apply_prompt_preset(
     preset_name: str,
     upload: Any,
+    server_source: str,
     max_tokens: int,
     temperature: float,
     top_p: float,
@@ -722,7 +816,7 @@ def apply_prompt_preset(
     )
     prompt = _append_reasoning_suffix(user_prompt) if use_reasoning else user_prompt
     preview = _preview_for_current(
-        upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        upload, server_source, prompt, system_prompt, max_tokens, temperature, top_p,
         repetition_penalty, top_k, seed, fps, use_reasoning=False
     )
     return prompt, system_prompt, use_reasoning, preview
@@ -756,6 +850,7 @@ def _stream_text(resp: requests.Response) -> Iterable[str]:
 
 def run_inference(
     upload: Any,
+    server_source: str,
     user_prompt: str,
     system_prompt: str,
     max_tokens: int,
@@ -772,14 +867,24 @@ def run_inference(
     if use_reasoning:
         prompt = _append_reasoning_suffix(prompt)
 
+    try:
+        media = _resolve_server_source(server_source) or upload
+    except Exception as exc:
+        preview = _request_preview(
+            model, upload, prompt, system_prompt, max_tokens, temperature, top_p,
+            repetition_penalty, top_k, seed, fps
+        )
+        yield "", f"Server media source error: {exc}", preview
+        return
+
     preview = _request_preview(
-        model, upload, prompt, system_prompt, max_tokens, temperature, top_p,
+        model, media, prompt, system_prompt, max_tokens, temperature, top_p,
         repetition_penalty, top_k, seed, fps
     )
     yield "", f"Detected model: `{model}` ({source}). Preparing request...", preview
 
     try:
-        path = _file_path(upload)
+        path = _file_path(media)
 
         def _build_body(messages: List[Dict[str, Any]], *, frame_fallback: bool = False) -> Dict[str, Any]:
             body: Dict[str, Any] = {
@@ -796,11 +901,11 @@ def run_inference(
                 body["repetition_penalty"] = float(repetition_penalty)
                 body["seed"] = int(seed)
                 body["top_k"] = int(top_k)
-            if path and pathlib.Path(path).suffix.lower() == ".mp4" and not frame_fallback:
+            if path and _source_suffix(path) == ".mp4" and not frame_fallback:
                 body["media_io_kwargs"] = {"video": {"fps": float(fps)}}
             return body
 
-        messages = _build_messages(upload, prompt, system_prompt, fps=fps)
+        messages = _build_messages(media, prompt, system_prompt, fps=fps)
         body = _build_body(messages)
 
         started = time.time()
@@ -811,7 +916,7 @@ def run_inference(
             stream=True,
             timeout=600,
         )
-        if resp.status_code in (400, 422) and path and pathlib.Path(path).suffix.lower() == ".mp4":
+        if resp.status_code in (400, 422) and path and _source_suffix(path) == ".mp4" and not _is_url_source(path):
             err_preview = resp.text[:2000]
             if _is_video_decode_error(err_preview):
                 try:
@@ -823,7 +928,7 @@ def run_inference(
                     f"{_nim_frame_fallback_limit()} image frames. {err_preview[:500]}",
                     flush=True,
                 )
-                messages = _build_messages(upload, prompt, system_prompt, fps=fps, force_frame_fallback=True)
+                messages = _build_messages(media, prompt, system_prompt, fps=fps, force_frame_fallback=True)
                 body = _build_body(messages, frame_fallback=True)
                 resp = requests.post(
                     f"{BASE_URL}/chat/completions",
@@ -850,10 +955,10 @@ def run_inference(
         yield "", f"Error: {exc}", preview
 
 
-def reset_ui() -> Tuple[None, str, str, str, bool, str, str, str]:
+def reset_ui() -> Tuple[None, str, str, str, str, bool, str, str, str]:
     model, source = detect_model(timeout=1.5)
     preview = _request_preview(model, None, DEFAULT_USER, DEFAULT_SYSTEM, 4096, 0.3, 0.3, 1.2, 20, 42, 4.0)
-    return None, DEFAULT_PRESET, DEFAULT_USER, DEFAULT_SYSTEM, False, "", f"Detected model: `{model}` ({source}).", preview
+    return None, "", DEFAULT_PRESET, DEFAULT_USER, DEFAULT_SYSTEM, False, "", f"Detected model: `{model}` ({source}).", preview
 
 
 def build_app() -> gr.Blocks:
@@ -895,6 +1000,19 @@ def build_app() -> gr.Blocks:
                     file_types=[".mp4", ".jpg", ".jpeg", ".png"],
                     file_count="single",
                 )
+                with gr.Accordion("Server media source", open=False):
+                    server_example = gr.Dropdown(
+                        label="Server example",
+                        choices=_server_example_choices(),
+                        value="",
+                        info="Choose media already staged on this machine.",
+                    )
+                    server_source = gr.Textbox(
+                        label="URL or local path",
+                        value="",
+                        placeholder="/tmp/nvidia-build-reason-vite/public/examples/lingoqa-red-light-slowdown.mp4",
+                        info="Server source wins over uploaded media and avoids browser upload.",
+                    )
                 prompt_preset = gr.Dropdown(
                     label="Prompt preset",
                     choices=list(PROMPT_PRESETS.keys()),
@@ -956,16 +1074,21 @@ def build_app() -> gr.Blocks:
         race_car = LOCAL_SOURCE_DIR / "Race Car.mp4"
         if race_car.exists():
             gr.Examples(
-                examples=[[str(race_car), RACE_CAR_PROMPT, DEFAULT_SYSTEM, 4096, 0.6, 0.3, 1.2, 20, 42, 6.0, False]],
+                examples=[[str(race_car), "", RACE_CAR_PROMPT, DEFAULT_SYSTEM, 4096, 0.6, 0.3, 1.2, 20, 42, 6.0, False]],
                 inputs=[
-                    upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+                    upload, server_source, user_prompt, system_prompt, max_tokens, temperature, top_p,
                     repetition_penalty, top_k, seed, fps, reasoning
                 ],
                 label="View Examples",
             )
 
+        def _pick_server_example(value: str) -> str:
+            return value or ""
+
+        server_example.change(_pick_server_example, inputs=[server_example], outputs=[server_source])
+
         preview_inputs = [
-            upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+            upload, server_source, user_prompt, system_prompt, max_tokens, temperature, top_p,
             repetition_penalty, top_k, seed, fps, reasoning
         ]
         for component in preview_inputs:
@@ -973,7 +1096,7 @@ def build_app() -> gr.Blocks:
         reasoning.change(
             fn=toggle_reasoning_prompt,
             inputs=[
-                user_prompt, reasoning, upload, system_prompt, max_tokens, temperature, top_p,
+                user_prompt, reasoning, server_source, upload, system_prompt, max_tokens, temperature, top_p,
                 repetition_penalty, top_k, seed, fps
             ],
             outputs=[user_prompt, code],
@@ -981,7 +1104,7 @@ def build_app() -> gr.Blocks:
         prompt_preset.change(
             fn=apply_prompt_preset,
             inputs=[
-                prompt_preset, upload, max_tokens, temperature, top_p,
+                prompt_preset, upload, server_source, max_tokens, temperature, top_p,
                 repetition_penalty, top_k, seed, fps
             ],
             outputs=[user_prompt, system_prompt, reasoning, code],
@@ -990,7 +1113,7 @@ def build_app() -> gr.Blocks:
         run.click(
             fn=run_inference,
             inputs=[
-                upload, user_prompt, system_prompt, max_tokens, temperature, top_p,
+                upload, server_source, user_prompt, system_prompt, max_tokens, temperature, top_p,
                 repetition_penalty, top_k, seed, fps, reasoning
             ],
             outputs=[output, status, code],
@@ -998,7 +1121,7 @@ def build_app() -> gr.Blocks:
         reset.click(
             fn=reset_ui,
             inputs=[],
-            outputs=[upload, prompt_preset, user_prompt, system_prompt, reasoning, output, status, code],
+            outputs=[upload, server_source, prompt_preset, user_prompt, system_prompt, reasoning, output, status, code],
         )
 
     return demo

@@ -31,6 +31,7 @@ Run on the same host as Ray Serve, with the cosmos3 venv:
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -54,6 +55,20 @@ from cosmos3.ray.gradio import (
 
 NVIDIA_GREEN = "#76B900"
 NVIDIA_DARK = "#1A1A1A"
+SERVER_MEDIA_EXTENSIONS = {".mp4", ".mov", ".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _server_example_choices() -> list[tuple[str, str]]:
+    roots = os.environ.get("BYO_VIDEO_SERVER_EXAMPLE_DIRS", "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples")
+    choices: list[tuple[str, str]] = [("None", "")]
+    for raw_root in [part for part in roots.split(":") if part.strip()]:
+        root = Path(raw_root).expanduser()
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if path.is_file() and path.suffix.lower() in SERVER_MEDIA_EXTENSIONS:
+                choices.append((f"{root.name}/{path.name}", str(path)))
+    return choices[:40]
 
 
 def _gpu_probe() -> dict:
@@ -164,16 +179,17 @@ def _telemetry_markdown() -> str:
     )
 
 
-def update_extra_with_vision(image_path, video_path, current_json):
+def update_extra_with_vision(image_path, video_path, server_source, current_json):
     """Inject the uploaded media path into extra_input.vision_path.
 
-    Video takes precedence over image. Clearing both removes vision_path.
+    Server source takes precedence over uploads, then video, then image.
+    Clearing all removes vision_path.
     """
     try:
         data = json.loads(current_json) if current_json else {}
     except json.JSONDecodeError:
         data = {}
-    media_path = video_path or image_path
+    media_path = (server_source or "").strip() or video_path or image_path
     if media_path:
         data["vision_path"] = str(media_path)
     else:
@@ -242,6 +258,19 @@ def ui_builder(args: Args) -> gr.Blocks:
                     sources=["upload"],
                     height=200,
                 )
+                with gr.Accordion("Server media source", open=False):
+                    server_example = gr.Dropdown(
+                        label="Server example",
+                        choices=_server_example_choices(),
+                        value="",
+                        info="Choose media already staged on this machine.",
+                    )
+                    server_source = gr.Textbox(
+                        label="Server media URL or local path",
+                        value="",
+                        placeholder="/tmp/source.mp4",
+                        info="Takes precedence over uploads and avoids browser upload.",
+                    )
 
                 components = build_components(OmniSampleOverrides, COMPONENTS)
 
@@ -275,13 +304,26 @@ def ui_builder(args: Args) -> gr.Blocks:
 
         image_upload.change(
             fn=update_extra_with_vision,
-            inputs=[image_upload, video_upload, extra_input],
+            inputs=[image_upload, video_upload, server_source, extra_input],
             outputs=[extra_input],
         )
         video_upload.change(
             fn=update_extra_with_vision,
-            inputs=[image_upload, video_upload, extra_input],
+            inputs=[image_upload, video_upload, server_source, extra_input],
             outputs=[extra_input],
+        )
+        server_source.change(
+            fn=update_extra_with_vision,
+            inputs=[image_upload, video_upload, server_source, extra_input],
+            outputs=[extra_input],
+        )
+        server_example.change(
+            fn=lambda value, image_path, video_path, current_json: (
+                value or "",
+                update_extra_with_vision(image_path, video_path, value or "", current_json),
+            ),
+            inputs=[server_example, image_upload, video_upload, extra_input],
+            outputs=[server_source, extra_input],
         )
 
         generate_btn.click(
