@@ -163,6 +163,7 @@ type ExampleItem = {
   userPrompt: string;
   systemPrompt: string;
   reasoning: boolean;
+  judgeNote?: string;
   parameters?: Partial<{
     framesPerSecond: number;
     maxTokens: number;
@@ -380,6 +381,97 @@ const EXAMPLES: ExampleItem[] = [
       framesPerSecond: 2,
       maxTokens: 4096,
       repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  }
+];
+
+const ALPAMAYO_LINGOQA_SYSTEM_PROMPT =
+  "You are Alpamayo 1.5 analyzing a LingoQA ego-camera driving clip. Answer the user's driving-scene question from visible evidence in the sampled frames.";
+
+const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
+  {
+    id: "lingoqa-red-light-slowdown",
+    title: "LingoQA: slow for red light",
+    mediaUrl: "/examples/lingoqa-red-light-slowdown.mp4",
+    mediaName: "lingoqa-red-light-slowdown.mp4",
+    mediaKind: "video",
+    userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
+    systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
+    reasoning: false,
+    judgeNote: "Lingo-Judge: Cosmos3 0.854, Cosmos Reason 2 0.198, Cosmos Reason 1 0.199.",
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 256,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  },
+  {
+    id: "lingoqa-return-left-after-truck",
+    title: "LingoQA: return left after truck",
+    mediaUrl: "/examples/lingoqa-return-left-after-truck.mp4",
+    mediaName: "lingoqa-return-left-after-truck.mp4",
+    mediaKind: "video",
+    userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
+    systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
+    reasoning: false,
+    judgeNote: "Lingo-Judge: Cosmos3 0.870, Cosmos Reason 2 0.231, Cosmos Reason 1 0.316.",
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 256,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  },
+  {
+    id: "lingoqa-green-light-accelerate",
+    title: "LingoQA: accelerate on green",
+    mediaUrl: "/examples/lingoqa-green-light-accelerate.mp4",
+    mediaName: "lingoqa-green-light-accelerate.mp4",
+    mediaKind: "video",
+    userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
+    systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
+    reasoning: false,
+    judgeNote: "Lingo-Judge: Cosmos3 0.781, Cosmos Reason 2 0.277, Cosmos Reason 1 0.263.",
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 256,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  },
+  {
+    id: "lingoqa-no-cycle-lane",
+    title: "LingoQA: no dedicated cycle lane",
+    mediaUrl: "/examples/lingoqa-no-cycle-lane.mp4",
+    mediaName: "lingoqa-no-cycle-lane.mp4",
+    mediaKind: "video",
+    userPrompt: "Is there a designated cycle lane on this road? If yes, where is it?",
+    systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
+    reasoning: false,
+    judgeNote: "Lingo-Judge: Cosmos3 0.799, Cosmos Reason 2 0.094, Cosmos Reason 1 0.086.",
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 256,
+      temperature: 0.3,
+      topP: 0.8
+    }
+  },
+  {
+    id: "lingoqa-no-traffic-lights",
+    title: "LingoQA: no traffic lights",
+    mediaUrl: "/examples/lingoqa-no-traffic-lights.mp4",
+    mediaName: "lingoqa-no-traffic-lights.mp4",
+    mediaKind: "video",
+    userPrompt: "Are there any traffic lights? What color are they showing?",
+    systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
+    reasoning: false,
+    judgeNote: "Lingo-Judge: Cosmos3 0.576, Cosmos Reason 2 0.037, Cosmos Reason 1 0.078.",
+    parameters: {
+      framesPerSecond: 4,
+      maxTokens: 256,
       temperature: 0.3,
       topP: 0.8
     }
@@ -656,6 +748,8 @@ export default function App() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
   const [copied, setCopied] = useState(false);
+  const vlaMode = isVlaMode(model, backendInfo);
+  const activeExamples = useMemo(() => (vlaMode ? ALPAMAYO_LINGOQA_EXAMPLES : EXAMPLES), [vlaMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -694,21 +788,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const example = EXAMPLES.find((item) => item.id === selectedExampleId);
+    const example = activeExamples.find((item) => item.id === selectedExampleId);
     if (example) {
       applyExampleParameters(example);
+      return;
+    }
+    if (activeExamples[0]) {
+      void applyExample(activeExamples[0].id, { closeModal: false });
       return;
     }
     const defaults = modelDefaults(model, backendInfo);
     setFramesPerSecond(defaults.fps);
     setMaxTokens(defaults.maxTokens);
-  }, [backendInfo, model]);
+  }, [activeExamples, backendInfo, model, selectedExampleId]);
 
   useEffect(() => {
     if (defaultExampleLoadedRef.current) return;
     defaultExampleLoadedRef.current = true;
-    void applyExample(EXAMPLES[0].id, { closeModal: false });
-  }, []);
+    void applyExample(activeExamples[0].id, { closeModal: false });
+  }, [activeExamples]);
 
   const effectivePrompt = useMemo(
     () => promptForReasoning(userPrompt || "Describe the provided media.", reasoningEnabled),
@@ -863,7 +961,7 @@ export default function App() {
 
   async function applyExample(exampleId = selectedExampleId, options: { closeModal?: boolean } = {}) {
     const closeModal = options.closeModal ?? true;
-    const example = EXAMPLES.find((item) => item.id === exampleId) || EXAMPLES[0];
+    const example = activeExamples.find((item) => item.id === exampleId) || activeExamples[0] || EXAMPLES[0];
     setSelectedExampleId(example.id);
     if (closeModal) setExamplesOpen(false);
     setStatus("Loading example");
@@ -1074,7 +1172,6 @@ export default function App() {
     window.setTimeout(() => setCopied(false), 1200);
   }
 
-  const vlaMode = isVlaMode(model, backendInfo);
   const heroTags = vlaMode ? VLA_HERO_TAGS : HERO_TAGS;
 
   return (
@@ -1182,6 +1279,7 @@ export default function App() {
             copied={copied}
             copyRequest={copyRequest}
             dragActive={dragActive}
+            examples={activeExamples}
             examplesOpen={examplesOpen}
             handleDrag={handleDrag}
             handleDrop={handleDrop}
@@ -1278,6 +1376,7 @@ function ExperiencePanel({
   copied,
   copyRequest,
   dragActive,
+  examples,
   examplesOpen,
   framesPerSecond,
   handleDrag,
@@ -1333,6 +1432,7 @@ function ExperiencePanel({
   copied: boolean;
   copyRequest: () => Promise<void>;
   dragActive: boolean;
+  examples: ExampleItem[];
   examplesOpen: boolean;
   framesPerSecond: number;
   handleDrag: (event: DragEvent<HTMLElement>, active: boolean) => void;
@@ -1621,6 +1721,7 @@ function ExperiencePanel({
         <ExampleModal
           applyExample={applyExample}
           close={() => setExamplesOpen(false)}
+          examples={examples}
           selectedExampleId={selectedExampleId}
           setSelectedExampleId={setSelectedExampleId}
         />
@@ -1632,11 +1733,13 @@ function ExperiencePanel({
 function ExampleModal({
   applyExample,
   close,
+  examples,
   selectedExampleId,
   setSelectedExampleId
 }: {
   applyExample: (exampleId?: string) => Promise<void>;
   close: () => void;
+  examples: ExampleItem[];
   selectedExampleId: string;
   setSelectedExampleId: (id: string) => void;
 }) {
@@ -1661,7 +1764,7 @@ function ExampleModal({
         <div className="modalMain">
           <p>Select the input from the examples below:</p>
           <div className="exampleList" role="radiogroup" aria-label="Examples">
-            {EXAMPLES.map((example) => {
+            {examples.map((example) => {
               const checked = draftExampleId === example.id;
               return (
                 <button
@@ -1693,6 +1796,11 @@ function ExampleModal({
                     <span>
                       <b>System Prompt:</b> {example.systemPrompt}
                     </span>
+                    {example.judgeNote ? (
+                      <span>
+                        <b>LingoQA:</b> {example.judgeNote}
+                      </span>
+                    ) : null}
                   </div>
                 </button>
               );
