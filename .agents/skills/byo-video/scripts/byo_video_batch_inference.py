@@ -4530,11 +4530,14 @@ def lingo_judge_score(question: str, reference: str, prediction: str) -> float:
     import torch
 
     text = f"[CLS]\nQuestion: {question}\nAnswer: {reference}\nStudent: {prediction}"
+    # Per official wayveai/LingoQA `benchmark/judge.py`, the protocol's
+    # tokenizer call hardcodes `max_length=128` (NOT DeBERTa's 512 architectural
+    # cap). We mirror that exactly so our scoring matches the upstream judge.
     encoded = _JUDGE_TOKENIZER(
         text,
         return_tensors="pt",
         truncation=True,
-        max_length=512,
+        max_length=LINGO_JUDGE_MAX_TOKENS,
         padding=False,
     ).to(_JUDGE_DEVICE)
     with torch.no_grad():
@@ -4583,7 +4586,8 @@ def _extract_final_answer(prediction: str) -> str:
 
     The returned string is the "answer-only" payload sent to Lingo-Judge in
     `judge_mode="answer-only"` / `judge_mode="both"`. Goal: brief, gt-A/gt-B-
-    style text so the judge's 512-token window holds the entire final answer.
+    style text so the judge's 128-token window (hardcoded in the official
+    benchmark/judge.py) holds the entire final answer.
     """
     if not prediction:
         return ""
@@ -4604,15 +4608,21 @@ def _extract_final_answer(prediction: str) -> str:
     return text.strip()
 
 
-# DeBERTa-v3-base (the Lingo-Judge backbone) hard-truncates inputs at 512
-# tokens — see lingo_judge_score(). Reasoning-style models that emit long
-# <think> chains can blow past this; we surface an approximate token count
-# per row so the UI can call out "judge couldn't see the final answer."
+# Lingo-Judge truncation cap.
 #
-# Heuristic: ~4 chars per token for English. Exact tokenizer counts would
-# be nicer but adding tiktoken as a dep is out of scope — the goal here is
-# directional, not precise.
-JUDGE_MAX_TOKENS = 512
+# IMPORTANT: The official wayveai/LingoQA `benchmark/judge.py`
+# (https://github.com/wayveai/LingoQA/blob/main/benchmark/judge.py) hardcodes:
+#     self.tokenizer(texts, return_tensors='pt', padding=True,
+#                    truncation=True, max_length=128)
+# i.e. the protocol clips judge inputs at 128 tokens — NOT DeBERTa-v3-base's
+# 512 architectural cap. 128 is MORE aggressive than 512: a moderate reasoning
+# trace (~90 tokens) is already over budget.
+#
+# Heuristic for the per-row truncation telemetry: ~4 chars per token for
+# English. Exact tokenizer counts would be nicer but adding tiktoken as a dep
+# is out of scope — the goal here is directional, not precise.
+LINGO_JUDGE_MAX_TOKENS = 128  # Hardcoded in official wayveai/LingoQA benchmark/judge.py — DeBERTa's 512 architectural cap is NOT what the protocol uses
+JUDGE_MAX_TOKENS = LINGO_JUDGE_MAX_TOKENS  # Back-compat alias for downstream readers
 
 
 def _judge_text_tokens(question: str, reference: str, prediction: str) -> int:
@@ -4628,7 +4638,8 @@ def _judge_text_for_row(question: str, reference: str, prediction: str) -> str:
     """The literal string fed to Lingo-Judge for one (q, ref, pred) triple.
 
     Surfaced in the detail panel so a reader can see WHAT the judge actually
-    saw — including how a 1024-token reasoning trace gets clipped to 512.
+    saw — including how a 1024-token reasoning trace gets clipped to 128
+    (the protocol's hardcoded ceiling in benchmark/judge.py).
     """
     return f"[CLS]\nQuestion: {question or ''}\nAnswer: {reference or ''}\nStudent: {prediction or ''}"
 
@@ -5038,9 +5049,11 @@ def _benchmark_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
     avg_len = (sum(answer_lens) / len(answer_lens)) if answer_lens else None
     reasoning_pct = (sum(1 for r in results if r.get("reasoning_trace")) / total) if total else 0.0
     # Judge-input truncation rate. A row is "truncated" if EITHER reference's
-    # [CLS]\nQuestion:\nAnswer:\nStudent: string exceeded the judge's 512-token
-    # window. Surfaced in the Recent Samples header so we can spot reasoning
-    # models being silently under-scored at the population level.
+    # [CLS]\nQuestion:\nAnswer:\nStudent: string exceeded the judge's
+    # 128-token window (hardcoded `max_length=128` in the official wayveai/LingoQA
+    # benchmark/judge.py — NOT DeBERTa's 512 architectural cap). Surfaced in
+    # the Recent Samples header so we can spot reasoning models being
+    # silently under-scored at the population level.
     truncated_rows = sum(
         1 for r in results
         if r.get("judge_truncated_a") or r.get("judge_truncated_b")
@@ -5105,8 +5118,11 @@ def run_lingoqa_benchmark(
       - "standard"    : judge sees result["prediction"] (default; back-compat).
       - "answer-only" : judge sees _extract_final_answer(prediction). The
                         <think>...</think> chain is removed before scoring so
-                        the brief final answer fits in DeBERTa's 512-token
-                        window — mirrors the brief gt-A/gt-B reference style.
+                        the brief final answer fits in the protocol's
+                        128-token window (hardcoded `max_length=128` in the
+                        official wayveai/LingoQA benchmark/judge.py — more
+                        aggressive than DeBERTa's 512 architectural cap).
+                        Mirrors the brief gt-A/gt-B reference style.
       - "both"        : runs both scorers per row. Each result captures
                         judge_score_{standard,answer_only} and
                         judge_correct_{standard,answer_only}. The verdict
@@ -5214,8 +5230,9 @@ def run_lingoqa_benchmark(
                     result["references"] = q["references"]
                     # ---- Token-count transparency for BOTH judge-input strings
                     # so the UI can show whether the answer-only mode actually
-                    # fit under the 512-token window (the whole point of the
-                    # A/B). Per-row fields:
+                    # fit under the 128-token window (the protocol's hardcoded
+                    # max_length=128 — see LINGO_JUDGE_MAX_TOKENS). The whole
+                    # point of the A/B. Per-row fields:
                     #   judge_input_tokens_a, _b            -> standard mode
                     #   judge_input_tokens_a_answer_only, _b_answer_only
                     #   judge_truncated_a, _b                -> standard mode
@@ -6383,7 +6400,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
             <label><input type="radio" name="benchJudgeMode" value="answer-only" /> Answer-only <span style="color:#94a3b8;">— strip &lt;think&gt; before judging</span></label>
             <label><input type="radio" name="benchJudgeMode" value="both" /> Both (A/B) <span style="color:#94a3b8;">— score twice; surface delta</span></label>
           </div>
-          <p class="hint">Brief gt-A/gt-B references favor short answers. Long &lt;think&gt; chains can push the judge past its 512-token window. Use "Both" to A/B the bias.</p>
+          <p class="hint">Brief gt-A/gt-B references favor short answers. Long &lt;think&gt; chains can push the judge past its 128-token window (protocol hardcodes <code>max_length=128</code> in <code>benchmark/judge.py</code> — more aggressive than DeBERTa's 512 architectural cap). Use "Both" to A/B the bias.</p>
         </div>
         <div class="bench-card">
           <h3>Model (auto-detected)</h3>
@@ -6741,8 +6758,10 @@ function benchRenderSnap(snap){
   }).join('');
   el('benchCats').innerHTML = chipsHtml || '<div class="hint" style="color:#94a3b8;">no completed predictions yet</div>';
   // Aggregate truncation callout — surface when a meaningful fraction of rows
-  // would have been clipped by the judge's 512-token window. >5% suggests a
-  // re-judge sprint with shortened prompts is warranted.
+  // would have been clipped by the judge's 128-token window (hardcoded
+  // `max_length=128` in benchmark/judge.py; more aggressive than DeBERTa's
+  // 512 architectural cap). >5% suggests a re-judge sprint with shortened
+  // prompts is warranted.
   const truncRows = summary.judge_truncated_rows || 0;
   const truncPct = summary.judge_truncated_pct || 0;
   const totalRows = summary.total_predictions || 0;
@@ -6753,8 +6772,8 @@ function benchRenderSnap(snap){
       const pctStr = (truncPct*100).toFixed(1);
       const warn = truncPct > 0.05;
       html += warn
-        ? `<div class="trunc-summary-callout"><strong>⚠️ ${truncRows} / ${totalRows} (${pctStr}%) judge inputs truncated</strong> at ${summary.judge_max_tokens||512} tokens. Reasoning-style models with long &lt;think&gt; chains may be under-rated — consider a shortened-prompt re-judge sprint as follow-up.</div>`
-        : `<div class="hint" style="color:#94a3b8; font-size:12px;">Judge truncation: ${truncRows} / ${totalRows} rows (${pctStr}%) exceeded ${summary.judge_max_tokens||512} tokens.</div>`;
+        ? `<div class="trunc-summary-callout"><strong>⚠️ ${truncRows} / ${totalRows} (${pctStr}%) judge inputs truncated</strong> at ${summary.judge_max_tokens||128} tokens (protocol hardcodes <code>max_length=128</code> in <code>benchmark/judge.py</code>). Reasoning-style models with long &lt;think&gt; chains may be under-rated — consider a shortened-prompt re-judge sprint as follow-up.</div>`
+        : `<div class="hint" style="color:#94a3b8; font-size:12px;">Judge truncation: ${truncRows} / ${totalRows} rows (${pctStr}%) exceeded ${summary.judge_max_tokens||128} tokens (protocol's hardcoded <code>max_length=128</code>).</div>`;
     }
     // A/B summary tile — only when in "both" mode (both accuracies computed).
     if(summary.accuracy_standard !== null && summary.accuracy_standard !== undefined
@@ -6812,7 +6831,7 @@ function benchRenderSnap(snap){
       score = r.judge_score!==null && r.judge_score!==undefined ? (r.judge_score*100).toFixed(0)+'%' : '';
     }
     const truncFlag = (r.judge_truncated_a || r.judge_truncated_b)
-      ? '<span class="trunc-flag" title="Judge input (standard mode) was truncated to 512 tokens — final answer may not have reached the judge.">⚠️ trunc</span>'
+      ? '<span class="trunc-flag" title="Judge input (standard mode) was truncated at 128 tokens (the protocol\'s hardcoded max_length=128 in benchmark/judge.py — more aggressive than DeBERTa\'s 512 architectural cap). Final answer may not have reached the judge.">⚠️ trunc</span>'
       : '';
     let thumbs = '';
     if(r.segment_id){
@@ -6867,7 +6886,9 @@ function benchOpenSample(idx){
   // Char-based estimate of (think + answer) tokens — directional only.
   const combinedChars = reasoningText.length + finalAnswer.length;
   const approxTokens = Math.max(1, Math.floor(combinedChars / 4));
-  const maxTok = r.judge_max_tokens || 512;
+  // Default 128: the official wayveai/LingoQA benchmark/judge.py hardcodes
+  // `max_length=128` in its tokenizer call. NOT DeBERTa's 512 architectural cap.
+  const maxTok = r.judge_max_tokens || 128;
   const overMax = approxTokens > maxTok;
   const tokFlag = overMax ? ' <span class="trunc-flag">⚠️ TRUNCATED BY JUDGE</span>' : '';
   // ---- Judge breakdown per reference ----
@@ -6893,10 +6914,12 @@ function benchOpenSample(idx){
   // ---- Build judge breakdown: standard mode (always shown), then answer-only
   // mode if it was scored (judge_mode "answer-only" or "both"). When both
   // are present the two panels render side-by-side so the A/B is visible.
+  const protocolNote = `<div style="font-size:11px; color:#94a3b8; margin:4px 0 8px 0; font-style:italic;">Truncated at ${maxTok} tokens (the protocol's hardcoded <code>max_length=128</code> in <code>benchmark/judge.py</code>, more aggressive than DeBERTa's 512 architectural cap).</div>`;
   const stdBlock = `
     <div class="judge-breakdown">
       <h4>Judge breakdown — standard${r.judge_score_standard !== null && r.judge_score_standard !== undefined ? ` (score ${r.judge_score_standard.toFixed(3)} → ${r.judge_correct_standard?'<span style=\"color:#76B900;\">correct</span>':'<span style=\"color:#DC2626;\">miss</span>'})` : ''}</h4>
       <div style="font-size:12px; margin-bottom:8px; color:#475569;">judge sees full prediction (incl. &lt;think&gt;)${winIdx>=0?` · winning ref index: <strong>${winIdx}</strong>`:''}</div>
+      ${protocolNote}
       ${refBlock('GT-A', refs[0]||'', 0, r.judge_input_text_a, r.judge_input_tokens_a, r.judge_truncated_a)}
       ${refs.length>1 ? refBlock('GT-B', refs[1]||'', 1, r.judge_input_text_b, r.judge_input_tokens_b, r.judge_truncated_b) : ''}
     </div>`;
@@ -6919,6 +6942,7 @@ function benchOpenSample(idx){
     <div class="judge-breakdown">
       <h4>Judge breakdown — answer-only (score ${r.judge_score_answer_only.toFixed(3)} → ${r.judge_correct_answer_only?'<span style="color:#76B900;">correct</span>':'<span style="color:#DC2626;">miss</span>'})</h4>
       <div style="font-size:12px; margin-bottom:8px; color:#475569;">judge sees only the final answer (&lt;think&gt; stripped) — mirrors brief gt-A/gt-B style</div>
+      ${protocolNote}
       ${aoRefBlock('GT-A', refs[0]||'', 0, r.judge_input_text_a_answer_only, r.judge_input_tokens_a_answer_only, r.judge_truncated_a_answer_only)}
       ${refs.length>1 ? aoRefBlock('GT-B', refs[1]||'', 1, r.judge_input_text_b_answer_only, r.judge_input_tokens_b_answer_only, r.judge_truncated_b_answer_only) : ''}
     </div>`;
@@ -7337,6 +7361,37 @@ class Handler(BaseHTTPRequestHandler):
                 "loaded": bool(BENCHMARK_STATE.get("judge_loaded")),
                 "error": BENCHMARK_STATE.get("judge_error"),
             }])
+        elif self.path == "/benchmark/judge_protocol_note":
+            # Lazy-fetch documentation: explains the 128 vs 512 distinction so
+            # the UI can surface it without inlining the prose at page load.
+            self.send_json({
+                "max_length": LINGO_JUDGE_MAX_TOKENS,
+                "deberta_architectural_cap": 512,
+                "source_file": "https://github.com/wayveai/LingoQA/blob/main/benchmark/judge.py",
+                "source_line": (
+                    "self.tokenizer(texts, return_tensors='pt', padding=True, "
+                    "truncation=True, max_length=128)"
+                ),
+                "summary": (
+                    "The official wayveai/LingoQA `benchmark/judge.py` hardcodes "
+                    "`max_length=128` in its tokenizer call. The protocol's "
+                    "truncation ceiling is 128, NOT DeBERTa-v3-base's 512 "
+                    "architectural cap. 128 is materially more aggressive: a "
+                    "reasoning trace beyond ~80-90 tokens is silently clipped."
+                ),
+                "implication": (
+                    "Reasoning-style predictions whose <think>...</think> chain "
+                    "pushes total judge input past 128 tokens will be scored "
+                    "against an answer-less prefix. Use judge_mode=answer-only "
+                    "or judge_mode=both to strip <think> before scoring."
+                ),
+                "koi_finding": (
+                    "Cosmos Benchmarks has no in-house LingoQA scorer; "
+                    "vlmeval_lingoqa in vlmeval_mapping.json is a forward "
+                    "declaration. VLMEvalKit has no lingoqa.py handler. Fix is "
+                    "to strip <think> before passing prediction to the judge."
+                ),
+            })
         elif self.path == "/benchmark/model":
             try:
                 model = benchmark_detect_model()
