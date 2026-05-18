@@ -111,7 +111,7 @@ async function getModelInfo() {
         models: models.length > 0 ? models : [defaultModel],
         image: process.env.NIM_IMAGE || process.env.IMAGE,
         capabilities: {
-          text_to_video: true,
+          text_to_video: false,
           image_to_video: true,
           action_policy: false
         }
@@ -129,7 +129,7 @@ async function getModelInfo() {
         staged_checkpoint: await readStagedModel(),
         warning,
         capabilities: {
-          text_to_video: true,
+          text_to_video: false,
           image_to_video: true,
           action_policy: false
         }
@@ -155,7 +155,7 @@ async function getModelInfo() {
       environment: data?.environment,
       cosmos3_version: data?.environment?.cosmos3_version,
       capabilities: {
-        text_to_video: true,
+        text_to_video: false,
         image_to_video: true,
         action_policy: false
       }
@@ -175,7 +175,7 @@ async function getModelInfo() {
         baseUrl: advertisedBaseUrl,
         models: models.length > 0 ? models : [defaultModel],
         capabilities: {
-          text_to_video: true,
+          text_to_video: false,
           image_to_video: true,
           action_policy: false
         }
@@ -193,7 +193,7 @@ async function getModelInfo() {
         models: [defaultModel],
         warning,
         capabilities: {
-          text_to_video: true,
+          text_to_video: false,
           image_to_video: true,
           action_policy: false
         }

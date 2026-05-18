@@ -1,21 +1,6 @@
 "use client";
 
-import {
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  ExternalLink,
-  FileVideo,
-  HelpCircle,
-  Image as ImageIcon,
-  Info,
-  Menu,
-  Play,
-  RotateCcw,
-  Search,
-  Upload,
-  X
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
@@ -50,7 +35,7 @@ const HERO_TAGS = [
   "robotics",
   "simulation",
   "synthetic data generation",
-  "text-to-video",
+  "image-conditioned video",
   "image-to-world",
   "future state generation"
 ];
@@ -78,7 +63,7 @@ const NIM_ETA_OPS_PER_SECOND = 2_500_000;
 
 type GeneratorMode = "Image-to-Video" | "Action Policy";
 type SectionTab = "Experience" | "Model Card" | "System Card";
-type SchemaMode = "local_nim" | "build_openapi";
+type SchemaMode = "build_openapi";
 type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
 type MediaState = {
@@ -495,7 +480,7 @@ export default function Page() {
   const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Image-to-Video");
-  const [schemaMode, setSchemaMode] = useState<SchemaMode>("local_nim");
+  const [schemaMode, setSchemaMode] = useState<SchemaMode>("build_openapi");
   const [media, setMedia] = useState<MediaState | null>(() => contentItemToMedia(DEFAULT_CONTENT_ITEM));
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [resolution, setResolution] = useState(QUICK_VIDEO_PARAMS.resolution);
@@ -529,8 +514,8 @@ export default function Page() {
   const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
   const isContentLoading = loadingContentItemId !== null;
   const isNimBackend = useMemo(
-    () => (backendInfo ? String(backendInfo.backend || "").toLowerCase().includes("nim") : schemaMode === "local_nim"),
-    [backendInfo, schemaMode]
+    () => Boolean(backendInfo && String(backendInfo.backend || "").toLowerCase().includes("nim")),
+    [backendInfo]
   );
 
   useEffect(() => {
@@ -810,7 +795,7 @@ export default function Page() {
     setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
-    setSchemaMode("local_nim");
+    setSchemaMode("build_openapi");
     setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
     setResolution(QUICK_VIDEO_PARAMS.resolution);
@@ -1087,7 +1072,7 @@ export default function Page() {
                     {media.kind === "image" ? <img src={media.previewUrl} alt="" /> : <video src={media.previewUrl} muted playsInline />}
                     <span>
                       <strong>{media.name}</strong>
-                      <small>{media.sourceUrl ? "Remote example asset" : `Upload staged for ${isNimBackend ? "NIM" : "Ray Serve"}`}</small>
+                      <small>{media.sourceUrl ? "Remote example asset" : "Upload staged for request"}</small>
                     </span>
                   </span>
                 ) : (
@@ -1133,11 +1118,11 @@ export default function Page() {
               </button>
               <span
                 className={isRunning ? "etaBadge runningEta" : "etaBadge"}
-                title={`${isNimBackend ? "NIM staging" : "Ray Serve"} estimator. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
+                title={`Generator estimator. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
               >
                 {isRunning
-                  ? `${isNimBackend ? "NIM" : "Est."} ${generatedFrameCount}/${numFrames} frames · ${formatDuration(remainingSeconds)} left`
-                  : `${isNimBackend ? "NIM est." : "Est. wall"} ~${formatDuration(etaSeconds)}`}
+                  ? `Est. ${generatedFrameCount}/${numFrames} frames · ${formatDuration(remainingSeconds)} left`
+                  : `Est. wall ~${formatDuration(etaSeconds)}`}
               </span>
               <button className="runButton" onClick={run} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
@@ -1192,7 +1177,7 @@ export default function Page() {
                   <ExternalLink size={15} />
                 </a>
               ) : (
-                <WorldPreview isNimBackend={isNimBackend} />
+                <WorldPreview />
               )}
             </div>
           </section>
@@ -1230,7 +1215,6 @@ export default function Page() {
             <label>
               Contract
               <select value={schemaMode} onChange={(event) => setSchemaMode(event.target.value as SchemaMode)}>
-                <option value="local_nim">Local NIM /v1/infer</option>
                 <option value="build_openapi">NVIDIA Build OpenAPI preview</option>
               </select>
             </label>
@@ -1352,7 +1336,7 @@ function StaticTab({
 
       <StaticSection title="Governing Terms / Terms of Use">
         <p>
-          Use is subject to the license, NIM image terms, and deployment environment attached to the active backend.
+          Use is subject to the license, model terms, and deployment environment attached to the active backend.
           Confirm commercial rights, data handling, and redistribution requirements before production use.
         </p>
       </StaticSection>
@@ -1407,7 +1391,7 @@ function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | nul
       <dd>{displayValue(backendInfo?.base_url)}</dd>
       <dt>Infer URL</dt>
       <dd>{displayValue(backendInfo?.infer_url)}</dd>
-      <dt>NIM image</dt>
+      <dt>Backend image</dt>
       <dd>{displayValue(backendInfo?.image || backendInfo?.staged_checkpoint?.image)}</dd>
       <dt>Capabilities</dt>
       <dd>{displayValue(capabilities)}</dd>
@@ -1493,7 +1477,7 @@ function GenerationProgress({
     <article className="generationProgress" aria-live="polite">
       <div className="progressHeader">
         <p>
-          <strong>{isNimBackend ? "NIM latent rollout is running:" : "The diffusion model is working:"}</strong> denoising{" "}
+          <strong>Generation is running:</strong> denoising{" "}
           {totalFrames} latent frames in parallel, then VAE-decoding and encoding the output.
         </p>
         <span>
@@ -1549,14 +1533,13 @@ function GenerationProgress({
   );
 }
 
-function WorldPreview({ isNimBackend }: { isNimBackend: boolean }) {
+function WorldPreview() {
   return (
     <article className="worldPreview">
       <FileVideo size={28} />
       <h3>Output will appear here.</h3>
       <p>
-        Upload a conditioning image or choose an example, then generate a video with the active{" "}
-        {isNimBackend ? "NIM" : "Ray Serve"} backend.
+        Upload a conditioning image or choose an example, then generate a video with the active Generator backend.
       </p>
     </article>
   );
@@ -1727,7 +1710,7 @@ function RuntimeBar({
       </div>
       {nimImage ? (
         <div className="runtimeMetric wideRuntimeMetric">
-          <span className="runtimeLabel">NIM Image</span>
+          <span className="runtimeLabel">Backend Image</span>
           <span className="runtimeValue">{displayValue(nimImage)}</span>
         </div>
       ) : null}
