@@ -269,7 +269,7 @@ app.post("/api/predict", async (request, response) => {
   }
 
   const model = body.model || defaultModel;
-  const seed = Number(body.seed);
+  const fixedSeed = Number(process.env.PREDICT_SEED ?? 0);
   const mediaKind =
     body.mediaKind === "video" || mode === "Action Policy"
       ? "video"
@@ -278,16 +278,16 @@ app.post("/api/predict", async (request, response) => {
         : undefined;
 
   const params = {
-    guidance: finiteNumber(body.guidanceScale, QUICK_VIDEO_PARAMS.guidance),
-    num_steps: finiteNumber(body.steps, QUICK_VIDEO_PARAMS.num_steps),
-    num_frames: finiteNumber(body.numFrames, QUICK_VIDEO_PARAMS.frames_count),
-    resolution: String(body.resolution || QUICK_VIDEO_PARAMS.resolution),
+    guidance: QUICK_VIDEO_PARAMS.guidance,
+    num_steps: QUICK_VIDEO_PARAMS.num_steps,
+    num_frames: QUICK_VIDEO_PARAMS.frames_count,
+    resolution: QUICK_VIDEO_PARAMS.resolution,
     aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
-    fps: finiteNumber(body.fps, QUICK_VIDEO_PARAMS.frames_per_sec),
+    fps: QUICK_VIDEO_PARAMS.frames_per_sec,
     vision_path: body.visionPath || null,
     model_mode: mode === "Action Policy" ? "policy" : "image2video"
   };
-  if (Number.isFinite(seed) && seed >= 0) params.seed = seed;
+  if (Number.isFinite(fixedSeed) && fixedSeed >= 0) params.seed = fixedSeed;
   if (process.env.PREDICT_NEGATIVE_PROMPT) params.negative_prompt = process.env.PREDICT_NEGATIVE_PROMPT;
   if (mode === "Action Policy") {
     params.action_mode = body.actionMode || "policy";

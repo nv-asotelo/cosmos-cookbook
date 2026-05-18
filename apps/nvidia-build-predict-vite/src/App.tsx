@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronRight, Copy, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
@@ -10,6 +10,7 @@ const MODEL_CARD_TITLE = "Image-to-World";
 const PAGE_TAGLINE = "Generates future frames based upon an image and text input.";
 const MODEL_CARD_LEAD =
   "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
+const CURATED_PREVIEW_VIDEO = "/examples/race-car.mp4";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
@@ -39,15 +40,6 @@ const HERO_TAGS = [
   "image-to-world",
   "future state generation"
 ];
-const MODEL_CHOICES = [
-  "nvidia/cosmos3-gen",
-  "nvidia/cosmos-predict1-5b",
-  "nvidia/cosmos-predict1-7b-video2world",
-  "nvidia/cosmos-predict2-5-2b",
-  "nvidia/cosmos-predict2-5-14b",
-  "Cosmos3-Nano"
-];
-const COLLECTIONS = ["cosmos-predict1", "cosmos-predict25", "cosmos3", "nvidia-cosmos-2", "cosmos"];
 const PROGRESS_FRAME_COUNT = 6;
 
 const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
@@ -63,8 +55,6 @@ const NIM_ETA_OPS_PER_SECOND = 2_500_000;
 
 type GeneratorMode = "Image-to-Video" | "Action Policy";
 type SectionTab = "Experience" | "Model Card" | "System Card";
-type SchemaMode = "build_openapi";
-type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
 type MediaState = {
   name: string;
@@ -334,20 +324,6 @@ function shortSha(sha?: string | null) {
   return sha ? sha.slice(0, 12) : "unknown";
 }
 
-function nimFrameCount(frames: number) {
-  const requested = Math.max(25, Math.round(frames));
-  const remainder = (requested - 1) % 4;
-  return remainder === 0 ? requested : requested + (4 - remainder);
-}
-
-function nimRequestParams(resolution: string | number, frames: number, fps: number) {
-  return {
-    resolution: String(resolution),
-    num_output_frames: nimFrameCount(frames),
-    fps
-  };
-}
-
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -474,13 +450,10 @@ export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
   const contentLoadTokenRef = useRef(0);
   const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
-  const [collection, setCollection] = useState("cosmos3");
   const [model, setModel] = useState(DEFAULT_MODEL);
-  const [models, setModels] = useState<string[]>(MODEL_CHOICES);
   const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Image-to-Video");
-  const [schemaMode, setSchemaMode] = useState<SchemaMode>("build_openapi");
   const [media, setMedia] = useState<MediaState | null>(() => contentItemToMedia(DEFAULT_CONTENT_ITEM));
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [resolution, setResolution] = useState(QUICK_VIDEO_PARAMS.resolution);
@@ -496,8 +469,6 @@ export default function Page() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressFrames, setProgressFrames] = useState<string[]>([]);
   const [result, setResult] = useState<ApiResult | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [outputTab, setOutputTab] = useState<OutputTab>("preview");
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const [examplesOpen, setExamplesOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -530,7 +501,6 @@ export default function Page() {
           (Array.isArray(d.models) ? (d.models[0] as string | undefined) : undefined);
         if (name) {
           setModel(name);
-          setModels((prev) => (prev.includes(name) ? prev : [name, ...prev]));
         }
         setBackendInfo(d);
       })
@@ -538,18 +508,6 @@ export default function Page() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  useEffect(() => {
-    fetch("/api/models")
-      .then((response) => response.json())
-      .then((data) => {
-        if (Array.isArray(data.models) && data.models.length > 0) {
-          const merged = Array.from(new Set([...data.models, ...MODEL_CHOICES]));
-          setModels(merged);
-        }
-      })
-      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -597,93 +555,6 @@ export default function Page() {
     return () => window.clearInterval(interval);
   }, [isRunning, submittedAt, etaSeconds]);
 
-  const requestPreview = useMemo(() => {
-    const visionPath = absoluteMediaUrl(media?.sourceUrl) ?? (media?.dataUrl ? "<written to /tmp/uploads/...>" : null);
-    const params: Record<string, unknown> = {
-      num_frames: numFrames,
-      resolution,
-      aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
-      fps,
-      num_steps: steps,
-      guidance: guidanceScale,
-      seed
-    };
-    if (generatorMode === "Action Policy") {
-      params.action_mode = activeExample.params?.actionMode ?? "policy";
-      params.domain_name = activeExample.params?.domainName;
-      params.image_size = activeExample.params?.imageSize ?? Number(resolution);
-      params.action_chunk_size = activeExample.params?.actionChunkSize;
-      params.raw_action_dim = activeExample.params?.rawActionDim;
-      params.shift = activeExample.params?.shift;
-    }
-
-    if (schemaMode === "build_openapi") {
-      return {
-        endpoint: "POST https://ai.api.nvidia.com/v1/infer",
-        collection,
-        model,
-        mode: generatorMode,
-        payload: {
-          prompt,
-          image_url: generatorMode === "Image-to-Video" ? visionPath : undefined,
-          seed,
-          ...params
-        },
-        response: { asset_url: "https://..." }
-      };
-    }
-
-    if (isNimBackend) {
-      const payload: Record<string, unknown> = {
-        prompt,
-        guidance_scale: guidanceScale,
-        steps,
-        ...nimRequestParams(resolution, numFrames, fps),
-        seed
-      };
-      if (generatorMode === "Image-to-Video") payload.image = visionPath ? "<base64 image omitted>" : undefined;
-      if (generatorMode === "Action Policy") payload.video = visionPath ? "<base64 video omitted>" : undefined;
-      return {
-        endpoint: `POST ${backendInfo?.infer_url || "/v1/infer"}`,
-        collection,
-        model,
-        mode: generatorMode,
-        payload
-      };
-    }
-
-    return {
-      endpoint: "POST /generate",
-      collection,
-      model,
-      mode: generatorMode,
-      payload: {
-        name: "ui-<auto>",
-        model,
-        prompt,
-        vision_path: visionPath,
-        ...params
-      }
-    };
-  }, [
-    activeExample.params,
-    backendInfo?.infer_url,
-    collection,
-    fps,
-    generatorMode,
-    guidanceScale,
-    isNimBackend,
-    media?.dataUrl,
-    media?.sourceUrl,
-    model,
-    numFrames,
-    prompt,
-    resolution,
-    schemaMode,
-    seed,
-    steps
-  ]);
-
   async function loadFile(file: File | null) {
     if (!file) return;
     contentLoadTokenRef.current += 1;
@@ -694,7 +565,6 @@ export default function Page() {
         diagnostic: { layer: "frontend", issue: "The selected file was not an image." }
       });
       setStatus("Wrong input type");
-      setOutputTab("preview");
       setMobilePanel("output");
       return;
     }
@@ -737,7 +607,6 @@ export default function Page() {
     setResult(null);
     setProgressPercent(0);
     setStatus(`${example.eyebrow} example loaded`);
-    setOutputTab("preview");
     setMobilePanel("input");
     setExamplesOpen(false);
     if (inputRef.current) inputRef.current.value = "";
@@ -751,7 +620,6 @@ export default function Page() {
     setResult(null);
     setProgressPercent(0);
     setProgressFrames([]);
-    setOutputTab("preview");
     setMobilePanel("input");
     if (inputRef.current) inputRef.current.value = "";
 
@@ -780,7 +648,6 @@ export default function Page() {
           suggestions: ["Choose another content tile or refresh the page before generating."]
         }
       });
-      setOutputTab("preview");
       setMobilePanel("output");
     } finally {
       if (contentLoadTokenRef.current === loadToken) {
@@ -792,10 +659,8 @@ export default function Page() {
   function reset() {
     contentLoadTokenRef.current += 1;
     setLoadingContentItemId(null);
-    setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
-    setSchemaMode("build_openapi");
     setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
     setResolution(QUICK_VIDEO_PARAMS.resolution);
@@ -810,14 +675,7 @@ export default function Page() {
     setProgressPercent(0);
     setProgressFrames([]);
     setResult(null);
-    setOutputTab("preview");
     if (inputRef.current) inputRef.current.value = "";
-  }
-
-  async function copyJson() {
-    await navigator.clipboard.writeText(JSON.stringify(outputTab === "json" ? { request: requestPreview, response: result } : requestPreview, null, 2));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
   }
 
   async function handleDrop(event: DragEvent<HTMLButtonElement>) {
@@ -842,7 +700,6 @@ export default function Page() {
         }
       });
       setStatus("Missing input asset");
-      setOutputTab("preview");
       setMobilePanel("output");
       return;
     }
@@ -853,7 +710,6 @@ export default function Page() {
     setResult(null);
     setProgressPercent(0);
     setStatus("Predicting frames");
-    setOutputTab("preview");
     setMobilePanel("output");
     try {
       const response = await fetch("/api/predict", {
@@ -1102,15 +958,6 @@ export default function Page() {
               rows={4}
             />
 
-            <div className="parameterGrid predictParams">
-              <SelectField label="Resolution" value={resolution} options={["256", "480", "720", "1080"]} onChange={setResolution} />
-              <NumberField label="Guidance" value={guidanceScale} min={1} max={12} step={0.5} onChange={setGuidanceScale} />
-              <NumberField label="Steps" value={steps} min={1} max={80} step={1} onChange={setSteps} />
-              <NumberField label="Frames" value={numFrames} min={25} max={241} step={4} onChange={setNumFrames} />
-              <NumberField label="FPS" value={fps} min={1} max={30} step={1} onChange={setFps} />
-              <NumberField label="Seed" value={seed} min={-1} max={2147483647} step={1} onChange={setSeed} />
-            </div>
-
             <div className="runBar">
               <button className="resetButton" onClick={reset}>
                 <RotateCcw size={16} />
@@ -1135,27 +982,15 @@ export default function Page() {
             <div className="panelHeader">
               <div className="outputTabs">
                 <h2>Output</h2>
-                <button className={outputTab === "preview" ? "previewPill activeOutputTab" : "previewPill"} onClick={() => setOutputTab("preview")}>
-                  Preview
-                </button>
-                <button className={outputTab === "json" ? "jsonTab activeOutputTab" : "jsonTab"} onClick={() => setOutputTab("json")}>
-                  JSON
-                </button>
               </div>
               <div className="outputActions">
                 <span className={`statusPill ${isRunning ? "working" : result?.error ? "error" : status === "Complete" ? "success" : ""}`}>
                   {status}
                 </span>
-                <button className="copyButton" onClick={copyJson}>
-                  <Copy size={14} />
-                  {copied ? "Copied" : "Copy"}
-                </button>
               </div>
             </div>
             <div className="outputBody">
-              {outputTab === "json" ? (
-                <pre className="jsonOutput">{JSON.stringify({ request: requestPreview, response: result }, null, 2)}</pre>
-              ) : isRunning ? (
+              {isRunning ? (
                 <GenerationProgress
                   media={media}
                   frames={progressFrames}
@@ -1177,51 +1012,12 @@ export default function Page() {
                   <ExternalLink size={15} />
                 </a>
               ) : (
-                <WorldPreview />
+                <CuratedOutputPreview />
               )}
             </div>
           </section>
         </div>
-
-        <aside className="apiPanel">
-          <div className="apiTopline">API request</div>
-          <div className="apiButtons">
-            <button onClick={copyJson}>
-              <Copy size={14} />
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
-          <div className="apiControls">
-            <label>
-              Collection
-              <select value={collection} onChange={(event) => setCollection(event.target.value)}>
-                {COLLECTIONS.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Model
-              <select value={model} onChange={(event) => setModel(event.target.value)}>
-                {models.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Contract
-              <select value={schemaMode} onChange={(event) => setSchemaMode(event.target.value as SchemaMode)}>
-                <option value="build_openapi">NVIDIA Build OpenAPI preview</option>
-              </select>
-            </label>
-          </div>
-          <pre className="codeBlock">{JSON.stringify(requestPreview, null, 2)}</pre>
-          {backendInfo?.warning ? <p className="backendWarning">{backendInfo.warning}</p> : null}
-        </aside>
+        {backendInfo?.warning ? <p className="backendWarning inlineWarning">{backendInfo.warning}</p> : null}
           </>
         ) : (
           <StaticTab backendInfo={backendInfo} model={model} tab={activeTab} />
@@ -1268,7 +1064,7 @@ function StaticTab({
         <StaticSection title="Description">
           <p>
             The Vite Generator stages Image-to-World requests for Cosmos3 generation while preserving the NVIDIA Build
-            dark control styling, examples modal, preview/JSON output tabs, and quick staging controls.
+            dark control styling, examples modal, and curated preview-first output behavior.
           </p>
         </StaticSection>
 
@@ -1286,7 +1082,7 @@ function StaticTab({
             <dt>Type</dt>
             <dd>MP4 video when the backend returns inline media, or an asset URL when hosted output is returned.</dd>
             <dt>Review</dt>
-            <dd>Use the Preview and JSON tabs together before promoting generated content into datasets.</dd>
+            <dd>Review generated content before promoting it into datasets.</dd>
           </dl>
         </StaticSection>
 
@@ -1345,7 +1141,7 @@ function StaticTab({
         <ul>
           <li>Generated frames may violate physics or object permanence; validate outputs against source intent.</li>
           <li>Robotics and AV workflows can carry safety consequences; require domain expert review.</li>
-          <li>Record prompts, parameters, model details, and backend warnings for repeatable evaluations.</li>
+          <li>Record prompts, model details, and backend warnings for repeatable evaluations.</li>
         </ul>
       </StaticSection>
 
@@ -1533,14 +1329,15 @@ function GenerationProgress({
   );
 }
 
-function WorldPreview() {
+function CuratedOutputPreview() {
   return (
-    <article className="worldPreview">
-      <FileVideo size={28} />
-      <h3>Output will appear here.</h3>
-      <p>
-        Upload a conditioning image or choose an example, then generate a video with the active Generator backend.
-      </p>
+    <article className="curatedOutputPreview">
+      <video src={CURATED_PREVIEW_VIDEO} autoPlay muted loop playsInline controls />
+      <div>
+        <p className="curatedEyebrow">Curated preview</p>
+        <h3>Example output is preloaded.</h3>
+        <p>Change the image or prompt, then generate a new video with the active backend.</p>
+      </div>
     </article>
   );
 }
@@ -1581,61 +1378,6 @@ function PromptBox({
       />
       <small>{hint}</small>
     </div>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  options,
-  onChange
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="numberField">
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  min,
-  max,
-  step,
-  onChange
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="numberField">
-      <span>{label}</span>
-      <input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </label>
   );
 }
 
