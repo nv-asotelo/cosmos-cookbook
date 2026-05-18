@@ -251,7 +251,7 @@ function smokeNumber(request, body, camelKey, snakeKey, fallback) {
 app.post("/api/predict", async (request, response) => {
   const body = request.body || {};
   const mode = body.mode || body.worldMode || "Image-to-Video";
-  const isSmokeTest = request.get("x-predict-smoke-test") === "1";
+  const isSmokeTest = request.get("x-predict-smoke-test") === "1" || body.smokeTest === true || body.smokeTest === "1";
   if (mode === "Text-to-Video") {
     sendError(response, 400, "Text-to-Video is not staged for this Generator page yet.", {
       layer: "parameters",
