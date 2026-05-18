@@ -10,7 +10,7 @@ const MODEL_CARD_TITLE = "Image-to-World";
 const PAGE_TAGLINE = "Generates future frames based upon an image and text input.";
 const MODEL_CARD_LEAD =
   "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
-const CURATED_PREVIEW_VIDEO = "/examples/race-car.mp4";
+const CURATED_PREVIEW_VIDEO = "/examples/default-robot-apple-1s.mp4";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
@@ -1334,9 +1334,9 @@ function CuratedOutputPreview() {
     <article className="curatedOutputPreview">
       <video src={CURATED_PREVIEW_VIDEO} autoPlay muted loop playsInline controls />
       <div>
-        <p className="curatedEyebrow">Curated preview</p>
-        <h3>Example output is preloaded.</h3>
-        <p>Change the image or prompt, then generate a new video with the active backend.</p>
+        <p className="curatedEyebrow">Generated preview</p>
+        <h3>Default output is preloaded.</h3>
+        <p>Generated from the default Robotics input image. Run the active backend again to create a fresh video.</p>
       </div>
     </article>
   );
