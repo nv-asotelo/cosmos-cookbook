@@ -242,9 +242,16 @@ function finiteNumber(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function smokeNumber(request, body, camelKey, snakeKey, fallback) {
+  const headerKey = `x-predict-smoke-${snakeKey.replace(/_/g, "-")}`;
+  const value = request.get(headerKey) ?? body[camelKey] ?? body[snakeKey];
+  return finiteNumber(value, fallback);
+}
+
 app.post("/api/predict", async (request, response) => {
   const body = request.body || {};
   const mode = body.mode || body.worldMode || "Image-to-Video";
+  const isSmokeTest = request.get("x-predict-smoke-test") === "1";
   if (mode === "Text-to-Video") {
     sendError(response, 400, "Text-to-Video is not staged for this Generator page yet.", {
       layer: "parameters",
@@ -278,12 +285,22 @@ app.post("/api/predict", async (request, response) => {
         : undefined;
 
   const params = {
-    guidance: QUICK_VIDEO_PARAMS.guidance,
-    num_steps: QUICK_VIDEO_PARAMS.num_steps,
-    num_frames: QUICK_VIDEO_PARAMS.frames_count,
-    resolution: QUICK_VIDEO_PARAMS.resolution,
+    guidance: isSmokeTest
+      ? smokeNumber(request, body, "guidanceScale", "guidance", QUICK_VIDEO_PARAMS.guidance)
+      : QUICK_VIDEO_PARAMS.guidance,
+    num_steps: isSmokeTest
+      ? smokeNumber(request, body, "steps", "num_steps", QUICK_VIDEO_PARAMS.num_steps)
+      : QUICK_VIDEO_PARAMS.num_steps,
+    num_frames: isSmokeTest
+      ? smokeNumber(request, body, "numFrames", "num_frames", QUICK_VIDEO_PARAMS.frames_count)
+      : QUICK_VIDEO_PARAMS.frames_count,
+    resolution: isSmokeTest
+      ? String(body.resolution || request.get("x-predict-smoke-resolution") || QUICK_VIDEO_PARAMS.resolution)
+      : QUICK_VIDEO_PARAMS.resolution,
     aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
-    fps: QUICK_VIDEO_PARAMS.frames_per_sec,
+    fps: isSmokeTest
+      ? smokeNumber(request, body, "fps", "fps", QUICK_VIDEO_PARAMS.frames_per_sec)
+      : QUICK_VIDEO_PARAMS.frames_per_sec,
     vision_path: body.visionPath || null,
     model_mode: mode === "Action Policy" ? "policy" : "image2video"
   };
