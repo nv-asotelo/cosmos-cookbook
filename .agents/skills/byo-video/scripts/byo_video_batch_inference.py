@@ -6876,11 +6876,11 @@ function benchOpenSample(idx){
   function refBlock(label, refText, refIdx, judgeTextRaw, nTokens, truncated){
     if(!refText && refText !== '') return '';
     const isWin = refIdx === winIdx;
-    const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\n' : '';
+    const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\\n' : '';
     // Clip the literal judge-input string for display at roughly 4*maxTok chars
     // so we render about what the tokenizer actually saw.
     const safeJudge = String(judgeTextRaw || '');
-    const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\n[...truncated for display]' : safeJudge;
+    const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\\n[...truncated for display]' : safeJudge;
     const meta = `${label}${isWin?' <strong style="color:#76B900;">← winning ref</strong>':''} · ~${nTokens||0} tokens${truncated?' · TRUNCATED':''}`;
     return `<div class="ref-block ${isWin?'winning':''}">
       <div class="ref-meta">${meta}</div>
@@ -6905,9 +6905,9 @@ function benchOpenSample(idx){
     const aoWinIdx = (r.judge_winning_reference_index_answer_only !== undefined && r.judge_winning_reference_index_answer_only !== null) ? r.judge_winning_reference_index_answer_only : -1;
     function aoRefBlock(label, refText, refIdx, judgeTextRaw, nTokens, truncated){
       const isWin = refIdx === aoWinIdx;
-      const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\n' : '';
+      const truncMarker = truncated ? '<span class="trunc-marker">↓ truncated here at '+maxTok+' tokens ↓</span>\\n' : '';
       const safeJudge = String(judgeTextRaw || '');
-      const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\n[...truncated for display]' : safeJudge;
+      const clip = truncated ? safeJudge.slice(0, maxTok*4) + '\\n[...truncated for display]' : safeJudge;
       const meta = `${label}${isWin?' <strong style="color:#76B900;">← winning ref</strong>':''} · ~${nTokens||0} tokens${truncated?' · TRUNCATED':''}`;
       return `<div class="ref-block ${isWin?'winning':''}">
         <div class="ref-meta">${meta}</div>
@@ -6940,7 +6940,7 @@ function benchOpenSample(idx){
   // ---- Reasoning + final answer block ----
   const reasoningBlock = reasoningText
     ? `<h4 style="margin-top:14px;">Reasoning trace + answer <span style="font-weight:400; color:#475569;">(~${approxTokens} tokens${tokFlag})</span></h4>
-       <pre style="max-height:280px;">${esc('<think>\n'+reasoningText+'\n</think>\n\n'+finalAnswer)}</pre>`
+       <pre style="max-height:280px;">${esc('<think>\\n'+reasoningText+'\\n</think>\\n\\n'+finalAnswer)}</pre>`
     : `<h4 style="margin-top:14px;">Final answer <span style="font-weight:400; color:#475569;">(~${approxTokens} tokens${tokFlag})</span></h4>
        <pre>${esc(finalAnswer)}</pre>`;
   // ---- Provenance footer ----
