@@ -873,7 +873,13 @@ select:focus,
 
 .runButton:disabled {
   cursor: not-allowed;
-  opacity: 0.72;
+  background: #2c2c2c;
+  color: #777777;
+  opacity: 1;
+}
+
+.runButton:disabled:hover {
+  background: #2c2c2c;
 }
 
 .outputTabs {
@@ -1535,6 +1541,7 @@ select:focus,
 }
 
 .contentCard {
+  position: relative;
   display: grid;
   grid-template-rows: 132px auto auto;
   min-width: 0;
@@ -1542,6 +1549,45 @@ select:focus,
   border: 1px solid #303030;
   border-radius: 8px;
   background: #080808;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.contentCard:hover:not(:disabled),
+.contentCard:focus-visible {
+  border-color: rgba(118, 185, 0, 0.6);
+  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.22);
+}
+
+.contentCard:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+
+.contentCard:disabled {
+  cursor: wait;
+}
+
+.contentCard:disabled:not(.loadingContentCard) {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.selectedContentCard {
+  border-color: var(--green);
+  box-shadow: inset 0 0 0 1px rgba(118, 185, 0, 0.4);
+}
+
+.loadingContentCard {
+  border-color: #b6ff45;
+  box-shadow:
+    inset 0 0 0 1px rgba(118, 185, 0, 0.42),
+    0 0 18px rgba(118, 185, 0, 0.12);
 }
 
 .contentThumb {
@@ -1563,7 +1609,7 @@ select:focus,
   content: "";
 }
 
-.contentThumb span {
+.contentDomainPill {
   position: relative;
   z-index: 1;
   margin: 10px;
@@ -1575,6 +1621,49 @@ select:focus,
   font-weight: 900;
   line-height: 22px;
   padding: 0 8px;
+}
+
+.contentLoadingOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  background:
+    linear-gradient(135deg, rgba(118, 185, 0, 0.2), rgba(0, 0, 0, 0.64)),
+    rgba(0, 0, 0, 0.74);
+  color: var(--text);
+  padding: 14px;
+  text-align: center;
+}
+
+.contentLoadingOverlay strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.contentLoadingOverlay small {
+  color: #c6df9b;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.contentSpinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(118, 185, 0, 0.22);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: contentSpin 0.8s linear infinite;
+}
+
+@keyframes contentSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .contentCardBody {
@@ -1616,8 +1705,7 @@ select:focus,
   padding: 10px 12px;
 }
 
-.contentActions button,
-.contentActions a,
+.contentActions span,
 .staticLink {
   display: inline-flex;
   align-items: center;
@@ -1630,8 +1718,7 @@ select:focus,
   text-decoration: none;
 }
 
-.contentActions button:hover,
-.contentActions a:hover,
+.contentCard:hover:not(:disabled) .contentActions span,
 .staticLink:hover {
   color: var(--green-hover);
 }

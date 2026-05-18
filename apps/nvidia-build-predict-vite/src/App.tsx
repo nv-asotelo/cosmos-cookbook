@@ -522,8 +522,22 @@ function findContentItem(groups: ContentSelectGroup[], id: string) {
   return groups.flatMap((group) => group.items).find((item) => item.id === id) ?? groups[0].items[0];
 }
 
+function waitForContentLoad(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+function preloadContentImage(url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error(`Failed to load ${url}`));
+    image.src = url;
+  });
+}
+
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const contentLoadTokenRef = useRef(0);
   const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
   const [collection, setCollection] = useState("cosmos3");
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -554,6 +568,7 @@ export default function Page() {
   const [dragActive, setDragActive] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [selectedContentItemId, setSelectedContentItemId] = useState(DEFAULT_CONTENT_ITEM.id);
+  const [loadingContentItemId, setLoadingContentItemId] = useState<string | null>(null);
 
   const activeExample = useMemo(
     () => EXAMPLES.find((example) => example.id === selectedExampleId) ?? EXAMPLES[0],
@@ -563,6 +578,7 @@ export default function Page() {
   const mediaRequired = generatorMode !== "Text-to-Video";
   const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
   const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
+  const isContentLoading = loadingContentItemId !== null;
   const isNimBackend = useMemo(
     () => (backendInfo ? String(backendInfo.backend || "").toLowerCase().includes("nim") : schemaMode === "local_nim"),
     [backendInfo, schemaMode]
@@ -736,6 +752,8 @@ export default function Page() {
 
   async function loadFile(file: File | null) {
     if (!file) return;
+    contentLoadTokenRef.current += 1;
+    setLoadingContentItemId(null);
     if (generatorMode === "Image-to-Video" && !file.type.startsWith("image/")) {
       setResult({
         error: "Image-to-Video expects a JPG, PNG, or WebP image.",
@@ -763,6 +781,8 @@ export default function Page() {
   }
 
   function setMode(mode: GeneratorMode) {
+    contentLoadTokenRef.current += 1;
+    setLoadingContentItemId(null);
     setGeneratorMode(mode);
     setMedia(mode === "Image-to-Video" ? contentItemToMedia(findContentItem(CONTENT_SELECT_GROUPS, selectedContentItemId)) : null);
     setProgressFrames([]);
@@ -800,27 +820,55 @@ export default function Page() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  function applyContentSelect(item: ContentSelectItem) {
-    setSelectedContentItemId(item.id);
-    setGeneratorMode("Image-to-Video");
-    setPrompt(item.prompt);
-    setResolution(QUICK_VIDEO_PARAMS.resolution);
-    setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
-    setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
-    setSteps(QUICK_VIDEO_PARAMS.num_steps);
-    setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
-    setSeed(0);
-    setMedia(contentItemToMedia(item));
+  async function applyContentSelect(item: ContentSelectItem) {
+    const loadToken = contentLoadTokenRef.current + 1;
+    contentLoadTokenRef.current = loadToken;
+    setLoadingContentItemId(item.id);
+    setStatus(`Loading ${item.title}`);
     setResult(null);
     setProgressPercent(0);
     setProgressFrames([]);
-    setStatus(`${item.title} loaded`);
     setOutputTab("preview");
     setMobilePanel("input");
     if (inputRef.current) inputRef.current.value = "";
+
+    try {
+      await Promise.all([preloadContentImage(item.mediaUrl), waitForContentLoad(450)]);
+      if (contentLoadTokenRef.current !== loadToken) return;
+      setSelectedContentItemId(item.id);
+      setGeneratorMode("Image-to-Video");
+      setPrompt(item.prompt);
+      setResolution(QUICK_VIDEO_PARAMS.resolution);
+      setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
+      setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
+      setSteps(QUICK_VIDEO_PARAMS.num_steps);
+      setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
+      setSeed(0);
+      setMedia(contentItemToMedia(item));
+      setStatus(`${item.title} loaded`);
+    } catch (error) {
+      if (contentLoadTokenRef.current !== loadToken) return;
+      setStatus("Example failed to load");
+      setResult({
+        error: "Example image could not be loaded.",
+        diagnostic: {
+          layer: "frontend",
+          issue: error instanceof Error ? error.message : String(error),
+          suggestions: ["Choose another content tile or refresh the page before generating."]
+        }
+      });
+      setOutputTab("preview");
+      setMobilePanel("output");
+    } finally {
+      if (contentLoadTokenRef.current === loadToken) {
+        setLoadingContentItemId(null);
+      }
+    }
   }
 
   function reset() {
+    contentLoadTokenRef.current += 1;
+    setLoadingContentItemId(null);
     setCollection("cosmos3");
     setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
@@ -856,6 +904,11 @@ export default function Page() {
   }
 
   async function run() {
+    if (isContentLoading) {
+      setStatus("Still loading example");
+      return;
+    }
+
     if (mediaRequired && !media) {
       setResult({
         error: "Add a conditioning image or choose an example before generating.",
@@ -1175,9 +1228,9 @@ export default function Page() {
                   ? `${isNimBackend ? "NIM" : "Est."} ${generatedFrameCount}/${numFrames} frames · ${formatDuration(remainingSeconds)} left`
                   : `${isNimBackend ? "NIM est." : "Est. wall"} ~${formatDuration(etaSeconds)}`}
               </span>
-              <button className="runButton" onClick={run} disabled={isRunning || (mediaRequired && !media)}>
+              <button className="runButton" onClick={run} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
-                {isRunning ? "Generating" : "Generate"}
+                {isContentLoading ? "Loading" : isRunning ? "Generating" : "Generate"}
               </button>
             </div>
           </section>
@@ -1234,7 +1287,13 @@ export default function Page() {
           </section>
         </div>
 
-        <ContentSelects groups={CONTENT_SELECT_GROUPS} onApply={applyContentSelect} />
+        <ContentSelects
+          disabled={isRunning}
+          groups={CONTENT_SELECT_GROUPS}
+          loadingId={loadingContentItemId}
+          onApply={applyContentSelect}
+          selectedId={selectedContentItemId}
+        />
 
         <aside className="apiPanel">
           <div className="apiTopline">API request</div>
@@ -1298,11 +1357,17 @@ export default function Page() {
 }
 
 function ContentSelects({
+  disabled,
   groups,
-  onApply
+  loadingId,
+  onApply,
+  selectedId
 }: {
+  disabled: boolean;
   groups: ContentSelectGroup[];
+  loadingId: string | null;
   onApply: (item: ContentSelectItem) => void;
+  selectedId: string;
 }) {
   return (
     <section className="contentSelects" aria-label="Content selects">
@@ -1321,27 +1386,46 @@ function ContentSelects({
               <p>{group.summary}</p>
             </div>
             <div className="contentCardGrid">
-              {group.items.map((item) => (
-                <div className="contentCard" key={`${group.title}-${item.id}`}>
-                  <div
-                    aria-hidden="true"
-                    className="contentThumb"
-                    style={{ backgroundImage: `url("${item.mediaUrl}")` }}
+              {group.items.map((item) => {
+                const isLoading = loadingId === item.id;
+                const isSelected = selectedId === item.id && !isLoading;
+                const isDisabled = disabled || loadingId !== null;
+
+                return (
+                  <button
+                    aria-busy={isLoading}
+                    aria-pressed={isSelected}
+                    className={`contentCard ${isSelected ? "selectedContentCard" : ""} ${isLoading ? "loadingContentCard" : ""}`}
+                    disabled={isDisabled}
+                    key={`${group.title}-${item.id}`}
+                    onClick={() => onApply(item)}
+                    type="button"
                   >
-                    <span>{item.domain}</span>
-                  </div>
-                  <div className="contentCardBody">
-                    <span className="contentMediaLabel">{item.domain}</span>
-                    <strong>{item.title}</strong>
-                    <p>{item.description}</p>
-                  </div>
-                  <div className="contentActions">
-                    <button type="button" onClick={() => onApply(item)}>
-                      Use image
-                    </button>
-                  </div>
-                </div>
-              ))}
+                    <div
+                      aria-hidden="true"
+                      className="contentThumb"
+                      style={{ backgroundImage: `url("${item.mediaUrl}")` }}
+                    >
+                      <span className="contentDomainPill">{item.domain}</span>
+                      {isLoading ? (
+                        <div className="contentLoadingOverlay">
+                          <span className="contentSpinner" />
+                          <strong>Loading image and prompt</strong>
+                          <small>Generate will enable when ready.</small>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="contentCardBody">
+                      <span className="contentMediaLabel">{item.domain}</span>
+                      <strong>{item.title}</strong>
+                      <p>{item.description}</p>
+                    </div>
+                    <div className="contentActions">
+                      <span>{isLoading ? "Loading..." : isSelected ? "Selected" : "Select image"}</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </article>
         ))}
