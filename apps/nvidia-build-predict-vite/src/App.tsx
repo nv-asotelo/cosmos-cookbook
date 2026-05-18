@@ -564,8 +564,8 @@ export default function Page() {
   const accepts = generatorMode === "Image-to-Video" ? ".jpg,.jpeg,.png,.webp" : ".mp4,.mov,.jpg,.jpeg,.png,.webp";
   const assetUrl = useMemo(() => resultAssetUrl(result), [result]);
   const isNimBackend = useMemo(
-    () => String(backendInfo?.backend || "").toLowerCase().includes("nim"),
-    [backendInfo?.backend]
+    () => (backendInfo ? String(backendInfo.backend || "").toLowerCase().includes("nim") : schemaMode === "local_nim"),
+    [backendInfo, schemaMode]
   );
 
   useEffect(() => {
@@ -628,6 +628,11 @@ export default function Page() {
     () => estimateWallSeconds(resolution, numFrames, steps, isNimBackend),
     [isNimBackend, numFrames, resolution, steps]
   );
+  const generatedFrameCount = useMemo(
+    () => Math.max(1, Math.min(numFrames, Math.round((progressPercent / 100) * numFrames))),
+    [numFrames, progressPercent]
+  );
+  const remainingSeconds = Math.max(0, etaSeconds - elapsedSeconds);
 
   useEffect(() => {
     if (!isRunning || submittedAt === null) return () => undefined;
@@ -1163,10 +1168,12 @@ export default function Page() {
                 Reset
               </button>
               <span
-                className="etaBadge"
+                className={isRunning ? "etaBadge runningEta" : "etaBadge"}
                 title={`${isNimBackend ? "NIM staging" : "Ray Serve"} estimator. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
               >
-                {isNimBackend ? "NIM est." : "Est. wall"} ~{formatDuration(etaSeconds)}
+                {isRunning
+                  ? `${isNimBackend ? "NIM" : "Est."} ${generatedFrameCount}/${numFrames} frames · ${formatDuration(remainingSeconds)} left`
+                  : `${isNimBackend ? "NIM est." : "Est. wall"} ~${formatDuration(etaSeconds)}`}
               </span>
               <button className="runButton" onClick={run} disabled={isRunning || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
@@ -1206,6 +1213,7 @@ export default function Page() {
                   progress={progressPercent}
                   elapsedSeconds={elapsedSeconds}
                   etaSeconds={etaSeconds}
+                  isNimBackend={isNimBackend}
                   totalFrames={numFrames}
                 />
               ) : result?.error ? (
@@ -1558,6 +1566,7 @@ function GenerationProgress({
   progress,
   elapsedSeconds,
   etaSeconds,
+  isNimBackend,
   totalFrames
 }: {
   media: MediaState | null;
@@ -1565,6 +1574,7 @@ function GenerationProgress({
   progress: number;
   elapsedSeconds: number;
   etaSeconds: number;
+  isNimBackend: boolean;
   totalFrames: number;
 }) {
   const generatedFrames = Math.max(1, Math.min(totalFrames, Math.round((progress / 100) * totalFrames)));
@@ -1577,8 +1587,8 @@ function GenerationProgress({
     <article className="generationProgress" aria-live="polite">
       <div className="progressHeader">
         <p>
-          <strong>The diffusion model is working:</strong> denoising {totalFrames} latent frames in parallel, then
-          VAE-decoding and encoding the output.
+          <strong>{isNimBackend ? "NIM latent rollout is running:" : "The diffusion model is working:"}</strong> denoising{" "}
+          {totalFrames} latent frames in parallel, then VAE-decoding and encoding the output.
         </p>
         <span>
           {generatedFrames} / {totalFrames} frames - elapsed {formatDuration(elapsedSeconds)}
@@ -1600,15 +1610,22 @@ function GenerationProgress({
           const threshold = (index / PROGRESS_FRAME_COUNT) * 86;
           const readiness = Math.max(0, Math.min(1, (progress - threshold) / 34));
           const frameNumber = Math.min(totalFrames, Math.max(1, Math.round(((index + 1) / PROGRESS_FRAME_COUNT) * totalFrames)));
+          const stage = readiness < 0.25 ? "Latent" : readiness < 0.78 ? "Denoising" : "Decoding";
           const style = {
             "--frame-blur": `${Math.max(0, 10 - readiness * 10)}px`,
-            "--frame-opacity": String(0.38 + readiness * 0.62)
+            "--frame-opacity": String(0.38 + readiness * 0.62),
+            "--diffusion-opacity": String(Math.max(0.18, 0.74 - readiness * 0.5)),
+            "--diffusion-reveal": `${Math.max(8, readiness * 100)}%`
           } as CSSProperties;
 
           return (
-            <figure className="generatedFrame" style={style} key={`${src || "fallback"}-${index}`}>
+            <figure className={src ? "generatedFrame diffusionFrame" : "generatedFrame latentFrame"} style={style} key={`${src || "fallback"}-${index}`}>
               {src ? (
-                <img src={src} alt="" />
+                <>
+                  <img src={src} alt="" />
+                  <span className="diffusionField" aria-hidden="true" />
+                  <span className="diffusionState">{stage}</span>
+                </>
               ) : (
                 <div className="generatedFrameFallback">
                   <span>Latent</span>

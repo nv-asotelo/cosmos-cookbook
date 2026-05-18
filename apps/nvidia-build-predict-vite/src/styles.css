@@ -838,6 +838,18 @@ select:focus,
   white-space: nowrap;
 }
 
+.etaBadge.runningEta {
+  min-width: 218px;
+  justify-content: center;
+  border-color: rgba(118, 185, 0, 0.66);
+  background:
+    linear-gradient(90deg, rgba(118, 185, 0, 0.18), rgba(118, 185, 0, 0.04)),
+    #0b1303;
+  box-shadow: 0 0 16px rgba(118, 185, 0, 0.18);
+  color: #b6ff45;
+  font-weight: 800;
+}
+
 .resetButton {
   min-width: 76px;
   border: 0;
@@ -1139,6 +1151,11 @@ select:focus,
   margin: 0;
 }
 
+.diffusionFrame {
+  border-color: rgba(118, 185, 0, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(118, 185, 0, 0.08);
+}
+
 .generatedFrame img,
 .generatedFrameFallback {
   display: block;
@@ -1151,6 +1168,41 @@ select:focus,
   transition:
     filter 0.55s ease,
     opacity 0.55s ease;
+}
+
+.diffusionFrame img {
+  filter: blur(var(--frame-blur)) saturate(0.78) contrast(1.08);
+}
+
+.diffusionField {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(90deg, rgba(118, 185, 0, 0.32), transparent var(--diffusion-reveal)),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.14) 0 1px, transparent 1px 7px),
+    linear-gradient(110deg, transparent 0%, rgba(182, 255, 69, 0.36) 46%, transparent 62%);
+  background-size: auto, auto, 240% 100%;
+  mix-blend-mode: screen;
+  opacity: var(--diffusion-opacity);
+  pointer-events: none;
+  animation: latentSweep 1.3s linear infinite;
+}
+
+.diffusionState {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 2;
+  border: 1px solid rgba(118, 185, 0, 0.48);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.74);
+  color: #b6ff45;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 18px;
+  padding: 0 7px;
 }
 
 .generatedFrameFallback {
@@ -1190,6 +1242,7 @@ select:focus,
   position: absolute;
   right: 8px;
   bottom: 7px;
+  z-index: 2;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.68);
   color: #eeeeee;
