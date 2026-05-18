@@ -27,6 +27,9 @@ const COSMOS3_INFO_URL =
 const DEFAULT_MODEL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_MODEL_NAME) ||
   "Detecting model...";
+const DEFAULT_BACKEND =
+  (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_INFERENCE_BACKEND) ||
+  "";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
 const DEPLOY_DOCKER_COMMAND = `docker login nvcr.io
@@ -282,6 +285,31 @@ type BackendInfo = {
   };
 };
 
+function initialBackendInfo(modelName = DEFAULT_MODEL, backend = DEFAULT_BACKEND): BackendInfo | null {
+  const lower = `${modelName} ${backend}`.toLowerCase();
+  if (String(backend).toLowerCase() !== "alpamayo" && !lower.includes("alpamayo")) return null;
+  const modelId = modelName && modelName !== "Detecting model..." ? modelName : "nvidia/Alpamayo-1.5-10B";
+  return {
+    checkpoint: modelId,
+    display_name: modelId,
+    backend: "alpamayo",
+    vla: {
+      type: "VLA",
+      family: "Alpamayo",
+      adapter: "alpamayo_openai",
+      current_mode: "vqa_text_generation",
+      model_id: modelId,
+      backbone: "Cosmos Reason2-8B VLM",
+      input_shape: "OpenAI chat/completions with video_url or image_url plus text prompt",
+      frames_per_video: 4,
+      max_decoded_video_frames: 96,
+      prompt_role: "VQA/caption question over sampled frames",
+      full_trajectory_mode: false,
+      clip_guidance: "Use short, front-loaded ego-camera clips for the Alpamayo VQA/captioning adapter."
+    }
+  };
+}
+
 const EXAMPLES: ExampleItem[] = [
   {
     id: "robotics-next-action",
@@ -393,14 +421,14 @@ const ALPAMAYO_LINGOQA_SYSTEM_PROMPT =
 const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   {
     id: "lingoqa-red-light-slowdown",
-    title: "LingoQA: slow for red light",
+    title: "AV LingoQA: slow for red light",
     mediaUrl: "/examples/lingoqa-red-light-slowdown.mp4",
     mediaName: "lingoqa-red-light-slowdown.mp4",
     mediaKind: "video",
     userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
     systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
     reasoning: false,
-    judgeNote: "Lingo-Judge: Cosmos3 0.854, Cosmos Reason 2 0.198, Cosmos Reason 1 0.199.",
+    judgeNote: "Challenging ego-camera action example. Lingo-Judge: Cosmos3 0.854, Cosmos Reason 2 0.198, Cosmos Reason 1 0.199.",
     parameters: {
       framesPerSecond: 4,
       maxTokens: 256,
@@ -410,14 +438,14 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   },
   {
     id: "lingoqa-return-left-after-truck",
-    title: "LingoQA: return left after truck",
+    title: "AV LingoQA: return left after truck",
     mediaUrl: "/examples/lingoqa-return-left-after-truck.mp4",
     mediaName: "lingoqa-return-left-after-truck.mp4",
     mediaKind: "video",
     userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
     systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
     reasoning: false,
-    judgeNote: "Lingo-Judge: Cosmos3 0.870, Cosmos Reason 2 0.231, Cosmos Reason 1 0.316.",
+    judgeNote: "Challenging ego-camera lane-position example. Lingo-Judge: Cosmos3 0.870, Cosmos Reason 2 0.231, Cosmos Reason 1 0.316.",
     parameters: {
       framesPerSecond: 4,
       maxTokens: 256,
@@ -427,14 +455,14 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   },
   {
     id: "lingoqa-green-light-accelerate",
-    title: "LingoQA: accelerate on green",
+    title: "AV LingoQA: accelerate on green",
     mediaUrl: "/examples/lingoqa-green-light-accelerate.mp4",
     mediaName: "lingoqa-green-light-accelerate.mp4",
     mediaKind: "video",
     userPrompt: 'What is the current action and its justification? Answer in the form "action, justification".',
     systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
     reasoning: false,
-    judgeNote: "Lingo-Judge: Cosmos3 0.781, Cosmos Reason 2 0.277, Cosmos Reason 1 0.263.",
+    judgeNote: "Challenging ego-camera traffic-control example. Lingo-Judge: Cosmos3 0.781, Cosmos Reason 2 0.277, Cosmos Reason 1 0.263.",
     parameters: {
       framesPerSecond: 4,
       maxTokens: 256,
@@ -444,14 +472,14 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   },
   {
     id: "lingoqa-no-cycle-lane",
-    title: "LingoQA: no dedicated cycle lane",
+    title: "AV LingoQA: no dedicated cycle lane",
     mediaUrl: "/examples/lingoqa-no-cycle-lane.mp4",
     mediaName: "lingoqa-no-cycle-lane.mp4",
     mediaKind: "video",
     userPrompt: "Is there a designated cycle lane on this road? If yes, where is it?",
     systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
     reasoning: false,
-    judgeNote: "Lingo-Judge: Cosmos3 0.799, Cosmos Reason 2 0.094, Cosmos Reason 1 0.086.",
+    judgeNote: "Challenging ego-camera road-layout example. Lingo-Judge: Cosmos3 0.799, Cosmos Reason 2 0.094, Cosmos Reason 1 0.086.",
     parameters: {
       framesPerSecond: 4,
       maxTokens: 256,
@@ -461,14 +489,14 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   },
   {
     id: "lingoqa-no-traffic-lights",
-    title: "LingoQA: no traffic lights",
+    title: "AV LingoQA: no traffic lights",
     mediaUrl: "/examples/lingoqa-no-traffic-lights.mp4",
     mediaName: "lingoqa-no-traffic-lights.mp4",
     mediaKind: "video",
     userPrompt: "Are there any traffic lights? What color are they showing?",
     systemPrompt: ALPAMAYO_LINGOQA_SYSTEM_PROMPT,
     reasoning: false,
-    judgeNote: "Lingo-Judge: Cosmos3 0.576, Cosmos Reason 2 0.037, Cosmos Reason 1 0.078.",
+    judgeNote: "Challenging ego-camera scene-understanding example. Lingo-Judge: Cosmos3 0.576, Cosmos Reason 2 0.037, Cosmos Reason 1 0.078.",
     parameters: {
       framesPerSecond: 4,
       maxTokens: 256,
@@ -664,7 +692,7 @@ function quantizationLabel(backendInfo: BackendInfo | null) {
 
 function isVlaMode(modelName: string, backendInfo?: BackendInfo | null) {
   const lower = `${modelName} ${backendInfo?.display_name || ""} ${backendInfo?.checkpoint || ""}`.toLowerCase();
-  return Boolean(backendInfo?.vla) || backendInfo?.backend === "alpamayo" || lower.includes("alpamayo");
+  return Boolean(backendInfo?.vla) || String(backendInfo?.backend || "").toLowerCase() === "alpamayo" || lower.includes("alpamayo");
 }
 
 function vlaFrameSummary(backendInfo?: BackendInfo | null) {
@@ -734,7 +762,7 @@ export default function App() {
   const [reasoningEnabled, setReasoningEnabled] = useState(true);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [models, setModels] = useState<string[]>([DEFAULT_MODEL]);
-  const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(null);
+  const [backendInfo, setBackendInfo] = useState<BackendInfo | null>(() => initialBackendInfo());
   const [temperature, setTemperature] = useState(DEFAULT_TEMPERATURE);
   const [topP, setTopP] = useState(DEFAULT_TOP_P);
   const [topK, setTopK] = useState(DEFAULT_TOP_K);
@@ -1745,6 +1773,17 @@ function ExampleModal({
 }) {
   const [draftExampleId, setDraftExampleId] = useState(selectedExampleId);
   const [isApplying, setIsApplying] = useState(false);
+
+  useEffect(() => {
+    if (examples.some((example) => example.id === selectedExampleId)) {
+      setDraftExampleId(selectedExampleId);
+      return;
+    }
+    if (examples[0]) {
+      setDraftExampleId(examples[0].id);
+      setSelectedExampleId(examples[0].id);
+    }
+  }, [examples, selectedExampleId, setSelectedExampleId]);
 
   function handleDone() {
     setIsApplying(true);

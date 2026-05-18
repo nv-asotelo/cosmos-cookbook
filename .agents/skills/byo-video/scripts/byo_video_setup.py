@@ -1617,6 +1617,8 @@ def _launch_reason_vite():
         "MODEL_NAME": MODEL_NAME or MODEL_ID,
         "ALPAMAYO_BASE_URL": os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8001/v1"),
         "VLLM_BASE_URL": os.environ.get("VLLM_BASE_URL", os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8000/v1")),
+        "VITE_MODEL_NAME": MODEL_NAME or MODEL_ID,
+        "VITE_INFERENCE_BACKEND": INFERENCE_BACKEND,
         "VITE_COSMOS3_INFO_URL": "/api/active-model",
     }
     proc = subprocess.Popen(
