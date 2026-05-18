@@ -4347,6 +4347,205 @@ def _benchmark_snapshot_save(run_id: str, snap: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+# ----------------------------------------------------------------------------
+# Drop-zone Benchmark View additions (sprint: "paste a URL → pick a model → hit Run")
+# ----------------------------------------------------------------------------
+
+BENCHMARK_HISTORY_PATH = BENCHMARK_RUN_ROOT / "history.json"
+BENCHMARK_HISTORY_MAX = 20
+BENCHMARK_MULTI_NIM_GLOB = BENCHMARK_RUN_ROOT / "multi-nim-20260517"
+
+
+def _benchmark_history_load() -> List[Dict[str, Any]]:
+    try:
+        if not BENCHMARK_HISTORY_PATH.exists():
+            return []
+        data = json.loads(BENCHMARK_HISTORY_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data[-BENCHMARK_HISTORY_MAX:]
+    except Exception as exc:
+        log(f"[benchmark history] load failed: {exc}")
+    return []
+
+
+def _benchmark_history_append(entry: Dict[str, Any]) -> None:
+    try:
+        history = _benchmark_history_load()
+        history.append(entry)
+        history = history[-BENCHMARK_HISTORY_MAX:]
+        BENCHMARK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = BENCHMARK_HISTORY_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(history, default=str, indent=2), encoding="utf-8")
+        tmp.replace(BENCHMARK_HISTORY_PATH)
+    except Exception as exc:
+        log(f"[benchmark history] append failed: {exc}")
+
+
+def _benchmark_history_find(run_id: str) -> Optional[Dict[str, Any]]:
+    for entry in _benchmark_history_load():
+        if entry.get("run_id") == run_id:
+            return entry
+    return None
+
+
+# URL kind detection: HuggingFace, Arxiv, GitHub, GDrive.
+_RE_HF = re.compile(r"^https?://(?:www\.)?huggingface\.co/datasets/([^/?#\s]+/[^/?#\s]+)", re.I)
+_RE_ARXIV = re.compile(r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/([\w.\-/]+)", re.I)
+_RE_GITHUB = re.compile(r"^https?://(?:www\.)?github\.com/([^/\s]+/[^/\s]+)", re.I)
+_RE_GDRIVE = re.compile(r"^https?://(?:drive|docs)\.google\.com/(?:drive/folders/|file/d/|open\?id=)([\w-]+)", re.I)
+_LINGOQA_HF_RE = re.compile(r"(runoob1|wayveai|wayve-ai)/lingoqa", re.I)
+
+
+def _resolve_url_kind(url: str) -> Tuple[str, Optional[str]]:
+    """Return (kind, identifier) for the given URL/string.
+
+    kind ∈ {"hf_dataset", "arxiv", "github", "gdrive", "lingoqa", "unknown"}
+    """
+    s = (url or "").strip()
+    if not s:
+        return ("unknown", None)
+    low = s.lower()
+    # Canonical shortcut: the word "lingoqa" or any URL pointing at lingoqa.
+    if low == "lingoqa" or _LINGOQA_HF_RE.search(s) or "lingoqa" in low:
+        return ("lingoqa", "lingoqa-official")
+    m = _RE_HF.match(s)
+    if m:
+        return ("hf_dataset", m.group(1))
+    m = _RE_ARXIV.match(s)
+    if m:
+        return ("arxiv", m.group(1))
+    m = _RE_GITHUB.match(s)
+    if m:
+        return ("github", m.group(1))
+    m = _RE_GDRIVE.match(s)
+    if m:
+        return ("gdrive", m.group(1))
+    return ("unknown", None)
+
+
+def _resolve_url_to_dataset(url: str) -> Dict[str, Any]:
+    """Parse url → dataset config candidate.
+
+    For LingoQA: always resolves to the cached on-disk path.
+    For HF/Arxiv/GitHub/GDrive: returns a best-effort discovery payload using
+    existing helpers when available. Network calls are deferred to the run step.
+    """
+    kind, ident = _resolve_url_kind(url)
+    result: Dict[str, Any] = {"kind": kind, "url": url, "identifier": ident}
+    if kind == "lingoqa":
+        base = _lingoqa_dataset_dir()
+        result["dataset_config"] = {
+            "id": "lingoqa-official",
+            "name": "LingoQA (1000 rows, GDrive local cache)",
+            "rows": 1000,
+            "ready": bool(base and (base / "val.parquet").exists()),
+            "path": str(base) if base else None,
+            "judge": "lingo-judge",
+        }
+        result["display"] = "LingoQA detected (local cache)"
+        return result
+    if kind == "hf_dataset":
+        result["dataset_config"] = {
+            "id": f"hf:{ident}",
+            "name": f"HuggingFace dataset: {ident}",
+            "repo_id": ident,
+            "ready": False,
+            "judge": "lingo-judge",
+        }
+        result["display"] = f"HuggingFace dataset detected: {ident}"
+        return result
+    if kind == "arxiv":
+        discovery: Dict[str, Any] = {}
+        try:
+            if "discover_paper_source" in globals():
+                discovery = globals()["discover_paper_source"](url) or {}
+        except Exception as exc:
+            discovery = {"error": str(exc)}
+        result["dataset_config"] = {
+            "id": f"arxiv:{ident}",
+            "name": f"Arxiv paper: {ident}",
+            "arxiv_id": ident,
+            "discovery": discovery,
+            "ready": False,
+            "judge": "lingo-judge",
+        }
+        result["display"] = f"Arxiv paper detected: {ident}"
+        return result
+    if kind == "github":
+        result["dataset_config"] = {
+            "id": f"github:{ident}",
+            "name": f"GitHub repo: {ident}",
+            "repo": ident,
+            "ready": False,
+            "judge": "lingo-judge",
+        }
+        result["display"] = f"GitHub repo detected: {ident}"
+        return result
+    if kind == "gdrive":
+        result["dataset_config"] = {
+            "id": f"gdrive:{ident}",
+            "name": f"GDrive folder: {ident}",
+            "gdrive_id": ident,
+            "ready": False,
+            "judge": "lingo-judge",
+        }
+        result["display"] = f"GDrive folder detected"
+        return result
+    result["dataset_config"] = None
+    result["display"] = "Unknown URL kind — paste a HuggingFace dataset, Arxiv paper, GitHub repo, GDrive folder, or type 'lingoqa'."
+    return result
+
+
+def _benchmark_available_models() -> List[Dict[str, Any]]:
+    """Return [{id, name, endpoint, status, host}, ...].
+
+    Reads from /tmp/benchmark-runs/multi-nim-20260517/*/identity.json if present;
+    falls back to the local /v1/models on the active NIM base url.
+    """
+    out: List[Dict[str, Any]] = []
+    multi_root = BENCHMARK_MULTI_NIM_GLOB
+    if multi_root.exists() and multi_root.is_dir():
+        for child in sorted(multi_root.iterdir()):
+            identity = child / "identity.json"
+            if not identity.exists():
+                continue
+            try:
+                ident = json.loads(identity.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            out.append({
+                "id": ident.get("served_model_id") or ident.get("model") or child.name,
+                "name": ident.get("name") or ident.get("served_model_id") or child.name,
+                "endpoint": ident.get("endpoint") or ident.get("base_url"),
+                "status": ident.get("status") or "ready",
+                "host": ident.get("host") or ident.get("gpu") or "",
+            })
+    # Always include the local detection as the default option.
+    try:
+        local_model = benchmark_detect_model()
+        local_base = benchmark_nim_base_url()
+        local_entry = {
+            "id": local_model,
+            "name": local_model,
+            "endpoint": local_base,
+            "status": "ready",
+            "host": "horde (local)",
+        }
+        # Dedupe by id — prefer the local entry if multi-nim list didn't include it.
+        if not any(m.get("id") == local_entry["id"] for m in out):
+            out.insert(0, local_entry)
+    except Exception as exc:
+        out.insert(0, {
+            "id": "nvidia/Cosmos3-Super-Reasoner",
+            "name": "nvidia/Cosmos3-Super-Reasoner",
+            "endpoint": benchmark_nim_base_url() if "benchmark_nim_base_url" in globals() else "",
+            "status": "error",
+            "host": "horde (local)",
+            "error": str(exc),
+        })
+    return out
+
+
 def benchmark_get(run_id: str) -> Optional[Dict[str, Any]]:
     with BENCHMARK_LOCK:
         snap = BENCHMARK_STATE["runs"].get(run_id)
@@ -4526,6 +4725,27 @@ def run_lingoqa_benchmark(
             summary=_benchmark_summarize(benchmark_get(run_id) or {}),
         )
         _benchmark_snapshot_save(run_id, final)
+        # Persist a one-line summary to /tmp/benchmark-runs/history.json so the
+        # Benchmark View "Last run" tile + run-history modal survive restarts.
+        try:
+            summary_obj = final.get("summary") or {}
+            _benchmark_history_append({
+                "run_id": run_id,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "epoch": time.time(),
+                "model": final.get("model") or "",
+                "dataset": final.get("dataset") or "",
+                "judge": final.get("judge") or "",
+                "sample_size": final.get("sample_size"),
+                "concurrency": final.get("concurrency"),
+                "seed": final.get("seed"),
+                "accuracy": summary_obj.get("overall_accuracy"),
+                "total_predictions": summary_obj.get("total_predictions"),
+                "wall_seconds": final.get("wall_seconds"),
+                "report_url": f"/benchmark/report/{run_id}",
+            })
+        except Exception as exc:
+            log(f"[benchmark {run_id}] history append failed: {exc}")
         log(f"[benchmark {run_id}] complete in {final['wall_seconds']:.1f}s")
     except Exception as exc:
         log(f"[benchmark {run_id}] FAILED: {exc}")
@@ -4539,6 +4759,428 @@ def run_lingoqa_benchmark(
             _benchmark_snapshot_save(run_id, final)
         except Exception:
             pass
+
+
+# =============================================================================
+# Traceability bundle renderer (sprint goal: prove what each prediction saw).
+#
+# Each "worked example" in the benchmark report renders 4 artifacts so a reader
+# can trace prediction -> input -> reasoning end-to-end:
+#   1. frame_strip.png  : 5 input frames concatenated horizontally
+#   2. frame_gif.gif    : same 5 frames at 1 fps, looped (video proxy)
+#   3. ui_card.png      : PIL-rendered result card mirroring the Benchmark View
+#   4. reasoning.png    : <think>...</think> chain as a styled card image
+#
+# Rendered on-demand at /benchmark/report build time (NOT at eval time) and
+# cached under TRACEABILITY_ROOT/<run_id>/<model_safe>/<question_id>/. Frames
+# are served raw via /lingoqa-frames/<segment_id>/<idx>.jpg for click-through.
+# =============================================================================
+
+TRACEABILITY_ROOT = Path(os.getenv("TRACEABILITY_ROOT", "/tmp/benchmark-artifacts"))
+TRACEABILITY_ROOT.mkdir(parents=True, exist_ok=True)
+NV_GREEN = (118, 185, 0)
+NV_DARK = (26, 26, 26)
+NV_SOFT = (240, 245, 232)
+NV_WHITE = (255, 255, 255)
+NV_LINE = (203, 213, 225)
+
+try:
+    from PIL import Image as _PIL_Image, ImageDraw as _PIL_ImageDraw, ImageFont as _PIL_ImageFont  # type: ignore
+    PIL_IMPORT_ERROR: Optional[BaseException] = None
+except Exception as _pil_exc:  # pragma: no cover - surfaced at render time
+    _PIL_Image = None  # type: ignore
+    _PIL_ImageDraw = None  # type: ignore
+    _PIL_ImageFont = None  # type: ignore
+    PIL_IMPORT_ERROR = _pil_exc
+
+
+def _safe_model_dir(model_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", model_id or "unknown")[:64] or "unknown"
+
+
+def _traceability_dir(run_id: str, model_id: str, question_id: str) -> Path:
+    out = TRACEABILITY_ROOT / run_id / _safe_model_dir(model_id) / (question_id or "unknown")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _load_font(size: int, mono: bool = False) -> Any:
+    """Best-effort font loader. Falls back to PIL default if no TTF found."""
+    if _PIL_ImageFont is None:
+        return None
+    candidates_mono = [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Courier.dfont",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    ]
+    candidates_sans = [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/SFNSDisplay.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for p in (candidates_mono if mono else candidates_sans):
+        if os.path.exists(p):
+            try:
+                return _PIL_ImageFont.truetype(p, size=size)
+            except Exception:
+                continue
+    try:
+        return _PIL_ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _resolve_segment_image(image_root: Optional[Path], segment_id: str, idx: int) -> Optional[Path]:
+    """Find <root>/val/<seg>/<idx>.jpg across known layouts."""
+    if not segment_id:
+        return None
+    roots: List[Path] = []
+    if image_root:
+        roots.append(Path(image_root))
+    base = _lingoqa_dataset_dir()
+    if base:
+        roots.append(_lingoqa_image_root(base))
+    # Walk known disk shapes (val/<seg>/<idx>.jpg or images/val/<seg>/<idx>.jpg).
+    for root in roots:
+        for tail in ("val", "images/val"):
+            p = root / tail / segment_id / f"{idx}.jpg"
+            if p.exists():
+                return p
+    # Last-chance fallback: scan the well-known absolute paths.
+    for prefix in ("/home/horde/lingoqa-data/evaluation/images/val",
+                   "/home/horde/lingoqa-data/evaluation/images/images/val",
+                   "/tmp/lingoqa-data/evaluation/images/val",
+                   "/tmp/lingoqa-data/evaluation/images/images/val"):
+        p = Path(prefix) / segment_id / f"{idx}.jpg"
+        if p.exists():
+            return p
+    return None
+
+
+def render_frame_strip(segment_id: str, image_root: Optional[Path], output_path: Path,
+                       cell: Tuple[int, int] = (320, 180), gutter: int = 4) -> Path:
+    """5-frame horizontal strip (PNG). 320x180 cells, 4px white gutter, ~1600x180."""
+    if _PIL_Image is None:
+        raise RuntimeError(f"PIL unavailable: {PIL_IMPORT_ERROR}")
+    cw, ch = cell
+    strip_w = cw * 5 + gutter * 4
+    canvas = _PIL_Image.new("RGB", (strip_w, ch), NV_WHITE)
+    for idx in range(5):
+        src = _resolve_segment_image(image_root, segment_id, idx)
+        if src is None:
+            # Missing frame placeholder.
+            cell_img = _PIL_Image.new("RGB", (cw, ch), (235, 238, 245))
+            draw = _PIL_ImageDraw.Draw(cell_img)
+            font = _load_font(14)
+            draw.text((10, ch // 2 - 8), f"frame {idx} missing", fill=NV_DARK, font=font)
+        else:
+            try:
+                img = _PIL_Image.open(src).convert("RGB")
+            except Exception as exc:
+                cell_img = _PIL_Image.new("RGB", (cw, ch), (235, 238, 245))
+                draw = _PIL_ImageDraw.Draw(cell_img)
+                font = _load_font(12)
+                draw.text((6, ch // 2 - 8), f"err: {exc}"[:60], fill=NV_DARK, font=font)
+            else:
+                # Letterbox-fit into cell.
+                img.thumbnail((cw, ch), _PIL_Image.LANCZOS)
+                cell_img = _PIL_Image.new("RGB", (cw, ch), NV_DARK)
+                ox = (cw - img.width) // 2
+                oy = (ch - img.height) // 2
+                cell_img.paste(img, (ox, oy))
+        canvas.paste(cell_img, (idx * (cw + gutter), 0))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
+def render_frame_gif(segment_id: str, image_root: Optional[Path], output_path: Path,
+                     fps: float = 1.0, size: Tuple[int, int] = (640, 360)) -> Path:
+    """Animated GIF over the 5 frames, infinite loop. ~5s at 1 fps."""
+    if _PIL_Image is None:
+        raise RuntimeError(f"PIL unavailable: {PIL_IMPORT_ERROR}")
+    w, h = size
+    duration_ms = int(round(1000.0 / max(fps, 0.1)))
+    frames: List[Any] = []
+    for idx in range(5):
+        src = _resolve_segment_image(image_root, segment_id, idx)
+        frame = _PIL_Image.new("RGB", (w, h), NV_DARK)
+        if src is not None:
+            try:
+                img = _PIL_Image.open(src).convert("RGB")
+                img.thumbnail((w, h), _PIL_Image.LANCZOS)
+                ox = (w - img.width) // 2
+                oy = (h - img.height) // 2
+                frame.paste(img, (ox, oy))
+            except Exception:
+                pass
+        else:
+            draw = _PIL_ImageDraw.Draw(frame)
+            font = _load_font(20)
+            draw.text((20, h // 2), f"frame {idx} missing", fill=NV_WHITE, font=font)
+        frames.append(frame.convert("P", palette=_PIL_Image.ADAPTIVE, colors=128))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not frames:
+        raise RuntimeError("no frames assembled for GIF")
+    frames[0].save(
+        output_path,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=True,
+        disposal=2,
+    )
+    return output_path
+
+
+def _wrap_text(text: str, font: Any, max_width: int, draw: Any) -> List[str]:
+    """Word-wrap text to fit max_width pixels using the given font."""
+    if not text:
+        return [""]
+    lines: List[str] = []
+    for raw_line in str(text).splitlines() or [""]:
+        words = raw_line.split(" ")
+        cur = ""
+        for word in words:
+            trial = (cur + " " + word).strip() if cur else word
+            try:
+                bbox = draw.textbbox((0, 0), trial, font=font)
+                tw = bbox[2] - bbox[0]
+            except Exception:
+                tw = len(trial) * 7
+            if tw <= max_width or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = word
+        lines.append(cur)
+    return lines or [""]
+
+
+def render_result_card(example: Dict[str, Any], output_path: Path,
+                       image_root: Optional[Path] = None,
+                       size: Tuple[int, int] = (1200, 640)) -> Path:
+    """Programmatic UI result-card screenshot (PIL fallback for headless browser).
+
+    Mirrors the Benchmark View card: NV-dark header bar with model + verdict
+    badge, frame strip thumbnail on the left, question/GT/prediction columns
+    on the right, "Expand reasoning" affordance at the bottom.
+    """
+    if _PIL_Image is None:
+        raise RuntimeError(f"PIL unavailable: {PIL_IMPORT_ERROR}")
+    W, H = size
+    canvas = _PIL_Image.new("RGB", (W, H), NV_WHITE)
+    draw = _PIL_ImageDraw.Draw(canvas)
+
+    # Header bar.
+    header_h = 64
+    draw.rectangle([0, 0, W, header_h], fill=NV_DARK)
+    draw.rectangle([0, 0, 8, header_h], fill=NV_GREEN)
+    title_font = _load_font(22)
+    sub_font = _load_font(14)
+    model_text = str(example.get("model") or "model")
+    draw.text((24, 14), model_text[:64], fill=NV_WHITE, font=title_font)
+    draw.text((24, 42), "Benchmark View — Result Card", fill=(118, 185, 0), font=sub_font)
+
+    # Verdict badge (top right).
+    correct = bool(example.get("judge_correct"))
+    verdict_text = "PASS" if correct else "FAIL"
+    badge_color = NV_GREEN if correct else (185, 28, 28)
+    badge_w, badge_h = 110, 36
+    bx0, by0 = W - badge_w - 16, 14
+    draw.rectangle([bx0, by0, bx0 + badge_w, by0 + badge_h], fill=badge_color)
+    badge_font = _load_font(20)
+    try:
+        bb = draw.textbbox((0, 0), verdict_text, font=badge_font)
+        tw, th = bb[2] - bb[0], bb[3] - bb[1]
+    except Exception:
+        tw, th = 60, 20
+    draw.text((bx0 + (badge_w - tw) // 2, by0 + (badge_h - th) // 2 - 2), verdict_text,
+              fill=NV_WHITE, font=badge_font)
+
+    # Frame strip thumbnail on the left.
+    strip_x, strip_y = 24, header_h + 20
+    strip_w, strip_h = 520, 96
+    segment_id = str(example.get("segment_id") or "")
+    cell_w = (strip_w - 4 * 4) // 5
+    for idx in range(5):
+        src = _resolve_segment_image(image_root, segment_id, idx)
+        cx = strip_x + idx * (cell_w + 4)
+        if src and src.exists():
+            try:
+                img = _PIL_Image.open(src).convert("RGB")
+                img.thumbnail((cell_w, strip_h), _PIL_Image.LANCZOS)
+                tile = _PIL_Image.new("RGB", (cell_w, strip_h), NV_DARK)
+                tile.paste(img, ((cell_w - img.width) // 2, (strip_h - img.height) // 2))
+                canvas.paste(tile, (cx, strip_y))
+            except Exception:
+                draw.rectangle([cx, strip_y, cx + cell_w, strip_y + strip_h], fill=NV_LINE)
+        else:
+            draw.rectangle([cx, strip_y, cx + cell_w, strip_y + strip_h], fill=NV_LINE)
+    cap_font = _load_font(12)
+    draw.text((strip_x, strip_y + strip_h + 4),
+              f"Segment {segment_id[:24]} | 5 frames", fill=(100, 116, 139), font=cap_font)
+
+    # Right column: question + GT + prediction.
+    col_x = strip_x + strip_w + 28
+    col_w = W - col_x - 24
+    body_font = _load_font(17)
+    label_font = _load_font(13)
+    mono_font = _load_font(15, mono=True)
+    y = header_h + 20
+    refs = example.get("references") or []
+
+    def _block(label: str, value: str, font: Any, max_lines: int = 4) -> int:
+        nonlocal y
+        draw.text((col_x, y), label, fill=(100, 116, 139), font=label_font)
+        y += 18
+        lines = _wrap_text(value or "", font, col_w, draw)
+        for line in lines[:max_lines]:
+            draw.text((col_x, y), line, fill=NV_DARK, font=font)
+            y += 22
+        if len(lines) > max_lines:
+            draw.text((col_x, y), "…", fill=NV_DARK, font=font)
+            y += 22
+        y += 8
+        return y
+
+    _block("QUESTION", str(example.get("question") or ""), body_font, max_lines=3)
+    _block("GROUND TRUTH (A / B)",
+           " | ".join([(refs[0] if refs else ""), (refs[1] if len(refs) > 1 else "")]),
+           body_font, max_lines=3)
+    _block("PREDICTION", str(example.get("prediction") or ""), body_font, max_lines=4)
+
+    # Footer: latency + reasoning affordance.
+    footer_y = H - 64
+    draw.line([(24, footer_y), (W - 24, footer_y)], fill=NV_LINE, width=1)
+    lat = example.get("latency_seconds")
+    jscore = example.get("judge_score")
+    foot_font = _load_font(14)
+    foot_left = f"Latency {lat:.2f}s" if isinstance(lat, (int, float)) else "Latency —"
+    if isinstance(jscore, (int, float)):
+        foot_left += f"  ·  Judge prob {jscore:.3f}"
+    draw.text((24, footer_y + 14), foot_left, fill=(71, 85, 105), font=foot_font)
+    expander = "▸  Expand reasoning trace"
+    try:
+        bb = draw.textbbox((0, 0), expander, font=foot_font)
+        ew = bb[2] - bb[0]
+    except Exception:
+        ew = 180
+    draw.text((W - ew - 24, footer_y + 14), expander, fill=NV_GREEN, font=foot_font)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
+def render_reasoning_image(reasoning_text: str, output_path: Path,
+                           width: int = 900, max_height: int = 1200,
+                           max_chars: int = 1500) -> Path:
+    """Render the <think> trace as a styled PNG card (NV-green header + mono body)."""
+    if _PIL_Image is None:
+        raise RuntimeError(f"PIL unavailable: {PIL_IMPORT_ERROR}")
+    text = (reasoning_text or "").strip() or "(no reasoning trace emitted)"
+    truncated = False
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "…"
+        truncated = True
+    body_font = _load_font(16, mono=True)
+    header_font = _load_font(18)
+    pad = 24
+    header_h = 52
+    body_max_w = width - 2 * pad
+    # Probe wrapping on a throwaway canvas to compute height.
+    probe = _PIL_Image.new("RGB", (10, 10), NV_WHITE)
+    draw = _PIL_ImageDraw.Draw(probe)
+    lines = _wrap_text(text, body_font, body_max_w, draw)
+    try:
+        bb = draw.textbbox((0, 0), "Hg", font=body_font)
+        line_h = (bb[3] - bb[1]) + 6
+    except Exception:
+        line_h = 22
+    body_h = max(40, len(lines) * line_h + pad * 2)
+    total_h = min(max_height, header_h + body_h + 12)
+    canvas = _PIL_Image.new("RGB", (width, total_h), NV_WHITE)
+    draw = _PIL_ImageDraw.Draw(canvas)
+    # Outer border.
+    draw.rectangle([0, 0, width - 1, total_h - 1], outline=NV_LINE, width=1)
+    # Header.
+    draw.rectangle([0, 0, width, header_h], fill=NV_GREEN)
+    draw.text((pad, 14), "REASONING TRACE", fill=NV_WHITE, font=header_font)
+    if truncated:
+        try:
+            bb = draw.textbbox((0, 0), "(truncated)", font=header_font)
+            tw = bb[2] - bb[0]
+        except Exception:
+            tw = 110
+        draw.text((width - tw - pad, 18), "(truncated)", fill=NV_WHITE, font=_load_font(13))
+    # Body bg.
+    draw.rectangle([0, header_h, width, total_h], fill=NV_SOFT)
+    y = header_h + pad
+    max_y = total_h - pad
+    for line in lines:
+        if y + line_h > max_y:
+            draw.text((pad, y), "…", fill=NV_DARK, font=body_font)
+            break
+        draw.text((pad, y), line, fill=NV_DARK, font=body_font)
+        y += line_h
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
+def render_traceability_bundle(example: Dict[str, Any], image_root: Optional[Path],
+                               output_dir: Path) -> Dict[str, Path]:
+    """Master orchestrator: build all four artifacts for one example.
+
+    Returns dict with keys frame_strip, frame_gif, ui_card, reasoning -> Path.
+    Cached: if an artifact already exists, we re-use it.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    segment_id = str(example.get("segment_id") or "")
+    paths = {
+        "frame_strip": output_dir / "frame_strip.png",
+        "frame_gif": output_dir / "frame_gif.gif",
+        "ui_card": output_dir / "ui_card.png",
+        "reasoning": output_dir / "reasoning.png",
+    }
+    if not paths["frame_strip"].exists():
+        render_frame_strip(segment_id, image_root, paths["frame_strip"])
+    if not paths["frame_gif"].exists():
+        render_frame_gif(segment_id, image_root, paths["frame_gif"])
+    if not paths["ui_card"].exists():
+        render_result_card(example, paths["ui_card"], image_root=image_root)
+    if not paths["reasoning"].exists():
+        render_reasoning_image(str(example.get("reasoning_trace") or ""), paths["reasoning"])
+    return paths
+
+
+def _traceability_examples(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Pick the worked examples for the report: 2 correct, 2 wrong, 2 rich-reasoning."""
+    results = [r for r in (snap.get("results") or []) if not r.get("error")]
+    correct = [r for r in results if r.get("judge_correct")][:2]
+    wrong = [r for r in results if not r.get("judge_correct")][:2]
+    rich = sorted(
+        [r for r in results if r.get("reasoning_trace")],
+        key=lambda r: len(r.get("reasoning_trace") or ""),
+        reverse=True,
+    )[:2]
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for bucket in (correct, wrong, rich):
+        for r in bucket:
+            key = (r.get("question_id"), r.get("model"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+    return out
 
 
 def benchmark_render_report(run_id: str) -> str:
@@ -4607,6 +5249,69 @@ def benchmark_render_report(run_id: str) -> str:
         for r in qual_reasoning
     )
 
+    # --- Traceability bundles -------------------------------------------------
+    # Build (or re-use cached) 4-artifact bundles for ~6 worked examples and
+    # render them inline. Falls back to a friendly note if PIL is unavailable
+    # or rendering fails on a per-example basis.
+    base = _lingoqa_dataset_dir()
+    image_root = _lingoqa_image_root(base) if base else None
+    trace_blocks: List[str] = []
+    if PIL_IMPORT_ERROR is not None:
+        traceability_html = (
+            f"<p class='trace'>Traceability bundles disabled: PIL import failed "
+            f"({_esc(PIL_IMPORT_ERROR)}). Install pillow to enable.</p>"
+        )
+    else:
+        examples_for_trace = _traceability_examples(snap)
+        for idx, r in enumerate(examples_for_trace, start=1):
+            qid = str(r.get("question_id") or f"q{idx}")
+            seg = str(r.get("segment_id") or "")
+            out_dir = _traceability_dir(run_id, str(r.get("model") or model), qid)
+            try:
+                paths = render_traceability_bundle(r, image_root, out_dir)
+            except Exception as exc:
+                trace_blocks.append(
+                    f"<section class='trace-bundle'><h3>Example {idx} — {_esc(qid)}</h3>"
+                    f"<p class='miss'>Bundle render failed: {_esc(exc)}</p></section>"
+                )
+                continue
+            # Serve the bundle assets through /benchmark/artifact/<run_id>/<model_safe>/<qid>/<name>.
+            # Always use the sanitized (slash-free) model directory name so the URL
+            # has a stable 4-segment shape regardless of which model id is used.
+            model_seg = _safe_model_dir(str(r.get("model") or model))
+            base_url = (
+                f"/benchmark/artifact/"
+                f"{urllib.parse.quote(run_id, safe='')}/"
+                f"{urllib.parse.quote(model_seg, safe='')}/"
+                f"{urllib.parse.quote(qid, safe='')}"
+            )
+            verdict = "PASS" if r.get("judge_correct") else "FAIL"
+            verdict_klass = "ok" if r.get("judge_correct") else "bad"
+            click_links = "  ".join(
+                f"<a class='frame-link' target='_blank' href='/lingoqa-frames/{urllib.parse.quote(seg, safe='')}/{i}.jpg'>frame {i}</a>"
+                for i in range(5)
+            )
+            trace_blocks.append(
+                "<section class='trace-bundle'>"
+                f"<h3>Example {idx} — <span class='qid'>{_esc(qid)}</span> "
+                f"<span class='verdict {verdict_klass}'>{verdict}</span></h3>"
+                f"<div class='trace-q'><strong>Q:</strong> {_esc(r.get('question'))}</div>"
+                f"<div class='trace-art'><div class='art-label'>Input frames (5, click to enlarge)</div>"
+                f"<a target='_blank' href='/lingoqa-frames/{urllib.parse.quote(seg, safe='')}/0.jpg'>"
+                f"<img class='strip' src='{base_url}/frame_strip.png' alt='Input frame strip'/></a>"
+                f"<div class='frame-links'>{click_links}</div></div>"
+                f"<div class='trace-art'><div class='art-label'>Animated GIF (1 fps, video proxy)</div>"
+                f"<img class='gif' src='{base_url}/frame_gif.gif' alt='Animated GIF over 5 frames'/></div>"
+                f"<div class='trace-art'><div class='art-label'>UI result card</div>"
+                f"<img class='ui' src='{base_url}/ui_card.png' alt='Benchmark View UI card'/></div>"
+                f"<div class='trace-art'><div class='art-label'>Reasoning trace</div>"
+                f"<img class='reasoning' src='{base_url}/reasoning.png' alt='Reasoning trace'/></div>"
+                f"<div class='trace-cap'>question_id: {_esc(qid)} · segment_id: {_esc(seg)} · "
+                f"Lingo-Judge: <strong>{verdict}</strong> (prob {(r.get('judge_score') or 0.0):.3f})</div>"
+                "</section>"
+            )
+        traceability_html = "".join(trace_blocks) or "<p>No worked examples available for traceability.</p>"
+
     return f"""<!doctype html>
 <html><head><meta charset='utf-8'><title>LingoQA Benchmark Report — {_esc(run_id)}</title>
 <style>
@@ -4639,6 +5344,24 @@ table.qual td.bad {{ background:#FEF2F2; }}
 .ref-bar .pill.us {{ background:var(--green); color:#fff; border-color:var(--green); }}
 .kv {{ display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; }}
 .kv div:nth-child(odd) {{ color:#64748b; }}
+.trace-bundle {{ background:#fff; border:1px solid #cbd5e1; border-left:6px solid var(--green); padding:18px 20px; margin:18px 0; border-radius:8px; }}
+.trace-bundle h3 {{ margin:0 0 8px; font-size:20px; }}
+.trace-bundle .qid {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:14px; color:#64748b; font-weight:normal; }}
+.trace-bundle .verdict {{ display:inline-block; padding:2px 10px; border-radius:999px; font-size:13px; font-weight:700; margin-left:8px; vertical-align:middle; }}
+.trace-bundle .verdict.ok {{ background:var(--green); color:#fff; }}
+.trace-bundle .verdict.bad {{ background:#b91c1c; color:#fff; }}
+.trace-bundle .trace-q {{ font-size:17px; color:var(--dark); margin:6px 0 14px; }}
+.trace-bundle .trace-art {{ margin:12px 0; }}
+.trace-bundle .art-label {{ font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:6px; }}
+.trace-bundle img.strip {{ width:100%; max-width:1100px; height:auto; border:1px solid #cbd5e1; border-radius:6px; cursor:zoom-in; }}
+.trace-bundle img.gif {{ max-width:640px; height:auto; border:1px solid #cbd5e1; border-radius:6px; }}
+.trace-bundle img.ui {{ max-width:1100px; width:100%; height:auto; border:1px solid #cbd5e1; border-radius:6px; }}
+.trace-bundle img.reasoning {{ max-width:900px; width:100%; height:auto; border:1px solid #cbd5e1; border-radius:6px; }}
+.trace-bundle .frame-links {{ font-size:12px; color:#64748b; margin-top:4px; }}
+.trace-bundle .frame-links a {{ color:var(--green); margin-right:8px; text-decoration:none; }}
+.trace-bundle .frame-links a:hover {{ text-decoration:underline; }}
+.trace-bundle .trace-cap {{ font-size:13px; color:#64748b; margin-top:10px; padding-top:10px; border-top:1px solid #e5e7eb; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
+.trace-bundle .miss {{ color:#b91c1c; font-size:14px; }}
 </style></head><body>
 <section class='slide' style='background:var(--dark); color:#fff;'>
   <div style='border-left:6px solid var(--green); padding-left:20px;'>
@@ -4688,6 +5411,12 @@ table.qual td.bad {{ background:#FEF2F2; }}
 <section class='slide'>
   <h2 class='slide-title'>Reasoning Trace Examples</h2>
   {reasoning_blocks or '<p>No reasoning traces emitted in this run.</p>'}
+</section>
+
+<section class='slide'>
+  <h2 class='slide-title'>Traceability Bundles — input frames, GIF, UI card, reasoning trace</h2>
+  <p class='slide-sub'>Each worked example shows the model's actual input (5 frames + animated proxy), the live Benchmark View card, and the reasoning trace as embeddable artifacts. Click any frame strip to open the source JPGs at full resolution.</p>
+  {traceability_html}
 </section>
 
 <section class='slide'>
@@ -4847,6 +5576,37 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 .bench-modal.open { display:flex; }
 .bench-modal-inner { background:#fff; max-width:900px; max-height:90vh; overflow:auto; border-radius:12px; padding:24px; }
 .bench-modal pre { background:#F0F5E8; padding:12px; border-radius:6px; white-space:pre-wrap; font-size:13px; max-height:240px; overflow:auto; }
+/* Drop-zone layout */
+.bench-lastrun { display:flex; justify-content:space-between; align-items:center; gap:14px; background:#F0F5E8; border:1px solid #c5e0a6; border-left:4px solid #76B900; border-radius:8px; padding:12px 16px; margin-bottom:14px; font-size:14px; color:#1A1A1A; }
+.bench-lastrun-actions { display:flex; gap:8px; align-items:center; }
+.bench-dropzone { background:#fff; border:1px solid var(--line); border-radius:12px; padding:24px; margin-bottom:18px; }
+.bench-dropzone-row { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+.bench-dropzone-row:last-of-type { margin-bottom:0; }
+.bench-url-input { flex:1 1 auto; min-width:260px; padding:14px 16px; font-size:15px; border:2px solid var(--line); border-radius:8px; font:inherit; transition:border-color .15s; }
+.bench-url-input:focus { outline:none; border-color:#76B900; }
+.bench-chip { background:#F0F5E8; border:1px solid #76B900; color:#1A1A1A; border-radius:999px; padding:6px 12px; font-size:12px; font-weight:600; white-space:nowrap; }
+.bench-chip.unknown { background:#FEF2F2; border-color:#FECACA; color:#7f1d1d; }
+.bench-model-select { flex:1 1 auto; min-width:260px; padding:12px 14px; font-size:14px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
+.bench-primary-btn { flex:1 1 auto; background:#76B900; color:#fff; border:none; border-radius:8px; padding:16px 24px; font-size:16px; font-weight:700; cursor:pointer; transition:background .15s; }
+.bench-primary-btn:hover { background:#5d9300; }
+.bench-primary-btn:disabled { background:#94a3b8; cursor:not-allowed; }
+.bench-ghost-row { gap:8px; }
+.bench-ghost-btn { background:#fff; color:#475569; border:1px solid var(--line); border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; transition:all .15s; }
+.bench-ghost-btn:hover:not(:disabled) { border-color:#76B900; color:#1A1A1A; }
+.bench-ghost-btn:disabled { opacity:0.5; cursor:not-allowed; }
+.bench-ghost-link { color:#76B900; text-decoration:none; font-size:13px; font-weight:600; padding:6px 10px; border-radius:6px; border:1px solid transparent; }
+.bench-ghost-link:hover { border-color:#76B900; }
+.bench-dropzone-status { margin:8px 0 0; min-height:18px; }
+.bench-advanced { background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:18px; }
+.bench-history { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:18px; }
+.bench-history-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px; }
+.bench-history-head h3 { margin:0; font-size:14px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
+.bench-history-rows { display:flex; flex-direction:column; gap:6px; }
+.bench-history-row { display:grid; grid-template-columns:1.2fr 1fr 1.2fr 0.6fr auto; gap:12px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:#f8fafc; font-size:13px; cursor:pointer; transition:border-color .15s; }
+.bench-history-row:hover { border-color:#76B900; background:#F0F5E8; }
+.bench-history-row .acc { font-weight:700; color:#76B900; }
+.bench-history-row .actions { display:flex; gap:6px; }
+.bench-history-empty { color:#94a3b8; font-size:13px; padding:12px; text-align:center; }
 @media (min-width: 1440px) { main { width:calc(100% - 40px); } .bench-wrap { width:calc(100% - 40px); } }
 @media (max-width: 900px) {
   header { padding:14px; align-items:flex-start; flex-direction:column; }
@@ -4977,30 +5737,63 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 </div><!-- end basicPane -->
 <div id="benchmarkPane" class="tab-pane">
   <div class="bench-wrap">
-    <div class="bench-grid">
-      <div class="bench-card">
-        <h3>Dataset</h3>
-        <label>Source</label>
-        <select id="benchDataset"><option value="lingoqa-official">LingoQA (official, GDrive local cache)</option></select>
-        <label style="margin-top:10px;">Custom GDrive URL (future)</label>
-        <input id="benchCustomGDrive" disabled placeholder="https://drive.google.com/drive/folders/... (coming soon)" />
-        <label style="margin-top:10px;">Custom Hugging Face dataset (future)</label>
-        <input id="benchCustomHF" disabled placeholder="owner/dataset (coming soon)" />
-        <p class="hint" id="benchDatasetStatus">Probing dataset...</p>
+    <!-- Drop-zone layout: 2 inputs + 1 primary button. Power-user knobs moved
+         into the collapsible Advanced panel below; everything still works. -->
+    <div id="benchLastRunTile" class="bench-lastrun" style="display:none;">
+      <span id="benchLastRunText">Last run: --</span>
+      <span class="bench-lastrun-actions">
+        <a id="benchLastRunReport" class="bench-ghost-link" href="#" target="_blank">Open Report</a>
+        <button id="benchLastRunRerun" class="bench-ghost-btn">Re-run</button>
+      </span>
+    </div>
+
+    <div class="bench-dropzone">
+      <div class="bench-dropzone-row">
+        <input id="benchUrlInput" class="bench-url-input"
+               placeholder="Paste a benchmark URL — HuggingFace dataset, Arxiv paper, GitHub repo, or GDrive folder (or just type &quot;lingoqa&quot;)"
+               autocomplete="off" spellcheck="false" />
+        <span id="benchUrlChip" class="bench-chip" style="display:none;"></span>
       </div>
-      <div class="bench-card">
-        <h3>Eval Method</h3>
-        <label>Judge</label>
-        <select id="benchJudge"><option value="lingo-judge">Lingo-Judge (DeBERTa-v3-base, Wayve)</option></select>
-        <p class="hint" id="benchJudgeStatus">Probing judge...</p>
+      <div class="bench-dropzone-row">
+        <select id="benchModelSelect" class="bench-model-select">
+          <option value="">Loading models...</option>
+        </select>
       </div>
-      <div class="bench-card">
-        <h3>Model (auto-detected)</h3>
-        <label>Served model id</label>
-        <input id="benchModel" readonly value="probing /v1/models..." />
-        <p class="hint">Auto-detected from the live NIM /v1/models endpoint. Never hardcoded.</p>
-        <details><summary>Run Anywhere shape (build.nvidia.com canonical)</summary>
-        <pre class="bench-shape">POST /v1/chat/completions
+      <div class="bench-dropzone-row">
+        <button id="benchRunBtn" class="bench-primary-btn">▶ Run Benchmark</button>
+      </div>
+      <div class="bench-dropzone-row bench-ghost-row">
+        <button id="benchRerunLastBtn" class="bench-ghost-btn" disabled>↻ Re-run last</button>
+        <button id="benchToggleAdvBtn" class="bench-ghost-btn" aria-expanded="false">⚙ Advanced</button>
+        <button id="benchToggleHistBtn" class="bench-ghost-btn" aria-expanded="false">≡ Run history</button>
+      </div>
+      <p class="bench-dropzone-status hint" id="benchDropzoneStatus"></p>
+    </div>
+
+    <!-- Advanced panel: the prior 5-knob form. Collapsed by default. -->
+    <div id="benchAdvanced" class="bench-advanced" style="display:none;">
+      <div class="bench-grid">
+        <div class="bench-card">
+          <h3>Dataset</h3>
+          <label>Source</label>
+          <select id="benchDataset"><option value="lingoqa-official">LingoQA (official, GDrive local cache)</option></select>
+          <label style="margin-top:10px;">Resolved from URL</label>
+          <input id="benchResolvedSource" readonly value="" placeholder="(set automatically when you paste a URL above)" />
+          <p class="hint" id="benchDatasetStatus">Probing dataset...</p>
+        </div>
+        <div class="bench-card">
+          <h3>Eval Method</h3>
+          <label>Judge</label>
+          <select id="benchJudge"><option value="lingo-judge">Lingo-Judge (DeBERTa-v3-base, Wayve)</option></select>
+          <p class="hint" id="benchJudgeStatus">Probing judge...</p>
+        </div>
+        <div class="bench-card">
+          <h3>Model (auto-detected)</h3>
+          <label>Served model id</label>
+          <input id="benchModel" readonly value="probing /v1/models..." />
+          <p class="hint">Auto-detected from the live NIM /v1/models endpoint. Never hardcoded.</p>
+          <details><summary>Run Anywhere shape (build.nvidia.com canonical)</summary>
+          <pre class="bench-shape">POST /v1/chat/completions
 {
   "model": "&lt;served_id&gt;",
   "messages": [{
@@ -5013,20 +5806,29 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   }]
   /* NO max_tokens, NO temperature, NO top_p — Alex standing order */
 }</pre></details>
-      </div>
-      <div class="bench-card">
-        <h3>Run Configuration</h3>
-        <label>Sample size: <span id="benchSampleSizeVal">1000</span></label>
-        <input id="benchSampleSize" type="range" min="10" max="1000" step="10" value="1000" />
-        <label style="margin-top:10px;">Concurrency: <span id="benchConcurrencyVal">8</span></label>
-        <input id="benchConcurrency" type="range" min="1" max="16" step="1" value="8" />
-        <label style="margin-top:10px;">Seed: <span id="benchSeedVal">42</span></label>
-        <input id="benchSeed" type="number" value="42" style="font:inherit;" />
-        <div class="actions" style="margin-top:14px;">
-          <button id="benchRunBtn" style="background:#76B900;">RUN BENCHMARK</button>
-          <button class="secondary" id="benchSmokeBtn">Smoke (5 rows)</button>
+        </div>
+        <div class="bench-card">
+          <h3>Run Configuration</h3>
+          <label>Sample size: <span id="benchSampleSizeVal">1000</span></label>
+          <input id="benchSampleSize" type="range" min="10" max="1000" step="10" value="1000" />
+          <label style="margin-top:10px;">Concurrency: <span id="benchConcurrencyVal">8</span></label>
+          <input id="benchConcurrency" type="range" min="1" max="16" step="1" value="8" />
+          <label style="margin-top:10px;">Seed: <span id="benchSeedVal">42</span></label>
+          <input id="benchSeed" type="number" value="42" style="font:inherit;" />
+          <div class="actions" style="margin-top:14px;">
+            <button class="secondary" id="benchSmokeBtn">Smoke (5 rows)</button>
+          </div>
         </div>
       </div>
+    </div>
+
+    <!-- Run history modal: last 20 runs, persistent on disk. -->
+    <div id="benchHistoryPanel" class="bench-history" style="display:none;">
+      <div class="bench-history-head">
+        <h3>Run history</h3>
+        <span class="hint">Last 20 runs · click any row to re-run with the same params</span>
+      </div>
+      <div id="benchHistoryRows" class="bench-history-rows"></div>
     </div>
 
     <div class="bench-section">
@@ -5276,7 +6078,10 @@ function benchSwitchTab(name){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
   document.getElementById('basicPane').classList.toggle('active', name==='basic');
   document.getElementById('benchmarkPane').classList.toggle('active', name==='benchmark');
-  if(name==='benchmark'){ benchProbeDataset(); benchProbeJudge(); benchProbeModel(); }
+  if(name==='benchmark'){
+    benchProbeDataset(); benchProbeJudge(); benchProbeModel();
+    benchLoadModels(); benchLoadHistory();
+  }
 }
 document.querySelectorAll('.tab-btn').forEach(b=>{ b.onclick = ()=>benchSwitchTab(b.dataset.tab); });
 
@@ -5410,13 +6215,250 @@ async function benchStart(sample_size){
     benchPoll();
   }catch(e){ alert(e.message); }
 }
-document.getElementById('benchRunBtn').onclick = ()=>benchStart();
 document.getElementById('benchSmokeBtn').onclick = ()=>benchStart(5);
 ['benchSampleSize','benchConcurrency','benchSeed'].forEach(id=>{
   const s = document.getElementById(id); if(!s) return;
   const vid = id+'Val'; const v = document.getElementById(vid);
   if(v){ s.oninput = ()=>{ v.textContent = s.value; }; }
 });
+
+// ====================================================================
+// Drop-zone Benchmark View — URL resolve, models, history, last-run tile.
+// One large URL input + one model dropdown + one big Run button.
+// Power-user knobs live behind "⚙ Advanced" (unchanged 5-knob form).
+// ====================================================================
+let benchUrlResolution = null;       // {kind, dataset_config, display, ...}
+let benchHistoryCache = [];          // raw array from /benchmark/history
+let benchUrlDebounce = null;
+
+function benchSetChip(text, kind){
+  const chip = el('benchUrlChip');
+  if(!text){ chip.style.display='none'; chip.textContent=''; return; }
+  chip.style.display = 'inline-block';
+  chip.textContent = text;
+  chip.classList.toggle('unknown', kind === 'unknown');
+}
+
+async function benchResolveUrl(raw){
+  const url = (raw||'').trim();
+  if(!url){
+    benchUrlResolution = null;
+    benchSetChip('', null);
+    el('benchDropzoneStatus').textContent = '';
+    const r = el('benchResolvedSource'); if(r) r.value = '';
+    return;
+  }
+  try{
+    const resp = await fetch('/benchmark/resolve_url?url='+encodeURIComponent(url));
+    const j = await resp.json();
+    benchUrlResolution = j;
+    const kind = j.kind || 'unknown';
+    if(kind === 'lingoqa'){
+      benchSetChip('✓ LingoQA detected (local cache)', kind);
+    } else if(kind === 'hf_dataset'){
+      benchSetChip('✓ HuggingFace dataset detected', kind);
+    } else if(kind === 'arxiv'){
+      benchSetChip('✓ Arxiv paper detected', kind);
+    } else if(kind === 'github'){
+      benchSetChip('✓ GitHub repo detected', kind);
+    } else if(kind === 'gdrive'){
+      benchSetChip('✓ GDrive folder detected', kind);
+    } else {
+      benchSetChip('? Unknown URL kind', 'unknown');
+    }
+    el('benchDropzoneStatus').textContent = j.display || '';
+    const r = el('benchResolvedSource');
+    if(r){
+      const cfg = j.dataset_config || {};
+      r.value = cfg.id ? (cfg.id + (cfg.ready ? ' [ready]' : '')) : '';
+    }
+    // If we resolved to lingoqa, mirror to the hidden Dataset select so the
+    // existing /benchmark/run pipeline keeps working unchanged.
+    if(kind === 'lingoqa'){
+      const ds = el('benchDataset'); if(ds) ds.value = 'lingoqa-official';
+    }
+  }catch(e){
+    benchSetChip('? resolve failed', 'unknown');
+    el('benchDropzoneStatus').textContent = 'Resolve failed: '+e.message;
+  }
+}
+
+async function benchLoadModels(){
+  const sel = el('benchModelSelect');
+  try{
+    const r = await fetch('/benchmark/available_models');
+    const list = await r.json();
+    if(!Array.isArray(list) || list.length===0){
+      sel.innerHTML = '<option value="">(no models available)</option>';
+      return;
+    }
+    // Default to nvidia/Cosmos3-Super-Reasoner when present, else first entry.
+    const def = list.find(m => (m.id||'').includes('Cosmos3-Super-Reasoner')) || list[0];
+    sel.innerHTML = list.map(m=>{
+      const id = m.id||'';
+      const host = m.host||'';
+      const status = m.status||'ready';
+      const label = id + (host ? ' — '+host : '') + ' — '+status;
+      const selected = (m === def) ? ' selected' : '';
+      return `<option value="${esc(id)}"${selected}>${esc(label)}</option>`;
+    }).join('');
+  }catch(e){
+    sel.innerHTML = `<option value="">(error: ${esc(e.message)})</option>`;
+  }
+}
+
+function benchFmtAgo(epoch){
+  if(!epoch) return '';
+  const ageSec = Math.max(0, (Date.now()/1000) - Number(epoch));
+  if(ageSec < 60) return Math.round(ageSec)+'s ago';
+  if(ageSec < 3600) return Math.round(ageSec/60)+'m ago';
+  if(ageSec < 86400) return (ageSec/3600).toFixed(1)+'h ago';
+  return Math.round(ageSec/86400)+'d ago';
+}
+
+function benchFmtDataset(d){
+  d = String(d||'');
+  if(d === 'lingoqa-official') return 'LingoQA';
+  return d;
+}
+
+async function benchLoadHistory(){
+  try{
+    const r = await fetch('/benchmark/history');
+    const list = await r.json();
+    benchHistoryCache = Array.isArray(list) ? list : [];
+    benchRenderHistory();
+    benchRenderLastRunTile();
+  }catch(e){
+    benchHistoryCache = [];
+    benchRenderHistory();
+    benchRenderLastRunTile();
+  }
+}
+
+function benchRenderLastRunTile(){
+  const tile = el('benchLastRunTile');
+  const rerunLast = el('benchRerunLastBtn');
+  if(!benchHistoryCache.length){
+    tile.style.display = 'none';
+    if(rerunLast) rerunLast.disabled = true;
+    return;
+  }
+  const last = benchHistoryCache[benchHistoryCache.length - 1];
+  const acc = (last.accuracy!=null) ? (Number(last.accuracy)*100).toFixed(1)+'%' : '--';
+  const ds = benchFmtDataset(last.dataset);
+  const ago = benchFmtAgo(last.epoch);
+  el('benchLastRunText').textContent = `Last run: ${acc} on ${ds} (${ago})`;
+  const link = el('benchLastRunReport');
+  link.href = last.report_url || ('/benchmark/report/'+last.run_id);
+  link.textContent = 'Open Report';
+  tile.style.display = 'flex';
+  if(rerunLast) rerunLast.disabled = false;
+}
+
+function benchRenderHistory(){
+  const rows = el('benchHistoryRows');
+  if(!benchHistoryCache.length){
+    rows.innerHTML = '<div class="bench-history-empty">No runs yet. Hit Run Benchmark above to start your first.</div>';
+    return;
+  }
+  const ordered = benchHistoryCache.slice().reverse();
+  rows.innerHTML = ordered.map(h=>{
+    const acc = (h.accuracy!=null) ? (Number(h.accuracy)*100).toFixed(1)+'%' : '--';
+    const ds = benchFmtDataset(h.dataset);
+    const when = h.timestamp || benchFmtAgo(h.epoch);
+    const model = h.model || '';
+    return `<div class="bench-history-row" data-rid="${esc(h.run_id)}">
+      <div title="${esc(h.run_id)}">${esc(when)}</div>
+      <div title="${esc(model)}">${esc(model)}</div>
+      <div>${esc(ds)}</div>
+      <div class="acc">${acc}</div>
+      <div class="actions">
+        <a class="bench-ghost-link" href="${esc(h.report_url||('/benchmark/report/'+h.run_id))}" target="_blank" onclick="event.stopPropagation();">Open Report</a>
+        <button class="bench-ghost-btn" data-rerun="${esc(h.run_id)}" onclick="event.stopPropagation(); benchRerunById('${esc(h.run_id)}');">Re-run</button>
+      </div>
+    </div>`;
+  }).join('');
+  rows.querySelectorAll('.bench-history-row').forEach(row=>{
+    row.addEventListener('click', ()=>benchRerunById(row.dataset.rid));
+  });
+}
+
+async function benchRerunById(runId){
+  if(!runId) return;
+  try{
+    const resp = await fetch('/benchmark/rerun/'+encodeURIComponent(runId), {method:'POST'});
+    const j = await resp.json();
+    if(j.error){ alert(j.error); return; }
+    benchRunId = j.run_id;
+    el('benchAccuracy').textContent = '--';
+    el('benchBar').style.width = '0%';
+    if(benchPollTimer) clearInterval(benchPollTimer);
+    benchPollTimer = setInterval(benchPoll, 1500);
+    benchPoll();
+  }catch(e){ alert(e.message); }
+}
+
+// Wire the drop-zone primary button + URL detection + ghost buttons.
+const benchUrlInputEl = document.getElementById('benchUrlInput');
+if(benchUrlInputEl){
+  benchUrlInputEl.addEventListener('input', (e)=>{
+    if(benchUrlDebounce) clearTimeout(benchUrlDebounce);
+    benchUrlDebounce = setTimeout(()=>benchResolveUrl(e.target.value), 200);
+  });
+  benchUrlInputEl.addEventListener('paste', (e)=>{
+    setTimeout(()=>benchResolveUrl(benchUrlInputEl.value), 50);
+  });
+}
+document.getElementById('benchRunBtn').onclick = async function(){
+  // If the user typed a URL, ensure we've resolved it; if unknown, warn.
+  const urlVal = (el('benchUrlInput').value||'').trim();
+  if(urlVal && (!benchUrlResolution || benchUrlResolution.kind === 'unknown')){
+    await benchResolveUrl(urlVal);
+    if(benchUrlResolution && benchUrlResolution.kind === 'unknown'){
+      if(!confirm('URL kind unknown — run with the cached LingoQA dataset anyway?')) return;
+    }
+  }
+  // Sync the selected model into the hidden auto-detected field so existing
+  // /benchmark/run flow keeps using auto-detection on the local NIM. Multi-NIM
+  // dispatch is a future hop; for now we surface the choice in the UI.
+  benchStart();
+};
+const benchRerunLastBtn = document.getElementById('benchRerunLastBtn');
+if(benchRerunLastBtn){
+  benchRerunLastBtn.onclick = ()=>{
+    if(!benchHistoryCache.length){ alert('No prior runs to re-run.'); return; }
+    const last = benchHistoryCache[benchHistoryCache.length - 1];
+    benchRerunById(last.run_id);
+  };
+}
+const benchLastRunRerunBtn = document.getElementById('benchLastRunRerun');
+if(benchLastRunRerunBtn){
+  benchLastRunRerunBtn.onclick = ()=>{
+    if(!benchHistoryCache.length) return;
+    const last = benchHistoryCache[benchHistoryCache.length - 1];
+    benchRerunById(last.run_id);
+  };
+}
+const benchToggleAdvBtn = document.getElementById('benchToggleAdvBtn');
+if(benchToggleAdvBtn){
+  benchToggleAdvBtn.onclick = ()=>{
+    const panel = el('benchAdvanced');
+    const open = panel.style.display !== 'none';
+    panel.style.display = open ? 'none' : 'block';
+    benchToggleAdvBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  };
+}
+const benchToggleHistBtn = document.getElementById('benchToggleHistBtn');
+if(benchToggleHistBtn){
+  benchToggleHistBtn.onclick = ()=>{
+    const panel = el('benchHistoryPanel');
+    const open = panel.style.display !== 'none';
+    if(!open) benchLoadHistory();
+    panel.style.display = open ? 'none' : 'block';
+    benchToggleHistBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  };
+}
 </script>
 </body>
 </html>
@@ -5471,6 +6513,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"model": model, "base_url": benchmark_nim_base_url()})
             except Exception as exc:
                 self.send_json({"model": None, "error": str(exc), "base_url": benchmark_nim_base_url()})
+        elif self.path.startswith("/benchmark/resolve_url"):
+            qs = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(qs)
+            url_arg = (params.get("url") or [""])[0]
+            try:
+                self.send_json(_resolve_url_to_dataset(url_arg))
+            except Exception as exc:
+                self.send_json({"kind": "unknown", "url": url_arg, "error": str(exc), "display": f"Resolve failed: {exc}"})
+        elif self.path == "/benchmark/available_models":
+            try:
+                self.send_json(_benchmark_available_models())
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
+        elif self.path == "/benchmark/history":
+            try:
+                self.send_json(_benchmark_history_load())
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
         elif self.path.startswith("/benchmark/status/"):
             run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
             snap = benchmark_get(run_id)
@@ -5499,6 +6559,56 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             self.send_text(benchmark_render_report(run_id), "text/html")
+        elif self.path.startswith("/benchmark/artifact/"):
+            # /benchmark/artifact/<run_id>/<model_safe>/<question_id>/<filename>
+            tail = urllib.parse.urlparse(self.path).path[len("/benchmark/artifact/"):]
+            parts = [urllib.parse.unquote(p) for p in tail.split("/") if p]
+            if len(parts) != 4:
+                self.send_error(404)
+                return
+            run_id, model_safe, qid, fname = parts
+            # Defensive: filename whitelist only.
+            if fname not in ("frame_strip.png", "frame_gif.gif", "ui_card.png", "reasoning.png"):
+                self.send_error(404)
+                return
+            safe_model = _safe_model_dir(model_safe)
+            artifact = TRACEABILITY_ROOT / run_id / safe_model / qid / fname
+            # Resolve and sandbox under TRACEABILITY_ROOT to avoid path traversal.
+            try:
+                resolved = artifact.resolve()
+                root_resolved = TRACEABILITY_ROOT.resolve()
+                if root_resolved not in resolved.parents and resolved != root_resolved:
+                    self.send_error(404)
+                    return
+            except Exception:
+                self.send_error(404)
+                return
+            if not resolved.exists():
+                self.send_error(404)
+                return
+            ctype = "image/gif" if fname.endswith(".gif") else "image/png"
+            self.send_file(resolved, ctype)
+        elif self.path.startswith("/lingoqa-frames/"):
+            # /lingoqa-frames/<segment_id>/<idx>.jpg — click-to-enlarge support.
+            tail = urllib.parse.urlparse(self.path).path[len("/lingoqa-frames/"):]
+            parts = [urllib.parse.unquote(p) for p in tail.split("/") if p]
+            if len(parts) != 2 or not parts[1].endswith(".jpg"):
+                self.send_error(404)
+                return
+            segment_id = parts[0]
+            try:
+                idx = int(parts[1][:-4])
+            except ValueError:
+                self.send_error(404)
+                return
+            if not re.match(r"^[A-Za-z0-9_-]+$", segment_id) or idx < 0 or idx > 99:
+                self.send_error(404)
+                return
+            src = _resolve_segment_image(None, segment_id, idx)
+            if src is None or not src.exists():
+                self.send_error(404)
+                return
+            self.send_file(src, "image/jpeg")
         elif self.path.startswith("/benchmark/stream/"):
             # Keepalive SSE stream for the live run panel. Emits a comment byte
             # every ~15s + a JSON status snapshot every poll.
@@ -5658,6 +6768,47 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({
                     "ok": True,
                     "run_id": run_id,
+                    "dataset": dataset_id,
+                    "judge": judge_id,
+                    "sample_size": sample_size,
+                    "concurrency": concurrency,
+                    "seed": seed,
+                })
+            elif self.path.startswith("/benchmark/rerun/"):
+                # POST /benchmark/rerun/<run_id> — clone params from history and fire a new run.
+                old_run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+                hist = _benchmark_history_find(old_run_id)
+                if not hist:
+                    self.send_json({"error": f"run_id not in history: {old_run_id}"}, status=404)
+                    return
+                dataset_id = str(hist.get("dataset") or "lingoqa-official")
+                judge_id = str(hist.get("judge") or "lingo-judge")
+                sample_size = int(hist.get("sample_size") or 1000)
+                concurrency = int(hist.get("concurrency") or 8)
+                seed = int(hist.get("seed") or 42)
+                new_run_id = f"lingoqa-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+                _benchmark_update(
+                    new_run_id,
+                    status="queued",
+                    dataset=dataset_id,
+                    judge=judge_id,
+                    sample_size=sample_size,
+                    concurrency=concurrency,
+                    seed=seed,
+                    results=[],
+                    progress={"done": 0, "total": 0, "errors": 0},
+                    rerun_of=old_run_id,
+                )
+                thread = threading.Thread(
+                    target=run_lingoqa_benchmark,
+                    args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed),
+                    daemon=True,
+                )
+                thread.start()
+                self.send_json({
+                    "ok": True,
+                    "run_id": new_run_id,
+                    "rerun_of": old_run_id,
                     "dataset": dataset_id,
                     "judge": judge_id,
                     "sample_size": sample_size,
