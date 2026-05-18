@@ -1151,6 +1151,14 @@ ALPAMAYO_PROMPT = (
     "immediate ego-vehicle behavior. If the clip is not a driving scene, caption "
     "the visible activity instead."
 )
+ALPAMAYO_LINGOQA_SYSTEM = (
+    "You are Alpamayo 1.5 analyzing a LingoQA ego-camera driving clip. Answer "
+    "the user's driving-scene question from visible evidence in the sampled frames."
+)
+ALPAMAYO_LINGOQA_ACTION_PROMPT = (
+    'What is the current action and its justification? Answer in the form '
+    '"action, justification".'
+)
 _ALPAMAYO_PROMPTS_ACTIVE = (
     INFERENCE_BACKEND == "alpamayo"
     or MODEL_SIZE == "ALPAMAYO"
@@ -1256,7 +1264,7 @@ DEMO_PROMPTS = [
 
 if _ALPAMAYO_PROMPTS_ACTIVE:
     DEMO_PROMPTS = [
-        ("Alpamayo: ego-driving caption", ALPAMAYO_PROMPT, ALPAMAYO_SYSTEM, False),
+        ("Alpamayo default: ego-driving caption", ALPAMAYO_PROMPT, ALPAMAYO_SYSTEM, False),
         ("Alpamayo: next ego action",
          "From the ego camera view, what is the next immediate action the ego vehicle should take? "
          "Briefly cite the visible road context, hazards, and traffic actors that support the answer.",
@@ -1265,7 +1273,22 @@ if _ALPAMAYO_PROMPTS_ACTIVE:
          "Describe the driving scene and identify any visible hazards or interactions that could affect the ego vehicle. "
          "Then state the likely intent or next motion of the ego vehicle.",
          ALPAMAYO_SYSTEM, False),
-    ] + DEMO_PROMPTS
+        ("LingoQA: slow for red light",
+         ALPAMAYO_LINGOQA_ACTION_PROMPT,
+         ALPAMAYO_LINGOQA_SYSTEM, False),
+        ("LingoQA: return left after truck",
+         ALPAMAYO_LINGOQA_ACTION_PROMPT,
+         ALPAMAYO_LINGOQA_SYSTEM, False),
+        ("LingoQA: accelerate on green",
+         ALPAMAYO_LINGOQA_ACTION_PROMPT,
+         ALPAMAYO_LINGOQA_SYSTEM, False),
+        ("LingoQA: no dedicated cycle lane",
+         "Is there a designated cycle lane on this road? If yes, where is it?",
+         ALPAMAYO_LINGOQA_SYSTEM, False),
+        ("LingoQA: no traffic lights",
+         "Are there any traffic lights? What color are they showing?",
+         ALPAMAYO_LINGOQA_SYSTEM, False),
+    ]
 
 
 def _checkpoint_uses_alpamayo_prompts(label=""):

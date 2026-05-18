@@ -177,6 +177,7 @@ export function buildReasoningPayload({
   const baseUrl = resolveBaseUrl();
   const p = params || {};
   const selectedModel = model || configuredModel();
+  const inferenceBackend = String(process.env.INFERENCE_BACKEND || "").toLowerCase();
   const content = mediaContent({ mediaDataUrl, mediaKind, mediaFrames, framesPerSecond, prompt });
 
   const messages = [];
@@ -192,11 +193,14 @@ export function buildReasoningPayload({
     presence_penalty: Number.isFinite(Number(p.presence_penalty)) ? Number(p.presence_penalty) : undefined
   };
 
-  // Keep parity with the Gradio C3/vLLM path: it exposes these controls in
-  // the UI, but the OpenAI-compatible request intentionally omits them. The
-  // server's model length governs the completion, and frame sampling happens
-  // before the request when the backend needs image-frame fallback.
-  if (process.env.REASONER_SEND_MAX_TOKENS === "1" && Number.isFinite(Number(p.max_tokens))) {
+  // Keep parity with the Gradio C3/vLLM path by default: it exposes this
+  // control in the UI, but most OpenAI-compatible services can govern the cap
+  // themselves. Alpamayo is local generation, so honoring max_tokens is the
+  // fastest user-visible way to reduce full-response latency.
+  if (
+    (inferenceBackend === "alpamayo" || process.env.REASONER_SEND_MAX_TOKENS === "1") &&
+    Number.isFinite(Number(p.max_tokens))
+  ) {
     payload.max_tokens = Number(p.max_tokens);
   }
   if (process.env.REASONER_SEND_TOP_K === "1" && Number.isFinite(Number(p.top_k))) {

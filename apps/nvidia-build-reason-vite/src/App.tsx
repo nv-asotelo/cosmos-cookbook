@@ -200,7 +200,16 @@ type ApiResult = {
   raw?: unknown;
 };
 
-type StreamPhase = "idle" | "waiting_first_token" | "reasoning" | "answer" | "complete" | "error" | "stopped";
+type StreamPhase =
+  | "idle"
+  | "preparing_media"
+  | "alpamayo_generating"
+  | "waiting_first_token"
+  | "reasoning"
+  | "answer"
+  | "complete"
+  | "error"
+  | "stopped";
 
 type StreamState = {
   phase: StreamPhase;
@@ -643,6 +652,8 @@ function drainSseEvents(buffer: string) {
 }
 
 function statusForPhase(phase: StreamPhase) {
+  if (phase === "preparing_media") return "Preparing media";
+  if (phase === "alpamayo_generating") return "Generating Alpamayo response";
   if (phase === "waiting_first_token") return "Waiting for first token";
   if (phase === "reasoning") return "Streaming reasoning";
   if (phase === "answer") return "Streaming response";

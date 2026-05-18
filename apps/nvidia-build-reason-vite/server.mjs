@@ -916,7 +916,18 @@ app.post("/api/reason/stream", async (request, response) => {
   sse(response, "state", { phase: "waiting_first_token" });
 
   try {
+    if (isAlpamayoBackend) sse(response, "state", { phase: "preparing_media" });
     prepared = await prepareReasonRequest(request.body || {});
+    if (isAlpamayoBackend) {
+      sse(response, "state", {
+        phase: "alpamayo_generating",
+        note:
+          "Alpamayo generate_text returns a complete answer rather than token callbacks; Vite uses a non-streaming adapter request for this backend."
+      });
+      const fallback = await submitPreparedReasoning(prepared);
+      emitFallback(response, fallback);
+      return;
+    }
     const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
       model: prepared.selectedModel,
       prompt: prepared.prompt,
