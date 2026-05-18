@@ -4037,6 +4037,10 @@ BENCHMARK_STATE: Dict[str, Any] = {
     "judge_error": None,
     "lingoqa_loaded": False,
     "lingoqa_count": 0,
+    # Datasets the user has resolved via /benchmark/resolve_url this session.
+    # Keyed by dataset_config['id']. Populated by _resolve_url_to_dataset and
+    # surfaced by /benchmark/datasets so the dropdown progressively grows.
+    "resolved_datasets": {},
 }
 BENCHMARK_LOCK = threading.Lock()
 
@@ -4154,6 +4158,340 @@ def group_lingoqa_by_question(samples: List[Dict[str, Any]]) -> List[Dict[str, A
             order.append(qid)
         bucket[qid]["references"].append(s["answer"])
     return [bucket[qid] for qid in order]
+
+
+# =============================================================================
+# Dataset dispatcher — any benchmark URL → canonical row shape.
+#
+# Canonical row (matches group_lingoqa_by_question output):
+#   {question_id, segment_id, question, references: [str, ...],
+#    images: [absolute_path, ...], category}
+#
+# Dispatch by dataset_id prefix:
+#   "lingoqa-official"   → existing on-disk loader (KEPT WORKING)
+#   "hf:owner/name"      → HuggingFace `datasets` library
+#   "hf:owner/name@split"→ same, with split override
+#   "arxiv:NNNN.NNNNN"   → discover paper's HF dataset, then dispatch hf:
+#   "github:owner/repo"  → walk repo for parquet/json data + image dir
+#   "gdrive:FOLDER_ID"   → gdown the folder, then look for parquet + images
+#   "local:/abs/path"    → load a local parquet (advanced)
+# =============================================================================
+
+_HF_DATASETS_CACHE_ROOT = Path("/tmp/hf-datasets")
+
+
+def _safe_dataset_dir_name(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s or "ds"))
+
+
+def _normalize_hf_row(
+    row: Dict[str, Any],
+    row_idx: int,
+    dataset_safe: str,
+    image_cache_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort normalization of an HF dataset row to the canonical shape.
+
+    Returns None if the row lacks a question OR references — we can't judge
+    without ground truth. Image-less rows are allowed (some QA datasets are
+    text-only); run_one_image_qa will simply send a text-only payload.
+    """
+    q = (
+        row.get("question")
+        or row.get("prompt")
+        or row.get("query")
+        or row.get("instruction")
+        or ""
+    )
+    if isinstance(q, (list, tuple)) and q:
+        q = q[0]
+    q = str(q).strip()
+    if not q:
+        return None
+
+    refs_raw = (
+        row.get("answer")
+        or row.get("answers")
+        or row.get("references")
+        or row.get("response")
+        or row.get("responses")
+        or row.get("output")
+    )
+    if isinstance(refs_raw, str):
+        refs = [refs_raw]
+    elif isinstance(refs_raw, (list, tuple)):
+        refs = [str(r) for r in refs_raw if r is not None and str(r).strip()]
+    elif refs_raw is None:
+        refs = []
+    else:
+        refs = [str(refs_raw)]
+    refs = [r for r in refs if r.strip()]
+    if not refs:
+        return None
+
+    images_raw = (
+        row.get("images")
+        or row.get("image")
+        or row.get("frames")
+        or row.get("image_paths")
+        or []
+    )
+    if not isinstance(images_raw, (list, tuple)):
+        images_raw = [images_raw]
+    image_paths: List[str] = []
+    for i, img in enumerate(images_raw):
+        if img is None:
+            continue
+        # PIL.Image-like (has .save and .convert)
+        if hasattr(img, "save") and hasattr(img, "convert"):
+            out = image_cache_dir / dataset_safe / f"{row_idx}" / f"{i}.jpg"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if not out.exists():
+                try:
+                    img.convert("RGB").save(out, "JPEG", quality=88)
+                except Exception:
+                    continue
+            image_paths.append(str(out))
+        elif isinstance(img, str):
+            if img.strip():
+                image_paths.append(img)
+        elif isinstance(img, dict):
+            p = img.get("path") or img.get("bytes_path") or img.get("filename")
+            if p:
+                image_paths.append(str(p))
+
+    qid = (
+        row.get("question_id")
+        or row.get("id")
+        or row.get("uid")
+        or f"{dataset_safe}-{row_idx}"
+    )
+    segment_id = (
+        row.get("segment_id")
+        or row.get("video_id")
+        or row.get("clip_id")
+        or ""
+    )
+    category = (
+        row.get("category")
+        or row.get("competence")
+        or row.get("tag")
+        or row.get("type")
+        or "uncategorized"
+    )
+    return {
+        "question_id": str(qid),
+        "segment_id": str(segment_id),
+        "question": q,
+        "references": refs,
+        "images": image_paths,
+        "category": str(category),
+    }
+
+
+def _load_hf_dataset(repo: str, split: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Load a HuggingFace dataset and return canonical rows.
+
+    Imports `datasets` lazily so the rest of the file (LingoQA path, NIM
+    serving, FiftyOne) stays importable on hosts without it.
+    """
+    # Special-case: if the user pasted a URL or repo id that points at the
+    # LingoQA dataset and we have the local GDrive cache available, use it.
+    # This keeps the smoke test fast and avoids hitting HF for a dataset we
+    # already have on disk.
+    if _LINGOQA_HF_RE.search(repo) and _lingoqa_dataset_dir() is not None:
+        log(f"[dataset hf:{repo}] short-circuit → on-disk LingoQA cache")
+        return group_lingoqa_by_question(load_lingoqa())
+
+    try:
+        from datasets import load_dataset  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            f"`datasets` library not installed. pip install datasets (got: {exc})"
+        ) from exc
+
+    use_split = split or "test"
+    log(f"[dataset hf:{repo}] load_dataset(split={use_split!r})")
+    try:
+        ds = load_dataset(repo, split=use_split, trust_remote_code=False)
+    except Exception as exc:
+        # Fallback splits — many datasets only have 'train' or 'validation'.
+        last_exc = exc
+        for fallback in ("validation", "val", "train"):
+            if fallback == use_split:
+                continue
+            try:
+                log(f"[dataset hf:{repo}] split={use_split!r} failed, trying {fallback!r}")
+                ds = load_dataset(repo, split=fallback, trust_remote_code=False)
+                use_split = fallback
+                last_exc = None
+                break
+            except Exception as exc2:
+                last_exc = exc2
+                continue
+        if last_exc is not None:
+            raise RuntimeError(f"HF load_dataset failed for {repo}: {last_exc}") from last_exc
+
+    safe = _safe_dataset_dir_name(repo)
+    image_cache_dir = _HF_DATASETS_CACHE_ROOT
+    image_cache_dir.mkdir(parents=True, exist_ok=True)
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(ds):
+        try:
+            normalized = _normalize_hf_row(dict(row), idx, safe, image_cache_dir)
+        except Exception as exc:
+            log(f"[dataset hf:{repo}] row {idx} normalize failed: {exc}")
+            continue
+        if normalized is not None:
+            out.append(normalized)
+    log(f"[dataset hf:{repo}] normalized {len(out)} rows from split={use_split!r}")
+    return out
+
+
+def _load_local_parquet(path: str) -> List[Dict[str, Any]]:
+    """Load an arbitrary local parquet and normalize each row."""
+    try:
+        import pyarrow.parquet as pq
+    except Exception as exc:
+        raise RuntimeError(f"pyarrow required to read local parquet: {exc}") from exc
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"local parquet not found: {p}")
+    table = pq.read_table(p)
+    rows = table.to_pylist()
+    safe = _safe_dataset_dir_name(p.stem)
+    image_cache_dir = _HF_DATASETS_CACHE_ROOT
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        try:
+            normalized = _normalize_hf_row(row, idx, safe, image_cache_dir)
+        except Exception:
+            continue
+        if normalized is not None:
+            out.append(normalized)
+    return out
+
+
+def _load_github_dataset(repo: str) -> List[Dict[str, Any]]:
+    """Walk a github repo's data/ or eval/ subdir for parquet files.
+
+    Best-effort: clones via `git clone --depth 1`. First parquet whose rows
+    normalize cleanly wins.
+    """
+    branch = None
+    if "@" in repo:
+        repo, branch = repo.split("@", 1)
+    safe = _safe_dataset_dir_name(repo.replace("/", "__"))
+    cache = Path("/tmp/github-datasets") / safe
+    cache.mkdir(parents=True, exist_ok=True)
+    repo_dir = cache / "repo"
+    if not repo_dir.exists():
+        url = f"https://github.com/{repo}.git"
+        cmd = ["git", "clone", "--depth", "1"]
+        if branch:
+            cmd += ["-b", branch]
+        cmd += [url, str(repo_dir)]
+        log(f"[dataset github:{repo}] clone: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"git clone failed: {result.stderr[:400]}")
+    # Find a parquet candidate.
+    candidates: List[Path] = []
+    for sub in ("data", "eval", "evaluation", "datasets"):
+        d = repo_dir / sub
+        if d.exists():
+            candidates.extend(sorted(d.rglob("*.parquet")))
+    if not candidates:
+        candidates = sorted(repo_dir.rglob("*.parquet"))
+    for parquet in candidates:
+        try:
+            rows = _load_local_parquet(str(parquet))
+            if rows:
+                log(f"[dataset github:{repo}] using {parquet} ({len(rows)} rows)")
+                return rows
+        except Exception as exc:
+            log(f"[dataset github:{repo}] {parquet} unusable: {exc}")
+            continue
+    return []
+
+
+def _load_gdrive_dataset(folder_id: str) -> List[Dict[str, Any]]:
+    """Pull a GDrive folder with gdown and walk for parquet files."""
+    safe = _safe_dataset_dir_name(folder_id)
+    cache = Path("/tmp/gdrive-cache") / safe
+    cache.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["gdown", "--folder", folder_id, "-O", str(cache)],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"gdown not installed: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"gdown failed: {exc.stderr[:400]}") from exc
+    for parquet in sorted(cache.rglob("*.parquet")):
+        try:
+            rows = _load_local_parquet(str(parquet))
+            if rows:
+                return rows
+        except Exception:
+            continue
+    return []
+
+
+def load_dataset_by_id(
+    dataset_id: str,
+    source_config: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Dispatch any benchmark dataset_id to its loader.
+
+    Returns rows in the same shape as group_lingoqa_by_question(load_lingoqa()).
+    Raises RuntimeError on unknown prefixes (preserves the existing error
+    surface for true unknowns).
+    """
+    ds = str(dataset_id or "").strip()
+    if not ds:
+        raise RuntimeError("empty dataset_id")
+
+    if ds == "lingoqa-official":
+        return group_lingoqa_by_question(load_lingoqa())
+
+    if ds.startswith("hf:"):
+        spec = ds[3:]
+        split: Optional[str] = None
+        if "@" in spec:
+            spec, split = spec.split("@", 1)
+        return _load_hf_dataset(spec, split=split)
+
+    if ds.startswith("arxiv:"):
+        arxiv_id = ds[len("arxiv:"):]
+        url = f"https://arxiv.org/abs/{arxiv_id}"
+        if "discover_paper_source" not in globals():
+            raise RuntimeError("discover_paper_source helper not available")
+        try:
+            discovery = globals()["discover_paper_source"](url, require_dataset=True) or {}
+        except Exception as exc:
+            raise RuntimeError(f"arxiv discovery failed for {arxiv_id}: {exc}") from exc
+        hf_repo = discovery.get("selected_dataset")
+        if not hf_repo:
+            raise RuntimeError(
+                f"arxiv:{arxiv_id} resolved with no HF dataset link; paste a "
+                f"specific HF dataset URL instead."
+            )
+        log(f"[dataset arxiv:{arxiv_id}] dispatching to hf:{hf_repo}")
+        return _load_hf_dataset(hf_repo)
+
+    if ds.startswith("github:"):
+        spec = ds[len("github:"):]
+        return _load_github_dataset(spec)
+
+    if ds.startswith("gdrive:"):
+        return _load_gdrive_dataset(ds[len("gdrive:"):])
+
+    if ds.startswith("local:"):
+        return _load_local_parquet(ds[len("local:"):])
+
+    raise RuntimeError(f"Unsupported dataset id: {dataset_id}")
 
 
 def _ensure_judge() -> None:
@@ -4400,13 +4738,20 @@ def _resolve_url_kind(url: str) -> Tuple[str, Optional[str]]:
     """Return (kind, identifier) for the given URL/string.
 
     kind ∈ {"hf_dataset", "arxiv", "github", "gdrive", "lingoqa", "unknown"}
+
+    Ordering: real URL regexes (HF/Arxiv/GitHub/GDrive) WIN over the bare
+    "lingoqa" shortcut. This means a paste of
+    https://huggingface.co/datasets/runoob1/lingoqa resolves to
+    ("hf_dataset", "runoob1/lingoqa") and exercises the dispatcher's hf:
+    path. The bare lingoqa shortcut is reserved for the literal string
+    "lingoqa" (zero-keystroke baseline).
     """
     s = (url or "").strip()
     if not s:
         return ("unknown", None)
     low = s.lower()
-    # Canonical shortcut: the word "lingoqa" or any URL pointing at lingoqa.
-    if low == "lingoqa" or _LINGOQA_HF_RE.search(s) or "lingoqa" in low:
+    # Bare keyword shortcut only — typed text, not a URL.
+    if low == "lingoqa":
         return ("lingoqa", "lingoqa-official")
     m = _RE_HF.match(s)
     if m:
@@ -4420,6 +4765,11 @@ def _resolve_url_kind(url: str) -> Tuple[str, Optional[str]]:
     m = _RE_GDRIVE.match(s)
     if m:
         return ("gdrive", m.group(1))
+    # Backstop: only treat as lingoqa if it's a wayveai/lingoqa-style
+    # reference that did NOT match a URL pattern above (e.g. a bare
+    # "wayveai/lingoqa" repo id).
+    if _LINGOQA_HF_RE.search(s):
+        return ("lingoqa", "lingoqa-official")
     return ("unknown", None)
 
 
@@ -4494,6 +4844,23 @@ def _resolve_url_to_dataset(url: str) -> Dict[str, Any]:
     result["dataset_config"] = None
     result["display"] = "Unknown URL kind — paste a HuggingFace dataset, Arxiv paper, GitHub repo, GDrive folder, or type 'lingoqa'."
     return result
+
+
+def _resolve_url_to_dataset_cached(url: str) -> Dict[str, Any]:
+    """Wrap _resolve_url_to_dataset and cache the dataset_config in
+    BENCHMARK_STATE['resolved_datasets'] so /benchmark/datasets can expose
+    the session's accumulated pool to the frontend dropdown."""
+    payload = _resolve_url_to_dataset(url)
+    cfg = (payload or {}).get("dataset_config") or {}
+    ds_id = cfg.get("id")
+    if ds_id:
+        with BENCHMARK_LOCK:
+            BENCHMARK_STATE.setdefault("resolved_datasets", {})[ds_id] = {
+                **cfg,
+                "source_url": url,
+                "resolved_epoch": time.time(),
+            }
+    return payload
 
 
 def _benchmark_available_models() -> List[Dict[str, Any]]:
@@ -4625,8 +4992,14 @@ def run_lingoqa_benchmark(
     sample_size: int,
     concurrency: int,
     seed: int,
+    source_config: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Benchmark worker thread. Mutates BENCHMARK_STATE['runs'][run_id]."""
+    """Benchmark worker thread. Mutates BENCHMARK_STATE['runs'][run_id].
+
+    Despite the historical name, this worker now drives any dataset
+    dispatched by load_dataset_by_id — not just LingoQA. The function name
+    is kept for backwards compatibility with the API handler call site.
+    """
     started = time.time()
     try:
         _benchmark_update(
@@ -4640,10 +5013,12 @@ def run_lingoqa_benchmark(
             status="loading_dataset",
         )
 
-        if dataset_id != "lingoqa-official":
-            raise RuntimeError(f"Unsupported dataset id: {dataset_id}")
-        samples = load_lingoqa()
-        questions = group_lingoqa_by_question(samples)
+        questions = load_dataset_by_id(dataset_id, source_config)
+        if not questions:
+            raise RuntimeError(
+                f"Dataset {dataset_id} loaded but returned 0 rows "
+                "(no questions with question + reference answer)"
+            )
 
         if sample_size and sample_size < len(questions):
             import random as _random
@@ -6199,12 +6574,22 @@ async function benchPoll(){
 
 async function benchStart(sample_size){
   try{
+    // Prefer the most recently resolved dataset if its id matches the dropdown
+    // value (i.e. the user pasted a URL and the resolver filled in the
+    // dropdown). source_config is the dataset_config blob the backend handed
+    // us — we forward it so the dispatcher can use repo_id/path hints.
+    const dsValue = el('benchDataset').value;
+    let source_config = null;
+    if(benchUrlResolution && benchUrlResolution.dataset_config && benchUrlResolution.dataset_config.id === dsValue){
+      source_config = benchUrlResolution.dataset_config;
+    }
     const body = {
-      dataset: el('benchDataset').value,
+      dataset: dsValue,
       judge: el('benchJudge').value,
       sample_size: sample_size!==undefined ? sample_size : Number(el('benchSampleSize').value),
       concurrency: Number(el('benchConcurrency').value),
       seed: Number(el('benchSeed').value),
+      source_config: source_config,
     };
     const j = await api('/benchmark/run', body);
     benchRunId = j.run_id;
@@ -6268,14 +6653,28 @@ async function benchResolveUrl(raw){
     }
     el('benchDropzoneStatus').textContent = j.display || '';
     const r = el('benchResolvedSource');
+    const cfg = j.dataset_config || {};
     if(r){
-      const cfg = j.dataset_config || {};
-      r.value = cfg.id ? (cfg.id + (cfg.ready ? ' [ready]' : '')) : '';
+      r.value = cfg.id ? (cfg.id + (cfg.ready ? ' [ready]' : (cfg.id !== 'lingoqa-official' ? ' [will load on Run]' : ''))) : '';
     }
-    // If we resolved to lingoqa, mirror to the hidden Dataset select so the
-    // existing /benchmark/run pipeline keeps working unchanged.
-    if(kind === 'lingoqa'){
-      const ds = el('benchDataset'); if(ds) ds.value = 'lingoqa-official';
+    // Mirror the resolver's dataset_config.id into the Dataset <select>.
+    // If the option doesn't exist yet (new HF/arxiv/github/gdrive URL),
+    // append it before selecting. This replaces the old hard-coded reset
+    // to 'lingoqa-official', which silently discarded the resolver's work.
+    if(cfg.id){
+      const ds = el('benchDataset');
+      if(ds){
+        let opt = Array.from(ds.options).find(o => o.value === cfg.id);
+        if(!opt){
+          opt = document.createElement('option');
+          opt.value = cfg.id;
+          opt.textContent = (cfg.name || cfg.id) + (cfg.ready ? '' : ' (will download on Run)');
+          ds.appendChild(opt);
+        } else {
+          opt.textContent = (cfg.name || cfg.id) + (cfg.ready ? '' : ' (will download on Run)');
+        }
+        ds.value = cfg.id;
+      }
     }
   }catch(e){
     benchSetChip('? resolve failed', 'unknown');
@@ -6319,6 +6718,11 @@ function benchFmtAgo(epoch){
 function benchFmtDataset(d){
   d = String(d||'');
   if(d === 'lingoqa-official') return 'LingoQA';
+  if(d.startsWith('hf:'))     return 'HF: ' + d.slice(3);
+  if(d.startsWith('arxiv:'))  return 'arXiv ' + d.slice(6);
+  if(d.startsWith('github:')) return 'GitHub: ' + d.slice(7);
+  if(d.startsWith('gdrive:')) return 'GDrive ' + d.slice(7, 15) + '…';
+  if(d.startsWith('local:'))  return 'Local: ' + d.slice(6).split('/').pop();
   return d;
 }
 
@@ -6493,13 +6897,27 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/benchmark/datasets":
             base = _lingoqa_dataset_dir()
             ready = base is not None and (base / "val.parquet").exists()
-            self.send_json([{
+            out_datasets: List[Dict[str, Any]] = [{
                 "id": "lingoqa-official",
                 "name": "LingoQA (1000 rows)",
                 "rows": 1000,
                 "ready": bool(ready),
                 "path": str(base) if base else None,
-            }])
+            }]
+            # Session-resolved datasets — populated by /benchmark/resolve_url.
+            with BENCHMARK_LOCK:
+                resolved = dict(BENCHMARK_STATE.get("resolved_datasets") or {})
+            for ds_id, cfg in resolved.items():
+                if ds_id == "lingoqa-official":
+                    continue
+                out_datasets.append({
+                    "id": ds_id,
+                    "name": cfg.get("name") or ds_id,
+                    "ready": bool(cfg.get("ready")),
+                    "source_url": cfg.get("source_url"),
+                    "resolved_epoch": cfg.get("resolved_epoch"),
+                })
+            self.send_json(out_datasets)
         elif self.path == "/benchmark/judges":
             self.send_json([{
                 "id": "lingo-judge",
@@ -6518,7 +6936,7 @@ class Handler(BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(qs)
             url_arg = (params.get("url") or [""])[0]
             try:
-                self.send_json(_resolve_url_to_dataset(url_arg))
+                self.send_json(_resolve_url_to_dataset_cached(url_arg))
             except Exception as exc:
                 self.send_json({"kind": "unknown", "url": url_arg, "error": str(exc), "display": f"Resolve failed: {exc}"})
         elif self.path == "/benchmark/available_models":
@@ -6747,7 +7165,13 @@ class Handler(BaseHTTPRequestHandler):
                 sample_size = int(payload.get("sample_size") or 1000)
                 concurrency = int(payload.get("concurrency") or 8)
                 seed = int(payload.get("seed") or 42)
-                run_id = f"lingoqa-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+                # source_config is the dataset_config dict the frontend got
+                # back from /benchmark/resolve_url. Forwarded so the loader
+                # can use repo_id, download paths, judge hints, etc.
+                source_config = payload.get("source_config")
+                if not isinstance(source_config, dict):
+                    source_config = None
+                run_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
                 _benchmark_update(
                     run_id,
                     status="queued",
@@ -6756,12 +7180,13 @@ class Handler(BaseHTTPRequestHandler):
                     sample_size=sample_size,
                     concurrency=concurrency,
                     seed=seed,
+                    source_config=source_config,
                     results=[],
                     progress={"done": 0, "total": 0, "errors": 0},
                 )
                 thread = threading.Thread(
                     target=run_lingoqa_benchmark,
-                    args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed),
+                    args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
                     daemon=True,
                 )
                 thread.start()
@@ -6786,7 +7211,14 @@ class Handler(BaseHTTPRequestHandler):
                 sample_size = int(hist.get("sample_size") or 1000)
                 concurrency = int(hist.get("concurrency") or 8)
                 seed = int(hist.get("seed") or 42)
-                new_run_id = f"lingoqa-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+                # Pull source_config from the prior run's live snapshot if
+                # still in memory; falls back to None (loader will look it up
+                # by dataset_id alone).
+                prior_snap = benchmark_get(old_run_id) or {}
+                source_config = prior_snap.get("source_config")
+                if not isinstance(source_config, dict):
+                    source_config = None
+                new_run_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
                 _benchmark_update(
                     new_run_id,
                     status="queued",
@@ -6795,13 +7227,14 @@ class Handler(BaseHTTPRequestHandler):
                     sample_size=sample_size,
                     concurrency=concurrency,
                     seed=seed,
+                    source_config=source_config,
                     results=[],
                     progress={"done": 0, "total": 0, "errors": 0},
                     rerun_of=old_run_id,
                 )
                 thread = threading.Thread(
                     target=run_lingoqa_benchmark,
-                    args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed),
+                    args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
                     daemon=True,
                 )
                 thread.start()
