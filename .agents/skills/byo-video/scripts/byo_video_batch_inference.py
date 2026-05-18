@@ -4555,6 +4555,488 @@ def lingo_judge_score_max(question: str, references: List[str], prediction: str)
     return scores[best], best
 
 
+# =============================================================================
+# Fairness audit — 5-method judge pipeline (Phase K addition)
+#
+# Compares 5 judging methods side-by-side on the SAME predictions:
+#   A. lingo_judge_max128            — OFFICIAL protocol (control). max_length=128.
+#   B. lingo_judge_max512            — DeBERTa-v3-base's architectural ceiling.
+#   C. lingo_judge_answer_only_max128— Protocol-correct: strip <think>, then max=128.
+#   D. lingo_judge_head_tail_512     — Hack: first 256 tok + last 256 tok of full text.
+#   E. llm_as_judge                  — Decoder-only LLM judge (configurable endpoint).
+#
+# All four DeBERTa variants share the SAME loaded model+tokenizer (see
+# _ensure_judge) — only preprocessing differs. E hits a remote endpoint.
+# =============================================================================
+
+JUDGE_METHODS = (
+    "lingo_judge_max128",
+    "lingo_judge_max512",
+    "lingo_judge_answer_only_max128",
+    "lingo_judge_head_tail_512",
+    "llm_as_judge",
+)
+
+
+def _lingo_judge_score_at(question: str, reference: str, prediction: str, max_length: int) -> float:
+    """Lingo-Judge scorer with explicit max_length. Mirrors lingo_judge_score
+    exactly but lets the caller pick the truncation cap.
+    """
+    _ensure_judge()
+    import torch
+    text = f"[CLS]\nQuestion: {question}\nAnswer: {reference}\nStudent: {prediction}"
+    encoded = _JUDGE_TOKENIZER(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_length,
+        padding=False,
+    ).to(_JUDGE_DEVICE)
+    with torch.no_grad():
+        out = _JUDGE_MODEL(**encoded)
+    logit = out.logits.squeeze().detach().cpu().float().item()
+    return float(1.0 / (1.0 + pow(2.718281828, -logit)))
+
+
+def _judge_head_tail(question: str, reference: str, prediction: str, max_total: int = 512) -> float:
+    """Method D: head-tail token-level truncation.
+
+    Tokenizes the FULL [CLS]/Question/Answer/Student string, takes the first
+    half-max + last half-max token IDs (with a `[...]` separator decoded back
+    into text), then re-tokenizes at max=max_total. Preserves both opening
+    context (Q + ref) AND final answer (end of long <think> chains).
+    """
+    _ensure_judge()
+    import torch
+    text = f"[CLS]\nQuestion: {question}\nAnswer: {reference}\nStudent: {prediction}"
+    # Tokenize WITHOUT truncation to get the full id list.
+    full_ids = _JUDGE_TOKENIZER(text, return_tensors=None, truncation=False, padding=False)["input_ids"]
+    # Separator token (decoded text representation, re-tokenized later).
+    sep = " [...] "
+    half = max_total // 2
+    # If the full sequence is already ≤ max_total, just score it normally.
+    if len(full_ids) <= max_total:
+        encoded = _JUDGE_TOKENIZER(
+            text, return_tensors="pt", truncation=True, max_length=max_total, padding=False
+        ).to(_JUDGE_DEVICE)
+    else:
+        head_ids = full_ids[:half]
+        tail_ids = full_ids[-half:]
+        head_text = _JUDGE_TOKENIZER.decode(head_ids, skip_special_tokens=True)
+        tail_text = _JUDGE_TOKENIZER.decode(tail_ids, skip_special_tokens=True)
+        concat = head_text + sep + tail_text
+        encoded = _JUDGE_TOKENIZER(
+            concat, return_tensors="pt", truncation=True, max_length=max_total, padding=False
+        ).to(_JUDGE_DEVICE)
+    with torch.no_grad():
+        out = _JUDGE_MODEL(**encoded)
+    logit = out.logits.squeeze().detach().cpu().float().item()
+    return float(1.0 / (1.0 + pow(2.718281828, -logit)))
+
+
+def _judge_score_max_with(
+    fn,
+    question: str,
+    references: List[str],
+    prediction: str,
+) -> Tuple[float, int]:
+    """Generic max-over-references for ANY (q, ref, pred) -> float scorer."""
+    scores = [fn(question, ref, prediction) for ref in references]
+    if not scores:
+        return 0.0, -1
+    best = max(range(len(scores)), key=scores.__getitem__)
+    return scores[best], best
+
+
+# ---- LLM-as-judge (E) ------------------------------------------------------
+
+BENCH_LLM_JUDGE_CONFIG_PATH = Path("/tmp/llm_judge_config.json")
+
+
+def _llm_judge_config() -> Dict[str, Any]:
+    """Resolve the LLM-judge endpoint config. Precedence:
+      1. BENCH_LLM_JUDGE_URL / BENCH_LLM_JUDGE_MODEL env vars
+      2. /tmp/llm_judge_config.json
+      3. Sensible default placeholder (ready=false until Bronson provisions).
+    """
+    url = os.getenv("BENCH_LLM_JUDGE_URL")
+    model = os.getenv("BENCH_LLM_JUDGE_MODEL")
+    cfg: Dict[str, Any] = {}
+    if BENCH_LLM_JUDGE_CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(BENCH_LLM_JUDGE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            log(f"[llm-judge] config parse failed: {exc}")
+            cfg = {}
+    url = url or cfg.get("url") or "http://0.0.0.0:8000/v1"
+    model = model or cfg.get("model") or "meta-llama/Llama-3.1-8B-Instruct"
+    return {"url": url, "model": model}
+
+
+def _llm_judge_endpoint_ready(url: str, timeout: float = 3.0) -> bool:
+    """Quick reachability probe — GET /v1/models on the endpoint."""
+    try:
+        probe = url.rstrip("/") + "/models"
+        req = urllib.request.Request(probe, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+_LLM_VERDICT_RE = re.compile(
+    r"VERDICT:\s*(YES|NO)\s*[\s,]*CONFIDENCE:\s*([0-9.]+)\s*[\s,]*REASON:\s*(.*)",
+    re.IGNORECASE,
+)
+
+
+def _llm_as_judge(
+    question: str,
+    reference: str,
+    prediction: str,
+    endpoint_url: str,
+    model_name: str,
+    timeout: float = 60.0,
+) -> Dict[str, Any]:
+    """Score one (q, ref, pred) triple via a decoder-only LLM judge.
+
+    Returns {"verdict": "YES"|"NO"|None, "confidence": float|None,
+             "reason": str, "score": 1.0|0.0|None, "error": str|None}.
+
+    Uses the build.nvidia.com canonical OpenAI-compatible chat shape.
+    NO max_tokens, NO temperature, NO top_p — Alex standing order.
+    """
+    prompt = (
+        "You are evaluating whether a STUDENT's answer to a visual question is correct.\n\n"
+        f"QUESTION: {question}\n"
+        f"REFERENCE ANSWER (one of two acceptable references): {reference}\n"
+        f"STUDENT'S ANSWER: {prediction}\n\n"
+        "Is the student's answer semantically equivalent to the reference answer for the "
+        "purposes of this question? The student may use different words or include reasoning, "
+        "but the final factual claim must agree with the reference. Visual details that "
+        "contradict the reference are wrong even if the rest of the answer is plausible.\n\n"
+        "Reply with exactly one line in this format:\n"
+        "VERDICT: YES|NO  CONFIDENCE: 0.XX  REASON: <one-sentence>"
+    )
+    body = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        ],
+    }
+    url = endpoint_url.rstrip("/") + "/chat/completions"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception as exc:
+        return {
+            "verdict": None, "confidence": None, "reason": "",
+            "score": None, "error": f"llm_judge_endpoint_unavailable: {exc}",
+        }
+    try:
+        parsed = json.loads(raw)
+        msg = (parsed.get("choices") or [{}])[0].get("message") or {}
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            # Some servers return list-of-parts; collect text parts.
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    except Exception as exc:
+        return {
+            "verdict": None, "confidence": None, "reason": "",
+            "score": None, "error": f"llm_judge_parse_failed: {exc}",
+        }
+    m = _LLM_VERDICT_RE.search(content)
+    if not m:
+        return {
+            "verdict": None, "confidence": None, "reason": content.strip()[:200],
+            "score": None,
+            "error": f"llm_judge_no_verdict_line",
+        }
+    verdict = m.group(1).upper()
+    try:
+        confidence = float(m.group(2))
+    except Exception:
+        confidence = None
+    reason = m.group(3).strip()
+    score = 1.0 if verdict == "YES" else 0.0
+    return {
+        "verdict": verdict, "confidence": confidence, "reason": reason,
+        "score": score, "error": None,
+    }
+
+
+def _llm_as_judge_max(
+    question: str,
+    references: List[str],
+    prediction: str,
+    endpoint_url: str,
+    model_name: str,
+) -> Tuple[Optional[float], int, Dict[str, Any]]:
+    """Run LLM-as-judge against every reference; take the max score.
+
+    Returns (max_score, winning_ref_idx, last_raw_record). max_score is None
+    if every call errored (so callers can degrade gracefully).
+    """
+    raw_records: List[Dict[str, Any]] = []
+    scores: List[Optional[float]] = []
+    for ref in references:
+        rec = _llm_as_judge(question, ref, prediction, endpoint_url, model_name)
+        raw_records.append(rec)
+        scores.append(rec.get("score"))
+    valid = [(i, s) for i, s in enumerate(scores) if s is not None]
+    if not valid:
+        return None, -1, {"per_reference": raw_records}
+    best_idx, best_score = max(valid, key=lambda kv: kv[1])
+    return best_score, best_idx, {"per_reference": raw_records}
+
+
+# ---- Rejudge dispatch ------------------------------------------------------
+
+def _rejudge_one_row(
+    row: Dict[str, Any],
+    method: str,
+    llm_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Re-score ONE existing prediction row through ONE judge method.
+
+    Returns a dict {score, correct, winning_reference_index, error, method, ...}.
+    Skips rows that have no prediction or are themselves errored — preserves
+    the original row's error contract.
+    """
+    out: Dict[str, Any] = {
+        "method": method,
+        "question_id": row.get("question_id"),
+        "score": None,
+        "correct": None,
+        "winning_reference_index": -1,
+        "error": None,
+    }
+    if row.get("error"):
+        out["error"] = f"upstream_error: {row.get('error')}"
+        return out
+    question = row.get("question") or ""
+    references = row.get("references") or []
+    prediction = row.get("prediction") or ""
+    if not references:
+        out["error"] = "no_references"
+        return out
+    try:
+        if method == "lingo_judge_max128":
+            score, idx = _judge_score_max_with(
+                lambda q, r, p: _lingo_judge_score_at(q, r, p, 128),
+                question, references, prediction,
+            )
+        elif method == "lingo_judge_max512":
+            score, idx = _judge_score_max_with(
+                lambda q, r, p: _lingo_judge_score_at(q, r, p, 512),
+                question, references, prediction,
+            )
+        elif method == "lingo_judge_answer_only_max128":
+            pred_ao = _extract_final_answer(prediction)
+            score, idx = _judge_score_max_with(
+                lambda q, r, p: _lingo_judge_score_at(q, r, p, 128),
+                question, references, pred_ao,
+            )
+            out["prediction_used"] = pred_ao
+        elif method == "lingo_judge_head_tail_512":
+            score, idx = _judge_score_max_with(
+                lambda q, r, p: _judge_head_tail(q, r, p, 512),
+                question, references, prediction,
+            )
+        elif method == "llm_as_judge":
+            cfg = llm_cfg or _llm_judge_config()
+            score, idx, raw = _llm_as_judge_max(
+                question, references, prediction, cfg["url"], cfg["model"],
+            )
+            out["llm_raw"] = raw
+            if score is None:
+                out["error"] = "llm_judge_endpoint_unavailable"
+        else:
+            out["error"] = f"unknown_method: {method}"
+            return out
+        out["score"] = score
+        out["winning_reference_index"] = idx
+        out["correct"] = bool((score or 0) > 0.5) if score is not None else None
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _benchmark_snapshot_load_from_disk(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a previous run's results.json from disk. Used by /benchmark/rejudge
+    + /benchmark/audit so historical runs (not in memory) can still be re-scored.
+    Falls back to None if not found.
+    """
+    path = BENCHMARK_RUN_ROOT / run_id / "results.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"[rejudge] failed to load {path}: {exc}")
+        return None
+
+
+def _benchmark_load_any(run_id: str) -> Optional[Dict[str, Any]]:
+    """In-memory snapshot first; fall back to disk results.json."""
+    snap = benchmark_get(run_id)
+    if snap and (snap.get("results") or snap.get("recent_results")):
+        return snap
+    return _benchmark_snapshot_load_from_disk(run_id)
+
+
+def _rejudge_summarize(per_row: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize a list of per-row rejudge records into {accuracy, n_judged, n_errored}."""
+    n_total = len(per_row)
+    judged = [r for r in per_row if r.get("score") is not None]
+    correct = sum(1 for r in judged if r.get("correct"))
+    n_errored = sum(1 for r in per_row if r.get("error"))
+    return {
+        "accuracy": (correct / len(judged)) if judged else 0.0,
+        "n_judged": len(judged),
+        "n_errored": n_errored,
+        "n_total": n_total,
+    }
+
+
+def run_rejudge(run_id: str, method: str) -> Dict[str, Any]:
+    """Re-judge an EXISTING run's predictions through `method`.
+
+    Writes /tmp/benchmark-runs/<run_id>/rejudge_<method>.json. Idempotent:
+    if the file already exists, returns the cached content.
+    """
+    if method not in JUDGE_METHODS:
+        raise RuntimeError(f"unknown judge_method: {method}")
+    run_dir = BENCHMARK_RUN_ROOT / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out_path = run_dir / f"rejudge_{method}.json"
+    if out_path.exists():
+        try:
+            return json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass  # corrupt cache; recompute
+    snap = _benchmark_load_any(run_id)
+    if not snap:
+        raise RuntimeError(f"run_id not found on disk or in memory: {run_id}")
+    rows = snap.get("results") or []
+    if not rows:
+        raise RuntimeError(f"run_id {run_id} has no results to rejudge")
+    # Resolve LLM config ONCE (avoid re-reading the file per row).
+    llm_cfg = _llm_judge_config() if method == "llm_as_judge" else None
+    log(f"[rejudge {run_id}] method={method} n_rows={len(rows)}")
+    per_row: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        rec = _rejudge_one_row(row, method, llm_cfg=llm_cfg)
+        per_row.append(rec)
+        if (i + 1) % 50 == 0:
+            log(f"[rejudge {run_id}] {method} {i+1}/{len(rows)}")
+    summary = _rejudge_summarize(per_row)
+    out = {
+        "run_id": run_id,
+        "method": method,
+        "summary": summary,
+        "per_row": per_row,
+    }
+    tmp = out_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out, default=str, indent=2), encoding="utf-8")
+    tmp.replace(out_path)
+    log(f"[rejudge {run_id}] {method} done. accuracy={summary['accuracy']:.3f}")
+    return out
+
+
+def run_audit(run_id: str) -> Dict[str, Any]:
+    """Run ALL 5 judge methods on a run and write a single aggregated audit.json.
+
+    Writes /tmp/benchmark-runs/<run_id>/audit.json. Per-method results are
+    cached in rejudge_<method>.json (so a second audit call is fast).
+    """
+    snap = _benchmark_load_any(run_id)
+    if not snap:
+        raise RuntimeError(f"run_id not found on disk or in memory: {run_id}")
+    rows = snap.get("results") or []
+    n_predictions = len(rows)
+    methods_data: Dict[str, Any] = {}
+    per_method_rows: Dict[str, List[Dict[str, Any]]] = {}
+    for method in JUDGE_METHODS:
+        rj = run_rejudge(run_id, method)
+        methods_data[method] = rj["summary"]
+        per_method_rows[method] = rj["per_row"]
+    # Build per-row matrix.
+    qid_index: Dict[str, int] = {}
+    for i, row in enumerate(rows):
+        qid_index[str(row.get("question_id") or i)] = i
+    per_row_out: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        qid = str(row.get("question_id") or i)
+        verdicts: Dict[str, Any] = {}
+        scores: Dict[str, Any] = {}
+        for method in JUDGE_METHODS:
+            rec = per_method_rows[method][i] if i < len(per_method_rows[method]) else {}
+            verdicts[method] = rec.get("correct")
+            scores[method] = rec.get("score")
+        # Divergent: verdicts != majority. Skip None verdicts in the vote.
+        votes = [v for v in verdicts.values() if isinstance(v, bool)]
+        if votes:
+            yes_n = sum(1 for v in votes if v)
+            no_n = len(votes) - yes_n
+            majority = True if yes_n >= no_n else False
+            divergent = [m for m, v in verdicts.items() if isinstance(v, bool) and v != majority]
+        else:
+            divergent = []
+        per_row_out.append({
+            "question_id": qid,
+            "question": (row.get("question") or "")[:200],
+            "verdicts": verdicts,
+            "scores": scores,
+            "divergent_methods": divergent,
+        })
+    # Divergence stats: rows with any disagreement, plus the method pair with
+    # most disagreements across rows.
+    rows_with_disagreement = sum(1 for r in per_row_out if r["divergent_methods"])
+    pair_disagreements: Dict[str, int] = {}
+    methods_list = list(JUDGE_METHODS)
+    for r in per_row_out:
+        for i, mi in enumerate(methods_list):
+            vi = r["verdicts"].get(mi)
+            if not isinstance(vi, bool):
+                continue
+            for mj in methods_list[i+1:]:
+                vj = r["verdicts"].get(mj)
+                if not isinstance(vj, bool):
+                    continue
+                if vi != vj:
+                    key = f"{mi} vs {mj}"
+                    pair_disagreements[key] = pair_disagreements.get(key, 0) + 1
+    max_pair = ""
+    max_pair_n = 0
+    if pair_disagreements:
+        max_pair, max_pair_n = max(pair_disagreements.items(), key=lambda kv: kv[1])
+    audit = {
+        "run_id": run_id,
+        "n_predictions": n_predictions,
+        "methods": methods_data,
+        "per_row": per_row_out,
+        "divergence_stats": {
+            "rows_with_disagreement": rows_with_disagreement,
+            "pair_disagreements": pair_disagreements,
+            "max_pairwise_disagreement": max_pair,
+            "max_pairwise_disagreement_count": max_pair_n,
+        },
+        "generated_epoch": time.time(),
+    }
+    out_path = BENCHMARK_RUN_ROOT / run_id / "audit.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(audit, default=str, indent=2), encoding="utf-8")
+    tmp.replace(out_path)
+    log(f"[audit {run_id}] complete. {n_predictions} preds, {rows_with_disagreement} divergent rows")
+    return audit
+
+
 def _strip_think_block(text: str) -> str:
     """Strip <think>...</think> and any <answer>...</answer> wrapper for the
     final-answer surfaced to Lingo-Judge.
@@ -6367,8 +6849,9 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
           <option value="">Loading models...</option>
         </select>
       </div>
-      <div class="bench-dropzone-row">
+      <div class="bench-dropzone-row" style="display:flex; gap:8px; align-items:center;">
         <button id="benchRunBtn" class="bench-primary-btn">▶ Run Benchmark</button>
+        <button id="benchAuditBtn" class="bench-ghost-btn" disabled title="Run all 5 judge methods (lingo_judge x4 + llm_as_judge) on the last completed run">🔬 Fairness Audit</button>
       </div>
       <div class="bench-dropzone-row bench-ghost-row">
         <button id="benchRerunLastBtn" class="bench-ghost-btn" disabled>↻ Re-run last</button>
@@ -7179,9 +7662,11 @@ async function benchLoadHistory(){
 function benchRenderLastRunTile(){
   const tile = el('benchLastRunTile');
   const rerunLast = el('benchRerunLastBtn');
+  const auditBtn = el('benchAuditBtn');
   if(!benchHistoryCache.length){
     tile.style.display = 'none';
     if(rerunLast) rerunLast.disabled = true;
+    if(auditBtn) auditBtn.disabled = true;
     return;
   }
   const last = benchHistoryCache[benchHistoryCache.length - 1];
@@ -7194,6 +7679,7 @@ function benchRenderLastRunTile(){
   link.textContent = 'Open Report';
   tile.style.display = 'flex';
   if(rerunLast) rerunLast.disabled = false;
+  if(auditBtn){ auditBtn.disabled = false; auditBtn.dataset.runId = last.run_id; }
 }
 
 function benchRenderHistory(){
@@ -7270,6 +7756,34 @@ if(benchRerunLastBtn){
     if(!benchHistoryCache.length){ alert('No prior runs to re-run.'); return; }
     const last = benchHistoryCache[benchHistoryCache.length - 1];
     benchRerunById(last.run_id);
+  };
+}
+const benchAuditBtn = document.getElementById('benchAuditBtn');
+if(benchAuditBtn){
+  benchAuditBtn.onclick = async ()=>{
+    const runId = benchAuditBtn.dataset.runId
+      || (benchHistoryCache.length ? benchHistoryCache[benchHistoryCache.length-1].run_id : '');
+    if(!runId){ alert('No completed run to audit.'); return; }
+    benchAuditBtn.disabled = true;
+    const origText = benchAuditBtn.textContent;
+    benchAuditBtn.textContent = '🔬 Auditing (5 methods)...';
+    try{
+      const resp = await fetch('/benchmark/audit', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({run_id: runId}),
+      });
+      const j = await resp.json();
+      if(j.error){ alert('Audit failed: '+j.error); return; }
+      // Minimal modal — open the audit JSON in a new tab so the reader can
+      // inspect the full matrix. The 6x5 modal can be a later polish.
+      const w = window.open('/benchmark/audit/'+encodeURIComponent(runId), '_blank');
+      if(!w){ alert('Audit complete: '+JSON.stringify(j.methods, null, 2)); }
+    }catch(e){ alert('Audit failed: '+e.message); }
+    finally{
+      benchAuditBtn.disabled = false;
+      benchAuditBtn.textContent = origText;
+    }
   };
 }
 const benchLastRunRerunBtn = document.getElementById('benchLastRunRerun');
@@ -7398,6 +7912,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"model": model, "base_url": benchmark_nim_base_url()})
             except Exception as exc:
                 self.send_json({"model": None, "error": str(exc), "base_url": benchmark_nim_base_url()})
+        elif self.path == "/benchmark/llm_judge_endpoint":
+            try:
+                cfg = _llm_judge_config()
+                ready = _llm_judge_endpoint_ready(cfg["url"])
+                self.send_json({"url": cfg["url"], "model": cfg["model"], "ready": ready})
+            except Exception as exc:
+                self.send_json({"url": None, "model": None, "ready": False, "error": str(exc)})
+        elif self.path.startswith("/benchmark/audit/"):
+            # GET /benchmark/audit/<run_id> — return cached audit.json if present.
+            run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+            audit_path = BENCHMARK_RUN_ROOT / run_id / "audit.json"
+            if not audit_path.exists():
+                self.send_error(404)
+                return
+            try:
+                self.send_json(json.loads(audit_path.read_text(encoding="utf-8")))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
         elif self.path.startswith("/benchmark/resolve_url"):
             qs = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
@@ -7731,6 +8263,55 @@ class Handler(BaseHTTPRequestHandler):
                     "concurrency": concurrency,
                     "seed": seed,
                 })
+            elif self.path == "/benchmark/rejudge":
+                # Re-score an existing run through ONE alternate judge method.
+                # Body: {"run_id": "...", "judge_method": "lingo_judge_max128|..."}.
+                # Idempotent — caches output in rejudge_<method>.json on disk.
+                target_run = str(payload.get("run_id") or "").strip()
+                method = str(payload.get("judge_method") or "").strip()
+                if not target_run:
+                    self.send_json({"error": "run_id required"}, status=400)
+                    return
+                if method not in JUDGE_METHODS:
+                    self.send_json({
+                        "error": f"judge_method must be one of {list(JUDGE_METHODS)}",
+                    }, status=400)
+                    return
+                try:
+                    result = run_rejudge(target_run, method)
+                    # Trim per_row in the wire response — full result is on disk.
+                    light = dict(result)
+                    full_rows = light.get("per_row") or []
+                    light["per_row_count"] = len(full_rows)
+                    light["per_row_sample"] = full_rows[:3]
+                    light["per_row"] = None
+                    light["artifact_path"] = str(
+                        BENCHMARK_RUN_ROOT / target_run / f"rejudge_{method}.json"
+                    )
+                    self.send_json(light)
+                except Exception as exc:
+                    log(f"[rejudge] {target_run} {method} failed: {exc}")
+                    self.send_json({"error": str(exc)}, status=400 if "not found" in str(exc) else 500)
+            elif self.path == "/benchmark/audit":
+                # Run ALL 5 judge methods on an existing run. Writes audit.json.
+                # Body: {"run_id": "..."}.
+                target_run = str(payload.get("run_id") or "").strip()
+                if not target_run:
+                    self.send_json({"error": "run_id required"}, status=400)
+                    return
+                try:
+                    audit = run_audit(target_run)
+                    # Trim per_row for the wire response — full audit on disk.
+                    light = dict(audit)
+                    full_rows = light.get("per_row") or []
+                    light["per_row_count"] = len(full_rows)
+                    light["per_row_sample"] = full_rows[:3]
+                    light["per_row"] = None
+                    light["artifact_path"] = str(BENCHMARK_RUN_ROOT / target_run / "audit.json")
+                    self.send_json(light)
+                except Exception as exc:
+                    log(f"[audit] {target_run} failed: {exc}")
+                    self.send_json({"error": str(exc)}, status=400 if "not found" in str(exc) else 500)
             else:
                 self.send_error(404)
         except Exception as exc:
