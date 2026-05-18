@@ -114,6 +114,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   structured prompts, and export artifacts through the batch-inference API.
 - `scripts/gradio_cr2_byo.py`: default Build-style Gradio app for video/image
   inference across supported BYO-video models.
+- `scripts/alpamayo_openai_server.py`: OpenAI-compatible `/v1/models` and
+  `/v1/chat/completions` adapter for Alpamayo VQA/captioning over BYO images
+  and videos.
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
 - `scripts/nim_runtime_monitor.py` and `scripts/nim_param_table.json`: NIM boot/readiness monitor and launch-parameter notes from the smoke sprints.
 - `scripts/gradio_cosmos_predict.py` and `scripts/gradio_cosmos_transfer.py`: generation frontends for the Cosmos Predict/Transfer BYO-video variants.

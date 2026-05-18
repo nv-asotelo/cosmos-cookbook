@@ -2215,8 +2215,16 @@ def detect_server() -> Dict[str, Any]:
         )
         default_model = os.getenv("MODEL_NAME") or "Cosmos3-Nano"
     else:
-        default_base = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
-        default_model = os.getenv("MODEL_NAME", "")
+        default_base = (
+            os.getenv("ALPAMAYO_BASE_URL", "http://localhost:8001/v1")
+            if configured_backend == "alpamayo"
+            else os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        )
+        default_model = os.getenv("MODEL_NAME") or (
+            os.getenv("ALPAMAYO_MODEL_ID", "nvidia/Alpamayo-1.5-10B")
+            if configured_backend == "alpamayo"
+            else ""
+        )
     info = {
         "base_url": default_base,
         "model": default_model,
@@ -2369,7 +2377,14 @@ def model_prefers_video_data(model: str, backend: str = "") -> bool:
 
 def model_uses_native_video(model: str, backend: str = "") -> bool:
     backend_lower = (backend or os.getenv("INFERENCE_BACKEND", "")).lower()
-    return "nim" in backend_lower or model_prefers_file_url(model) or model_prefers_video_data(model, backend)
+    model_lower = (model or "").lower()
+    return (
+        "nim" in backend_lower
+        or "alpamayo" in backend_lower
+        or "alpamayo" in model_lower
+        or model_prefers_file_url(model)
+        or model_prefers_video_data(model, backend)
+    )
 
 
 def nim_frame_fallback_limit() -> int:

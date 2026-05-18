@@ -16,8 +16,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 5173);
 
-const defaultModel = process.env.MODEL_NAME || process.env.MODEL_ID || "nvidia/Cosmos3-Nano-Reasoner";
-const backend = process.env.INFERENCE_BACKEND || (process.env.NIM_BASE_URL ? "nim_local" : "vllm");
+const defaultModel =
+  process.env.MODEL_NAME ||
+  process.env.MODEL_ID ||
+  process.env.ALPAMAYO_MODEL_ID ||
+  (process.env.INFERENCE_BACKEND === "alpamayo" ? "nvidia/Alpamayo-1.5-10B" : "nvidia/Cosmos3-Nano-Reasoner");
+const backend =
+  process.env.INFERENCE_BACKEND ||
+  (process.env.ALPAMAYO_BASE_URL ? "alpamayo" : process.env.NIM_BASE_URL ? "nim_local" : "vllm");
+const isAlpamayoBackend = String(backend || "").toLowerCase() === "alpamayo";
 const KNOWN_HF_MODEL_COMMITS = {
   "nvidia/Cosmos3-Nano-Reasoner": "6406357cdc32fbf8db5f51ff7992343803b06961"
 };
@@ -90,6 +97,7 @@ function usesNativeVideoUrl(model) {
   const mode = String(process.env.REASONER_MEDIA_MODE || "auto").toLowerCase();
   if (mode === "video_url") return true;
   if (mode === "frames") return false;
+  if (isAlpamayoBackend) return true;
   if (backend === "nim_local" && !mid.includes("cosmos-reason1")) return true;
   return (
     mid.includes("qwen3-vl") ||
@@ -99,8 +107,39 @@ function usesNativeVideoUrl(model) {
     mid.includes("cosmos-3") ||
     mid.includes("cosmos-reason2") ||
     mid.includes("cosmos-reason-2") ||
+    mid.includes("alpamayo") ||
     mid.includes("nemotron")
   );
+}
+
+function positiveIntegerEnv(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isVlaModel(model) {
+  const mid = String(model || "").toLowerCase();
+  return isAlpamayoBackend || mid.includes("alpamayo") || mid.includes("reasoningvla");
+}
+
+function vlaRuntimeInfo(selectedModel, modelInfo) {
+  if (!isVlaModel(selectedModel) && !isVlaModel(modelInfo?.id)) return null;
+  const framesPerVideo = positiveIntegerEnv("ALPAMAYO_FRAMES", 4);
+  const maxDecodedVideoFrames = positiveIntegerEnv("ALPAMAYO_MAX_DECODED_VIDEO_FRAMES", 96);
+  return {
+    type: "VLA",
+    family: "Alpamayo",
+    adapter: "alpamayo_openai",
+    current_mode: "vqa_text_generation",
+    model_id: selectedModel || modelInfo?.id || defaultModel,
+    backbone: "Cosmos Reason2-8B VLM",
+    input_shape: "OpenAI chat/completions with video_url or image_url plus text prompt",
+    frames_per_video: framesPerVideo,
+    max_decoded_video_frames: maxDecodedVideoFrames,
+    prompt_role: "VQA/caption question over sampled frames",
+    full_trajectory_mode: false,
+    clip_guidance: `Use short, front-loaded clips. The adapter samples ${framesPerVideo} frame(s) from the first ${maxDecodedVideoFrames} decoded video frame(s) unless ALPAMAYO_FRAMES or ALPAMAYO_MAX_DECODED_VIDEO_FRAMES is changed.`
+  };
 }
 
 function frameFallbackLimit() {
@@ -555,6 +594,7 @@ async function buildRuntimeInfo(info) {
     source,
     app_source: appSourceInfo(),
     quantization,
+    vla: vlaRuntimeInfo(selectedModel, modelInfo),
     vllm: {
       base_url: info.baseUrl,
       model: modelInfo,
@@ -584,6 +624,7 @@ app.get("/api/active-model", async (_request, response) => {
     source: runtime.source,
     app_source: runtime.app_source,
     quantization: runtime.quantization,
+    vla: runtime.vla,
     vllm: runtime.vllm,
     warning: info.warning
   });

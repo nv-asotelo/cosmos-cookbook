@@ -132,6 +132,16 @@ const HERO_TAGS = [
   "video understanding",
   "vision language model"
 ];
+const VLA_HERO_TAGS = [
+  "vision language action",
+  "Alpamayo",
+  "ego camera",
+  "video captioning",
+  "VQA mode",
+  "BYO video",
+  "physical ai",
+  "adapter"
+];
 
 type SectionTab = "Experience" | "Model Card" | "System Card" | "Deploy";
 type OutputTab = "preview" | "json";
@@ -239,6 +249,20 @@ type BackendInfo = {
     dtype?: string | null;
     source?: string | null;
   };
+  vla?: {
+    type?: string;
+    family?: string;
+    adapter?: string;
+    current_mode?: string;
+    model_id?: string;
+    backbone?: string;
+    input_shape?: string;
+    frames_per_video?: number;
+    max_decoded_video_frames?: number;
+    prompt_role?: string;
+    full_trajectory_mode?: boolean;
+    clip_guidance?: string;
+  } | null;
   vllm?: {
     base_url?: string;
     model?: {
@@ -546,7 +570,33 @@ function quantizationLabel(backendInfo: BackendInfo | null) {
   return `None detected${quantization.dtype ? `, dtype ${quantization.dtype}` : ""}`;
 }
 
-function modelDefaults(modelName: string) {
+function isVlaMode(modelName: string, backendInfo?: BackendInfo | null) {
+  const lower = `${modelName} ${backendInfo?.display_name || ""} ${backendInfo?.checkpoint || ""}`.toLowerCase();
+  return Boolean(backendInfo?.vla) || backendInfo?.backend === "alpamayo" || lower.includes("alpamayo");
+}
+
+function vlaFrameSummary(backendInfo?: BackendInfo | null) {
+  const frames = backendInfo?.vla?.frames_per_video || 4;
+  const decoded = backendInfo?.vla?.max_decoded_video_frames || 96;
+  return `${frames} frame${frames === 1 ? "" : "s"} from the first ${decoded} decoded frames`;
+}
+
+function vlaModeLabel(backendInfo?: BackendInfo | null) {
+  const mode = backendInfo?.vla?.current_mode || "vqa_text_generation";
+  return mode.replace(/_/g, " ");
+}
+
+function heroDescription(modelName: string, backendInfo?: BackendInfo | null) {
+  if (isVlaMode(modelName, backendInfo)) {
+    return "Vision-language-action model served through the Alpamayo BYO adapter. Current user path is VQA/captioning over sampled video frames.";
+  }
+  return "Vision language model that excels in understanding the physical world using structured reasoning on videos or images.";
+}
+
+function modelDefaults(modelName: string, backendInfo?: BackendInfo | null) {
+  if (isVlaMode(modelName, backendInfo)) {
+    return { fps: 4, maxTokens: 256 };
+  }
   const lower = modelName.toLowerCase();
   if (lower.includes("cosmos3") || lower.includes("c3-") || lower.includes("nano-reasoner")) {
     return { fps: 2, maxTokens: 512 };
@@ -559,6 +609,7 @@ function modelDefaults(modelName: string) {
 
 function usesFrameFallback(modelName: string, backend?: string) {
   const lower = modelName.toLowerCase();
+  if (backend === "alpamayo" || lower.includes("alpamayo")) return false;
   if (backend === "nim_local" && !lower.includes("cosmos-reason1")) return false;
   return !(
     lower.includes("nemotron") ||
@@ -568,7 +619,8 @@ function usesFrameFallback(modelName: string, backend?: string) {
     lower.includes("cosmos3") ||
     lower.includes("cosmos-3") ||
     lower.includes("cosmos-reason2") ||
-    lower.includes("cosmos-reason-2")
+    lower.includes("cosmos-reason-2") ||
+    lower.includes("alpamayo")
   );
 }
 
@@ -626,8 +678,8 @@ export default function App() {
 
   useEffect(() => {
     if (!model || model === DEFAULT_MODEL) return;
-    document.title = `${model} | NVIDIA NIM`;
-  }, [model]);
+    document.title = `${model} | ${isVlaMode(model, backendInfo) ? "VLA BYO" : "NVIDIA NIM"}`;
+  }, [backendInfo, model]);
 
   useEffect(() => {
     fetch("/api/models")
@@ -647,10 +699,10 @@ export default function App() {
       applyExampleParameters(example);
       return;
     }
-    const defaults = modelDefaults(model);
+    const defaults = modelDefaults(model, backendInfo);
     setFramesPerSecond(defaults.fps);
     setMaxTokens(defaults.maxTokens);
-  }, [model]);
+  }, [backendInfo, model]);
 
   useEffect(() => {
     if (defaultExampleLoadedRef.current) return;
@@ -698,8 +750,19 @@ export default function App() {
 	      media_sampling:
 	        media?.kind === "video"
 	          ? {
-	              mode: usesFrameFallback(model, backendInfo?.backend) ? "image-frame-fallback" : "video_url",
-	              fps: framesPerSecond
+	              mode: isVlaMode(model, backendInfo)
+	                ? "alpamayo_adapter_video_url"
+	                : usesFrameFallback(model, backendInfo?.backend)
+	                  ? "image-frame-fallback"
+	                  : "video_url",
+	              fps: isVlaMode(model, backendInfo) ? undefined : framesPerSecond,
+	              adapter_frames: isVlaMode(model, backendInfo) ? backendInfo?.vla?.frames_per_video || 4 : undefined,
+	              adapter_max_decoded_frames: isVlaMode(model, backendInfo)
+	                ? backendInfo?.vla?.max_decoded_video_frames || 96
+	                : undefined,
+	              note: isVlaMode(model, backendInfo)
+	                ? "Alpamayo samples frames inside the adapter; the Vite FPS slider is only used by frame-fallback paths."
+	                : undefined
 	            }
 	          : undefined
 	    }),
@@ -707,6 +770,7 @@ export default function App() {
 	      effectivePrompt,
 	      framesPerSecond,
 	      backendInfo?.backend,
+	      backendInfo?.vla,
 	      media,
 	      model,
 	      maxTokens,
@@ -835,7 +899,7 @@ export default function App() {
 
   function applyExampleParameters(example: ExampleItem) {
     const samplingDefaults = example.reasoning ? SAMPLING_DEFAULTS.reasoning : SAMPLING_DEFAULTS.standard;
-    const mediaDefaults = modelDefaults(model);
+    const mediaDefaults = modelDefaults(model, backendInfo);
     const params = example.parameters || {};
     setTemperature(params.temperature ?? samplingDefaults.temperature);
     setTopP(params.topP ?? samplingDefaults.topP);
@@ -1010,6 +1074,9 @@ export default function App() {
     window.setTimeout(() => setCopied(false), 1200);
   }
 
+  const vlaMode = isVlaMode(model, backendInfo);
+  const heroTags = vlaMode ? VLA_HERO_TAGS : HERO_TAGS;
+
   return (
     <main>
       <header className="appbar">
@@ -1053,15 +1120,12 @@ export default function App() {
           <div className="titleLine">
             <h1>{model}</h1>
             <div className="heroMeta">
-              <span>Downloadable</span>
+              <span>{vlaMode ? "VLA adapter active" : "Downloadable"}</span>
             </div>
           </div>
-          <p>
-            Vision language model that excels in understanding the physical world using structured reasoning on videos
-            or images.
-          </p>
+          <p>{heroDescription(model, backendInfo)}</p>
           <div className="tagRow">
-            {HERO_TAGS.map((tag, index) => (
+            {heroTags.map((tag, index) => (
               <span className={index > 1 ? "desktopOnlyTag" : ""} key={tag}>
                 {tag}
               </span>
@@ -1177,6 +1241,37 @@ export default function App() {
   );
 }
 
+function VlaModeBanner({ backendInfo }: { backendInfo: BackendInfo | null }) {
+  const currentMode = vlaModeLabel(backendInfo);
+  const trajectoryMode = backendInfo?.vla?.full_trajectory_mode ? "Trajectory/action mode active" : "Trajectory/action mode not active";
+  return (
+    <section className="vlaModeBanner" aria-label="Active VLA mode">
+      <div>
+        <p className="vlaEyebrow">Alpamayo VLA loaded</p>
+        <h2>Use BYO video as captioning or VQA over sampled frames</h2>
+        <p>
+          Current path is {currentMode}. Prompts are sent as questions to the Alpamayo adapter, which samples{" "}
+          {vlaFrameSummary(backendInfo)} before calling the model.
+        </p>
+      </div>
+      <dl>
+        <div>
+          <dt>Backbone</dt>
+          <dd>{backendInfo?.vla?.backbone || "Cosmos Reason2-8B VLM"}</dd>
+        </div>
+        <div>
+          <dt>Prompt role</dt>
+          <dd>{backendInfo?.vla?.prompt_role || "VQA/caption question"}</dd>
+        </div>
+        <div>
+          <dt>Boundary</dt>
+          <dd>{trajectoryMode}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
 function ExperiencePanel({
   applyExample,
   backendInfo,
@@ -1289,6 +1384,7 @@ function ExperiencePanel({
   userPrompt: string;
 }) {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
+  const vlaMode = isVlaMode(model, backendInfo);
 
   async function runWithOutputVisible() {
     setMobilePanel("output");
@@ -1313,6 +1409,7 @@ function ExperiencePanel({
         <span className="noticeMobile">AI Response Message</span>
         <button className="noticeView">View</button>
       </div>
+      {vlaMode ? <VlaModeBanner backendInfo={backendInfo} /> : null}
 
       <div className="mobileIOTabs" role="tablist" aria-label="Input output">
         <button
@@ -1395,7 +1492,11 @@ function ExperiencePanel({
 
           <PromptBox
             label="User Prompt"
-            hint="Describe the video or ask a question. Enable reasoning by asking for the <think> format."
+            hint={
+              vlaMode
+                ? "Ask a VQA/caption question about the visible scene. Keep important actions early in the clip."
+                : "Describe the video or ask a question. Enable reasoning by asking for the <think> format."
+            }
             max={4000}
             value={userPrompt}
             onChange={setUserPrompt}
@@ -1431,6 +1532,8 @@ function ExperiencePanel({
             temperature={temperature}
             topK={topK}
             topP={topP}
+            vlaMode={vlaMode}
+            vlaSummary={vlaFrameSummary(backendInfo)}
           />
 
           <div className="runBar">
@@ -1493,7 +1596,7 @@ function ExperiencePanel({
 
       <aside className="apiPanel">
         <div className="apiTopline">
-          Backend: <strong>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</strong>
+          Backend: <strong>{vlaMode ? "Alpamayo VLA adapter" : backendInfo?.backend || "vLLM / OpenAI-compatible"}</strong>
         </div>
         <div className="apiButtons">
           <button>Upgrade</button>
@@ -1843,7 +1946,9 @@ function ParameterAccordion({
   setTopP,
   temperature,
   topK,
-  topP
+  topP,
+  vlaMode,
+  vlaSummary
 }: {
   framesPerSecond: number;
   maxTokens: number;
@@ -1865,7 +1970,13 @@ function ParameterAccordion({
   temperature: number;
   topK: number;
   topP: number;
+  vlaMode: boolean;
+  vlaSummary: string;
 }) {
+  const frameHelp = vlaMode
+    ? `Alpamayo receives the MP4 as video_url and samples ${vlaSummary} inside the adapter. This slider only affects legacy image-frame fallback paths.`
+    : PARAMETER_HELP.framesPerSecond;
+
   return (
     <div className="parameterAccordion">
       <button
@@ -1880,6 +1991,15 @@ function ParameterAccordion({
       </button>
       {open ? (
         <div className="nv-accordion-content" data-state="open">
+          {vlaMode ? (
+            <div className="vlaParameterNote">
+              <strong>VLA adapter sampling</strong>
+              <span>
+                For Alpamayo, use short front-loaded clips. Change adapter env vars, not this FPS slider, to alter the
+                effective frame window.
+              </span>
+            </div>
+          ) : null}
           <SliderField
             help={PARAMETER_HELP.temperature}
             label="Temperature"
@@ -1926,8 +2046,8 @@ function ParameterAccordion({
             onChange={setPresencePenalty}
           />
           <SliderField
-            help={PARAMETER_HELP.framesPerSecond}
-            label="Frames per Second"
+            help={frameHelp}
+            label={vlaMode ? "Frame fallback FPS" : "Frames per Second"}
             min={2}
             max={8}
             step={1}
@@ -2108,6 +2228,7 @@ function RuntimeBar({
   const parser = flagValue(backendInfo, "reasoning_parser");
   const gpuUtil = flagValue(backendInfo, "gpu_memory_utilization");
   const source = backendInfo?.source;
+  const vlaMode = isVlaMode(model, backendInfo);
 
   return (
     <div className="runtimeBar" id="active-model-runtime-details">
@@ -2122,8 +2243,8 @@ function RuntimeBar({
         </span>
       </div>
       <div className="runtimeMetric">
-        <span className="runtimeLabel">Quantization</span>
-        <span className="runtimeValue">{quantizationLabel(backendInfo)}</span>
+        <span className="runtimeLabel">{vlaMode ? "Mode" : "Quantization"}</span>
+        <span className="runtimeValue">{vlaMode ? vlaModeLabel(backendInfo) : quantizationLabel(backendInfo)}</span>
       </div>
       <div className="runtimeMetric">
         <span className="runtimeLabel">Model Commit</span>
@@ -2139,11 +2260,17 @@ function RuntimeBar({
         </span>
       </div>
       <div className="runtimeMetric">
-        <span className="runtimeLabel">vLLM Details</span>
+        <span className="runtimeLabel">{vlaMode ? "Adapter Sampling" : "vLLM Details"}</span>
         <span className="runtimeValue">
-          max len {displayValue(maxModelLen)}
-          {parser ? `, parser ${parser}` : ""}
-          {gpuUtil ? `, GPU util ${gpuUtil}` : ""}
+          {vlaMode ? (
+            vlaFrameSummary(backendInfo)
+          ) : (
+            <>
+              max len {displayValue(maxModelLen)}
+              {parser ? `, parser ${parser}` : ""}
+              {gpuUtil ? `, GPU util ${gpuUtil}` : ""}
+            </>
+          )}
         </span>
       </div>
       <a className="runtimeJsonLink" href={detailsUrl} rel="noreferrer" target="_blank">
@@ -2155,6 +2282,7 @@ function RuntimeBar({
 }
 
 function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | null; model: string }) {
+  const vlaMode = isVlaMode(model, backendInfo);
   return (
     <dl className="metadataGrid">
       <dt>Loaded model</dt>
@@ -2163,6 +2291,20 @@ function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | nul
       <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
       <dt>Backend endpoint</dt>
       <dd>{backendInfo?.vllm?.base_url || backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
+      {vlaMode ? (
+        <>
+          <dt>VLA family</dt>
+          <dd>{backendInfo?.vla?.family || "Alpamayo"}</dd>
+          <dt>Current VLA mode</dt>
+          <dd>{vlaModeLabel(backendInfo)}</dd>
+          <dt>VLA backbone</dt>
+          <dd>{backendInfo?.vla?.backbone || "Cosmos Reason2-8B VLM"}</dd>
+          <dt>Adapter sampling</dt>
+          <dd>{vlaFrameSummary(backendInfo)}</dd>
+          <dt>Trajectory/action mode</dt>
+          <dd>{backendInfo?.vla?.full_trajectory_mode ? "active" : "not active"}</dd>
+        </>
+      ) : null}
       <dt>HF model commit SHA</dt>
       <dd>
         <code>{displayValue(backendInfo?.source?.sha)}</code>
@@ -2230,22 +2372,23 @@ function StaticTab({
   model: string;
   tab: SectionTab;
 }) {
+  const vlaMode = isVlaMode(model, backendInfo);
   if (tab === "Model Card") {
     return (
       <div className="staticPanel">
         <p className="staticEyebrow">Overview</p>
         <h2>{model}</h2>
         <p className="staticLead">
-          Cosmos3 Nano Reasoner is a vision-language reasoning surface for images and videos. This Vite deployment is
-          tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback,
-          and concise final answers.
+          {vlaMode
+            ? "Alpamayo is loaded as a VLA-backed BYO-video endpoint. The current frontend path is captioning and VQA over adapter-sampled frames, with full driving trajectory/action mode called out as not active."
+            : "Cosmos3 Nano Reasoner is a vision-language reasoning surface for images and videos. This Vite deployment is tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback, and concise final answers."}
         </p>
 
         <StaticSection title="ModelCard++">
           <p>
-            This card follows the NVIDIA Build model-card layout while reflecting the active Cosmos3 Nano Reasoner
-            deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for
-            evaluating the local OpenAI-compatible endpoint.
+            {vlaMode
+              ? "This card follows the NVIDIA Build model-card layout while reflecting the active Alpamayo adapter. It separates the user-facing VQA/caption mode from the deeper VLA trajectory mode that still needs a dedicated adapter path."
+              : "This card follows the NVIDIA Build model-card layout while reflecting the active Cosmos3 Nano Reasoner deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for evaluating the local OpenAI-compatible endpoint."}
           </p>
         </StaticSection>
 
@@ -2264,7 +2407,16 @@ function StaticTab({
             <dt>Formats</dt>
             <dd>.mp4, .jpg, .jpeg, .png</dd>
             <dt>Prompting</dt>
-            <dd>Reasoning prompts can request a <code>&lt;think&gt;</code> trace followed by the answer.</dd>
+            <dd>
+              {vlaMode ? (
+                <>
+                  Prompts are VQA/caption questions over sampled frames. Use short, front-loaded clips unless adapter
+                  sampling settings are raised.
+                </>
+              ) : (
+                <>Reasoning prompts can request a <code>&lt;think&gt;</code> trace followed by the answer.</>
+              )}
+            </dd>
           </dl>
         </StaticSection>
 

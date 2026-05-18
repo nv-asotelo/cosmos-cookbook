@@ -75,7 +75,7 @@ except Exception:
 # ── Config ─────────────────────────────────────────────────────────────────────
 HOME        = os.path.expanduser("~")
 MODEL_DIR   = os.environ.get("MODEL_DIR",  f"{HOME}/cosmos-reason2/models/Cosmos-Reason2-2B")
-MODEL_NAME  = os.environ.get("MODEL_NAME", "nvidia/Cosmos-Reason2-2B")
+MODEL_NAME  = os.environ.get("MODEL_NAME", os.environ.get("ALPAMAYO_MODEL_ID", "nvidia/Cosmos-Reason2-2B"))
 OUT_FILE    = os.environ.get("OUT_FILE",   "/tmp/byo_video_reason2_results.json")
 PORT        = int(os.environ.get("GRADIO_PORT", "7860"))
 SHARE       = os.environ.get("GRADIO_SHARE", "true").lower() != "false"
@@ -104,16 +104,20 @@ IMAGE_AUTO_CAP_MAX = 524288
 
 NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-# vLLM server (OpenAI-compatible) — set INFERENCE_BACKEND=vllm to use
-INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf").lower()   # hf | vllm | nim_local
-VLLM_BASE_URL     = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+# OpenAI-compatible servers — set INFERENCE_BACKEND=vllm, nim_local, or alpamayo to use.
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf").lower()   # hf | vllm | nim_local | alpamayo
+VLLM_BASE_URL     = (
+    os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8001/v1")
+    if INFERENCE_BACKEND == "alpamayo"
+    else os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+)
 VLLM_API_KEY      = os.environ.get("VLLM_API_KEY", "EMPTY")             # vLLM default
 
 # Prefill TPS for TTFT estimation.
 # HF mode: ~23 tok/s measured on RTX PRO 6000 Blackwell (empirical, local HTML report).
 # vLLM mode on H100: ~12000 tok/s (GSheet CR2-8B PBR; 374×374 · 30s clips:
 #   2K → 174ms, 4K → 341ms, 8K → 724ms → avg ~11,700 tok/s).
-_prefill_default = "12000" if INFERENCE_BACKEND == "vllm" else "23"
+_prefill_default = "12000" if INFERENCE_BACKEND in ("vllm", "alpamayo") else "23"
 PREFILL_TPS = float(os.environ.get("GRADIO_PREFILL_TPS", _prefill_default))
 
 # For vllm/nim_local: query the running server to get its actual served model name.
@@ -123,7 +127,7 @@ PREFILL_TPS = float(os.environ.get("GRADIO_PREFILL_TPS", _prefill_default))
 _NIM_LOCAL_MODEL_ID = None  # kept for backward compat
 _SERVER_MODEL_ID = None
 _SERVER_MAX_MODEL_LEN = None  # captured from /v1/models; used by warnings panel
-if INFERENCE_BACKEND in ("vllm", "nim_local"):
+if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo"):
     try:
         import urllib.request as _urlreq, json as _json
         with _urlreq.urlopen(f"{VLLM_BASE_URL}/models", timeout=5) as _r:
@@ -146,7 +150,7 @@ def _refresh_server_model_id(timeout=2):
     _run_vllm_inference.
     """
     global _SERVER_MODEL_ID, _NIM_LOCAL_MODEL_ID, _SERVER_MAX_MODEL_LEN
-    if INFERENCE_BACKEND not in ("vllm", "nim_local"):
+    if INFERENCE_BACKEND not in ("vllm", "nim_local", "alpamayo"):
         return _SERVER_MODEL_ID
     try:
         import urllib.request as _urlreq, json as _json
@@ -310,6 +314,12 @@ MODEL_CONFIGS = {
         "vllm_swap_flags": ["--allowed-local-media-path", "/tmp"],
         "vllm_swap_env":   {"VLLM_VIDEO_LOADER_BACKEND": "opencv", "FLASHINFER_DISABLE_VERSION_CHECK": "1"},
     },
+    "ALPAMAYO": {
+        "variants": [
+            ("Alpamayo 1.5 10B", "Alpamayo-1.5-10B", "nvidia/Alpamayo-1.5-10B", "bf16"),
+        ],
+        "nim": None,
+    },
 }
 
 # Per-model-size slider defaults shown in Advanced Settings when a checkpoint is selected.
@@ -321,6 +331,7 @@ _MODEL_SIZE_DEFAULTS = {
     "QW3-2B":   {"max_tokens": 512},
     "QW3-8B":   {"max_tokens": 512},
     "QW3-32B":  {"max_tokens": 1024},
+    "ALPAMAYO": {"fps": 4, "max_pixels": 524288, "max_tokens": 256},
     # base64-frame models — fps controls extraction; set sensible per-size values
     "CR1-7B":{"fps": 2, "max_tokens": 512},
     "OMNI-30B":{"fps": 1, "max_tokens": 1024},
@@ -340,12 +351,12 @@ _LABEL_TO_MODEL_SIZE = {
     for label, _, _, _ in cfg.get("variants", [])
 }
 
-MODEL_SIZE   = os.environ.get("MODEL_SIZE", "2B").upper()
+MODEL_SIZE   = os.environ.get("MODEL_SIZE", "ALPAMAYO" if INFERENCE_BACKEND == "alpamayo" else "2B").upper()
 # .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 if MODEL_SIZE not in MODEL_CONFIGS:
-    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, OMNI-30B, GM-4-31B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
+    print(f"[ERROR] MODEL_SIZE={MODEL_SIZE} not supported. Use ALPAMAYO, CR1-7B, 2B, 8B, 32B, C3-2B, C3-8B, C3-32B, C3-super, OMNI-30B, GM-4-31B, NEM-12B, QW3-2B, QW3-8B, or QW3-32B."); sys.exit(1)
 
 # Model-size specific fps default for the UI slider (HF mode uses lower fps to bound prefill time)
 _UI_DEFAULT_FPS = _MODEL_SIZE_DEFAULTS.get(MODEL_SIZE, {}).get("fps", DEFAULT_FPS)
@@ -618,7 +629,10 @@ _VLLM_DD_META = {
     label: (os.path.join(_MODELS_BASE, dirname), hf_id)
     for label, dirname, hf_id, _ in _ALL_VARIANTS_DD_RAW
 }
-if INFERENCE_BACKEND == "vllm":
+if INFERENCE_BACKEND == "alpamayo":
+    CHECKPOINT_PRESETS = [("Alpamayo 1.5 10B", _SERVER_MODEL_ID or MODEL_NAME or "nvidia/Alpamayo-1.5-10B")]
+    _VLLM_DD_DEFAULT = "Alpamayo 1.5 10B"
+elif INFERENCE_BACKEND == "vllm":
     CHECKPOINT_PRESETS = [
         (label, _resolve(dirname, hf_id))
         for label, dirname, hf_id, _ in _ALL_VARIANTS_DD_RAW
@@ -1128,6 +1142,8 @@ _NIM_SWITCH_SERVICE_READY = (
 
 DEFAULT_SYSTEM = "You are a helpful assistant that analyzes videos."
 DEFAULT_PROMPT = "Describe what is happening in this video. What are the key actions, objects, and events?"
+ALPAMAYO_ADAPTER_FRAMES = int(os.environ.get("ALPAMAYO_FRAMES", "4"))
+ALPAMAYO_MAX_DECODED_VIDEO_FRAMES = int(os.environ.get("ALPAMAYO_MAX_DECODED_VIDEO_FRAMES", "96"))
 
 _GENERIC_SYSTEM = "You are a helpful assistant."
 _WAREHOUSE_SYSTEM = "You are a helpful warehouse monitoring system."
@@ -1389,7 +1405,11 @@ def _build_payload_preview(video_path, image_path, user_prompt, system_prompt,
         "fps": int(fps_val),
         "max_pixels": int(max_pixels),
         "transmission_mode": mode,
-        "note": "max_tokens not sent at the wire (standing order); server max_model_len governs.",
+        "note": (
+            f"Alpamayo adapter samples {_alpamayo_frame_summary()}; fps/max_pixels are UI compatibility controls."
+            if _is_alpamayo_mode(effective_model)
+            else "max_tokens not sent at the wire (standing order); server max_model_len governs."
+        ),
     }
     text = _json.dumps(body, indent=2, ensure_ascii=False)
     # Cache the exact bytes we wrote so _parse_payload_edit can distinguish
@@ -1473,6 +1493,14 @@ def _build_warnings_html(fps, max_pixels, max_tokens, temperature, top_p,
             "is rejected with HTTP 400 by vLLM and build.nvidia.com hosted "
             "endpoints. Canonical shape is one video_url with base64 data URL. "
             "Fix path: extend _uses_native_video_url(model_id) for this model."))
+
+    if _is_alpamayo_mode():
+        rows.append(("info",
+            "Alpamayo VLA mode is active: the MP4 is sent as video_url, and "
+            f"adapter-side sampling uses {_alpamayo_frame_summary()}. The fps "
+            "and max_pixels controls are retained for compatibility but do not "
+            "change Alpamayo's effective video window unless the adapter env "
+            "vars are changed and the adapter is restarted."))
 
     # ── NIM-FP8-8B EOS bug (Alex 2026-05-08) ───────────────────────────────
     if INFERENCE_BACKEND == "nim_local" and float(temperature) < 0.3:
@@ -1570,7 +1598,7 @@ def _is_nim(model_id):
     return model_id.startswith("nim://")
 
 def _is_vllm(model_id):
-    return INFERENCE_BACKEND in ("vllm", "nim_local") and not _is_nim(model_id)
+    return INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") and not _is_nim(model_id)
 
 def _is_nemotron(model_id):
     """True for Nemotron models — they use native video_url payloads."""
@@ -1625,6 +1653,8 @@ def _uses_native_video_url(model_id):
         if _is_frames_fallback_nim(mid):
             return False  # frame fallback for NIMs whose NVDEC video_url path rejects uploads
         return True
+    if INFERENCE_BACKEND == "alpamayo":
+        return True
 
     # ── vllm + hf backends ──────────────────────────────────────────────────
     # Both route through qwen_vl_utils for native-capable models. Empirical list
@@ -1634,9 +1664,36 @@ def _uses_native_video_url(model_id):
         "qwen3-vl", "qwen3vl",                  # base Qwen3-VL releases
         "cosmos3", "cosmos-3",                  # Cosmos3-Nano-Reasoner / Super-Reasoner
         "cosmos-reason2", "cosmos-reason-2",    # Cosmos Reason 2 family (2B/8B/32B)
+        "alpamayo",                             # Alpamayo 1.5 BYO OpenAI adapter
         "nemotron",                             # Nemotron-Nano-12B-v2-VL
     )
     return any(sig in mid for sig in native_signatures)
+
+def _is_alpamayo_mode(model_id=None):
+    mid = (model_id or _SERVER_MODEL_ID or MODEL_NAME or "").lower()
+    return INFERENCE_BACKEND == "alpamayo" or "alpamayo" in mid
+
+def _alpamayo_frame_summary():
+    frames = ALPAMAYO_ADAPTER_FRAMES
+    decoded = ALPAMAYO_MAX_DECODED_VIDEO_FRAMES
+    return f"{frames} frame{'s' if frames != 1 else ''} from the first {decoded} decoded frames"
+
+def _alpamayo_mode_html():
+    if not _is_alpamayo_mode():
+        return ""
+    return (
+        '<div style="border:1px solid #b7791f;border-left:4px solid #f59e0b;'
+        'background:#1f1606;color:#f8e7c0;padding:12px 14px;border-radius:8px;'
+        'margin:10px 0 14px;font-size:13px;line-height:1.45">'
+        '<div style="font-size:11px;text-transform:uppercase;font-weight:800;'
+        'letter-spacing:.02em;color:#fbbf24">Alpamayo VLA loaded</div>'
+        '<div style="font-size:16px;font-weight:800;color:#fff;margin-top:3px">'
+        'Current path is BYO-video VQA/captioning over adapter-sampled frames.</div>'
+        f'<div style="margin-top:6px">The frontend sends one <code>video_url</code> plus your prompt. '
+        f'The Alpamayo adapter samples {_alpamayo_frame_summary()} and calls '
+        '<code>Alpamayo1_5.generate_text</code>. Full ego trajectory/action mode is not active in this UI yet.</div>'
+        '</div>'
+    )
 
 def _expected_quant(model_id):
     """Infer expected quantization from model path/ID name."""
@@ -2238,7 +2295,7 @@ def _hf_model_commit_sha(model_id):
 def _active_model_details():
     live_model = (
         _refresh_server_model_id(timeout=1.5)
-        if INFERENCE_BACKEND in ("vllm", "nim_local")
+        if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo")
         else None
     ) or _SERVER_MODEL_ID or _loaded.get("model_id") or MODEL_NAME
     proc = _find_vllm_process(live_model) if INFERENCE_BACKEND in ("vllm", "nim_local") else None
@@ -2253,7 +2310,7 @@ def _active_model_details():
         "checkpoint": live_model,
         "display_name": live_model,
         "backend": INFERENCE_BACKEND,
-        "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local") else None,
+        "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") else None,
         "model_commit": {
             "sha": hf_sha,
             "url": hf_url,
@@ -2273,7 +2330,7 @@ def _active_model_details():
         },
         "quantization": _infer_quantization(live_model, flags),
         "vllm": {
-            "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local") else None,
+            "base_url": VLLM_BASE_URL if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") else None,
             "model": _backend_model_info(live_model),
             "process": proc,
         },
@@ -2697,7 +2754,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
     steps = VLLM_STEPS
     if t_run_start is None:
         t_run_start = time.time()
-    _be_label = "NIM" if INFERENCE_BACKEND == "nim_local" else "VLLM"
+    _be_label = "NIM" if INFERENCE_BACKEND == "nim_local" else "Alpamayo" if INFERENCE_BACKEND == "alpamayo" else "VLLM"
 
     # NIM-8B-FP8-THINK-EOS safety net: at greedy decode the FP8 model emits
     # `<think>` then an EOS-like token, finishing in 2-3 tokens with no answer.
@@ -2875,7 +2932,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
         # than the one Gradio cached at startup. Re-query /v1/models, and if
         # the served name changed, retry once with the fresh value. Saves a
         # full Gradio restart on every container swap.
-        if resp.status_code == 404 and INFERENCE_BACKEND in ("vllm", "nim_local"):
+        if resp.status_code == 404 and INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo"):
             try: resp.close()
             except Exception: pass
             _new_mid = _refresh_server_model_id()
@@ -2911,6 +2968,13 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
                     "    -e NGC_API_KEY=<key> nvcr.io/nim/nvidia/cosmos-reason2-2b:latest\n\n"
                     "Check status: docker logs cosmos-nim\n"
                     "Check ready: curl http://localhost:8000/v1/models"
+                )
+            elif INFERENCE_BACKEND == "alpamayo":
+                err = (
+                    f"[Alpamayo] Adapter not responding at {VLLM_BASE_URL}\n\n"
+                    "Start the adapter first:\n"
+                    "  uv run python -m alpamayo1_5.byo_openai_server --port 8001\n\n"
+                    "Check ready: curl http://localhost:8001/v1/models"
                 )
             else:
                 err = (
@@ -3447,8 +3511,8 @@ def run_all_variants(video_path, user_prompt, system_prompt, fps, max_pixels, ma
 
     _do_reload = reload_vllm and INFERENCE_BACKEND == "vllm"
 
-    if INFERENCE_BACKEND in ("vllm", "nim_local"):
-        _be_hdr = "NIM (local Docker)" if INFERENCE_BACKEND == "nim_local" else "vLLM"
+    if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo"):
+        _be_hdr = "NIM (local Docker)" if INFERENCE_BACKEND == "nim_local" else "Alpamayo adapter" if INFERENCE_BACKEND == "alpamayo" else "vLLM"
         if _do_reload:
             combined = (f"[{_be_hdr} mode — real benchmarks: reloading vLLM per variant]\n"
                         f"Each variant restarts the vLLM server. Gradio stays live. "
@@ -3571,7 +3635,7 @@ def run_all_variants(video_path, user_prompt, system_prompt, fps, max_pixels, ma
 # Loading here wastes ~9 GB VRAM (weights loaded twice) and risks OOM on 80 GB GPUs.
 # Set SKIP_HF_PRELOAD=1 to force-skip even in HF mode (useful when VRAM is tight).
 _SKIP_PRELOAD = (
-    INFERENCE_BACKEND == "vllm"
+    INFERENCE_BACKEND in ("vllm", "alpamayo")
     or os.environ.get("SKIP_HF_PRELOAD", "").lower() in ("1", "true", "yes")
 )
 _preloaded_ok = False
@@ -3582,8 +3646,8 @@ if os.path.exists(MODEL_DIR) and not _SKIP_PRELOAD:
         _preloaded_ok = True
     except Exception as e:
         print(f"[demo] Pre-load failed ({e}) — model loads on first inference", flush=True)
-elif _SKIP_PRELOAD and INFERENCE_BACKEND == "vllm":
-    print(f"[demo] vLLM mode — skipping HF preload (PRELOAD-001 fix)", flush=True)
+elif _SKIP_PRELOAD and INFERENCE_BACKEND in ("vllm", "alpamayo"):
+    print(f"[demo] {INFERENCE_BACKEND} mode — skipping HF preload (PRELOAD-001 fix)", flush=True)
 else:
     print(f"[demo] MODEL_DIR not found — model loads on first inference", flush=True)
 
@@ -3924,17 +3988,27 @@ with gr.Blocks(
     _backend_note = (
         f"**Backend:** NIM local Docker (`{VLLM_BASE_URL}`)"
         if INFERENCE_BACKEND == "nim_local"
+        else f"**Backend:** Alpamayo adapter (`{VLLM_BASE_URL}`)"
+        if INFERENCE_BACKEND == "alpamayo"
         else f"**Backend:** vLLM (`{VLLM_BASE_URL}`)"
         if INFERENCE_BACKEND == "vllm"
         else "**Backend:** HF transformers *(quantized models upcast to BF16)*"
     )
+    _title = "Alpamayo VLA — BYO Video Demo" if _is_alpamayo_mode() else f"Cosmos Reason — BYO Video Demo ({MODEL_SIZE})"
+    _intro = (
+        "Upload a short, front-loaded MP4 or image and ask a captioning/VQA prompt. "
+        "The adapter owns Alpamayo frame sampling; use the clip info panel to verify the event is early."
+        if _is_alpamayo_mode()
+        else "Upload any MP4 or image (JPG/PNG/WebP) and ask the model a question. "
+        "Select a checkpoint from the dropdown to load it into vLLM."
+    )
     gr.Markdown(
-        f"# 🌌 Cosmos Reason — BYO Video Demo ({MODEL_SIZE})\n"
+        f"# 🌌 {_title}\n"
         f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
         f"**VRAM free:** {free_vram:,} MiB &nbsp;·&nbsp; {_backend_note}\n\n"
-        f"Upload any MP4 or image (JPG/PNG/WebP) and ask the model a question. "
-        f"Select a checkpoint from the dropdown to load it into vLLM."
+        f"{_intro}"
     )
+    gr.HTML(_alpamayo_mode_html())
     gr.HTML(_active_model_details_html("/api/active-model"))
 
     # ── Input row ───────────────────────────────────────────────────────────
@@ -3985,12 +4059,13 @@ with gr.Blocks(
             "HF Transformers" + (" (active)" if _active_be == "HF" else ""),
             _vllm_label + (" (active)" if _active_be == "VLLM" else ""),
             "NIM (local Docker)" + (" (active)" if _active_be == "NIM_LOCAL" else ""),
+            "Alpamayo adapter" + (" (active)" if _active_be == "ALPAMAYO" else ""),
             "TRT-LLM (not yet supported)",
         ]
         _be_map = {c: v for c, v in zip(
-            _be_choices, ["hf", "vllm", "nim_local", "trtllm"]
+            _be_choices, ["hf", "vllm", "nim_local", "alpamayo", "trtllm"]
         )}
-        _current_be_choice = _be_choices[{"HF": 0, "VLLM": 1, "NIM_LOCAL": 2}.get(_active_be, 0)]
+        _current_be_choice = _be_choices[{"HF": 0, "VLLM": 1, "NIM_LOCAL": 2, "ALPAMAYO": 3}.get(_active_be, 0)]
 
         with gr.Row():
             backend_radio = gr.Radio(
@@ -4001,11 +4076,11 @@ with gr.Blocks(
                 interactive=True,
             )
             vllm_url_box = gr.Textbox(
-                label="vLLM / NIM Base URL",
+                label="OpenAI-compatible Base URL",
                 value=VLLM_BASE_URL,
                 placeholder="http://localhost:8000/v1",
-                info="Used when backend = vLLM or NIM (local Docker)",
-                visible=_active_be in ("VLLM", "NIM_LOCAL"),
+                info="Used when backend = vLLM, NIM (local Docker), or Alpamayo",
+                visible=_active_be in ("VLLM", "NIM_LOCAL", "ALPAMAYO"),
                 interactive=True,
             )
 
@@ -4046,6 +4121,8 @@ with gr.Blocks(
                 env_cmd = f"INFERENCE_BACKEND={selected}"
                 if selected == "vllm":
                     env_cmd += "  VLLM_BASE_URL=http://localhost:8000/v1"
+                elif selected == "alpamayo":
+                    env_cmd += "  ALPAMAYO_BASE_URL=http://localhost:8001/v1"
                 _cuda_note = ""
                 if selected == "vllm":
                     _cuda_note = (
@@ -4063,9 +4140,9 @@ with gr.Blocks(
                     f'{_cuda_note}'
                     '</div>'
                 )
-                show_url = selected in ("vllm", "nim_local")
+                show_url = selected in ("vllm", "nim_local", "alpamayo")
                 return gr.update(value=warn_html, visible=True), gr.update(visible=show_url)
-            return gr.update(value="", visible=False), gr.update(visible=selected in ("vllm", "nim_local"))
+            return gr.update(value="", visible=False), gr.update(visible=selected in ("vllm", "nim_local", "alpamayo"))
 
         backend_radio.change(
             fn=_on_backend_change,
@@ -4400,6 +4477,8 @@ with gr.Blocks(
             return gr.update(), gr.update()
         src_fps = max(1, min(60, int(round(m.fps)))) if (m.fps and m.fps > 0) else None
         src_px = max(64*(32**2), min(8192*(32**2), int(m.width) * int(m.height)))
+        if INFERENCE_BACKEND == "alpamayo":
+            return gr.update(value=_INITIAL_FPS), gr.update()
         if INFERENCE_BACKEND == "nim_local" and not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
             src_px = min(src_px, _INITIAL_MAX_PIXELS)
         fps_upd = gr.update(value=src_fps) if src_fps else gr.update()
@@ -4429,6 +4508,21 @@ with gr.Blocks(
             return "*Clip info unavailable (PyAV not installed)*", gr.update()
         fps_val  = max(1, int(fps_val))
         target   = max(1, int(m.duration_s * fps_val))
+        if INFERENCE_BACKEND == "alpamayo":
+            effective_s = (ALPAMAYO_MAX_DECODED_VIDEO_FRAMES / m.fps) if m.fps and m.fps > 0 else 0.0
+            front_window = f"first ~{effective_s:.1f}s" if effective_s > 0 else f"first {ALPAMAYO_MAX_DECODED_VIDEO_FRAMES} decoded frames"
+            late_note = (
+                "\n> ⚠ **Trim recommended** · this clip is longer than the default adapter window; "
+                "late events may not be sampled."
+                if effective_s > 0 and m.duration_s > effective_s
+                else "\n> ✓ **Within default adapter window** · key events should still be visible to Alpamayo."
+            )
+            info_str = (
+                f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
+                f"video_url sent to Alpamayo; adapter samples {_alpamayo_frame_summary()} ({front_window})"
+                f"{late_note}"
+            )
+            return info_str, gr.update()
         if INFERENCE_BACKEND == "nim_local":
             if not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
                 n_frames = min(target, _nim_frame_fallback_limit())
@@ -4491,7 +4585,7 @@ with gr.Blocks(
             return "*Image info unavailable*", gr.update()
         # Fast backends (vLLM, NIM) serve at high throughput; HF-backend
         # timing math doesn't apply and auto-cap is unnecessary.
-        if INFERENCE_BACKEND in ("vllm", "nim_local"):
+        if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo"):
             return info_str, gr.update()
         est_s_full = _est_tokens(1, DEFAULT_MAX_PIXELS) / PREFILL_TPS
         capped_px, est_s_capped = _auto_cap(1, DEFAULT_MAX_PIXELS)

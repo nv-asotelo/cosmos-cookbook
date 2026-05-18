@@ -284,6 +284,16 @@ _MODEL_CONFIGS = {
             "FLASHINFER_DISABLE_VERSION_CHECK": "1",
         },
     },
+    # ── Alpamayo 1.5 VQA/captioning through the local BYO OpenAI adapter ─────
+    "ALPAMAYO": {
+        "variants": [
+            ("Alpamayo 1.5 10B", "Alpamayo-1.5-10B", "nvidia/Alpamayo-1.5-10B", "~22 GB"),
+        ],
+        "nim": None,
+        "hf_auth_required": True,
+        "backend_required": "alpamayo",
+        "disk_gb": 128,
+    },
 }
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -301,13 +311,15 @@ ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', ''
                  "HF_MODULES_CACHE": f"{HF_HOME_DIR}/modules"}
 HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
-MODEL_SIZE    = os.environ.get("MODEL_SIZE", "C3-2B").upper()
+_INFERENCE_BACKEND_RAW = os.environ.get("INFERENCE_BACKEND", "hf").lower()
+MODEL_SIZE    = os.environ.get("MODEL_SIZE", "ALPAMAYO" if _INFERENCE_BACKEND_RAW == "alpamayo" else "C3-2B").upper()
 # .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 # Cosmos3-Reasoner uses cosmos-reason2 working dir until a dedicated repo is published.
-# Set COSMOS_DIR env var to override if the repo path changes.
-REASON2_DIR   = os.environ.get("COSMOS_DIR", f"{HOME}/cosmos-reason2")
+# Alpamayo uses its own repo checkout. Set COSMOS_DIR or ALPAMAYO_DIR to override.
+_DEFAULT_WORK_DIR = f"{HOME}/amo-1-5" if _INFERENCE_BACKEND_RAW == "alpamayo" else f"{HOME}/cosmos-reason2"
+REASON2_DIR   = os.environ.get("COSMOS_DIR", os.environ.get("ALPAMAYO_DIR", _DEFAULT_WORK_DIR))
 MODELS_BASE   = f"{REASON2_DIR}/models"
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "nvidia_build").strip().lower()
@@ -340,7 +352,7 @@ URL_FILE      = "/tmp/gradio_url.txt"
 LOG_FILE      = "/tmp/gradio_demo.log"
 # MAXLEN-001: 32768 is the minimum required for video queries. Do not reduce below this.
 VLLM_MAX_MODEL_LEN   = int(os.environ.get("VLLM_MAX_MODEL_LEN", "32768"))
-INFERENCE_BACKEND    = os.environ.get("INFERENCE_BACKEND", "hf")
+INFERENCE_BACKEND    = _INFERENCE_BACKEND_RAW
 # VRAM flags — set during GPU detection; declare defaults here
 ULTRA_LOW_VRAM = False
 LOW_VRAM       = False
@@ -356,7 +368,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use ALPAMAYO, CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -496,6 +508,7 @@ else:
     _variant_labels = MODEL_ID
 
 _REASONING_MODEL_SIZES = {
+    "ALPAMAYO",
     "CR1-7B", "2B", "8B", "32B",
     "C3-2B", "C3-8B", "C3-32B", "C3-super",
     "NEM-12B", "OMNI-30B", "GM-4-31B",
@@ -528,7 +541,7 @@ def _infer_model_towers(model_size, *names):
     tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
     if any(token in tokens for token in ("predict", "video2world", "text2world", "generator")):
         return {"generation"}
-    if any(token in tokens for token in ("reason", "reasoner", "vlm", "qwen", "nemotron", "gemma")):
+    if any(token in tokens for token in ("reason", "reasoner", "vlm", "qwen", "nemotron", "gemma", "alpamayo")):
         return {"reasoning"}
     if any(token in tokens for token in ("cosmos3-nano", "cosmos3-super", "cosmos-3-nano", "cosmos-3-super")):
         return {"generation"}
@@ -613,6 +626,8 @@ def _is_cosmos3_reasoner(model_size, towers, *names):
 
 def _build_playground_app(model_size, towers, *names):
     tokens = " ".join(str(n or "") for n in (model_size, *names)).lower()
+    if "alpamayo" in tokens:
+        return "/tmp/gradio_cr2_byo.py", "Alpamayo BYO-video Gradio"
     if "generation" in towers and "reasoning" not in towers:
         return "/tmp/gradio_cosmos_predict.py", "Cosmos Predict Build-style playground"
     if "reasoning" in towers and "generation" not in towers:
@@ -634,8 +649,8 @@ else:
 USE_REASON_VITE = (
     FRONTEND == "nvidia_build"
     and "reasoning" in FRONTEND_TOWERS
-    and INFERENCE_BACKEND in {"vllm", "nim_local"}
-    and MODEL_SIZE in {"C3-8B", "C3-super"}
+    and INFERENCE_BACKEND in {"vllm", "nim_local", "alpamayo"}
+    and (MODEL_SIZE in {"C3-8B", "C3-super", "ALPAMAYO"} or "alpamayo" in (MODEL_ID + MODEL_NAME).lower())
 )
 USE_PREDICT_VITE = (
     FRONTEND == "nvidia_build"
@@ -773,15 +788,21 @@ else:
     ok(f"uv installed in {time.time()-t0:.0f}s")
 STEPS_DONE.append(4)
 
-# ── Step 5: cosmos-reason2 repo ───────────────────────────────────────────────
-header("Step 5 — cosmos-reason2 repo", eta="<5s if cached, ~15s first time")
-if os.path.exists(f"{REASON2_DIR}/.git"):
-    ok(f"cosmos-reason2 already cloned at {REASON2_DIR}")
+# ── Step 5: model repo ───────────────────────────────────────────────────────
+_repo_label = "Alpamayo 1.5 repo" if INFERENCE_BACKEND == "alpamayo" else "cosmos-reason2 repo"
+header(f"Step 5 — {_repo_label}", eta="<5s if cached, ~15s first time")
+if os.path.exists(f"{REASON2_DIR}/.git") or (
+    INFERENCE_BACKEND == "alpamayo"
+    and os.path.exists(f"{REASON2_DIR}/pyproject.toml")
+    and os.path.isdir(f"{REASON2_DIR}/src/alpamayo1_5")
+):
+    ok(f"{_repo_label} already cloned at {REASON2_DIR}")
 else:
-    run("Cloning cosmos-reason2  (~15s)")
+    _repo_url = "https://github.com/NVlabs/alpamayo1.5.git" if INFERENCE_BACKEND == "alpamayo" else "https://github.com/nvidia-cosmos/cosmos-reason2.git"
+    run(f"Cloning {_repo_label}  (~15s)")
     t0 = time.time()
     rc = stream_cmd(
-        ["git", "clone", "https://github.com/nvidia-cosmos/cosmos-reason2.git", REASON2_DIR],
+        ["git", "clone", _repo_url, REASON2_DIR],
         env=ENV
     )
     if rc != 0:
@@ -793,17 +814,37 @@ STEPS_DONE.append(5)
 header("Step 6 — Python dependencies (uv sync)", eta="<5s if cached, ~2-3 min first time")
 venv_marker = f"{REASON2_DIR}/.venv/lib"
 if os.path.exists(venv_marker):
+    if INFERENCE_BACKEND == "alpamayo":
+        ENV["UV_NO_SYNC"] = "1"
+        os.environ["UV_NO_SYNC"] = "1"
     ok("virtualenv already present — skipping uv sync")
 else:
     _extras = os.environ.get("COSMOS_EXTRAS", "cu128")
-    run(f"Running uv sync --extra {_extras}  (~2-3 min)")
+    run("Running Alpamayo uv sync  (~2-5 min)" if INFERENCE_BACKEND == "alpamayo" else f"Running uv sync --extra {_extras}  (~2-3 min)")
     t0 = time.time()
-    rc, out = run_cmd(["uv", "sync", "--extra", _extras], cwd=REASON2_DIR, env=ENV, timeout=600)
-    if rc != 0:
+    if INFERENCE_BACKEND == "alpamayo":
+        rc, out = run_cmd(["uv", "sync"], cwd=REASON2_DIR, env=ENV, timeout=900)
+        if rc != 0 and "flash-attn" in out.lower():
+            run("Alpamayo uv sync failed on flash-attn, retrying with SDPA fallback")
+            rc, out = run_cmd(
+                ["uv", "sync", "--no-install-package", "flash-attn"],
+                cwd=REASON2_DIR,
+                env=ENV,
+                timeout=900,
+            )
+            if rc == 0:
+                ENV["ALPAMAYO_ATTENTION"] = "eager"
+                os.environ["ALPAMAYO_ATTENTION"] = "eager"
+    else:
+        rc, out = run_cmd(["uv", "sync", "--extra", _extras], cwd=REASON2_DIR, env=ENV, timeout=600)
+    if rc != 0 and INFERENCE_BACKEND != "alpamayo":
         run(f"{_extras} failed, trying uv sync without extras")
         rc, out = run_cmd(["uv", "sync"], cwd=REASON2_DIR, env=ENV, timeout=600)
     if rc != 0:
         print("  ✗  uv sync failed:", out[-500:]); sys.exit(1)
+    if INFERENCE_BACKEND == "alpamayo":
+        ENV["UV_NO_SYNC"] = "1"
+        os.environ["UV_NO_SYNC"] = "1"
     ok(f"Dependencies installed in {time.time()-t0:.0f}s")
 
 # ── Step 6b: vLLM version pin for CUDA 12.8 ──────────────────────────────────
@@ -819,7 +860,7 @@ try:
         timeout=10, text=True
     ).strip().split(".")[0:2]
     _driver_major = int(_smi[0])
-    if _driver_major < 575:  # < CUDA 13.0 threshold → cu128 pin required
+    if INFERENCE_BACKEND == "vllm" and _driver_major < 575:  # < CUDA 13.0 threshold → cu128 pin required
         header("Step 6b — vLLM pin for CUDA 12.8", eta="~30-60s")
         rc_vllm, out_vllm = run_cmd(
             ["uv", "pip", "install", "vllm==0.14.0"],
@@ -895,6 +936,20 @@ else:
         warn(f"requests install failed — NIM API mode unavailable: {out}")
     else:
         ok("requests installed")
+
+if INFERENCE_BACKEND == "alpamayo":
+    rc, qwen_check = run_cmd(
+        ["uv", "run", "python", "-c", "import qwen_vl_utils; print('ok')"],
+        cwd=REASON2_DIR, env=ENV
+    )
+    if rc == 0:
+        ok("qwen-vl-utils already installed")
+    else:
+        run("Installing qwen-vl-utils  (~5s)")
+        rc, out = run_cmd(["uv", "pip", "install", "qwen-vl-utils"], cwd=REASON2_DIR, env=ENV)
+        if rc != 0:
+            print("  ✗  qwen-vl-utils install failed:", out); sys.exit(1)
+        ok("qwen-vl-utils installed")
 
 if USE_REASON_VITE:
     def _activate_node_home():
@@ -1216,6 +1271,76 @@ if INFERENCE_BACKEND == "nim_local":
     MODEL_NAME = _nim_served
     ok(f"NIM container live at http://localhost:{_nim_port}/v1")
 
+# ── Step 9-A: Alpamayo OpenAI-compatible adapter ─────────────────────────────
+ALPAMAYO_LOG_FILE = "/tmp/alpamayo_openai_server.log"
+if INFERENCE_BACKEND == "alpamayo":
+    _alpamayo_port = int(os.environ.get("ALPAMAYO_PORT", "8001"))
+    _alpamayo_base = f"http://localhost:{_alpamayo_port}/v1"
+    _alpamayo_script_candidates = [
+        os.environ.get("ALPAMAYO_OPENAI_SERVER", ""),
+        "/tmp/alpamayo_openai_server.py",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "alpamayo_openai_server.py"),
+        os.path.join(REASON2_DIR, "src", "alpamayo1_5", "byo_openai_server.py"),
+    ]
+    _alpamayo_script = next((candidate for candidate in _alpamayo_script_candidates if candidate and os.path.exists(candidate)), "")
+    _alpamayo_ready = False
+    try:
+        urllib.request.urlopen(f"{_alpamayo_base}/models", timeout=3)
+        _alpamayo_ready = True
+        ok(f"Alpamayo adapter already running at {_alpamayo_base} — reusing")
+    except Exception:
+        pass
+
+    if not _alpamayo_ready:
+        header("Step 9-A — Start Alpamayo BYO OpenAI adapter", eta="~2-5 min for first model load")
+        _alpamayo_model_path = os.environ.get(
+            "ALPAMAYO_MODEL_PATH",
+            os.path.join(MODELS_BASE, _cfg["variants"][0][1]),
+        )
+        _alpamayo_cmd = [
+            "uv", "run", "python",
+            _alpamayo_script or "-m",
+        ]
+        if not _alpamayo_script:
+            _alpamayo_cmd.append("alpamayo1_5.byo_openai_server")
+        _alpamayo_cmd.extend([
+            "--port", str(_alpamayo_port),
+            "--model-id", MODEL_NAME,
+        ])
+        if os.path.exists(os.path.join(_alpamayo_model_path, "config.json")):
+            _alpamayo_cmd.extend(["--model-path", _alpamayo_model_path])
+        if os.environ.get("ALPAMAYO_PRELOAD", "1").lower() not in {"0", "false", "no"}:
+            _alpamayo_cmd.append("--preload")
+        _alpamayo_env = {
+            **ENV,
+            "MODEL_ID": MODEL_NAME,
+            "ALPAMAYO_MODEL_ID": MODEL_NAME,
+            "ALPAMAYO_MODEL_PATH": _alpamayo_model_path,
+            "ALPAMAYO_PORT": str(_alpamayo_port),
+            "ALPAMAYO_ATTENTION": os.environ.get("ALPAMAYO_ATTENTION", "eager"),
+        }
+        run(f"Launching Alpamayo adapter for {MODEL_NAME} (log: {ALPAMAYO_LOG_FILE})")
+        with open(ALPAMAYO_LOG_FILE, "w") as _af:
+            subprocess.Popen(_alpamayo_cmd, cwd=REASON2_DIR, env=_alpamayo_env,
+                             stdout=_af, stderr=subprocess.STDOUT)
+
+        t_alpamayo = time.time()
+        _ALPAMAYO_TIMEOUT = int(os.environ.get("ALPAMAYO_START_TIMEOUT", "900"))
+        while time.time() - t_alpamayo < _ALPAMAYO_TIMEOUT:
+            try:
+                urllib.request.urlopen(f"{_alpamayo_base}/models", timeout=5)
+                _alpamayo_ready = True
+                break
+            except Exception:
+                time.sleep(5)
+
+        if not _alpamayo_ready:
+            print(f"  ✗  Alpamayo adapter did not start within {_ALPAMAYO_TIMEOUT}s. Check {ALPAMAYO_LOG_FILE}")
+            sys.exit(1)
+        ok(f"Alpamayo adapter ready in {int(time.time() - t_alpamayo)}s")
+    os.environ["ALPAMAYO_BASE_URL"] = _alpamayo_base
+    os.environ["VLLM_BASE_URL"] = _alpamayo_base
+
 # ── Step 9b: vLLM server auto-start (BUG-VLLM-AUTOSTART) ─────────────────────
 # In vLLM mode Gradio connects to localhost:8000. If vLLM isn't running, the first
 # inference request fails with "Connection refused". Start it here, before Gradio.
@@ -1281,10 +1406,13 @@ launch_env = {
     "MODEL_SIZE":         MODEL_SIZE,
     "MODEL_DIR":          MODEL_DIR,
     "MODEL_NAME":         MODEL_NAME,
+    "MODEL_ID":           MODEL_NAME,
+    "ALPAMAYO_MODEL_ID":  os.environ.get("ALPAMAYO_MODEL_ID", MODEL_NAME if INFERENCE_BACKEND == "alpamayo" else ""),
+    "ALPAMAYO_BASE_URL":  os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8001/v1"),
     "BYO_VIDEO_MODEL_TOWERS": ",".join(sorted(MODEL_TOWERS)),
     "BYO_VIDEO_ACTIVE_TOWERS": ",".join(sorted(FRONTEND_TOWERS)),
     "GRADIO_PORT":        str(GRADIO_PORT),
-    "GRADIO_SHARE":       "true",
+    "GRADIO_SHARE":       os.environ.get("GRADIO_SHARE", "true"),
     "PYTHONUNBUFFERED":   "1",
     "HF_TOKEN":           HF_TOKEN,
     "NGC_API_KEY":        NGC_API_KEY,
@@ -1293,7 +1421,7 @@ launch_env = {
     "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
     "INFERENCE_BACKEND":  INFERENCE_BACKEND,
-    "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+    "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8000/v1")),
     "NIM_BASE_URL":       os.environ.get("NIM_BASE_URL", os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")),
     "NIM_IMAGE":          os.environ.get("NIM_IMAGE", os.environ.get("IMAGE", "")),
     "NIM_SERVED_MODEL_NAME": os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME),
@@ -1311,7 +1439,7 @@ launch_env = {
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
     "VLLM_MAX_MODEL_LEN": str(_cfg.get("vllm_max_model_len", VLLM_MAX_MODEL_LEN)),
     # PRELOAD-001: skip HF preload when using API-backed servers.
-    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local") else "0",
+    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") else "0",
 }
 
 def _detect_host_ip():
@@ -1402,6 +1530,7 @@ def _launch_gradio(sidecar=False):
     url_pattern        = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
     local_url_pattern  = re.compile(r'Running on local URL:\s+(http://[^\s]+)')
     launch_url_pattern = re.compile(r'\[launch\]\s+(https?://[^\s]+)')
+    share_requested = gradio_env.get("GRADIO_SHARE", "true").lower() not in {"0", "false", "no"}
     URL_CAPTURE_TIMEOUT = 300
     t_launch = time.time()
     with open(LOG_FILE, "w") as log:
@@ -1418,6 +1547,8 @@ def _launch_gradio(sidecar=False):
             ml = local_url_pattern.search(stripped)
             if ml and not local_url:
                 local_url = ml.group(1).rstrip("/")
+                if not share_requested:
+                    break
             mla = launch_url_pattern.search(stripped)
             if mla:
                 candidate = mla.group(1).rstrip(".").rstrip("/")
@@ -1426,6 +1557,8 @@ def _launch_gradio(sidecar=False):
                     break
                 if not local_url:
                     local_url = candidate
+                if not share_requested:
+                    break
             if "Could not create share link" in stripped:
                 share_failed = True
                 if local_url:
@@ -1480,9 +1613,10 @@ def _launch_reason_vite():
     vite_env = {
         **launch_env,
         "PORT": str(REASON_VITE_PORT),
-        "MODEL_ID": MODEL_ID,
+        "MODEL_ID": MODEL_ID or MODEL_NAME,
         "MODEL_NAME": MODEL_NAME or MODEL_ID,
-        "VLLM_BASE_URL": os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+        "ALPAMAYO_BASE_URL": os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8001/v1"),
+        "VLLM_BASE_URL": os.environ.get("VLLM_BASE_URL", os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8000/v1")),
         "VITE_COSMOS3_INFO_URL": "/api/active-model",
     }
     proc = subprocess.Popen(
@@ -1553,7 +1687,7 @@ def _launch_predict_vite():
     vite_env = {
         **launch_env,
         "PORT": str(PREDICT_VITE_PORT),
-        "MODEL_ID": MODEL_ID,
+        "MODEL_ID": MODEL_ID or MODEL_NAME,
         "MODEL_NAME": MODEL_NAME or MODEL_ID,
         "COSMOS3_BACKEND": os.environ.get("COSMOS3_BACKEND", INFERENCE_BACKEND),
         "COSMOS3_BASE_URL": _predict_base,

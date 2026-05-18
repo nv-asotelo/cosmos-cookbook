@@ -509,6 +509,71 @@ h1 {
   display: none;
 }
 
+.vlaModeBanner {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
+  gap: 22px;
+  margin-top: 16px;
+  border: 1px solid #9a6a18;
+  border-left: 4px solid #d99a25;
+  border-radius: 8px;
+  background: #171105;
+  padding: 18px 20px;
+}
+
+.vlaModeBanner h2 {
+  margin-top: 4px;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.vlaModeBanner p {
+  max-width: 760px;
+  margin-top: 8px;
+  color: #e8dcc8;
+  font-size: 14px;
+  line-height: 21px;
+}
+
+.vlaEyebrow {
+  margin: 0;
+  color: #f1b54b;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.vlaModeBanner dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.vlaModeBanner dl div {
+  min-width: 0;
+  border: 1px solid #4b3712;
+  border-radius: 6px;
+  background: #0b0b0b;
+  padding: 12px;
+}
+
+.vlaModeBanner dt {
+  color: #d99a25;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+
+.vlaModeBanner dd {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 17px;
+}
+
 .mobileIOTabs {
   display: none;
 }
@@ -1166,6 +1231,27 @@ select {
   display: grid;
   gap: 20px;
   padding: 6px 0 18px;
+}
+
+.vlaParameterNote {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #7d5a1a;
+  border-radius: 6px;
+  background: #130f06;
+  color: #f4dfb8;
+  padding: 10px 12px;
+}
+
+.vlaParameterNote strong {
+  color: #f1b54b;
+  font-size: 12px;
+}
+
+.vlaParameterNote span {
+  color: #d6c7ae;
+  font-size: 12px;
+  line-height: 17px;
 }
 
 .sliderField {
@@ -1891,6 +1977,15 @@ select {
     gap: 10px;
     margin-top: 4px;
     padding: 12px;
+  }
+
+  .vlaModeBanner {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
+  .vlaModeBanner dl {
+    grid-template-columns: 1fr;
   }
 
   .tabs {

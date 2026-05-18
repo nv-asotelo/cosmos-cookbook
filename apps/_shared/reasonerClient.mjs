@@ -1,12 +1,21 @@
 // Shared server-side client for vLLM/OpenAI-compatible Cosmos Reasoner APIs.
 //
 // Env var priority:
-//   VLLM_BASE_URL > NIM_BASE_URL > REASONER_BASE_URL > http://localhost:8000/v1
+//   ALPAMAYO_BASE_URL when INFERENCE_BACKEND=alpamayo,
+//   otherwise VLLM_BASE_URL > NIM_BASE_URL > REASONER_BASE_URL > http://localhost:8000/v1
 //
 // The BYO-video standing order is to send media as data URLs in the OpenAI
 // multimodal content array. Do not use file:// or HTML-tag-in-text shapes.
 
 function resolveBaseUrl() {
+  if (String(process.env.INFERENCE_BACKEND || "").toLowerCase() === "alpamayo") {
+    const alpamayoUrl =
+      process.env.ALPAMAYO_BASE_URL ||
+      process.env.REASONER_BASE_URL ||
+      "http://localhost:8001/v1";
+    const strippedAlpamayo = alpamayoUrl.replace(/\/$/, "");
+    return strippedAlpamayo.endsWith("/v1") ? strippedAlpamayo : `${strippedAlpamayo}/v1`;
+  }
   const raw =
     process.env.VLLM_BASE_URL ||
     process.env.NIM_BASE_URL ||
@@ -20,8 +29,11 @@ function configuredModel() {
   return (
     process.env.MODEL_NAME ||
     process.env.MODEL_ID ||
+    process.env.ALPAMAYO_MODEL_ID ||
     process.env.VLLM_MODEL ||
-    "nvidia/Cosmos3-Nano-Reasoner"
+    (String(process.env.INFERENCE_BACKEND || "").toLowerCase() === "alpamayo"
+      ? "nvidia/Alpamayo-1.5-10B"
+      : "nvidia/Cosmos3-Nano-Reasoner")
   );
 }
 
