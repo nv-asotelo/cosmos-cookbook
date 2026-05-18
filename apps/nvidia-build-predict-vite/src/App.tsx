@@ -1135,7 +1135,7 @@ export default function Page() {
               </button>
             </div>
 
-            <label className="fieldLabel">Generator Mode</label>
+            <label className="fieldLabel">World Creation Mode</label>
             <div className="modeGrid">
               {visibleModes.map((mode) => {
                 const Icon = mode.icon;
@@ -1230,7 +1230,7 @@ export default function Page() {
               </span>
               <button className="runButton" onClick={run} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
-                {isContentLoading ? "Loading" : isRunning ? "Generating" : "Generate"}
+                {isContentLoading ? "Loading" : isRunning ? "Generating" : "Generate New Video"}
               </button>
             </div>
           </section>
@@ -1286,14 +1286,6 @@ export default function Page() {
             </div>
           </section>
         </div>
-
-        <ContentSelects
-          disabled={isRunning}
-          groups={CONTENT_SELECT_GROUPS}
-          loadingId={loadingContentItemId}
-          onApply={applyContentSelect}
-          selectedId={selectedContentItemId}
-        />
 
         <aside className="apiPanel">
           <div className="apiTopline">API request</div>
@@ -1353,84 +1345,6 @@ export default function Page() {
         />
       ) : null}
     </main>
-  );
-}
-
-function ContentSelects({
-  disabled,
-  groups,
-  loadingId,
-  onApply,
-  selectedId
-}: {
-  disabled: boolean;
-  groups: ContentSelectGroup[];
-  loadingId: string | null;
-  onApply: (item: ContentSelectItem) => void;
-  selectedId: string;
-}) {
-  return (
-    <section className="contentSelects" aria-label="Content selects">
-      <div className="contentSelectsHeader">
-        <div>
-          <p>Content Selects</p>
-          <h2>Generator examples by domain</h2>
-        </div>
-        <span>Robotics, Autonomous Vehicles, Industrial Smart Spaces</span>
-      </div>
-      <div className="contentGroupGrid">
-        {groups.map((group) => (
-          <article className="contentGroup" key={group.title}>
-            <div className="contentGroupTopline">
-              <h3>{group.title}</h3>
-              <p>{group.summary}</p>
-            </div>
-            <div className="contentCardGrid">
-              {group.items.map((item) => {
-                const isLoading = loadingId === item.id;
-                const isSelected = selectedId === item.id && !isLoading;
-                const isDisabled = disabled || loadingId !== null;
-
-                return (
-                  <button
-                    aria-busy={isLoading}
-                    aria-pressed={isSelected}
-                    className={`contentCard ${isSelected ? "selectedContentCard" : ""} ${isLoading ? "loadingContentCard" : ""}`}
-                    disabled={isDisabled}
-                    key={`${group.title}-${item.id}`}
-                    onClick={() => onApply(item)}
-                    type="button"
-                  >
-                    <div
-                      aria-hidden="true"
-                      className="contentThumb"
-                      style={{ backgroundImage: `url("${item.mediaUrl}")` }}
-                    >
-                      <span className="contentDomainPill">{item.domain}</span>
-                      {isLoading ? (
-                        <div className="contentLoadingOverlay">
-                          <span className="contentSpinner" />
-                          <strong>Loading image and prompt</strong>
-                          <small>Generate will enable when ready.</small>
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="contentCardBody">
-                      <span className="contentMediaLabel">{item.domain}</span>
-                      <strong>{item.title}</strong>
-                      <p>{item.description}</p>
-                    </div>
-                    <div className="contentActions">
-                      <span>{isLoading ? "Loading..." : isSelected ? "Selected" : "Select image"}</span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </article>
-        ))}
-      </div>
-    </section>
   );
 }
 
