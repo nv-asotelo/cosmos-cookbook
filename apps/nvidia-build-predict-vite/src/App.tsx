@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronRight, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
@@ -41,6 +41,11 @@ const HERO_TAGS = [
   "future state generation"
 ];
 const PROGRESS_FRAME_COUNT = 6;
+const COMMUNITY_VIDEOS = [
+  "/examples/canonical/007.mp4",
+  "/examples/canonical/009.mp4",
+  "/examples/canonical/010.mp4"
+];
 
 const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
   "256": 256 * 256,
@@ -1044,7 +1049,6 @@ export default function Page() {
                   progress={progressPercent}
                   elapsedSeconds={elapsedSeconds}
                   etaSeconds={etaSeconds}
-                  isNimBackend={isNimBackend}
                   totalFrames={numFrames}
                 />
               ) : result?.error ? (
@@ -1301,7 +1305,6 @@ function GenerationProgress({
   progress,
   elapsedSeconds,
   etaSeconds,
-  isNimBackend,
   totalFrames
 }: {
   media: MediaState | null;
@@ -1309,71 +1312,66 @@ function GenerationProgress({
   progress: number;
   elapsedSeconds: number;
   etaSeconds: number;
-  isNimBackend: boolean;
   totalFrames: number;
 }) {
-  const generatedFrames = Math.max(1, Math.min(totalFrames, Math.round((progress / 100) * totalFrames)));
-  const displayFrames = frames.length > 0 ? frames : Array.from({ length: PROGRESS_FRAME_COUNT }, () => "");
-  const fallbackLabel = media?.kind === "image" ? "Image condition" : media?.kind === "video" ? "Video condition" : "Text prompt";
-  const remainingSeconds = Math.max(0, etaSeconds - elapsedSeconds);
-  const overrun = elapsedSeconds > etaSeconds;
+  void progress;
+  void elapsedSeconds;
+  void etaSeconds;
+  void totalFrames;
+  const sourceFrame = media?.previewUrl || frames[0] || "";
+  const displayFrames =
+    frames.length > 0
+      ? frames.slice(0, PROGRESS_FRAME_COUNT)
+      : Array.from({ length: PROGRESS_FRAME_COUNT }, () => sourceFrame);
+  while (displayFrames.length < PROGRESS_FRAME_COUNT) {
+    displayFrames.push(sourceFrame);
+  }
 
   return (
     <article className="generationProgress" aria-live="polite">
-      <div className="progressHeader">
+      <div className="autoregressiveHeader">
         <p>
-          <strong>Generation is running:</strong> denoising{" "}
-          {totalFrames} latent frames in parallel, then VAE-decoding and encoding the output.
+          <strong>The autoregressive model is working:</strong> Predicting future frames for you...
         </p>
-        <span>
-          {generatedFrames} / {totalFrames} frames - elapsed {formatDuration(elapsedSeconds)}
-          {overrun ? ` - over est. by ${formatDuration(elapsedSeconds - etaSeconds)}` : ` - ETA ${formatDuration(remainingSeconds)}`}
-        </span>
       </div>
-      <div
-        className="progressTrack"
-        aria-label="Generation progress"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(progress)}
-        role="progressbar"
-      >
-        <span style={{ width: `${Math.max(4, progress)}%` }} />
-      </div>
-      <div className="generatedFrameStrip">
+      <div className="autoregressiveFrameStrip">
         {displayFrames.map((src, index) => {
-          const threshold = (index / PROGRESS_FRAME_COUNT) * 86;
-          const readiness = Math.max(0, Math.min(1, (progress - threshold) / 34));
-          const frameNumber = Math.min(totalFrames, Math.max(1, Math.round(((index + 1) / PROGRESS_FRAME_COUNT) * totalFrames)));
-          const stage = readiness < 0.25 ? "Latent" : readiness < 0.78 ? "Denoising" : "Decoding";
           const style = {
-            "--frame-blur": `${Math.max(0, 10 - readiness * 10)}px`,
-            "--frame-opacity": String(0.38 + readiness * 0.62),
-            "--diffusion-opacity": String(Math.max(0.18, 0.74 - readiness * 0.5)),
-            "--diffusion-reveal": `${Math.max(8, readiness * 100)}%`
+            "--future-blur": `${index * 1.1}px`,
+            "--future-scale": String(1 + index * 0.014),
+            "--future-pixel": index < 1 ? "auto" : "pixelated",
+            "--future-opacity": String(Math.max(0.42, 1 - index * 0.1))
           } as CSSProperties;
 
           return (
-            <figure className={src ? "generatedFrame diffusionFrame" : "generatedFrame latentFrame"} style={style} key={`${src || "fallback"}-${index}`}>
-              {src ? (
-                <>
-                  <img src={src} alt="" />
-                  <span className="diffusionField" aria-hidden="true" />
-                  <span className="diffusionState">{stage}</span>
-                </>
-              ) : (
-                <div className="generatedFrameFallback">
-                  <span>Latent</span>
-                </div>
-              )}
-              <figcaption>Frame {frameNumber}</figcaption>
+            <figure className="autoregressiveFrame" style={style} key={`${src || "fallback"}-${index}`}>
+              {src ? <img src={src} alt="" /> : <span aria-hidden="true" />}
             </figure>
           );
         })}
       </div>
-      <p className="progressFootnote">
-        Conditioning source: {media?.name || fallbackLabel}. The final MP4 replaces this preview as soon as inference completes.
-      </p>
+      <section className="communityWaitShelf" aria-label="Community-generated videos">
+        <h3>While you wait! Check out these community-generated videos</h3>
+        <div className="communityVideoRow">
+          <button className="carouselArrow leftArrow" type="button" aria-label="Previous community video">
+            <ChevronLeft size={30} />
+          </button>
+          {COMMUNITY_VIDEOS.map((src, index) => (
+            <video
+              className={index === 1 ? "communityVideo primaryCommunityVideo" : "communityVideo"}
+              controls
+              key={src}
+              muted
+              playsInline
+              preload="metadata"
+              src={src}
+            />
+          ))}
+          <button className="carouselArrow rightArrow" type="button" aria-label="Next community video">
+            <ChevronRight size={30} />
+          </button>
+        </div>
+      </section>
     </article>
   );
 }

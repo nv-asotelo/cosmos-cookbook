@@ -1243,177 +1243,118 @@ select:focus,
 .generationProgress {
   min-height: 620px;
   border-radius: 8px;
+  overflow: hidden;
   background: #080808;
-  padding: 30px 0 22px;
+  padding: 34px 0 22px;
 }
 
-.progressHeader {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  border-bottom: 1px solid var(--line);
-  margin: 0 0 28px;
-  padding: 0 0 30px;
+.autoregressiveHeader {
+  margin-bottom: 18px;
 }
 
-.progressHeader p {
+.autoregressiveHeader p {
   color: #d7d7d7;
-  font-size: 18px;
-  line-height: 28px;
+  font-size: 16px;
+  line-height: 24px;
 }
 
-.progressHeader strong {
+.autoregressiveHeader strong {
   color: #f2f2f2;
   font-weight: 800;
 }
 
-.progressHeader span {
-  flex: 0 0 auto;
-  color: var(--green);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.progressTrack {
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: #262626;
-}
-
-.progressTrack span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--green), #b6ff45);
-  box-shadow: 0 0 18px rgba(118, 185, 0, 0.32);
-  transition: width 0.65s ease;
-}
-
-.generatedFrameStrip {
+.autoregressiveFrameStrip {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 30px;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+  overflow: hidden;
+  margin: 16px 0 74px;
 }
 
-.generatedFrame {
+.autoregressiveFrame {
   position: relative;
-  height: 126px;
+  height: 120px;
   overflow: hidden;
-  border: 1px solid #202020;
-  border-radius: 10px;
-  background: #111;
+  border: 0;
+  border-radius: 8px;
+  background: #111111;
   margin: 0;
 }
 
-.diffusionFrame {
-  border-color: rgba(118, 185, 0, 0.28);
-  box-shadow: inset 0 0 0 1px rgba(118, 185, 0, 0.08);
-}
-
-.generatedFrame img,
-.generatedFrameFallback {
+.autoregressiveFrame img,
+.autoregressiveFrame span {
   display: block;
   width: 100%;
   height: 100%;
-  filter: blur(var(--frame-blur));
-  opacity: var(--frame-opacity);
   object-fit: cover;
-  transform: scale(1.04);
-  transition:
-    filter 0.55s ease,
-    opacity 0.55s ease;
+  filter: blur(var(--future-blur)) saturate(0.94) contrast(1.02);
+  image-rendering: var(--future-pixel);
+  opacity: var(--future-opacity);
+  transform: scale(var(--future-scale));
 }
 
-.diffusionFrame img {
-  filter: blur(var(--frame-blur)) saturate(0.78) contrast(1.08);
-}
-
-.diffusionField {
+.autoregressiveFrame::after {
   position: absolute;
   inset: 0;
-  z-index: 1;
   background:
-    linear-gradient(90deg, rgba(118, 185, 0, 0.32), transparent var(--diffusion-reveal)),
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.14) 0 1px, transparent 1px 7px),
-    linear-gradient(110deg, transparent 0%, rgba(182, 255, 69, 0.36) 46%, transparent 62%);
-  background-size: auto, auto, 240% 100%;
-  mix-blend-mode: screen;
-  opacity: var(--diffusion-opacity);
+    linear-gradient(90deg, transparent 0%, rgba(8, 8, 8, 0.08) 44%, rgba(8, 8, 8, 0.34) 100%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.02), rgba(255, 255, 255, 0.02));
+  content: "";
   pointer-events: none;
-  animation: latentSweep 1.3s linear infinite;
 }
 
-.diffusionState {
-  position: absolute;
-  left: 8px;
-  top: 8px;
-  z-index: 2;
-  border: 1px solid rgba(118, 185, 0, 0.48);
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.74);
-  color: #b6ff45;
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0;
-  line-height: 18px;
-  padding: 0 7px;
+.communityWaitShelf h3 {
+  color: #d7d7d7;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 700;
 }
 
-.generatedFrameFallback {
+.communityVideoRow {
   position: relative;
   display: grid;
-  place-items: center;
-  background:
-    linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.12) 46%, transparent 62%),
-    linear-gradient(90deg, rgba(118, 185, 0, 0.18), transparent),
-    linear-gradient(135deg, #2a2a2a, #090909 60%, #1f1f1f);
-  background-size: 220% 100%, auto, auto;
-  animation: latentSweep 1.6s linear infinite;
+  grid-template-columns: minmax(130px, 0.58fr) minmax(260px, 1.7fr) minmax(130px, 0.58fr);
+  gap: 24px;
+  overflow: hidden;
+  margin-top: 16px;
 }
 
-.generatedFrameFallback span {
-  border: 1px solid rgba(118, 185, 0, 0.36);
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.45);
-  color: var(--green);
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0;
-  line-height: 18px;
-  padding: 0 7px;
+.communityVideo {
+  display: block;
+  width: 100%;
+  height: 280px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 20px;
+  background: #050505;
+  object-fit: cover;
 }
 
-@keyframes latentSweep {
-  from {
-    background-position: 160% 0, 0 0, 0 0;
-  }
-  to {
-    background-position: -60% 0, 0 0, 0 0;
-  }
+.primaryCommunityVideo {
+  height: 280px;
 }
 
-.generatedFrame figcaption {
+.carouselArrow {
   position: absolute;
-  right: 8px;
-  bottom: 7px;
+  top: 50%;
   z-index: 2;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.68);
-  color: #eeeeee;
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 18px;
-  padding: 0 7px;
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.74);
+  color: #ffffff;
 }
 
-.progressFootnote {
-  margin-top: 18px;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 20px;
+.leftArrow {
+  left: 12px;
+}
+
+.rightArrow {
+  right: 12px;
 }
 
 .reasoningCard {
@@ -2191,7 +2132,6 @@ select {
   .parameterGrid,
   .worldFrameGrid,
   .apiControls,
-  .generatedFrameStrip,
   .staticPanel dl {
     grid-template-columns: 1fr;
   }
@@ -2361,27 +2301,28 @@ select {
     padding-top: 18px;
   }
 
-  .progressHeader {
-    display: block;
-    padding-bottom: 18px;
+  .autoregressiveFrameStrip {
+    grid-template-columns: repeat(6, minmax(132px, 1fr));
+    margin-bottom: 42px;
+    overflow-x: auto;
   }
 
-  .progressHeader p {
+  .autoregressiveHeader p {
     font-size: 16px;
     line-height: 24px;
   }
 
-  .progressHeader span {
-    display: inline-block;
-    margin-top: 8px;
+  .communityVideoRow {
+    grid-template-columns: minmax(220px, 1fr);
+    gap: 12px;
   }
 
-  .generatedFrameStrip {
-    gap: 10px;
-    margin-top: 20px;
+  .communityVideo,
+  .primaryCommunityVideo {
+    height: 220px;
   }
 
-  .generatedFrame {
-    height: 132px;
+  .communityVideo:not(.primaryCommunityVideo) {
+    display: none;
   }
 }
