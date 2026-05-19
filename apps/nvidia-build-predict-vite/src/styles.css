@@ -568,7 +568,7 @@ h1 {
 }
 
 .inputPanel .panelHeader {
-  margin-bottom: 68px;
+  margin-bottom: 34px;
 }
 
 h2 {
@@ -582,6 +582,46 @@ h2 {
   color: var(--green);
   padding: 0 8px;
   font-size: 14px;
+}
+
+.worldModeSummary {
+  margin-bottom: 24px;
+}
+
+.worldModeSummary > span,
+.outputDescriptor {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.worldModeSummary > div {
+  margin-top: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: #242424;
+  padding: 12px 14px;
+}
+
+.worldModeSummary strong,
+.worldModeSummary p {
+  display: block;
+  margin: 0;
+}
+
+.worldModeSummary strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 800;
+}
+
+.worldModeSummary p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .fieldLabel {
@@ -753,6 +793,7 @@ h2 {
 }
 
 .infoDot {
+  position: relative;
   display: inline-grid;
   width: 12px;
   height: 12px;
@@ -763,6 +804,37 @@ h2 {
   color: var(--muted);
   font-size: 9px;
   line-height: 1;
+}
+
+.promptTooltip {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  z-index: 8;
+  display: none;
+  width: min(480px, 70vw);
+  transform: translateX(-48%);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: var(--text);
+  font-family:
+    "NVIDIA Sans Mono",
+    "SFMono-Regular",
+    Consolas,
+    monospace;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  padding: 16px 18px;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42);
+}
+
+.promptInfoDot:hover .promptTooltip,
+.promptInfoDot:focus-visible .promptTooltip {
+  display: block;
 }
 
 .promptTopline span,
@@ -882,6 +954,31 @@ select:focus,
   background: #2c2c2c;
 }
 
+.termsRow {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 26px;
+}
+
+.governingTerms {
+  width: min(100%, 384px);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.governingTerms strong,
+.governingTerms span {
+  display: block;
+}
+
+.governingTerms strong {
+  margin-bottom: 6px;
+  color: var(--text);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .outputTabs {
   gap: 20px;
 }
@@ -946,6 +1043,10 @@ select:focus,
   display: block;
   min-height: 620px;
   background: transparent;
+}
+
+.outputDescriptor {
+  margin: -6px 0 12px;
 }
 
 .jsonOutput {

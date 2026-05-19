@@ -52,6 +52,11 @@ const defaultModel =
   process.env.MODEL_NAME ||
   process.env.MODEL_ID ||
   (backend === "nim_local" ? "nvidia/cosmos3-gen" : "Cosmos3-Nano");
+const displayModel =
+  process.env.PREDICT_DISPLAY_MODEL ||
+  process.env.VITE_MODEL_NAME ||
+  process.env.DISPLAY_MODEL_NAME ||
+  "Cosmos3-Nano";
 const stagedModelFile = process.env.PREDICT_STAGED_MODEL_FILE || "/tmp/nvidia_build_predict_staged_model.json";
 
 const QUICK_VIDEO_PARAMS = {
@@ -211,7 +216,8 @@ app.get("/api/active-model", async (_request, response) => {
   const checkpoint = info.models[0] || defaultModel;
   response.json({
     checkpoint,
-    display_name: checkpoint,
+    display_name: displayModel,
+    served_model: checkpoint,
     backend: info.backend || backend,
     base_url: info.baseUrl || advertisedBaseUrl,
     infer_url: info.inferUrl,

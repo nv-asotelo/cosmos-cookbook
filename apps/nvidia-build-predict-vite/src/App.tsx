@@ -10,7 +10,7 @@ const MODEL_CARD_TITLE = "Image-to-World";
 const PAGE_TAGLINE = "Generates future frames based upon an image and text input.";
 const MODEL_CARD_LEAD =
   "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
-const CURATED_PREVIEW_VIDEO = "/examples/default-robot-apple-1s.mp4";
+const DISPLAY_MODEL_FALLBACK = "Cosmos3-Nano";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
@@ -29,7 +29,7 @@ const COSMOS3_INFO_URL =
   "/api/active-model";
 const DEFAULT_MODEL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_MODEL_NAME) ||
-  "Detecting model...";
+  DISPLAY_MODEL_FALLBACK;
 const HERO_TAGS = [
   "physical ai",
   "world foundation model",
@@ -96,6 +96,8 @@ type ContentSelectItem = {
   prompt: string;
   mediaUrl: string;
   mediaName: string;
+  previewVideoUrl: string;
+  previewVideoName: string;
 };
 type ContentSelectGroup = {
   title: string;
@@ -133,6 +135,7 @@ type BackendInfo = {
   base_url?: string;
   infer_url?: string;
   image?: string;
+  served_model?: string;
   output_dir?: string;
   warning?: string;
   capabilities?: Record<string, boolean>;
@@ -147,6 +150,15 @@ type BackendInfo = {
     commit_sha?: string;
     [key: string]: unknown;
   };
+};
+
+const CANONICAL_PROMPTS = {
+  "001": `The robotic arm picks up the pear and place it in the dark-color bowl`,
+  "005": `The robotic hand picks up the bok choy and places it to the left of the frying pan`,
+  "007": `A robotic arm interacts with various objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a red tomato with green leaves, a piece of salmon with a pinkish-orange hue, and a small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the salmon. It lifts the carrot slightly off the board, moves it towards the orange bowl, and releases it, causing the salmon to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.`,
+  "009": `The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.`,
+  "010": `A close-up view captures a melting popsicle on a white plate. The popsicle features a vibrant red top, likely strawberry-flavored, transitioning into a creamy white base, possibly vanilla or yogurt-based. The popsicle stick is visible on the right side, and the surface of the popsicle shows signs of melting, with the red portion becoming more fluid and spreading outward. The creamy white base remains relatively intact initially but eventually starts to soften and blend with the red, creating a smooth transition between the two flavors. The camera remains steady, focusing on the popsicle as it transforms from a solid form into a liquid, with the background remaining plain and white to ensure all attention is on the melting process. The lighting is consistent throughout, highlighting the colors and textures of the ice cream.`,
+  "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`
 };
 
 const EXAMPLES: ExampleItem[] = [
@@ -199,38 +211,30 @@ const EXAMPLES: ExampleItem[] = [
 ];
 const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
   {
-    title: "Robotics",
-    summary: "Robot manipulation scenes with tabletop objects, grippers, and goal-directed motion.",
+    title: "Industrial Smart Spaces",
+    summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
     items: [
       {
-        id: "robot-ingredient-sorting",
-        title: "Robot Arm Ingredient Sorting",
-        domain: "Robotics",
-        description: "A tabletop robot scene with food items, a bowl, and a gripper poised for manipulation.",
-        prompt:
-          "Animate the robotic arm as it carefully reaches toward the tabletop objects, grasps one item, and places it into the bowl. Preserve the tabletop layout, camera angle, workshop lighting, and realistic contact physics.",
-        mediaUrl: "/examples/robot_apple.png",
-        mediaName: "Robot Arm Ingredient Sorting.png"
+        id: "melting-popsicle-physics",
+        title: "Melting Popsicle Physics",
+        domain: "Industrial Smart Spaces",
+        description: "A close-up physical-process scene focused on melting and material change.",
+        prompt: CANONICAL_PROMPTS["010"],
+        mediaUrl: "/examples/canonical/010.png",
+        mediaName: "Melting Popsicle Physics.png",
+        previewVideoUrl: "/examples/canonical/010.mp4",
+        previewVideoName: "Melting Popsicle Physics.mp4"
       },
       {
-        id: "robot-tabletop-motion",
-        title: "Robot Tabletop Motion",
-        domain: "Robotics",
-        description: "A robot-hand view over a workbench with a raised platform and object targets.",
-        prompt:
-          "Animate the robot hand with small, precise motions toward the tabletop target. Keep the original scene geometry, camera position, and lab lighting stable while the end effector moves naturally.",
-        mediaUrl: "/examples/robot_tabletop.jpg",
-        mediaName: "Robot Tabletop Motion.jpg"
-      },
-      {
-        id: "robot-tape-placement",
-        title: "Robot Tape Placement",
-        domain: "Robotics",
-        description: "Two robot hands observe tape and a basket from a first-person manipulation setup.",
-        prompt:
-          "Animate the robot hands reaching toward the blue tape, lifting it from the table, and placing it into the basket. Preserve object identity, hand geometry, and the tabletop perspective.",
-        mediaUrl: "/examples/robot_tape.png",
-        mediaName: "Robot Tape Placement.png"
+        id: "industrial-metal-lathe",
+        title: "Industrial Metal Lathe",
+        domain: "Industrial Smart Spaces",
+        description: "A precision machining scene with a rotating workpiece and cutting tool.",
+        prompt: CANONICAL_PROMPTS["011"],
+        mediaUrl: "/examples/canonical/011.png",
+        mediaName: "Industrial Metal Lathe.png",
+        previewVideoUrl: "/examples/canonical/011.mp4",
+        previewVideoName: "Industrial Metal Lathe.mp4"
       }
     ]
   },
@@ -239,65 +243,60 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
     summary: "Forward-facing driving scenes that exercise road layout, ego motion, and traffic context.",
     items: [
       {
-        id: "residential-intersection-turn",
-        title: "Residential Intersection Turn",
+        id: "suburban-intersection-yield",
+        title: "Suburban Intersection Yield",
         domain: "Autonomous Vehicles",
-        description: "An ego-vehicle view at an urban intersection under clear daylight.",
-        prompt:
-          "Animate the ego vehicle rolling forward slowly through the intersection while preserving lane geometry, crosswalk markings, parked cars, building facades, and bright daylight. Keep the camera fixed to the vehicle and maintain realistic traffic motion.",
-        mediaUrl: "/examples/av_intersection.jpg",
-        mediaName: "Residential Intersection Turn.jpg"
-      },
-      {
-        id: "rainy-night-traffic",
-        title: "Rainy Night Traffic",
-        domain: "Autonomous Vehicles",
-        description: "A low-light roadway scene with wet pavement, vehicles, and headlight reflections.",
-        prompt:
-          "Animate the vehicle queue inching forward on the wet road at night. Preserve headlight reflections, road boundaries, vehicle spacing, and low-light atmosphere with smooth ego-camera motion.",
-        mediaUrl: "/examples/av_rainy_night.jpg",
-        mediaName: "Rainy Night Traffic.jpg"
-      },
-      {
-        id: "race-car-track",
-        title: "Race Car Track",
-        domain: "Autonomous Vehicles",
-        description: "A high-speed driving condition with track context and strong forward motion.",
-        prompt:
-          "Animate a forward driving rollout on the track with smooth ego motion, stable road boundaries, and realistic vehicle dynamics. Preserve the original camera framing and lighting.",
-        mediaUrl: "/examples/av_race_car.jpg",
-        mediaName: "Race Car Track.jpg"
+        description: "An ego-vehicle view approaching a residential intersection under clear daylight.",
+        prompt: CANONICAL_PROMPTS["009"],
+        mediaUrl: "/examples/canonical/009.png",
+        mediaName: "Suburban Intersection Yield.png",
+        previewVideoUrl: "/examples/canonical/009.mp4",
+        previewVideoName: "Suburban Intersection Yield.mp4"
       }
     ]
   },
   {
-    title: "Industrial Smart Spaces",
-    summary: "Warehouse and facility scenes for physical AI simulation and smart-space monitoring.",
+    title: "Robotics",
+    summary: "Robot manipulation scenes with tabletop objects, grippers, and goal-directed motion.",
     items: [
       {
-        id: "warehouse-camera-grid",
-        title: "Warehouse Camera Grid",
-        domain: "Industrial Smart Spaces",
-        description: "A multi-camera warehouse overview with shelves, floor lanes, and varied lighting.",
-        prompt:
-          "Animate the smart-space warehouse scene with subtle worker and equipment movement across camera views. Preserve the multi-camera structure, shelves, floor markings, and lighting consistency.",
-        mediaUrl: "/examples/warehouse_grid.jpg",
-        mediaName: "Warehouse Camera Grid.jpg"
+        id: "robot-cutting-board-sorting",
+        title: "Robot Cutting Board Sorting",
+        domain: "Robotics",
+        description: "A tabletop robot scene with food items, a bowl, and a gripper in a workshop setting.",
+        prompt: CANONICAL_PROMPTS["007"],
+        mediaUrl: "/examples/canonical/007.png",
+        mediaName: "Robot Cutting Board Sorting.png",
+        previewVideoUrl: "/examples/canonical/007.mp4",
+        previewVideoName: "Robot Cutting Board Sorting.mp4"
       },
       {
-        id: "warehouse-summary",
-        title: "Warehouse Summary View",
-        domain: "Industrial Smart Spaces",
-        description: "A wide warehouse monitoring view with spatial context for goods and aisles.",
-        prompt:
-          "Animate the warehouse monitoring view with realistic small movements in the aisles while preserving camera perspective, object permanence, shelving, and traffic lanes.",
-        mediaUrl: "/examples/warehouse_summary.png",
-        mediaName: "Warehouse Summary View.png"
+        id: "robot-pear-bowl-placement",
+        title: "Robot Pear Bowl Placement",
+        domain: "Robotics",
+        description: "A robot manipulation setup with a pear and a dark bowl.",
+        prompt: CANONICAL_PROMPTS["001"],
+        mediaUrl: "/examples/canonical/001.png",
+        mediaName: "Robot Pear Bowl Placement.png",
+        previewVideoUrl: "/examples/canonical/001.mp4",
+        previewVideoName: "Robot Pear Bowl Placement.mp4"
+      },
+      {
+        id: "robot-bok-choy-pan-placement",
+        title: "Robot Bok Choy Pan Placement",
+        domain: "Robotics",
+        description: "A gripper positions bok choy near a frying pan on a tabletop.",
+        prompt: CANONICAL_PROMPTS["005"],
+        mediaUrl: "/examples/canonical/005.png",
+        mediaName: "Robot Bok Choy Pan Placement.png",
+        previewVideoUrl: "/examples/canonical/005.mp4",
+        previewVideoName: "Robot Bok Choy Pan Placement.mp4"
       }
     ]
   }
 ];
-const DEFAULT_CONTENT_ITEM = CONTENT_SELECT_GROUPS[0].items[0];
+const DEFAULT_CONTENT_ITEM =
+  findContentItem(CONTENT_SELECT_GROUPS, "robot-cutting-board-sorting") ?? CONTENT_SELECT_GROUPS[0].items[0];
 const DEFAULT_PROMPT = DEFAULT_CONTENT_ITEM.prompt;
 
 function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number, isNimBackend: boolean): number {
@@ -318,6 +317,10 @@ function formatDuration(seconds: number): string {
 function displayValue(value: unknown, fallback = "unknown") {
   if (value === undefined || value === null || value === "") return fallback;
   return String(value);
+}
+
+function displayMediaName(name: string) {
+  return name.replace(/\.(png|jpe?g|webp|mp4|mov|webm)$/i, "");
 }
 
 function shortSha(sha?: string | null) {
@@ -446,6 +449,31 @@ function preloadContentImage(url: string) {
   });
 }
 
+function preloadContentVideo(url: string) {
+  return new Promise<void>((resolve, reject) => {
+    const video = document.createElement("video");
+    let settled = false;
+    const done = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.addEventListener("loadedmetadata", () => done());
+    video.addEventListener("canplay", () => done());
+    video.addEventListener("error", () => done(new Error(`Failed to load ${url}`)));
+    window.setTimeout(() => done(), 5000);
+    video.src = url;
+    video.load();
+  });
+}
+
 export default function Page() {
   const inputRef = useRef<HTMLInputElement>(null);
   const contentLoadTokenRef = useRef(0);
@@ -474,6 +502,10 @@ export default function Page() {
   const [dragActive, setDragActive] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [selectedContentItemId, setSelectedContentItemId] = useState(DEFAULT_CONTENT_ITEM.id);
+  const [selectedPreviewVideo, setSelectedPreviewVideo] = useState(() => ({
+    url: DEFAULT_CONTENT_ITEM.previewVideoUrl,
+    name: DEFAULT_CONTENT_ITEM.previewVideoName
+  }));
   const [loadingContentItemId, setLoadingContentItemId] = useState<string | null>(null);
 
   const activeExample = useMemo(
@@ -496,8 +528,8 @@ export default function Page() {
       .then((d) => {
         if (cancelled || !d) return;
         const name =
-          (d.checkpoint as string | undefined) ||
           (d.display_name as string | undefined) ||
+          (d.checkpoint as string | undefined) ||
           (Array.isArray(d.models) ? (d.models[0] as string | undefined) : undefined);
         if (name) {
           setModel(name);
@@ -536,11 +568,6 @@ export default function Page() {
     () => estimateWallSeconds(resolution, numFrames, steps, isNimBackend),
     [isNimBackend, numFrames, resolution, steps]
   );
-  const generatedFrameCount = useMemo(
-    () => Math.max(1, Math.min(numFrames, Math.round((progressPercent / 100) * numFrames))),
-    [numFrames, progressPercent]
-  );
-  const remainingSeconds = Math.max(0, etaSeconds - elapsedSeconds);
 
   useEffect(() => {
     if (!isRunning || submittedAt === null) return () => undefined;
@@ -577,6 +604,7 @@ export default function Page() {
     });
     setResult(null);
     setProgressPercent(0);
+    setSelectedPreviewVideo({ url: "", name: "" });
     setStatus("Conditioning media loaded");
   }
 
@@ -605,6 +633,7 @@ export default function Page() {
         : null
     );
     setResult(null);
+    setSelectedPreviewVideo({ url: "", name: "" });
     setProgressPercent(0);
     setStatus(`${example.eyebrow} example loaded`);
     setMobilePanel("input");
@@ -624,7 +653,11 @@ export default function Page() {
     if (inputRef.current) inputRef.current.value = "";
 
     try {
-      await Promise.all([preloadContentImage(item.mediaUrl), waitForContentLoad(450)]);
+      await Promise.all([
+        preloadContentImage(item.mediaUrl),
+        preloadContentVideo(item.previewVideoUrl),
+        waitForContentLoad(450)
+      ]);
       if (contentLoadTokenRef.current !== loadToken) return;
       setSelectedContentItemId(item.id);
       setGeneratorMode("Image-to-Video");
@@ -636,7 +669,8 @@ export default function Page() {
       setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
       setSeed(0);
       setMedia(contentItemToMedia(item));
-      setStatus(`${item.title} loaded`);
+      setSelectedPreviewVideo({ url: item.previewVideoUrl, name: item.previewVideoName });
+      setStatus("Ready");
     } catch (error) {
       if (contentLoadTokenRef.current !== loadToken) return;
       setStatus("Example failed to load");
@@ -659,7 +693,6 @@ export default function Page() {
   function reset() {
     contentLoadTokenRef.current += 1;
     setLoadingContentItemId(null);
-    setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
     setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
@@ -671,6 +704,7 @@ export default function Page() {
     setSeed(0);
     setSelectedExampleId(EXAMPLES[0].id);
     setSelectedContentItemId(DEFAULT_CONTENT_ITEM.id);
+    setSelectedPreviewVideo({ url: DEFAULT_CONTENT_ITEM.previewVideoUrl, name: DEFAULT_CONTENT_ITEM.previewVideoName });
     setStatus("Ready");
     setProgressPercent(0);
     setProgressFrames([]);
@@ -906,6 +940,14 @@ export default function Page() {
               </button>
             </div>
 
+            <div className="worldModeSummary">
+              <span>World Creation Mode</span>
+              <div>
+                <strong>Video-to-World</strong>
+                <p>Generate future frames based on a video input.</p>
+              </div>
+            </div>
+
             <label className="fieldLabel">Input</label>
             {mediaRequired ? (
               <button
@@ -927,8 +969,8 @@ export default function Page() {
                   <span className="mediaLoaded mediaPreview">
                     {media.kind === "image" ? <img src={media.previewUrl} alt="" /> : <video src={media.previewUrl} muted playsInline />}
                     <span>
-                      <strong>{media.name}</strong>
-                      <small>{media.sourceUrl ? "Remote example asset" : "Upload staged for request"}</small>
+                      <strong>{displayMediaName(media.name)}</strong>
+                      {media.sourceUrl ? null : <small>Upload staged for request</small>}
                     </span>
                   </span>
                 ) : (
@@ -950,11 +992,12 @@ export default function Page() {
             )}
 
             <PromptBox
-              label="Prompt"
+              label="Prompt (Read Only)"
               hint="Describe the future world state to generate."
               max={1000}
               value={prompt}
               onChange={setPrompt}
+              readOnly
               rows={4}
             />
 
@@ -963,18 +1006,19 @@ export default function Page() {
                 <RotateCcw size={16} />
                 Reset
               </button>
-              <span
-                className={isRunning ? "etaBadge runningEta" : "etaBadge"}
-                title={`Generator estimator. ${etaSeconds}s for ${numFrames} frames at ${resolution} resolution x ${steps} steps.`}
-              >
-                {isRunning
-                  ? `Est. ${generatedFrameCount}/${numFrames} frames · ${formatDuration(remainingSeconds)} left`
-                  : `Est. wall ~${formatDuration(etaSeconds)}`}
-              </span>
               <button className="runButton" onClick={run} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
                 {isContentLoading ? "Loading" : isRunning ? "Generating" : "Generate New Video"}
               </button>
+            </div>
+            <div className="termsRow">
+              <div className="governingTerms">
+                <strong>Governing Terms:</strong>
+                <span>
+                  This trial service is governed by the NVIDIA API Trial Terms of Service. Use of this model is governed
+                  by the NVIDIA Open Model License Agreement.
+                </span>
+              </div>
             </div>
           </section>
 
@@ -984,11 +1028,14 @@ export default function Page() {
                 <h2>Output</h2>
               </div>
               <div className="outputActions">
-                <span className={`statusPill ${isRunning ? "working" : result?.error ? "error" : status === "Complete" ? "success" : ""}`}>
-                  {status}
-                </span>
+                {isRunning || result?.error || status === "Complete" ? (
+                  <span className={`statusPill ${isRunning ? "working" : result?.error ? "error" : "success"}`}>
+                    {isRunning ? "Generating" : result?.error ? "Error" : "Complete"}
+                  </span>
+                ) : null}
               </div>
             </div>
+            <p className="outputDescriptor">Generated Future World</p>
             <div className="outputBody">
               {isRunning ? (
                 <GenerationProgress
@@ -1011,8 +1058,10 @@ export default function Page() {
                   Open generated asset
                   <ExternalLink size={15} />
                 </a>
+              ) : selectedPreviewVideo.url ? (
+                <video className="resultVideo" src={selectedPreviewVideo.url} aria-label={selectedPreviewVideo.name} controls />
               ) : (
-                <CuratedOutputPreview />
+                <CuratedOutputPreview item={DEFAULT_CONTENT_ITEM} />
               )}
             </div>
           </section>
@@ -1087,14 +1136,14 @@ function StaticTab({
         </StaticSection>
 
         <StaticSection title="Content Selects">
-          <p>Domain order is Robotics, Autonomous Vehicles, then Industrial Smart Spaces.</p>
+          <p>Domain order is Industrial Smart Spaces, Autonomous Vehicles, then Robotics.</p>
           <dl>
-            <dt>Robotics</dt>
-            <dd>Robot Arm Ingredient Sorting, Robot Tabletop Motion, Robot Tape Placement</dd>
-            <dt>Autonomous Vehicles</dt>
-            <dd>Residential Intersection Turn, Rainy Night Traffic, Race Car Track</dd>
             <dt>Industrial Smart Spaces</dt>
-            <dd>Warehouse Camera Grid, Warehouse Summary View</dd>
+            <dd>Melting Popsicle Physics, Industrial Metal Lathe</dd>
+            <dt>Autonomous Vehicles</dt>
+            <dd>Suburban Intersection Yield</dd>
+            <dt>Robotics</dt>
+            <dd>Robot Cutting Board Sorting, Robot Pear Bowl Placement, Robot Bok Choy Pan Placement</dd>
           </dl>
         </StaticSection>
 
@@ -1150,7 +1199,7 @@ function StaticTab({
       </StaticSection>
 
       <StaticSection title="Content Order">
-        <p>Robotics appears first, followed by Autonomous Vehicles, followed by Industrial Smart Spaces.</p>
+        <p>Industrial Smart Spaces appears first, followed by Autonomous Vehicles, followed by Robotics.</p>
       </StaticSection>
 
       <a className="staticLink" href={BUILD_PREDICT_SYSTEM_CARD_URL} rel="noreferrer" target="_blank">
@@ -1329,14 +1378,14 @@ function GenerationProgress({
   );
 }
 
-function CuratedOutputPreview() {
+function CuratedOutputPreview({ item }: { item: ContentSelectItem }) {
   return (
     <article className="curatedOutputPreview">
-      <video src={CURATED_PREVIEW_VIDEO} autoPlay muted loop playsInline controls />
+      <video src={item.previewVideoUrl} autoPlay muted loop playsInline controls />
       <div>
         <p className="curatedEyebrow">Generated preview</p>
-        <h3>Default output is preloaded.</h3>
-        <p>Generated from the default Robotics input image. Run the active backend again to create a fresh video.</p>
+        <h3>{item.title}</h3>
+        <p>Canonical output is preloaded. Run the active backend again to create a fresh video.</p>
       </div>
     </article>
   );
@@ -1348,6 +1397,7 @@ function PromptBox({
   value,
   max,
   rows,
+  readOnly = false,
   onChange
 }: {
   label: string;
@@ -1355,6 +1405,7 @@ function PromptBox({
   value: string;
   max: number;
   rows: number;
+  readOnly?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
@@ -1362,8 +1413,14 @@ function PromptBox({
       <div className="promptTopline">
         <label>
           {label}
-          <span className="requiredDot">*</span>
-          <span className="infoDot">i</span>
+          {readOnly ? null : <span className="requiredDot">*</span>}
+          <span className="infoDot promptInfoDot" tabIndex={0}>
+            i
+            <span className="promptTooltip" role="tooltip">
+              Text prompts are used for world generation. For best results aligned to Cosmos capabilities, use prompts
+              for autonomous driving, robotics, and industrial domains.
+            </span>
+          </span>
         </label>
         <span>
           {value.length}/{max}
@@ -1374,7 +1431,11 @@ function PromptBox({
         value={value}
         maxLength={max}
         placeholder={hint}
-        onChange={(event) => onChange(event.target.value)}
+        readOnly={readOnly}
+        aria-readonly={readOnly}
+        onChange={(event) => {
+          if (!readOnly) onChange(event.target.value);
+        }}
       />
       <small>{hint}</small>
     </div>
