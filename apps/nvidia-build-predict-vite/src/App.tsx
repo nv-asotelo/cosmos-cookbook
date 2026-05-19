@@ -211,51 +211,6 @@ const EXAMPLES: ExampleItem[] = [
 ];
 const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
   {
-    title: "Industrial Smart Spaces",
-    summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
-    items: [
-      {
-        id: "melting-popsicle-physics",
-        title: "Melting Popsicle Physics",
-        domain: "Industrial Smart Spaces",
-        description: "A close-up physical-process scene focused on melting and material change.",
-        prompt: CANONICAL_PROMPTS["010"],
-        mediaUrl: "/examples/canonical/010.png",
-        mediaName: "Melting Popsicle Physics.png",
-        previewVideoUrl: "/examples/canonical/010.mp4",
-        previewVideoName: "Melting Popsicle Physics.mp4"
-      },
-      {
-        id: "industrial-metal-lathe",
-        title: "Industrial Metal Lathe",
-        domain: "Industrial Smart Spaces",
-        description: "A precision machining scene with a rotating workpiece and cutting tool.",
-        prompt: CANONICAL_PROMPTS["011"],
-        mediaUrl: "/examples/canonical/011.png",
-        mediaName: "Industrial Metal Lathe.png",
-        previewVideoUrl: "/examples/canonical/011.mp4",
-        previewVideoName: "Industrial Metal Lathe.mp4"
-      }
-    ]
-  },
-  {
-    title: "Autonomous Vehicles",
-    summary: "Forward-facing driving scenes that exercise road layout, ego motion, and traffic context.",
-    items: [
-      {
-        id: "suburban-intersection-yield",
-        title: "Suburban Intersection Yield",
-        domain: "Autonomous Vehicles",
-        description: "An ego-vehicle view approaching a residential intersection under clear daylight.",
-        prompt: CANONICAL_PROMPTS["009"],
-        mediaUrl: "/examples/canonical/009.png",
-        mediaName: "Suburban Intersection Yield.png",
-        previewVideoUrl: "/examples/canonical/009.mp4",
-        previewVideoName: "Suburban Intersection Yield.mp4"
-      }
-    ]
-  },
-  {
     title: "Robotics",
     summary: "Robot manipulation scenes with tabletop objects, grippers, and goal-directed motion.",
     items: [
@@ -291,6 +246,51 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         mediaName: "Robot Bok Choy Pan Placement.png",
         previewVideoUrl: "/examples/canonical/005.mp4",
         previewVideoName: "Robot Bok Choy Pan Placement.mp4"
+      }
+    ]
+  },
+  {
+    title: "Autonomous Vehicles",
+    summary: "Forward-facing driving scenes that exercise road layout, ego motion, and traffic context.",
+    items: [
+      {
+        id: "suburban-intersection-yield",
+        title: "Suburban Intersection Yield",
+        domain: "Autonomous Vehicles",
+        description: "An ego-vehicle view approaching a residential intersection under clear daylight.",
+        prompt: CANONICAL_PROMPTS["009"],
+        mediaUrl: "/examples/canonical/009.png",
+        mediaName: "Suburban Intersection Yield.png",
+        previewVideoUrl: "/examples/canonical/009.mp4",
+        previewVideoName: "Suburban Intersection Yield.mp4"
+      }
+    ]
+  },
+  {
+    title: "Smart Spaces",
+    summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
+    items: [
+      {
+        id: "melting-popsicle-physics",
+        title: "Melting Popsicle Physics",
+        domain: "Smart Spaces",
+        description: "A close-up physical-process scene focused on melting and material change.",
+        prompt: CANONICAL_PROMPTS["010"],
+        mediaUrl: "/examples/canonical/010.png",
+        mediaName: "Melting Popsicle Physics.png",
+        previewVideoUrl: "/examples/canonical/010.mp4",
+        previewVideoName: "Melting Popsicle Physics.mp4"
+      },
+      {
+        id: "industrial-metal-lathe",
+        title: "Industrial Metal Lathe",
+        domain: "Smart Spaces",
+        description: "A precision machining scene with a rotating workpiece and cutting tool.",
+        prompt: CANONICAL_PROMPTS["011"],
+        mediaUrl: "/examples/canonical/011.png",
+        mediaName: "Industrial Metal Lathe.png",
+        previewVideoUrl: "/examples/canonical/011.mp4",
+        previewVideoName: "Industrial Metal Lathe.mp4"
       }
     ]
   }
@@ -1136,14 +1136,14 @@ function StaticTab({
         </StaticSection>
 
         <StaticSection title="Content Selects">
-          <p>Domain order is Industrial Smart Spaces, Autonomous Vehicles, then Robotics.</p>
+          <p>Domain order is Robotics, Autonomous Vehicles, then Smart Spaces.</p>
           <dl>
-            <dt>Industrial Smart Spaces</dt>
-            <dd>Melting Popsicle Physics, Industrial Metal Lathe</dd>
-            <dt>Autonomous Vehicles</dt>
-            <dd>Suburban Intersection Yield</dd>
             <dt>Robotics</dt>
             <dd>Robot Cutting Board Sorting, Robot Pear Bowl Placement, Robot Bok Choy Pan Placement</dd>
+            <dt>Autonomous Vehicles</dt>
+            <dd>Suburban Intersection Yield</dd>
+            <dt>Smart Spaces</dt>
+            <dd>Melting Popsicle Physics, Industrial Metal Lathe</dd>
           </dl>
         </StaticSection>
 
@@ -1199,7 +1199,7 @@ function StaticTab({
       </StaticSection>
 
       <StaticSection title="Content Order">
-        <p>Industrial Smart Spaces appears first, followed by Autonomous Vehicles, followed by Robotics.</p>
+        <p>Robotics appears first, followed by Autonomous Vehicles, followed by Smart Spaces.</p>
       </StaticSection>
 
       <a className="staticLink" href={BUILD_PREDICT_SYSTEM_CARD_URL} rel="noreferrer" target="_blank">
