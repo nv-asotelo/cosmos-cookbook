@@ -1826,12 +1826,14 @@ def _is_frames_fallback_nim(model_id):
     )
 
 def _nim_frame_fallback_limit():
-    raw = os.environ.get("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.environ.get("NIM_MAX_IMAGES_PER_PROMPT") or "5"
+    raw = os.environ.get("REASONER_FRAME_FALLBACK_MAX_IMAGES") or os.environ.get("NIM_MAX_IMAGES_PER_PROMPT") or ""
+    if not str(raw).strip():
+        return None
     try:
         value = int(float(raw))
     except Exception:
-        value = 5
-    return max(1, value)
+        return None
+    return max(1, value) if value > 0 else None
 
 def _uses_native_video_url(model_id):
     """Backend-dynamic decision: which message shape does this backend+model accept?
@@ -1842,8 +1844,9 @@ def _uses_native_video_url(model_id):
             (legacy path for backends/models that reject native video_url).
 
     Backend matrix:
-      nim_local : most NIMs accept native video_url. Exception: Cosmos Reason1
-                  NIM rejects it (May 2026 smoke sprint).
+      nim_local : most NIMs accept native video_url. Exceptions include
+                  Cosmos Reason1 and Cosmos3 staging NIMs whose NVDEC
+                  video_url path rejected uploads in smoke runs.
       vllm      : Qwen3-VL family (including Cosmos3-Nano-Reasoner,
                   Cosmos3-Super-Reasoner, Cosmos Reason2 2B/8B/32B), Nemotron
                   family, and explicit "qwen3-vl" strings accept native via
@@ -2994,15 +2997,16 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
     # paths bypass both browser upload and Gradio base64 repost there.
     # Images: single image_url for native-media models.
     # Videos: native models use one video_url item; known frame-fallback NIMs
-    # (currently Cosmos Reason1 7B) use JPEG frames.
+    # use JPEG frames.
     _native_video = _uses_native_video_url(model_id) or _uses_native_video_url(_SERVER_MODEL_ID or "")
 
     def _build_frame_content_for_video(reason="fallback"):
-        # Frame extraction fallback — known for Cosmos Reason1 7B and for OSS
-        # image-frame vLLM paths. NIM-local has a 5-image prompt limit on the
-        # current staging stack, so cap fallback frames there.
+        # Frame extraction fallback — known for Cosmos Reason1 7B, rejected
+        # NVDEC/video_url uploads, and OSS image-frame vLLM paths. By default
+        # this follows the visible FPS slider; admins can still opt into a
+        # hard cap with REASONER_FRAME_FALLBACK_MAX_IMAGES.
         _max_frames = _nim_frame_fallback_limit() if INFERENCE_BACKEND == "nim_local" else None
-        _cap_note = f"max_frames={_max_frames}" if _max_frames else "no client cap"
+        _cap_note = f"admin max_frames={_max_frames}" if _max_frames else "no client frame cap"
         _px_note = f"max_pixels={max_pixels}" if max_pixels else "native resolution"
         _t_extract = time.time()
         print(f"[vllm] Extracting frames fps={fps} ({_cap_note}; {_px_note}; {reason})", flush=True)
@@ -3321,7 +3325,8 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
     # Step 3: prepare media content
     def _build_hosted_frame_content(reason="fallback"):
         _max_frames = _nim_frame_fallback_limit()
-        print(f"[nim] Extracting frames fps={fps} (max_frames={_max_frames}; {reason})", flush=True)
+        _cap_note = f"admin max_frames={_max_frames}" if _max_frames else "no client frame cap"
+        print(f"[nim] Extracting frames fps={fps} ({_cap_note}; {reason})", flush=True)
         _frames_b64 = _extract_frames_b64(video_path, fps=fps, max_frames=_max_frames)
         if not _frames_b64:
             raise RuntimeError("Could not extract frames from video (PyAV missing or video unreadable)")
@@ -4772,10 +4777,11 @@ with gr.Blocks(
             return info_str, gr.update()
         if INFERENCE_BACKEND == "nim_local":
             if not _uses_native_video_url(_SERVER_MODEL_ID or MODEL_NAME):
-                n_frames = min(target, _nim_frame_fallback_limit())
+                fallback_limit = _nim_frame_fallback_limit()
+                n_frames = min(target, fallback_limit) if fallback_limit else target
                 src_px = max(64*(32**2), min(8192*(32**2), int(m.width) * int(m.height)))
                 cap_px = min(src_px, _INITIAL_MAX_PIXELS)
-                cap_note = f" (capped from {target})" if target > n_frames else ""
+                cap_note = f" (admin-capped from {target})" if fallback_limit and target > n_frames else ""
                 info_str = (
                     f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
                     f"{n_frames} JPEG frames sampled{cap_note} · ≤{cap_px:,} px/frame"

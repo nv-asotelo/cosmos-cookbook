@@ -32,7 +32,7 @@ const DEFAULT_BACKEND =
   "";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
-const DEPLOY_DOCKER_COMMAND = `docker login nvcr.io
+const DEPLOY_DOCKER_COMMAND = (model: string, backendInfo: BackendInfo | null) => `docker login nvcr.io
 Username: $oauthtoken
 Password: <PASTE_API_KEY_HERE>
 
@@ -49,12 +49,12 @@ docker run -it --rm \\
   -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \\
   -u $(id -u) \\
   -p 8000:8000 \\
-  nvcr.io/nim/nvidia/cosmos3-nano-reasoner:latest`;
-const DEPLOY_CURL_COMMAND = `curl -X POST "http://0.0.0.0:8000/v1/chat/completions" \\
+  ${nimImageForModel(model, backendInfo)}`;
+const DEPLOY_CURL_COMMAND = (model: string) => `curl -X POST "http://0.0.0.0:8000/v1/chat/completions" \\
   -H "Accept: application/json" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "nvidia/cosmos3-nano-reasoner",
+    "model": "${model}",
     "messages": [
       {
         "role": "user",
@@ -97,6 +97,13 @@ const DEFAULT_PRESENCE_PENALTY = SAMPLING_DEFAULTS.reasoning.presencePenalty;
 const DEFAULT_SEED = 42;
 const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
+const ACCEPTED_MEDIA_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "jpg", "jpeg", "png", "webp"];
+const ACCEPTED_MEDIA_ACCEPT = [
+  "video/*",
+  "image/*",
+  ...ACCEPTED_MEDIA_EXTENSIONS.map((extension) => `.${extension}`)
+].join(",");
+const ACCEPTED_MEDIA_HELP = ".mp4, .mov, .m4v, .webm, .avi, .jpg, .jpeg, .png, .webp";
 const PARAMETER_HELP = {
   temperature:
     "Sampling parameter from the guide. Default 0.7, or 0.6 with reasoning. Lower values are more deterministic; higher values are more varied.",
@@ -275,6 +282,14 @@ type BackendInfo = {
     prompt_role?: string;
     full_trajectory_mode?: boolean;
     clip_guidance?: string;
+  } | null;
+  nim?: {
+    name?: string;
+    image?: string | null;
+    image_id?: string | null;
+    status?: string | null;
+    started_at?: string | null;
+    env?: Record<string, string>;
   } | null;
   vllm?: {
     base_url?: string;
@@ -553,7 +568,8 @@ function inferKind(file: File): "video" | "image" {
 
 function isAcceptedFile(file: File): boolean {
   if (file.type.startsWith("image/") || file.type.startsWith("video/")) return true;
-  return /\.(mp4|jpg|jpeg|png)$/i.test(file.name);
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  return ACCEPTED_MEDIA_EXTENSIONS.includes(extension);
 }
 
 function stripAnswerTags(text: string): string {
@@ -738,6 +754,39 @@ function modelDefaults(modelName: string, backendInfo?: BackendInfo | null) {
   return { fps: DEFAULT_FRAMES_PER_SECOND, maxTokens: DEFAULT_MAX_TOKENS };
 }
 
+function modelShortName(modelName: string) {
+  const raw = String(modelName || "").trim();
+  if (!raw || raw === "Detecting model...") return "Cosmos Reasoner";
+  return raw.split("/").filter(Boolean).pop() || raw;
+}
+
+function modelSlug(modelName: string) {
+  return modelShortName(modelName)
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
+function modelFamilyLabel(modelName: string) {
+  const lower = String(modelName || "").toLowerCase();
+  if (lower.includes("cosmos3-super")) return "Cosmos3 Super Reasoner";
+  if (lower.includes("cosmos3-nano")) return "Cosmos3 Nano Reasoner";
+  if (lower.includes("cosmos-reason2")) return "Cosmos Reason2";
+  if (lower.includes("cosmos-reason1")) return "Cosmos Reason1";
+  if (lower.includes("nemotron")) return "Nemotron VL Reasoner";
+  if (lower.includes("qwen")) return "Qwen VL Reasoner";
+  if (lower.includes("gemma")) return "Gemma VL Reasoner";
+  return modelShortName(modelName);
+}
+
+function nimImageForModel(modelName: string, backendInfo: BackendInfo | null) {
+  const liveImage = backendInfo?.nim?.image;
+  if (liveImage) return liveImage;
+  const slug = modelSlug(modelName);
+  return slug ? `nvcr.io/nim/nvidia/${slug}:latest` : "<NIM_IMAGE>";
+}
+
 function usesFrameFallback(modelName: string, backend?: string) {
   const lower = modelName.toLowerCase();
   if (backend === "alpamayo" || lower.includes("alpamayo")) return false;
@@ -792,20 +841,39 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(COSMOS3_INFO_URL, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (cancelled || !d) return;
-        const name = (d.checkpoint as string | undefined) || (d.display_name as string | undefined);
-        if (name) {
-          setModel(name);
-          setModels((prev) => (prev.includes(name) ? prev : [name, ...prev]));
+
+    async function refreshActiveModel() {
+      try {
+        const [activeResponse, modelsResponse] = await Promise.all([
+          fetch(COSMOS3_INFO_URL, { cache: "no-store" }),
+          fetch("/api/models", { cache: "no-store" })
+        ]);
+        const active = activeResponse.ok ? await activeResponse.json() : null;
+        const listed = modelsResponse.ok ? await modelsResponse.json() : null;
+        if (cancelled) return;
+
+        const activeName = (active?.checkpoint as string | undefined) || (active?.display_name as string | undefined);
+        const listedModels = Array.isArray(listed?.models) ? (listed.models as string[]).filter(Boolean) : [];
+        const nextModels = activeName ? [activeName, ...listedModels.filter((item) => item !== activeName)] : listedModels;
+
+        if (nextModels.length > 0) {
+          setModels(nextModels);
+          setModel(nextModels[0]);
+        } else if (activeName) {
+          setModel(activeName);
+          setModels([activeName]);
         }
-        setBackendInfo(d);
-      })
-      .catch(() => {});
+        if (active) setBackendInfo(active);
+      } catch {
+        // Keep the last known model visible if the backend is mid-restart.
+      }
+    }
+
+    void refreshActiveModel();
+    const timer = window.setInterval(refreshActiveModel, 5000);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -813,18 +881,6 @@ export default function App() {
     if (!model || model === DEFAULT_MODEL) return;
     document.title = `${model} | ${isVlaMode(model, backendInfo) ? "VLA BYO" : "NVIDIA NIM"}`;
   }, [backendInfo, model]);
-
-  useEffect(() => {
-    fetch("/api/models")
-      .then((response) => response.json())
-      .then((data) => {
-        if (Array.isArray(data.models) && data.models.length > 0) {
-          setModels(data.models);
-          setModel(data.models[0]);
-        }
-      })
-      .catch(() => undefined);
-  }, []);
 
   useEffect(() => {
     const example = activeExamples.find((item) => item.id === selectedExampleId);
@@ -1582,7 +1638,7 @@ function ExperiencePanel({
           </div>
 
           <label className="fieldLabel">Input</label>
-          <input ref={inputRef} type="file" accept=".mp4,.jpg,.jpeg,.png" onChange={handleFile} hidden />
+          <input ref={inputRef} type="file" accept={ACCEPTED_MEDIA_ACCEPT} onChange={handleFile} hidden />
           {media ? (
             <div
               className={`dropzone hasMedia${dragActive ? " dragActive" : ""}`}
@@ -1625,7 +1681,7 @@ function ExperiencePanel({
             >
               <Upload size={22} />
               <span>Drop files here</span>
-              <small>.mp4, .jpg, .jpeg, .png</small>
+              <small>{ACCEPTED_MEDIA_HELP}</small>
             </button>
           )}
 
@@ -2531,6 +2587,8 @@ function StaticTab({
   tab: SectionTab;
 }) {
   const vlaMode = isVlaMode(model, backendInfo);
+  const familyLabel = modelFamilyLabel(model);
+  const imageName = nimImageForModel(model, backendInfo);
   if (tab === "Model Card") {
     return (
       <div className="staticPanel">
@@ -2539,14 +2597,14 @@ function StaticTab({
         <p className="staticLead">
           {vlaMode
             ? "Alpamayo is loaded as a VLA-backed BYO-video endpoint. The current frontend path is captioning and VQA over adapter-sampled frames, with full driving trajectory/action mode called out as not active."
-            : "Cosmos3 Nano Reasoner is a vision-language reasoning surface for images and videos. This Vite deployment is tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback, and concise final answers."}
+            : `${familyLabel} is a vision-language reasoning surface for images and videos. This Vite deployment is tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback, and concise final answers.`}
         </p>
 
         <StaticSection title="ModelCard++">
           <p>
             {vlaMode
               ? "This card follows the NVIDIA Build model-card layout while reflecting the active Alpamayo adapter. It separates the user-facing VQA/caption mode from the deeper VLA trajectory mode that still needs a dedicated adapter path."
-              : "This card follows the NVIDIA Build model-card layout while reflecting the active Cosmos3 Nano Reasoner deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for evaluating the local OpenAI-compatible endpoint."}
+              : `This card follows the NVIDIA Build model-card layout while reflecting the active ${familyLabel} deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for evaluating the local OpenAI-compatible endpoint.`}
           </p>
         </StaticSection>
 
@@ -2563,7 +2621,7 @@ function StaticTab({
             <dt>Type</dt>
             <dd>Text with video or image</dd>
             <dt>Formats</dt>
-            <dd>.mp4, .jpg, .jpeg, .png</dd>
+            <dd>{ACCEPTED_MEDIA_HELP}</dd>
             <dt>Prompting</dt>
             <dd>
               {vlaMode ? (
@@ -2651,7 +2709,7 @@ function StaticTab({
         <StaticSection title="Deployment">
           <dl>
             <dt>Supported input</dt>
-            <dd>.mp4, .jpg, .jpeg, .png</dd>
+            <dd>{ACCEPTED_MEDIA_HELP}</dd>
             <dt>GPU</dt>
             <dd>{backendInfo?.gpu_name || "Detected on target host"}</dd>
             <dt>vLLM launch command</dt>
@@ -2682,7 +2740,7 @@ function StaticTab({
       <h2>Deploy</h2>
       <p className="staticLead">
         Follow the NVIDIA Build deployment flow for a downloadable NIM, with the model references adapted to
-        <code> cosmos3-nano-reasoner</code>. After the service is running, test the same local OpenAI-compatible
+        <code> {modelShortName(model)}</code>. After the service is running, test the same local OpenAI-compatible
         endpoint with a multimodal chat completion request.
       </p>
 
@@ -2694,11 +2752,14 @@ function StaticTab({
       </StaticSection>
 
       <StaticSection title="Step 2: Pull and Run the NIM">
-        <pre className="codeBlock">{DEPLOY_DOCKER_COMMAND}</pre>
+        <p>
+          Active image: <code>{imageName}</code>
+        </p>
+        <pre className="codeBlock">{DEPLOY_DOCKER_COMMAND(model, backendInfo)}</pre>
       </StaticSection>
 
       <StaticSection title="Step 3: Test the NIM">
-        <pre className="codeBlock">{DEPLOY_CURL_COMMAND}</pre>
+        <pre className="codeBlock">{DEPLOY_CURL_COMMAND(model)}</pre>
       </StaticSection>
 
       <a className="staticLink" href={BUILD_REASON2_DEPLOY_URL} rel="noreferrer" target="_blank">

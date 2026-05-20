@@ -16,15 +16,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 5173);
 
-const defaultModel =
-  process.env.MODEL_NAME ||
-  process.env.MODEL_ID ||
-  process.env.ALPAMAYO_MODEL_ID ||
-  (process.env.INFERENCE_BACKEND === "alpamayo" ? "nvidia/Alpamayo-1.5-10B" : "nvidia/Cosmos3-Nano-Reasoner");
 const backend =
   process.env.INFERENCE_BACKEND ||
   (process.env.ALPAMAYO_BASE_URL ? "alpamayo" : process.env.NIM_BASE_URL ? "nim_local" : "vllm");
 const isAlpamayoBackend = String(backend || "").toLowerCase() === "alpamayo";
+const defaultModel =
+  process.env.NIM_SERVED_MODEL_NAME ||
+  process.env.MODEL_NAME ||
+  process.env.MODEL_ID ||
+  process.env.ALPAMAYO_MODEL_ID ||
+  (isAlpamayoBackend ? "nvidia/Alpamayo-1.5-10B" : "Detecting model...");
 const KNOWN_HF_MODEL_COMMITS = {
   "nvidia/Cosmos3-Nano-Reasoner": "6406357cdc32fbf8db5f51ff7992343803b06961"
 };
@@ -332,9 +333,62 @@ async function findVllmProcess(selectedModel) {
   }
 }
 
+function safeNimEnv(rawEnv = []) {
+  const allowPrefixes = [
+    "NIM_",
+    "MODEL_",
+    "VLLM_",
+    "COSMOS_",
+    "INFERENCE_BACKEND",
+    "REASONER_MEDIA_MODE"
+  ];
+  const blocked = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i;
+  const safe = {};
+  for (const item of rawEnv || []) {
+    const index = String(item).indexOf("=");
+    if (index <= 0) continue;
+    const key = item.slice(0, index);
+    const value = item.slice(index + 1);
+    if (blocked.test(key)) continue;
+    if (!allowPrefixes.some((prefix) => key.startsWith(prefix))) continue;
+    safe[key] = value;
+  }
+  return safe;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function findNimContainer() {
+  const containerName = process.env.CONTAINER_NAME || "cosmos-nim";
+  try {
+    const stdout = await execFileText("docker", ["inspect", containerName]);
+    const data = JSON.parse(stdout);
+    const container = Array.isArray(data) ? data[0] : null;
+    if (!container) return null;
+    return {
+      name: container.Name ? String(container.Name).replace(/^\//, "") : containerName,
+      image: container.Config?.Image || null,
+      image_id: container.Image || null,
+      status: container.State?.Status || null,
+      started_at: container.State?.StartedAt || null,
+      env: safeNimEnv(container.Config?.Env || [])
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchBackendModelInfo(baseUrl, selectedModel) {
   try {
-    const response = await fetch(`${baseUrl}/models`, {
+    const response = await fetchWithTimeout(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}` }
     });
     if (!response.ok) return null;
@@ -587,12 +641,14 @@ async function buildRuntimeInfo(info) {
   const selectedModel = info.models?.[0] || defaultModel;
   const vllmProcess = await findVllmProcess(selectedModel);
   const modelInfo = await fetchBackendModelInfo(info.baseUrl, selectedModel);
+  const nim = backend === "nim_local" ? await findNimContainer() : null;
   const flags = vllmProcess?.flags || {};
   const quantization = inferQuantization(selectedModel, flags);
   const source = await resolveModelSource({ selectedModel, vllmProcess, modelInfo });
   return {
     source,
     app_source: appSourceInfo(),
+    nim,
     quantization,
     vla: vlaRuntimeInfo(selectedModel, modelInfo),
     vllm: {
@@ -623,6 +679,7 @@ app.get("/api/active-model", async (_request, response) => {
     base_url: info.baseUrl,
     source: runtime.source,
     app_source: runtime.app_source,
+    nim: runtime.nim,
     quantization: runtime.quantization,
     vla: runtime.vla,
     vllm: runtime.vllm,

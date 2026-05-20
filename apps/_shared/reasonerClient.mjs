@@ -27,14 +27,25 @@ function resolveBaseUrl() {
 
 function configuredModel() {
   return (
+    process.env.NIM_SERVED_MODEL_NAME ||
     process.env.MODEL_NAME ||
     process.env.MODEL_ID ||
     process.env.ALPAMAYO_MODEL_ID ||
     process.env.VLLM_MODEL ||
     (String(process.env.INFERENCE_BACKEND || "").toLowerCase() === "alpamayo"
       ? "nvidia/Alpamayo-1.5-10B"
-      : "nvidia/Cosmos3-Nano-Reasoner")
+      : "nvidia/Cosmos3-Reasoner")
   );
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function mediaContent({ mediaDataUrl, mediaKind, mediaFrames, framesPerSecond, prompt }) {
@@ -148,7 +159,7 @@ export function normalizeReasonerMessage(data) {
 export async function listReasonerModels() {
   const baseUrl = resolveBaseUrl();
   try {
-    const response = await fetch(`${baseUrl}/models`, {
+    const response = await fetchWithTimeout(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}` }
     });
     if (!response.ok) throw new Error(`Model probe failed with HTTP ${response.status}`);
