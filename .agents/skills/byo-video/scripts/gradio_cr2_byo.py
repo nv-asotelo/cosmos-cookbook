@@ -1730,6 +1730,183 @@ def _source_extension(value):
     return os.path.splitext(text)[1].lower()
 
 
+def _local_path_for_media_source(value):
+    if _is_file_url_source(value):
+        return _path_from_file_url(value)
+    if _is_url_source(value):
+        return None
+    text = str(value or "").strip()
+    return text if text and os.path.isfile(text) else None
+
+
+def _video_mime_for_path(path):
+    ext = _source_extension(path)
+    if ext == ".webm":
+        return "video/webm"
+    if ext in (".mov", ".qt"):
+        return "video/quicktime"
+    return "video/mp4"
+
+
+def _video_data_url_for_path(path, mime=None):
+    with open(path, "rb") as _vf:
+        _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+    return f"data:{mime or _video_mime_for_path(path)};base64,{_vb64}", len(_vb64)
+
+
+def _even_video_dims(width, height, max_edge=None):
+    width = max(2, int(width or 2))
+    height = max(2, int(height or 2))
+    edge = int(max_edge or 0)
+    if edge > 0 and max(width, height) > edge:
+        scale = edge / float(max(width, height))
+        width = max(2, int(round(width * scale)))
+        height = max(2, int(round(height * scale)))
+    width -= width % 2
+    height -= height % 2
+    return max(2, width), max(2, height)
+
+
+def _transcode_video_with_pyav_for_nim(source, out_path, max_edge=None, reason="retry"):
+    if not _AV_OK:
+        return f"PyAV unavailable for {reason}"
+    try:
+        container = _av_module.open(source)
+        in_stream = container.streams.video[0]
+        width = int(in_stream.codec_context.width or in_stream.width or 0)
+        height = int(in_stream.codec_context.height or in_stream.height or 0)
+        out_width, out_height = _even_video_dims(width, height, max_edge=max_edge)
+        rate = in_stream.average_rate or 30
+        output = _av_module.open(out_path, "w")
+        try:
+            try:
+                out_stream = output.add_stream("libx264", rate=rate)
+            except Exception:
+                out_stream = output.add_stream("h264", rate=rate)
+            out_stream.width = out_width
+            out_stream.height = out_height
+            out_stream.pix_fmt = "yuv420p"
+            try:
+                out_stream.options = {
+                    "preset": "veryfast",
+                    "crf": str(os.environ.get("NIM_VIDEO_TRANSCODE_CRF", "23")),
+                }
+            except Exception:
+                pass
+            for frame in container.decode(in_stream):
+                frame = frame.reformat(width=out_width, height=out_height, format="yuv420p")
+                for packet in out_stream.encode(frame):
+                    output.mux(packet)
+            for packet in out_stream.encode():
+                output.mux(packet)
+        finally:
+            output.close()
+            container.close()
+    except Exception as exc:
+        return f"PyAV {reason} failed: {exc}"
+    return None
+
+
+def _transcode_video_for_nim_video_url(video_path, max_edge=None, reason="retry"):
+    """Return a local H.264/yuv420p MP4 path for NIM video_url retry.
+
+    NIM video-capable endpoints expect one video item and do their own frame
+    sampling. If their NVDEC path rejects an uploaded codec/container, retry as
+    a conservative MP4 instead of degrading the video to image_url frames.
+    """
+    source = _local_path_for_media_source(video_path)
+    if not source:
+        return None, "video source is not a local file"
+    try:
+        import shutil as _shutil
+        import subprocess as _sp
+        import tempfile as _tempfile
+    except Exception as exc:
+        return None, f"transcode helpers unavailable: {exc}"
+    try:
+        with _tempfile.NamedTemporaryFile(prefix="byo_video_nim_", suffix=".mp4", delete=False) as handle:
+            out_path = handle.name
+    except Exception as exc:
+        return None, f"could not create temp mp4: {exc}"
+
+    ffmpeg = _shutil.which("ffmpeg")
+    if not ffmpeg:
+        pyav_error = _transcode_video_with_pyav_for_nim(source, out_path, max_edge=max_edge, reason=reason)
+        if pyav_error:
+            try:
+                os.unlink(out_path)
+            except Exception:
+                pass
+            return None, pyav_error
+        return out_path, None
+
+    scale = "scale='trunc(iw/2)*2':'trunc(ih/2)*2',format=yuv420p"
+    edge = int(max_edge or 0)
+    if edge > 0:
+        scale = (
+            "scale='if(gt(iw,ih),min(iw,"
+            f"{edge}),-2)':'if(gt(iw,ih),-2,min(ih,{edge}))',"
+            "scale='trunc(iw/2)*2':'trunc(ih/2)*2',format=yuv420p"
+        )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        source,
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        scale,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(os.environ.get("NIM_VIDEO_TRANSCODE_CRF", "23")),
+        "-movflags",
+        "+faststart",
+        out_path,
+    ]
+    try:
+        completed = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, timeout=300)
+    except Exception as exc:
+        try:
+            os.unlink(out_path)
+        except Exception:
+            pass
+        return None, f"ffmpeg {reason} failed: {exc}"
+    if completed.returncode != 0:
+        try:
+            os.unlink(out_path)
+        except Exception:
+            pass
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return None, f"ffmpeg {reason} failed: {detail[:500]}"
+    return out_path, None
+
+
+def _nim_transcode_max_edge_candidates():
+    raw = os.environ.get("NIM_VIDEO_TRANSCODE_MAX_EDGE", "").strip()
+    candidates = [None]
+    if raw:
+        try:
+            value = int(float(raw))
+        except Exception:
+            value = 0
+        if value > 0:
+            candidates.append(value)
+    elif os.environ.get("NIM_VIDEO_TRANSCODE_DOWNSCALE_RETRY", "1") != "0":
+        # A second retry keeps the payload as video while addressing NIM/NVDEC
+        # resolution-profile failures. This is far less destructive than
+        # collapsing the clip to five still frames.
+        candidates.append(1920)
+    return candidates
+
+
 def _is_image_source(value):
     return _source_extension(value) in {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -1840,13 +2017,13 @@ def _uses_native_video_url(model_id):
 
     True  → send ONE `video_url` content item with base64 data: URL (canonical
             OpenAI / build.nvidia.com shape; what Vite frontends use).
-    False → fall back to N `image_url` items with extracted JPEG frames
-            (legacy path for backends/models that reject native video_url).
+    False → fall back to N `image_url` items with extracted JPEG frames.
+            This is only for non-NIM/local legacy paths; NIM video stays video.
 
     Backend matrix:
-      nim_local : most NIMs accept native video_url. Exceptions include
-                  Cosmos Reason1 and Cosmos3 staging NIMs whose NVDEC
-                  video_url path rejected uploads in smoke runs.
+      nim_local : always use one native video_url for videos. If the NIM's
+                  decoder rejects the source, retry as conservative MP4
+                  video_url rather than degrading the video to image frames.
       vllm      : Qwen3-VL family (including Cosmos3-Nano-Reasoner,
                   Cosmos3-Super-Reasoner, Cosmos Reason2 2B/8B/32B), Nemotron
                   family, and explicit "qwen3-vl" strings accept native via
@@ -1857,8 +2034,6 @@ def _uses_native_video_url(model_id):
 
     # ── nim_local backend ───────────────────────────────────────────────────
     if INFERENCE_BACKEND == "nim_local":
-        if _is_frames_fallback_nim(mid):
-            return False  # frame fallback for NIMs whose NVDEC video_url path rejects uploads
         return True
     if INFERENCE_BACKEND == "alpamayo":
         return True
@@ -2996,9 +3171,33 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
     # adapter can read server-side file:// sources, so staged examples/local
     # paths bypass both browser upload and Gradio base64 repost there.
     # Images: single image_url for native-media models.
-    # Videos: native models use one video_url item; known frame-fallback NIMs
-    # use JPEG frames.
+    # Videos: NIM/native models use one video_url item. Legacy non-native
+    # local vLLM paths can still use JPEG frames.
     _native_video = _uses_native_video_url(model_id) or _uses_native_video_url(_SERVER_MODEL_ID or "")
+
+    def _build_video_url_content(_source, _reason="original"):
+        # Standard NIM/vLLM deployments still get base64 unless the user gave a
+        # direct URL. Alpamayo gets file:// for local staged media because the
+        # adapter runs beside Gradio and enforces its own allowed media roots.
+        if _is_url_source(_source) or _is_file_url_source(_source) or (
+            INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(_source))
+        ):
+            _video_url = (
+                _source
+                if _is_url_source(_source) or _is_file_url_source(_source)
+                else _file_url_for_path(_source)
+            )
+            print(f"[{_be_label}] video_url: direct server source ({_source_extension(_video_url) or 'url'}; {_reason})", flush=True)
+        else:
+            try:
+                _video_url, _b64_len = _video_data_url_for_path(_source, mime=_video_mime_for_path(_source))
+            except Exception as _vread_err:
+                raise RuntimeError(f"Could not read video: {_vread_err}") from _vread_err
+            print(f"[{_be_label}] video_url: base64 {_video_mime_for_path(_source)} ({_b64_len//1000} KB; {_reason})", flush=True)
+        return [
+            {"type": "video_url", "video_url": {"url": _video_url}},
+            {"type": "text", "text": prompt},
+        ]
 
     def _build_frame_content_for_video(reason="fallback"):
         # Frame extraction fallback — known for Cosmos Reason1 7B, rejected
@@ -3076,37 +3275,14 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
             ]
             print(f"[vllm/image] base64 image prepared", flush=True)
     elif _native_video:
-        # Standard NIM/vLLM deployments still get base64 unless the user gave a
-        # direct URL. Alpamayo gets file:// for local staged media because the
-        # adapter runs beside Gradio and enforces its own allowed media roots.
-        if _is_url_source(video_path) or _is_file_url_source(video_path) or (
-            INFERENCE_BACKEND == "alpamayo" and os.path.isfile(str(video_path))
-        ):
-            _video_url = (
-                video_path
-                if _is_url_source(video_path) or _is_file_url_source(video_path)
-                else _file_url_for_path(video_path)
-            )
-            content = [
-                {"type": "video_url", "video_url": {"url": _video_url}},
-                {"type": "text", "text": prompt},
-            ]
-            print(f"[{_be_label}] video_url: direct server source ({_source_extension(_video_url) or 'url'})", flush=True)
-        else:
-            try:
-                with open(video_path, "rb") as _vf:
-                    _vb64 = base64.b64encode(_vf.read()).decode("ascii")
-            except Exception as _vread_err:
-                msg = f"[vLLM ERROR] Could not read video: {_vread_err}"
-                _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
-                yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
-                                        {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
-                return
-            content = [
-                {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
-                {"type": "text", "text": prompt},
-            ]
-            print(f"[{_be_label}] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
+        try:
+            content = _build_video_url_content(video_path, "original")
+        except Exception as _vread_err:
+            msg = f"[vLLM ERROR] {_vread_err}"
+            _log_run(model_id, total_s=_elapsed(), status="video-error", display_label=display_label)
+            yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
+                                    {"elapsed_s": _elapsed(), "backend": _be_label}, steps=steps), _table_html()
+            return
     else:
         try:
             content = _build_frame_content_for_video("selected path")
@@ -3181,12 +3357,39 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
                 _err_preview = ""
             try: resp.close()
             except Exception: pass
-            print(f"[NIM] video_url rejected ({resp.status_code}); retrying with image-frame fallback. {_err_preview}", flush=True)
-            try:
-                content = _build_frame_content_for_video("video_url rejected")
-            except Exception as _frame_err:
-                raise RuntimeError(f"video_url rejected and frame fallback failed: {_frame_err}") from _frame_err
-            resp = _post_chat(model_id)
+            _last_preview = _err_preview
+            print(f"[NIM] video_url rejected ({resp.status_code}); retrying as conservative MP4 video_url. {_err_preview}", flush=True)
+            resp = None
+            for _max_edge in _nim_transcode_max_edge_candidates():
+                _reason = "h264-yuv420p" if not _max_edge else f"h264-yuv420p-maxedge-{_max_edge}"
+                _retry_path, _retry_err = _transcode_video_for_nim_video_url(video_path, max_edge=_max_edge, reason=_reason)
+                if not _retry_path:
+                    print(f"[NIM] video_url transcode retry skipped: {_retry_err}", flush=True)
+                    continue
+                try:
+                    content = _build_video_url_content(_retry_path, _reason)
+                finally:
+                    try:
+                        os.unlink(_retry_path)
+                    except Exception:
+                        pass
+                resp = _post_chat(model_id)
+                if resp.status_code not in (400, 422):
+                    print(f"[NIM] video_url transcode retry accepted ({_reason})", flush=True)
+                    break
+                try:
+                    _last_preview = resp.text[:500]
+                except Exception:
+                    _last_preview = ""
+                try: resp.close()
+                except Exception: pass
+                print(f"[NIM] video_url transcode retry still rejected ({_reason}): {_last_preview}", flush=True)
+                resp = None
+            if resp is None:
+                raise RuntimeError(
+                    "NIM rejected video_url and MP4 transcode retries did not recover. "
+                    f"Last error: {_last_preview}"
+                )
         resp.raise_for_status()
     except Exception as e:
         e_str = str(e)
@@ -3339,6 +3542,17 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             })
         return _content
 
+    def _build_hosted_video_content(_source, _reason="original"):
+        try:
+            _video_url, _b64_len = _video_data_url_for_path(_source, mime=_video_mime_for_path(_source))
+        except Exception as _vread_err:
+            raise RuntimeError(f"Could not read video: {_vread_err}") from _vread_err
+        print(f"[nim] video_url: base64 {_video_mime_for_path(_source)} ({_b64_len//1000} KB; {_reason})", flush=True)
+        return [
+            {"type": "video_url", "video_url": {"url": _video_url}},
+            {"type": "text", "text": prompt},
+        ]
+
     if is_image:
         try:
             from PIL import Image as _pil_img
@@ -3359,19 +3573,13 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         print(f"[nim/image] base64 image prepared", flush=True)
     else:
         try:
-            with open(video_path, "rb") as _vf:
-                _vb64 = base64.b64encode(_vf.read()).decode("ascii")
+            content = _build_hosted_video_content(video_path, "original")
         except Exception as _vread_err:
-            msg = f"[NIM ERROR] Could not read video: {_vread_err}"
+            msg = f"[NIM ERROR] {_vread_err}"
             _log_run(model_id, total_s=_elapsed(), status="frame-error", display_label=display_label)
             yield msg, _status_html(["ok", "ok", "wait", "wait", "wait"],
                                {"elapsed_s": _elapsed()}, steps=steps), _table_html()
             return
-        content = [
-            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{_vb64}"}},
-            {"type": "text", "text": prompt},
-        ]
-        print(f"[nim] video_url: base64 data:video/mp4 ({len(_vb64)//1000} KB)", flush=True)
 
     # Step 4: send to NVCF
 
@@ -3401,22 +3609,52 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                 _err_preview = ""
             try: resp.close()
             except Exception: pass
-            print(f"[NIM] video_url rejected ({resp.status_code}); retrying with image-frame fallback. {_err_preview}", flush=True)
-            content = _build_hosted_frame_content("video_url rejected")
-            resp = _requests.post(
-                NIM_ENDPOINT,
-                headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": NIM_MODEL_API,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user",   "content": content},
-                    ],
-                    "stream": True,
-                },
-                stream=True,
-                timeout=120,
-            )
+            _last_preview = _err_preview
+            print(f"[NIM] video_url rejected ({resp.status_code}); retrying as conservative MP4 video_url. {_err_preview}", flush=True)
+            resp = None
+            for _max_edge in _nim_transcode_max_edge_candidates():
+                _reason = "h264-yuv420p" if not _max_edge else f"h264-yuv420p-maxedge-{_max_edge}"
+                _retry_path, _retry_err = _transcode_video_for_nim_video_url(video_path, max_edge=_max_edge, reason=_reason)
+                if not _retry_path:
+                    print(f"[NIM] video_url transcode retry skipped: {_retry_err}", flush=True)
+                    continue
+                try:
+                    content = _build_hosted_video_content(_retry_path, _reason)
+                finally:
+                    try:
+                        os.unlink(_retry_path)
+                    except Exception:
+                        pass
+                resp = _requests.post(
+                    NIM_ENDPOINT,
+                    headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": NIM_MODEL_API,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user",   "content": content},
+                        ],
+                        "stream": True,
+                    },
+                    stream=True,
+                    timeout=120,
+                )
+                if resp.status_code not in (400, 422):
+                    print(f"[NIM] video_url transcode retry accepted ({_reason})", flush=True)
+                    break
+                try:
+                    _last_preview = resp.text[:500]
+                except Exception:
+                    _last_preview = ""
+                try: resp.close()
+                except Exception: pass
+                print(f"[NIM] video_url transcode retry still rejected ({_reason}): {_last_preview}", flush=True)
+                resp = None
+            if resp is None:
+                raise RuntimeError(
+                    "NIM rejected video_url and MP4 transcode retries did not recover. "
+                    f"Last error: {_last_preview}"
+                )
         resp.raise_for_status()
     except Exception as e:
         err = f"[NIM ERROR] {e}"
@@ -4788,7 +5026,7 @@ with gr.Blocks(
                 )
                 return info_str, gr.update(value=cap_px)
             info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
-                        f"video_url sent to NIM (server samples at ~{fps_val} fps → ~{target} frames)")
+                        "video_url sent to NIM (server-side video sampler; no JPEG frame fallback)")
             return info_str, gr.update()
         if INFERENCE_BACKEND == "vllm":
             info_str = (f"**{m.width}×{m.height}** · {m.fps:.1f} fps · {m.duration_s:.1f}s · "
