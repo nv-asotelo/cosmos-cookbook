@@ -530,18 +530,21 @@ def _is_cosmos3_generator() -> bool:
 
 
 def _nim_resolution_key() -> str:
+    explicit = os.environ.get("COSMOS_VIDEO_RESOLUTION")
+    if explicit:
+        return str(explicit)
     height = int(LOCAL_VIDEO_PARAMS["height"])
-    if height <= 256:
+    if height <= 256 and int(LOCAL_VIDEO_PARAMS["width"]) <= 256:
         return "256"
     if height <= 480:
         return "480"
-    return "720"
+    if height <= 720:
+        return "720"
+    return str(height)
 
 
 def _nim_frame_count(value: int | float) -> int:
-    requested = max(25, round(float(value)))
-    remainder = (requested - 1) % 4
-    return requested if remainder == 0 else requested + (4 - remainder)
+    return round(float(value))
 
 
 def build_local_payload(
@@ -555,7 +558,7 @@ def build_local_payload(
     if _is_cosmos3_generator():
         payload = {
             "prompt": prompt or "",
-            "guidance_scale": min(7.0, max(1.0, float(guidance_scale))),
+            "guidance_scale": float(guidance_scale),
             "steps": int(steps),
             "resolution": _nim_resolution_key(),
             "num_output_frames": _nim_frame_count(LOCAL_VIDEO_PARAMS["frames_count"]),
@@ -977,8 +980,20 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                     info="Hosted schema field. 0 is the first input image/frame; max is 1.",
                 )
             with gr.Accordion("Generation parameters", open=True):
-                guidance = gr.Slider(1.0, 10.0, value=DEFAULT_GUIDANCE, step=0.5, label="Guidance scale (CFG)")
-                steps = gr.Slider(1, 50, value=DEFAULT_STEPS, step=1, label="Steps")
+                guidance = gr.Slider(
+                    float(os.environ.get("COSMOS_GUIDANCE_MIN", "0")),
+                    float(os.environ.get("COSMOS_GUIDANCE_MAX", "20")),
+                    value=DEFAULT_GUIDANCE,
+                    step=0.5,
+                    label="Guidance scale (CFG)",
+                )
+                steps = gr.Slider(
+                    int(os.environ.get("COSMOS_STEPS_MIN", "1")),
+                    int(os.environ.get("COSMOS_STEPS_MAX", "200")),
+                    value=DEFAULT_STEPS,
+                    step=1,
+                    label="Steps",
+                )
                 seed = gr.Number(label="Seed (-1 = random)", value=-1, precision=0)
                 gr.Markdown(
                     "Quick staging defaults are controlled by COSMOS_VIDEO_HEIGHT/WIDTH/FRAMES/FPS. "

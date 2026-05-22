@@ -11,6 +11,7 @@ const PAGE_TAGLINE = "Generates future frames based upon an image and text input
 const MODEL_CARD_LEAD =
   "Generates future frames of a physics-aware world state based on simply an image or short video along with a text prompt for physical AI development.";
 const DISPLAY_MODEL_FALLBACK = "Cosmos3-Nano";
+const CURATED_PREVIEW_VIDEO = "/examples/race-car.mp4";
 const QUICK_VIDEO_PARAMS = {
   resolution: "256",
   aspect_ratio: "16,9",
@@ -698,6 +699,7 @@ export default function Page() {
   function reset() {
     contentLoadTokenRef.current += 1;
     setLoadingContentItemId(null);
+    setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
     setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
@@ -1033,9 +1035,9 @@ export default function Page() {
                 <h2>Output</h2>
               </div>
               <div className="outputActions">
-                {isRunning || result?.error || status === "Complete" ? (
+                {isRunning || result?.error || status !== "Ready" ? (
                   <span className={`statusPill ${isRunning ? "working" : result?.error ? "error" : "success"}`}>
-                    {isRunning ? "Generating" : result?.error ? "Error" : "Complete"}
+                    {isRunning ? "Generating" : result?.error ? "Error" : status}
                   </span>
                 ) : null}
               </div>
@@ -1376,10 +1378,11 @@ function GenerationProgress({
   );
 }
 
-function CuratedOutputPreview({ item }: { item: ContentSelectItem }) {
+function CuratedOutputPreview({ item = DEFAULT_CONTENT_ITEM }: { item?: ContentSelectItem }) {
+  const previewVideoUrl = item.previewVideoUrl || CURATED_PREVIEW_VIDEO;
   return (
     <article className="curatedOutputPreview">
-      <video src={item.previewVideoUrl} autoPlay muted loop playsInline controls />
+      <video src={previewVideoUrl} autoPlay muted loop playsInline controls />
       <div>
         <p className="curatedEyebrow">Generated preview</p>
         <h3>{item.title}</h3>

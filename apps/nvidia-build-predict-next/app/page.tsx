@@ -38,6 +38,7 @@ const MODEL_CHOICES = [
 ];
 const COLLECTIONS = ["cosmos-predict1", "cosmos-predict25", "cosmos3", "nvidia-cosmos-2", "cosmos"];
 const VIDEO_PARAMS = {
+  resolution: 720,
   height: 704,
   width: 1280,
   frames_count: 121,
@@ -45,6 +46,32 @@ const VIDEO_PARAMS = {
 };
 const PROGRESS_FRAME_COUNT = 6;
 const PROGRESS_TOTAL_FRAMES = VIDEO_PARAMS.frames_count;
+
+// ETA model — mirrors apps/_shared/cosmos3Client.mjs estimator (two-point fit
+// from the 21:26 + 22:30 runs on horde@RTX PRO 6000 Blackwell). Keep these
+// constants synced with the shared client; the UI displays the same wall-time
+// estimate that the server-side budget guard uses to gate the request.
+const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
+  "256": 256 * 256,
+  "480": 854 * 480,
+  "720": 1280 * 720,
+  "1080": 1920 * 1080
+};
+const ETA_BASELINE_SECONDS = 5;
+const ETA_OPS_PER_SECOND = 10_000_000;
+
+function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number): number {
+  const px = ETA_PIXELS_BY_RESOLUTION[String(resolution)] || ETA_PIXELS_BY_RESOLUTION["480"];
+  const f = Math.max(1, numFrames);
+  const s = Math.max(1, numSteps);
+  return Math.ceil(ETA_BASELINE_SECONDS + (px * f * s) / ETA_OPS_PER_SECOND);
+}
+
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
 
 type WorldMode = "Video-to-World" | "Image-to-World";
 type SchemaMode = "local_nim" | "build_openapi";
@@ -204,6 +231,8 @@ export default function Page() {
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
+  const [submittedAt, setSubmittedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressFrames, setProgressFrames] = useState<string[]>([]);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [copied, setCopied] = useState(false);
@@ -245,20 +274,27 @@ export default function Page() {
     };
   }, [media]);
 
+  const etaSeconds = useMemo(
+    () => estimateWallSeconds(VIDEO_PARAMS.resolution, VIDEO_PARAMS.frames_count, steps),
+    [steps]
+  );
+
+  // Real progress: tied to elapsed/ETA, not a synthetic ramp. Updates 4×/sec.
+  // Once we cross the ETA we cap at 96 % to signal "any moment now" (the last
+  // ~4 % is VAE decode + h264 encode + file write, none of which emit a signal
+  // we can hook into upstream).
   useEffect(() => {
-    if (!isRunning) return () => undefined;
-
-    const interval = window.setInterval(() => {
-      setProgressPercent((current) => {
-        if (current < 28) return current + 7;
-        if (current < 68) return current + 4;
-        if (current < 90) return current + 2;
-        return Math.min(current + 0.8, 96);
-      });
-    }, 950);
-
+    if (!isRunning || submittedAt === null) return () => undefined;
+    const tick = () => {
+      const elapsed = (Date.now() - submittedAt) / 1000;
+      setElapsedSeconds(elapsed);
+      const pct = Math.min(96, (elapsed / Math.max(1, etaSeconds)) * 96);
+      setProgressPercent(pct);
+    };
+    tick();
+    const interval = window.setInterval(tick, 250);
     return () => window.clearInterval(interval);
-  }, [isRunning]);
+  }, [isRunning, submittedAt, etaSeconds]);
 
   const requestPreview = useMemo(() => {
     if (schemaMode === "build_openapi") {
@@ -336,9 +372,11 @@ export default function Page() {
   }
 
   async function run() {
+    setSubmittedAt(Date.now());
+    setElapsedSeconds(0);
     setIsRunning(true);
     setResult(null);
-    setProgressPercent(4);
+    setProgressPercent(0);
     setStatus("Predicting frames");
     try {
       const response = await fetch("/api/predict", {
@@ -356,16 +394,62 @@ export default function Page() {
           inputImageIndex
         })
       });
-      const data = (await response.json()) as ApiResult;
+
+      // Streamed response with heartbeat keepalives — the final chunk after the
+      // sentinel is the JSON payload. See app/api/predict/route.ts for the
+      // server-side write order.
+      const RESULT_SENTINEL = "\n\n---PREDICT-RESULT---\n";
+      let buffer = "";
+      const reader = response.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+        }
+        buffer += decoder.decode();
+      } else {
+        buffer = await response.text();
+      }
+
+      const sentinelIdx = buffer.lastIndexOf(RESULT_SENTINEL);
+      let data: ApiResult;
+      if (sentinelIdx >= 0) {
+        const jsonText = buffer.slice(sentinelIdx + RESULT_SENTINEL.length).trim();
+        try {
+          data = JSON.parse(jsonText) as ApiResult;
+        } catch (parseError) {
+          data = {
+            error: "Response payload was not valid JSON.",
+            diagnostic: {
+              parseError: parseError instanceof Error ? parseError.message : String(parseError),
+              tail: jsonText.slice(-512)
+            }
+          };
+        }
+      } else {
+        // Old single-shot response shape — try direct JSON parse on the buffer.
+        try {
+          data = JSON.parse(buffer.trim()) as ApiResult;
+        } catch {
+          data = {
+            error: "Predict response missing the streaming sentinel.",
+            diagnostic: { bufferTail: buffer.slice(-512) }
+          };
+        }
+      }
+
       setResult(data);
       setProgressPercent(100);
-      setStatus(response.ok ? "Complete" : "Backend error");
+      setStatus(response.ok && !data.error ? "Complete" : "Backend error");
     } catch (error) {
       setResult({ error: error instanceof Error ? error.message : "Request failed" });
       setProgressPercent(100);
       setStatus("Request failed");
     } finally {
       setIsRunning(false);
+      setSubmittedAt(null);
     }
   }
 
@@ -530,6 +614,12 @@ export default function Page() {
                 <RotateCcw size={16} />
                 Reset
               </button>
+              <span
+                className="etaBadge"
+                title={`Linear estimator from horde@RTX PRO 6000 Blackwell. ${etaSeconds}s for ${VIDEO_PARAMS.frames_count} frames @ ${VIDEO_PARAMS.resolution}p × ${steps} steps.`}
+              >
+                Est. wall ~{formatDuration(etaSeconds)}
+              </span>
               <button className="runButton" onClick={run} disabled={isRunning}>
                 <Play size={16} fill="currentColor" />
                 {isRunning ? "Generating" : "Generate"}
@@ -547,7 +637,13 @@ export default function Page() {
             </div>
             <div className="outputBody">
               {isRunning ? (
-                <GenerationProgress media={media} frames={progressFrames} progress={progressPercent} />
+                <GenerationProgress
+                  media={media}
+                  frames={progressFrames}
+                  progress={progressPercent}
+                  elapsedSeconds={elapsedSeconds}
+                  etaSeconds={etaSeconds}
+                />
               ) : result?.error ? (
                 <FailureReport result={result} />
               ) : result?.videoDataUrl ? (
@@ -664,23 +760,33 @@ function FailureReport({ result }: { result: ApiResult }) {
 function GenerationProgress({
   media,
   frames,
-  progress
+  progress,
+  elapsedSeconds,
+  etaSeconds
 }: {
   media: MediaState | null;
   frames: string[];
   progress: number;
+  elapsedSeconds: number;
+  etaSeconds: number;
 }) {
   const generatedFrames = Math.max(1, Math.min(PROGRESS_TOTAL_FRAMES, Math.round((progress / 100) * PROGRESS_TOTAL_FRAMES)));
   const displayFrames = frames.length > 0 ? frames : Array.from({ length: PROGRESS_FRAME_COUNT }, () => "");
   const fallbackLabel = media?.kind === "image" ? "Image condition" : "Video condition";
+  const remainingSeconds = Math.max(0, etaSeconds - elapsedSeconds);
+  const overrun = elapsedSeconds > etaSeconds;
 
   return (
     <article className="generationProgress" aria-live="polite">
       <div className="progressHeader">
         <p>
-          <strong>The autoregressive model is working:</strong> Predicting future frames for you...
+          <strong>The diffusion model is working:</strong> denoising {PROGRESS_TOTAL_FRAMES} latent frames in parallel,
+          then VAE-decoding + h264 encoding the output.
         </p>
-        <span>{generatedFrames} / {PROGRESS_TOTAL_FRAMES} frames</span>
+        <span>
+          {generatedFrames} / {PROGRESS_TOTAL_FRAMES} frames · elapsed {formatDuration(elapsedSeconds)}
+          {overrun ? ` · over est. by ${formatDuration(elapsedSeconds - etaSeconds)}` : ` · ETA ${formatDuration(remainingSeconds)}`}
+        </span>
       </div>
       <div className="progressTrack" aria-label="Generation progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} role="progressbar">
         <span style={{ width: `${Math.max(4, progress)}%` }} />

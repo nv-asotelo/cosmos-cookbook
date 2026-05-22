@@ -137,66 +137,130 @@ export async function POST(request: Request) {
     params.negative_prompt = process.env.PREDICT_NEGATIVE_PROMPT;
   }
 
-  let result: SharedResult;
-  try {
-    result = (await submitGeneration({
-      prompt: body.prompt,
-      mediaDataUrl: body.mediaDataUrl,
-      mediaKind,
-      params,
-      model
-    })) as SharedResult;
-  } catch (error) {
-    return errorResponse(502, "Cosmos3 Ray Serve transport threw before returning.", {
-      layer: "backend",
-      issue: error instanceof Error ? error.message : "Unknown transport error.",
-      likelyCause: "The shared Cosmos3 client could not complete the round-trip to /generate.",
-      suggestions: [
-        "Confirm the Ray Serve replica is up: `curl http://localhost:8000/generate` on horde.",
-        "Check that the configured COSMOS3_BASE_URL / RAY_SERVE_BASE_URL resolves from this process."
-      ]
-    });
-  }
+  // Stream a chunked response with a heartbeat byte every 20 s so the browser
+  // (and any intermediate proxy) keeps the TCP connection alive past Chrome's
+  // ~3-4 min idle ceiling. The actual JSON payload arrives as the final chunk,
+  // prefixed by a known sentinel so the client can find it in the buffer.
+  //
+  // Why this matters: Cosmos3 Ray Serve /generate is synchronous and can take
+  // 6+ min on HD. Without periodic bytes flowing, the browser shows
+  // "Failed to fetch" even though the server-side request still succeeds (and
+  // the output file lands on disk).
+  const encoder = new TextEncoder();
+  const RESULT_SENTINEL = "\n\n---PREDICT-RESULT---\n";
 
-  if (result.status === "error" || !Array.isArray(result.files)) {
-    return errorResponse(502, result.message || "Cosmos3 generation failed.", {
-      layer: "backend",
-      issue: result.message || "Ray Serve returned a non-success status.",
-      stack_trace: result.stack_trace || null,
-      likelyCause: "The Cosmos3 Ray Serve handler raised before producing outputs.",
-      suggestions: [
-        "Check the Ray Serve logs on horde for the matching `name` field.",
-        "Confirm the requested model is currently mounted by Ray Serve."
-      ],
-      raw: result.raw
-    }, result.payload as Record<string, unknown> | undefined);
-  }
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      const safeEnqueue = (chunk: Uint8Array) => {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          // Stream was closed underneath us — swallow.
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {}
+      };
 
-  // Adapt the new files[] to the old { videoDataUrl, assetUrl } the UI
-  // renders. Pick the first video file if present; fall back to first image.
-  const firstVideo = result.files.find((file) => file.b64 && file.mime?.startsWith("video/"));
-  const firstImage = result.files.find((file) => file.b64 && file.mime?.startsWith("image/"));
-  const primary = firstVideo || firstImage || null;
+      // Opening byte forces headers to flush so the browser sees a response.
+      safeEnqueue(encoder.encode("​"));
 
-  return Response.json({
-    videoDataUrl:
-      primary && primary.b64 && primary.mime?.startsWith("video/")
-        ? `data:${primary.mime};base64,${primary.b64}`
-        : undefined,
-    imageDataUrl:
-      primary && primary.b64 && primary.mime?.startsWith("image/")
-        ? `data:${primary.mime};base64,${primary.b64}`
-        : undefined,
-    assetUrl: undefined,
-    files: result.files.map((file) => ({
-      path: file.path,
-      mime: file.mime,
-      hasInlineData: Boolean(file.b64),
-      error: file.error
-    })),
-    status: result.status,
-    message: result.message,
-    raw: result.raw,
-    payload: result.payload ? redactPayload(result.payload) : undefined
+      const heartbeat = setInterval(() => {
+        // A space is invisible if the response is ever rendered as text.
+        safeEnqueue(encoder.encode(" "));
+      }, 20_000);
+
+      try {
+        const result = (await submitGeneration({
+          prompt: body.prompt,
+          mediaDataUrl: body.mediaDataUrl,
+          mediaKind,
+          params,
+          model
+        })) as SharedResult;
+
+        clearInterval(heartbeat);
+
+        let payload: Record<string, unknown>;
+        if (result.status === "error" || !Array.isArray(result.files)) {
+          payload = {
+            error: result.message || "Cosmos3 generation failed.",
+            diagnostic: {
+              layer: "backend",
+              issue: result.message || "Ray Serve returned a non-success status.",
+              stack_trace: result.stack_trace || null,
+              likelyCause: "The Cosmos3 Ray Serve handler raised before producing outputs.",
+              suggestions: [
+                "Check the Ray Serve logs on horde for the matching `name` field.",
+                "Confirm the requested model is currently mounted by Ray Serve."
+              ],
+              raw: result.raw
+            },
+            payload: result.payload ? redactPayload(result.payload as Record<string, unknown>) : undefined,
+            status: result.status,
+            files: []
+          };
+        } else {
+          const firstVideo = result.files.find((file) => file.b64 && file.mime?.startsWith("video/"));
+          const firstImage = result.files.find((file) => file.b64 && file.mime?.startsWith("image/"));
+          const primary = firstVideo || firstImage || null;
+          payload = {
+            videoDataUrl:
+              primary && primary.b64 && primary.mime?.startsWith("video/")
+                ? `data:${primary.mime};base64,${primary.b64}`
+                : undefined,
+            imageDataUrl:
+              primary && primary.b64 && primary.mime?.startsWith("image/")
+                ? `data:${primary.mime};base64,${primary.b64}`
+                : undefined,
+            assetUrl: undefined,
+            files: result.files.map((file) => ({
+              path: file.path,
+              mime: file.mime,
+              hasInlineData: Boolean(file.b64),
+              error: file.error
+            })),
+            status: result.status,
+            message: result.message,
+            raw: result.raw,
+            payload: result.payload ? redactPayload(result.payload as Record<string, unknown>) : undefined
+          };
+        }
+
+        safeEnqueue(encoder.encode(RESULT_SENTINEL + JSON.stringify(payload)));
+        safeClose();
+      } catch (error) {
+        clearInterval(heartbeat);
+        const payload = {
+          error: "Cosmos3 Ray Serve transport threw before returning.",
+          diagnostic: {
+            layer: "backend",
+            issue: error instanceof Error ? error.message : "Unknown transport error.",
+            likelyCause: "The shared Cosmos3 client could not complete the round-trip to /generate.",
+            suggestions: [
+              "Confirm the Ray Serve replica is up: `curl http://localhost:8000/generate` on horde.",
+              "Check that the configured COSMOS3_BASE_URL / RAY_SERVE_BASE_URL resolves from this process."
+            ]
+          },
+          files: []
+        };
+        safeEnqueue(encoder.encode(RESULT_SENTINEL + JSON.stringify(payload)));
+        safeClose();
+      }
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      "X-Accel-Buffering": "no"
+    }
   });
 }

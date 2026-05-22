@@ -27,6 +27,7 @@ import concurrent.futures
 import csv
 import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
@@ -42,7 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -4022,6 +4023,41 @@ LINGOQA_DATA_ROOTS = [
 ]
 BENCHMARK_RUN_ROOT = Path(os.getenv("BENCHMARK_RUN_ROOT", "/tmp/benchmark-runs"))
 BENCHMARK_RUN_ROOT.mkdir(parents=True, exist_ok=True)
+RF100_VL_DATA_ROOTS = [
+    Path(p) for p in (
+        os.getenv("RF100_VL_DATA_ROOT") or "",
+        "/home/horde/rf100-vl",
+        "/tmp/rf100-vl",
+        str(BENCHMARK_RUN_ROOT / "rf100-vl"),
+    ) if p
+]
+RF100_VL_EXPECTED_GROUPS = int(os.getenv("RF100_VL_EXPECTED_GROUPS", "100"))
+RF100_VL_AUTO_DOWNLOAD = os.getenv("RF100_VL_AUTO_DOWNLOAD", "1").lower() not in ("0", "false", "no")
+RF100_VL_DISCOVERY_CACHE = BENCHMARK_RUN_ROOT / "rf100-vl-profile.json"
+RF100_VL_MAX_PIXELS = int(os.getenv("RF100_VL_MAX_PIXELS", str(128 * (32 ** 2))))
+RF100_VL_MIN_PIXELS = int(os.getenv("RF100_VL_MIN_PIXELS", str(32 * (32 ** 2))))
+RF100_VL_JPEG_QUALITY = int(os.getenv("RF100_VL_JPEG_QUALITY", "82"))
+RF100_VL_PROMPT_MAX_CATEGORIES = int(os.getenv("RF100_VL_PROMPT_MAX_CATEGORIES", "160"))
+RF100_VL_PROMPT_MAX_CHARS = int(os.getenv("RF100_VL_PROMPT_MAX_CHARS", "6000"))
+RF100_VL_CONTEXT_RETRY_ATTEMPTS = int(os.getenv("RF100_VL_CONTEXT_RETRY_ATTEMPTS", "4"))
+RF100_VL_TRANSIENT_RETRIES = int(os.getenv("RF100_VL_TRANSIENT_RETRIES", "1"))
+RF100_VL_MAX_IN_FLIGHT_MULTIPLIER = int(os.getenv("RF100_VL_MAX_IN_FLIGHT_MULTIPLIER", "3"))
+RF100_VL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("RF100_VL_REQUEST_TIMEOUT_SECONDS", "240"))
+RF100_VL_USE_PROJECT_CATEGORIES = os.getenv("RF100_VL_USE_PROJECT_CATEGORIES", "0").lower() in ("1", "true", "yes")
+BENCHMARK_FLUSH_EVERY = int(os.getenv("BENCHMARK_FLUSH_EVERY", "100"))
+BENCHMARK_FLUSH_SECONDS = float(os.getenv("BENCHMARK_FLUSH_SECONDS", "180"))
+BENCHMARK_DURABLE_FLUSH_EVERY = int(os.getenv("BENCHMARK_DURABLE_FLUSH_EVERY", "500"))
+BENCHMARK_DURABLE_FLUSH_SECONDS = float(os.getenv("BENCHMARK_DURABLE_FLUSH_SECONDS", "900"))
+RF100_GATE_STATUS_PATH = Path(os.getenv("RF100_GATE_STATUS_PATH", "/tmp/rf100_last_heartbeat_status.json"))
+AIR_SUPPORT_MIN_STABLE_SECONDS = int(os.getenv("AIR_SUPPORT_MIN_STABLE_SECONDS", str(30 * 60)))
+AIR_SUPPORT_MIN_STABLE_IMAGES = int(os.getenv("AIR_SUPPORT_MIN_STABLE_IMAGES", "500"))
+AIR_SUPPORT_MAX_ERROR_RATE = float(os.getenv("AIR_SUPPORT_MAX_ERROR_RATE", "0.01"))
+CLAUDE_DOCS_PRESENTATIONS_DIR = Path(
+    os.getenv(
+        "CLAUDE_DOCS_PRESENTATIONS_DIR",
+        "/Users/asotelo/Library/CloudStorage/GoogleDrive-asotelo@nvidia.com/My Drive/Claude Docs/presentations",
+    )
+)
 
 LINGOQA_CATEGORY_KEYWORDS: List[Tuple[str, List[str]]] = [
     ("counting", ["how many", " count", "number of"]),
@@ -4153,26 +4189,33 @@ def load_lingoqa(parquet_path: Optional[Path] = None, image_root: Optional[Path]
 
 
 def group_lingoqa_by_question(samples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Collapse two-reference rows into one record per question_id.
+    """Collapse LingoQA reference rows using the official evaluator key.
+
+    The upstream evaluator groups references by
+    (question_id, segment_id, question), not just question_id. Keeping the same
+    key preserves the expected 500-row validation shape and avoids merging
+    distinct clips that happen to reuse a question id.
 
     Returns dicts: {question_id, segment_id, images, question, references: [a,b], category}.
     """
-    bucket: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
+    bucket: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    order: List[Tuple[str, str, str]] = []
     for s in samples:
-        qid = s["question_id"]
-        if qid not in bucket:
-            bucket[qid] = {
-                "question_id": qid,
+        key = (str(s["question_id"]), str(s["segment_id"]), str(s["question"]))
+        if key not in bucket:
+            bucket[key] = {
+                "question_id": key[0],
                 "segment_id": s["segment_id"],
                 "images": s["images"],
                 "question": s["question"],
                 "references": [],
                 "category": s["category"],
             }
-            order.append(qid)
-        bucket[qid]["references"].append(s["answer"])
-    return [bucket[qid] for qid in order]
+            order.append(key)
+        answer = str(s.get("answer") or "")
+        if answer and answer not in bucket[key]["references"]:
+            bucket[key]["references"].append(answer)
+    return [bucket[key] for key in order]
 
 
 # =============================================================================
@@ -4197,6 +4240,502 @@ _HF_DATASETS_CACHE_ROOT = Path("/tmp/hf-datasets")
 
 def _safe_dataset_dir_name(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s or "ds"))
+
+
+def _is_rf100_source_text(value: str) -> bool:
+    low = (value or "").strip().lower()
+    return (
+        low in {"rf100-vl", "rf100vl", "roboflow100-vl", "roboflow100vl"}
+        or "rf100-vl.org" in low
+        or "roboflow/rf100-vl" in low
+        or "2505.20612" in low
+    )
+
+
+def _is_lingoqa_source_text(value: str) -> bool:
+    low = (value or "").strip().lower()
+    return low == "lingoqa" or "wayveai/lingoqa" in low or "2312.14115" in low
+
+
+def _rf100_dependency_status() -> Dict[str, Any]:
+    out = {
+        "package": "rf100vl",
+        "package_ready": False,
+        "roboflow_api_key_ready": bool(os.getenv("ROBOFLOW_API_KEY")),
+        "auto_download": bool(RF100_VL_AUTO_DOWNLOAD),
+        "blockers": [],
+    }
+    try:
+        __import__("rf100vl")
+        out["package_ready"] = True
+    except Exception as exc:
+        out["package_error"] = str(exc)
+        out["blockers"].append("Install the rf100vl package on the benchmark host.")
+    if not out["roboflow_api_key_ready"]:
+        out["blockers"].append("Set ROBOFLOW_API_KEY on the benchmark host before downloading RF100-VL.")
+    return out
+
+
+def _rf100_candidate_annotation_files(root: Path) -> List[Path]:
+    if not root.exists():
+        return []
+    patterns = [
+        "**/_annotations.coco.json",
+        "**/*_annotations*.json",
+        "**/annotations/*.json",
+        "**/instances*.json",
+    ]
+    seen: set = set()
+    files: List[Path] = []
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            if path.name == "_annotations.coco.json":
+                files.append(path)
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("images") and data.get("annotations") and data.get("categories"):
+                files.append(path)
+    return files
+
+
+def _rf100_discovery_signature(root: Path, files: List[Path]) -> Dict[str, Any]:
+    latest_mtime = 0.0
+    for path in files:
+        try:
+            latest_mtime = max(latest_mtime, path.stat().st_mtime)
+        except OSError:
+            continue
+    return {
+        "root": str(root),
+        "annotation_file_count": len(files),
+        "latest_annotation_mtime": latest_mtime,
+    }
+
+
+def _rf100_find_root() -> Optional[Path]:
+    for root in RF100_VL_DATA_ROOTS:
+        if not root.exists():
+            continue
+        if _rf100_candidate_annotation_files(root):
+            return root
+        for child in sorted(root.iterdir()) if root.is_dir() else []:
+            if child.is_dir() and _rf100_candidate_annotation_files(child):
+                return child
+    return None
+
+
+def _rf100_download_if_possible(force_complete: bool = False) -> Path:
+    existing = _rf100_find_root()
+    if existing is not None and not force_complete:
+        return existing
+    if existing is not None and force_complete:
+        profile = _rf100_discover(download=False)
+        if int(profile.get("group_count") or 0) >= RF100_VL_EXPECTED_GROUPS:
+            return existing
+    dep = _rf100_dependency_status()
+    if not RF100_VL_AUTO_DOWNLOAD:
+        raise RuntimeError("RF100-VL data is not staged and RF100_VL_AUTO_DOWNLOAD=0.")
+    if dep.get("blockers"):
+        raise RuntimeError("RF100-VL cannot be downloaded yet: " + " ".join(dep["blockers"]))
+    target = RF100_VL_DATA_ROOTS[0]
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        from rf100vl import download_rf100vl  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"rf100vl import failed: {exc}") from exc
+    log(f"[rf100-vl] downloading full dataset to {target}")
+    download_rf100vl(path=str(target), api_key=os.getenv("ROBOFLOW_API_KEY"))
+    found = _rf100_find_root()
+    if found is None:
+        raise RuntimeError(f"RF100-VL download finished but no COCO annotations were found under {target}")
+    return found
+
+
+def _rf100_group_name(root: Path, annotation_path: Path) -> str:
+    parent = annotation_path.parent
+    if parent.name.lower() in {"train", "valid", "val", "test"} and parent.parent != root:
+        return parent.parent.name
+    if parent.name.lower() == "annotations" and parent.parent != root:
+        return parent.parent.name
+    return parent.name if parent != root else annotation_path.stem
+
+
+def _rf100_split_name(annotation_path: Path) -> str:
+    parent = annotation_path.parent.name.lower()
+    if parent in {"train", "valid", "val", "test"}:
+        return "valid" if parent == "val" else parent
+    return "unknown"
+
+
+def _rf100_project_categories() -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    try:
+        from rf100vl import get_rf100vl_projects  # type: ignore
+        projects = get_rf100vl_projects(api_key=os.getenv("ROBOFLOW_API_KEY"))
+    except Exception:
+        return mapping
+    for item in projects or []:
+        name = (
+            getattr(item, "name", None)
+            or getattr(item, "project_name", None)
+            or getattr(item, "slug", None)
+            or ""
+        )
+        category = (
+            getattr(item, "category", None)
+            or getattr(item, "domain", None)
+            or getattr(item, "group", None)
+            or ""
+        )
+        if name and category:
+            mapping[str(name)] = str(category)
+            mapping[_safe_dataset_dir_name(str(name)).lower()] = str(category)
+    return mapping
+
+
+def _rf100_image_path(annotation_path: Path, file_name: str) -> str:
+    file_name = str(file_name or "")
+    candidates = [
+        annotation_path.parent / file_name,
+        annotation_path.parent.parent / file_name,
+        annotation_path.parent / Path(file_name).name,
+        annotation_path.parent.parent / Path(file_name).name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
+
+
+def _rf100_prompt(
+    categories: List[Dict[str, Any]],
+    dataset_name: str,
+    domain: str,
+    *,
+    max_categories: Optional[int] = None,
+    max_chars: Optional[int] = None,
+) -> str:
+    limit = max_categories if max_categories is not None else RF100_VL_PROMPT_MAX_CATEGORIES
+    char_limit = max_chars if max_chars is not None else RF100_VL_PROMPT_MAX_CHARS
+    category_entries = [
+        f"{int(c.get('id'))}:{c.get('name')}"
+        for c in categories[: max(0, limit)]
+    ]
+    category_text = "; ".join(category_entries)
+    omitted = max(0, len(categories) - len(category_entries))
+    if char_limit > 0 and len(category_text) > char_limit:
+        clipped: List[str] = []
+        used = 0
+        for entry in category_entries:
+            extra = len(entry) + (2 if clipped else 0)
+            if used + extra > char_limit:
+                omitted += 1
+                continue
+            clipped.append(entry)
+            used += extra
+        category_text = "; ".join(clipped)
+    if omitted:
+        category_text += f"; ... {omitted} categories omitted to stay within context"
+    return (
+        "You are evaluating RF100-VL object detection. Detect every visible instance "
+        "of the requested categories in this image.\n"
+        f"Dataset: {dataset_name}\n"
+        f"Domain: {domain or 'unknown'}\n"
+        "Return only valid JSON with this schema:\n"
+        '{"detections":[{"category_id":integer,"category_name":"string","bbox":[x,y,width,height],"score":number}]}\n'
+        "Use pixel coordinates relative to the image you see. Do not include prose outside the JSON.\n"
+        "Categories:\n"
+        f"{category_text}"
+    )
+
+
+def _rf100_discover(download: bool = False) -> Dict[str, Any]:
+    root = _rf100_download_if_possible(force_complete=True) if download else _rf100_find_root()
+    dep = _rf100_dependency_status()
+    profile: Dict[str, Any] = {
+        "adapter": "rf100-vl",
+        "id": "rf100-vl",
+        "name": "RF100-VL",
+        "task": "object_detection",
+        "metric": "COCO-style AP@[.50:.95]",
+        "source_urls": [
+            "https://rf100-vl.org/",
+            "https://github.com/roboflow/rf100-vl",
+            "https://arxiv.org/abs/2505.20612",
+        ],
+        "ready": False,
+        "path": str(root) if root else None,
+        "groups": [],
+        "group_count": 0,
+        "image_count": 0,
+        "annotation_count": 0,
+        "expected_groups": RF100_VL_EXPECTED_GROUPS,
+        "full_gate_ready": False,
+        "dependencies": dep,
+        "blockers": list(dep.get("blockers") or []),
+    }
+    if root is None:
+        profile["blockers"].insert(0, "RF100-VL COCO annotations were not found on this host.")
+        return profile
+    ann_files = _rf100_candidate_annotation_files(root)
+    signature = _rf100_discovery_signature(root, ann_files)
+    if not download and RF100_VL_DISCOVERY_CACHE.exists():
+        try:
+            cached = json.loads(RF100_VL_DISCOVERY_CACHE.read_text(encoding="utf-8"))
+            if cached.get("_signature") == signature:
+                cached["dependencies"] = dep
+                cached["blockers"] = [
+                    b for b in (cached.get("blockers") or [])
+                    if "Install the rf100vl package" not in str(b)
+                    and "ROBOFLOW_API_KEY" not in str(b)
+                ]
+                if dep.get("blockers") and not cached.get("ready"):
+                    cached["blockers"].extend(dep.get("blockers") or [])
+                return cached
+        except Exception:
+            pass
+    category_map = _rf100_project_categories()
+    groups: Dict[str, Dict[str, Any]] = {}
+    image_count = 0
+    annotation_count = 0
+    for ann in ann_files:
+        try:
+            data = json.loads(ann.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        group = _rf100_group_name(root, ann)
+        split = _rf100_split_name(ann)
+        key = group
+        domain = category_map.get(group) or category_map.get(_safe_dataset_dir_name(group).lower()) or "uncategorized"
+        bucket = groups.setdefault(key, {
+            "id": key,
+            "name": group,
+            "domain": domain,
+            "splits": [],
+            "images": 0,
+            "annotations": 0,
+            "categories": len(data.get("categories") or []),
+        })
+        if split not in bucket["splits"]:
+            bucket["splits"].append(split)
+        bucket["images"] += len(data.get("images") or [])
+        bucket["annotations"] += len(data.get("annotations") or [])
+        image_count += len(data.get("images") or [])
+        annotation_count += len(data.get("annotations") or [])
+    group_list = sorted(groups.values(), key=lambda g: g["name"])
+    profile.update({
+        "ready": bool(group_list),
+        "groups": group_list,
+        "group_count": len(group_list),
+        "image_count": image_count,
+        "annotation_count": annotation_count,
+        "full_gate_ready": len(group_list) >= RF100_VL_EXPECTED_GROUPS,
+    })
+    if len(group_list) < RF100_VL_EXPECTED_GROUPS:
+        profile["blockers"].append(
+            f"Full RF100-VL gate requires {RF100_VL_EXPECTED_GROUPS} groups; found {len(group_list)}."
+        )
+    profile["_signature"] = signature
+    try:
+        RF100_VL_DISCOVERY_CACHE.write_text(json.dumps(profile, default=str, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log(f"[rf100-vl] discovery cache write failed: {exc}")
+    return profile
+
+
+def _load_rf100vl_dataset(
+    source_config: Optional[Dict[str, Any]] = None,
+    *,
+    download: bool = False,
+) -> List[Dict[str, Any]]:
+    profile = _rf100_discover(download=download)
+    if not profile.get("ready"):
+        hf_repo = str((source_config or {}).get("hf_repo") or "probicheaux/rf100-vl")
+        try:
+            log(f"[rf100-vl] local COCO data unavailable; trying HF fallback {hf_repo}")
+            return _load_rf100vl_hf_dataset(hf_repo, split=(source_config or {}).get("split"))
+        except Exception as hf_exc:
+            raise RuntimeError(
+                "RF100-VL is not ready: "
+                + " ".join(profile.get("blockers") or [])
+                + f" HF fallback {hf_repo} also failed: {hf_exc}"
+            ) from hf_exc
+    root = Path(profile["path"])
+    include_raw = (source_config or {}).get("include_groups") or []
+    exclude_raw = (source_config or {}).get("exclude_groups") or []
+    include = {str(x).strip() for x in include_raw if str(x).strip()}
+    exclude = {str(x).strip() for x in exclude_raw if str(x).strip()}
+    category_map = _rf100_project_categories()
+    rows: List[Dict[str, Any]] = []
+    for ann in _rf100_candidate_annotation_files(root):
+        group = _rf100_group_name(root, ann)
+        if include and group not in include:
+            continue
+        if group in exclude:
+            continue
+        try:
+            data = json.loads(ann.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"RF100-VL COCO JSON unreadable at {ann}: {exc}") from exc
+        images = {int(img.get("id")): img for img in (data.get("images") or []) if img.get("id") is not None}
+        ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
+        for a in data.get("annotations") or []:
+            try:
+                img_id = int(a.get("image_id"))
+            except Exception:
+                continue
+            ann_by_image.setdefault(img_id, []).append(a)
+        categories = [
+            {"id": int(c.get("id")), "name": str(c.get("name") or c.get("id"))}
+            for c in (data.get("categories") or [])
+            if c.get("id") is not None
+        ]
+        cat_lookup = {int(c["id"]): c["name"] for c in categories}
+        domain = category_map.get(group) or category_map.get(_safe_dataset_dir_name(group).lower()) or "uncategorized"
+        split = _rf100_split_name(ann)
+        prompt = _rf100_prompt(categories, group, domain)
+        for img_id, img in images.items():
+            gt = []
+            for a in ann_by_image.get(img_id, []):
+                if a.get("bbox") is None or a.get("category_id") is None:
+                    continue
+                try:
+                    cat_id = int(a.get("category_id"))
+                    bbox = [float(x) for x in a.get("bbox")]
+                except Exception:
+                    continue
+                gt.append({
+                    "image_id": img_id,
+                    "category_id": cat_id,
+                    "category_name": cat_lookup.get(cat_id, str(cat_id)),
+                    "bbox": bbox,
+                    "area": a.get("area"),
+                    "iscrowd": a.get("iscrowd", 0),
+                })
+            image_path = _rf100_image_path(ann, str(img.get("file_name") or ""))
+            refs = [
+                f"{len(gt)} COCO boxes across {len({g['category_id'] for g in gt})} categories",
+                json.dumps(gt[:20], default=str),
+            ]
+            rows.append({
+                "adapter": "rf100-vl",
+                "task": "object_detection",
+                "question_id": f"{group}:{img_id}",
+                "segment_id": str(img_id),
+                "question": prompt,
+                "references": refs,
+                "images": [image_path],
+                "category": domain,
+                "dataset_name": group,
+                "split": split,
+                "image_id": img_id,
+                "image_width": img.get("width"),
+                "image_height": img.get("height"),
+                "ground_truth": gt,
+                "categories": categories,
+                "category_lookup": cat_lookup,
+                "annotation_file": str(ann),
+            })
+    return rows
+
+
+def _save_hf_image(img: Any, cache_dir: Path, row_idx: int) -> str:
+    out = cache_dir / f"{row_idx}.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(img, "save") and hasattr(img, "convert"):
+        if not out.exists():
+            img.convert("RGB").save(out, "JPEG", quality=88)
+        return str(out)
+    if isinstance(img, str):
+        return img
+    raise RuntimeError("HF RF100-VL row did not contain a supported image value")
+
+
+def _load_rf100vl_hf_dataset(repo: str, split: Optional[str] = None) -> List[Dict[str, Any]]:
+    try:
+        from datasets import load_dataset  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"`datasets` library not installed. pip install datasets (got: {exc})") from exc
+    use_split = split or "test"
+    try:
+        ds = load_dataset(repo, split=use_split, trust_remote_code=False)
+    except Exception as exc:
+        last_exc = exc
+        for fallback in ("validation", "valid", "train"):
+            if fallback == use_split:
+                continue
+            try:
+                ds = load_dataset(repo, split=fallback, trust_remote_code=False)
+                use_split = fallback
+                last_exc = None
+                break
+            except Exception as exc2:
+                last_exc = exc2
+        if last_exc is not None:
+            raise RuntimeError(f"HF RF100-VL load_dataset failed for {repo}: {last_exc}") from last_exc
+    safe = _safe_dataset_dir_name(repo.replace("/", "__"))
+    cache_dir = _HF_DATASETS_CACHE_ROOT / safe / use_split
+    rows: List[Dict[str, Any]] = []
+    for idx, row_raw in enumerate(ds):
+        row = dict(row_raw)
+        annotations = row.get("annotations") or row.get("objects") or {}
+        if not isinstance(annotations, dict):
+            continue
+        bboxes = annotations.get("bbox") or annotations.get("bboxes") or []
+        cat_ids = annotations.get("category_id") or annotations.get("category_ids") or []
+        cat_names = annotations.get("category_name") or annotations.get("category_names") or []
+        image_id = row.get("image_id") or row.get("id") or idx
+        dataset_name = str(row.get("dataset_name") or row.get("dataset_id") or "rf100-vl-hf")
+        domain = str(row.get("domain") or row.get("category") or "uncategorized")
+        image_path = _save_hf_image(row.get("image"), cache_dir, idx)
+        categories_by_id: Dict[int, str] = {}
+        gt = []
+        for j, bbox in enumerate(bboxes):
+            try:
+                cat_id = int(cat_ids[j])
+                bb = [float(x) for x in bbox]
+            except Exception:
+                continue
+            name = str(cat_names[j]) if j < len(cat_names) and cat_names[j] is not None else str(cat_id)
+            categories_by_id[cat_id] = name
+            gt.append({
+                "image_id": image_id,
+                "category_id": cat_id,
+                "category_name": name,
+                "bbox": bb,
+            })
+        categories = [{"id": cid, "name": name} for cid, name in sorted(categories_by_id.items())]
+        rows.append({
+            "adapter": "rf100-vl",
+            "task": "object_detection",
+            "question_id": f"{dataset_name}:{image_id}",
+            "segment_id": str(image_id),
+            "question": _rf100_prompt(categories, dataset_name, domain),
+            "references": [
+                f"{len(gt)} COCO boxes across {len(categories)} categories",
+                json.dumps(gt[:20], default=str),
+            ],
+            "images": [image_path],
+            "category": domain,
+            "dataset_name": dataset_name,
+            "split": use_split,
+            "image_id": image_id,
+            "image_width": row.get("width"),
+            "image_height": row.get("height"),
+            "ground_truth": gt,
+            "categories": categories,
+            "category_lookup": categories_by_id,
+            "annotation_file": f"hf:{repo}@{use_split}",
+        })
+    if not rows:
+        raise RuntimeError(f"HF RF100-VL dataset {repo}@{use_split} produced no rows with annotations")
+    return rows
 
 
 def _normalize_hf_row(
@@ -4232,6 +4771,14 @@ def _normalize_hf_row(
         or row.get("responses")
         or row.get("output")
     )
+    if refs_raw is None:
+        indexed_refs = [
+            row.get(k)
+            for k in ("answer_1", "answer_2", "answer1", "answer2", "gt_a", "gt_b", "reference_1", "reference_2")
+            if row.get(k) is not None
+        ]
+        if indexed_refs:
+            refs_raw = indexed_refs
     if isinstance(refs_raw, str):
         refs = [refs_raw]
     elif isinstance(refs_raw, (list, tuple)):
@@ -4251,6 +4798,14 @@ def _normalize_hf_row(
         or row.get("image_paths")
         or []
     )
+    if not images_raw:
+        indexed_images = [
+            row.get(f"image_{i}")
+            for i in range(1, 6)
+            if row.get(f"image_{i}") is not None
+        ]
+        if indexed_images:
+            images_raw = indexed_images
     if not isinstance(images_raw, (list, tuple)):
         images_raw = [images_raw]
     image_paths: List[str] = []
@@ -4310,6 +4865,9 @@ def _load_hf_dataset(repo: str, split: Optional[str] = None) -> List[Dict[str, A
     Imports `datasets` lazily so the rest of the file (LingoQA path, NIM
     serving, FiftyOne) stays importable on hosts without it.
     """
+    if "rf100-vl" in repo.lower():
+        return _load_rf100vl_hf_dataset(repo, split=split)
+
     # Special-case: if the user pasted a URL or repo id that points at the
     # LingoQA dataset and we have the local GDrive cache available, use it.
     # This keeps the smoke test fast and avoids hitting HF for a dataset we
@@ -4467,6 +5025,10 @@ def load_dataset_by_id(
     ds = str(dataset_id or "").strip()
     if not ds:
         raise RuntimeError("empty dataset_id")
+
+    if ds in {"rf100-vl", "rf100vl", "roboflow100-vl"} or ds.startswith("rf100-vl:"):
+        download = bool((source_config or {}).get("download", True))
+        return _load_rf100vl_dataset(source_config, download=download)
 
     if ds == "lingoqa-official":
         return group_lingoqa_by_question(load_lingoqa())
@@ -5243,6 +5805,504 @@ def run_one_image_qa(
     }
 
 
+def _extract_json_payload(text: str) -> Any:
+    raw = (text or "").strip()
+    if not raw:
+        return {}
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    start_candidates = [i for i in (raw.find("{"), raw.find("[")) if i >= 0]
+    if not start_candidates:
+        return {}
+    start = min(start_candidates)
+    for end_char in ("}", "]"):
+        end = raw.rfind(end_char)
+        if end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except Exception:
+                continue
+    return {}
+
+
+def _coerce_bbox_xywh(value: Any, width: Optional[float] = None, height: Optional[float] = None) -> Optional[List[float]]:
+    if isinstance(value, dict):
+        if all(k in value for k in ("x", "y", "width", "height")):
+            try:
+                return [float(value["x"]), float(value["y"]), max(0.0, float(value["width"])), max(0.0, float(value["height"]))]
+            except Exception:
+                return None
+        if all(k in value for k in ("x1", "y1", "x2", "y2")):
+            try:
+                x1, y1, x2, y2 = float(value["x1"]), float(value["y1"]), float(value["x2"]), float(value["y2"])
+                return [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+            except Exception:
+                return None
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x0, y0, a, b = [float(value[i]) for i in range(4)]
+    except Exception:
+        return None
+    # The RF100 prompt asks for COCO xywh. Lists are treated as xywh unless
+    # image bounds make that impossible and x2/y2 interpretation fits.
+    if width and height and a > x0 and b > y0:
+        try:
+            w_img = float(width)
+            h_img = float(height)
+            xywh_runs_out = (x0 + a > w_img * 1.05) or (y0 + b > h_img * 1.05)
+            xyxy_fits = a <= w_img * 1.05 and b <= h_img * 1.05
+            if xywh_runs_out and xyxy_fits:
+                return [x0, y0, max(0.0, a - x0), max(0.0, b - y0)]
+        except Exception:
+            pass
+    return [x0, y0, max(0.0, a), max(0.0, b)]
+
+
+def _bbox_iou_xywh(a: List[float], b: List[float]) -> float:
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(0.0, aw * ah) + max(0.0, bw * bh) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _rf100_parse_predictions(text: str, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payload = _extract_json_payload(text)
+    if isinstance(payload, dict):
+        raw_items = payload.get("detections") or payload.get("instances") or payload.get("predictions") or []
+    elif isinstance(payload, list):
+        if len(payload) == 1 and isinstance(payload[0], dict) and (
+            payload[0].get("detections") or payload[0].get("instances") or payload[0].get("predictions")
+        ):
+            raw_items = payload[0].get("detections") or payload[0].get("instances") or payload[0].get("predictions") or []
+        else:
+            raw_items = payload
+    else:
+        raw_items = []
+    cat_lookup = sample.get("category_lookup") or {}
+    name_to_id = {str(v).lower(): int(k) for k, v in cat_lookup.items()}
+    image_width = sample.get("image_width")
+    image_height = sample.get("image_height")
+    out: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        bbox = _coerce_bbox_xywh(
+            item.get("bbox") or item.get("box") or item.get("bounding_box"),
+            image_width,
+            image_height,
+        )
+        if bbox is None:
+            continue
+        cat_id_raw = item.get("category_id")
+        if cat_id_raw is None:
+            cat_id_raw = item.get("class_id")
+        if cat_id_raw is None:
+            cat_id_raw = item.get("label_id")
+        cat_name = item.get("category_name") or item.get("class_name") or item.get("label") or item.get("name")
+        try:
+            cat_id = int(cat_id_raw)
+        except Exception:
+            cat_id = name_to_id.get(str(cat_name or "").lower(), -1)
+        if cat_id < 0:
+            continue
+        try:
+            score = float(item.get("score") if item.get("score") is not None else item.get("confidence"))
+        except Exception:
+            score = 1.0
+        out.append({
+            "image_id": sample.get("image_id"),
+            "category_id": cat_id,
+            "category_name": str(cat_name or cat_lookup.get(cat_id) or cat_id),
+            "bbox": bbox,
+            "score": max(0.0, min(1.0, score)),
+            "dataset_name": sample.get("dataset_name"),
+        })
+    return out
+
+
+def _rf100_match_counts(gt: List[Dict[str, Any]], preds: List[Dict[str, Any]], threshold: float = 0.5) -> Dict[str, Any]:
+    matched_gt: set = set()
+    tp = 0
+    fp = 0
+    for pred in sorted(preds, key=lambda p: float(p.get("score") or 0), reverse=True):
+        best_i = -1
+        best_iou = 0.0
+        for i, g in enumerate(gt):
+            if i in matched_gt:
+                continue
+            if int(g.get("category_id")) != int(pred.get("category_id")):
+                continue
+            iou = _bbox_iou_xywh(g.get("bbox") or [0, 0, 0, 0], pred.get("bbox") or [0, 0, 0, 0])
+            if iou > best_iou:
+                best_iou = iou
+                best_i = i
+        if best_i >= 0 and best_iou >= threshold:
+            matched_gt.add(best_i)
+            tp += 1
+        else:
+            fp += 1
+    fn = max(0, len(gt) - len(matched_gt))
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / len(gt) if gt else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {"tp": tp, "fp": fp, "fn": fn, "precision": precision, "recall": recall, "f1": f1}
+
+
+def _rf100_context_error(text: str) -> Optional[Dict[str, int]]:
+    match = re.search(
+        r"Input length\s*\(?(\d+)\)?\s*exceeds model'?s maximum context length\s*\(?(\d+)\)?",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return {"input_length": int(match.group(1)), "max_context_length": int(match.group(2))}
+
+
+def _rf100_pixel_attempts() -> List[int]:
+    values = [
+        RF100_VL_MAX_PIXELS,
+        max(RF100_VL_MIN_PIXELS, RF100_VL_MAX_PIXELS // 2),
+        max(RF100_VL_MIN_PIXELS, RF100_VL_MAX_PIXELS // 4),
+        RF100_VL_MIN_PIXELS,
+    ]
+    out: List[int] = []
+    for value in values[: max(1, RF100_VL_CONTEXT_RETRY_ATTEMPTS)]:
+        if value > 0 and value not in out:
+            out.append(value)
+    return out or [RF100_VL_MAX_PIXELS]
+
+
+def _rf100_encode_image(path: str, max_pixels: int, jpeg_quality: int) -> Tuple[str, Dict[str, Any]]:
+    image_meta: Dict[str, Any] = {
+        "source_path": path,
+        "max_pixels": max_pixels,
+        "jpeg_quality": jpeg_quality,
+    }
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(path) as img:
+            rgb = img.convert("RGB")
+            image_meta["original_size"] = [rgb.width, rgb.height]
+            resized = resize_to_max_pixels(rgb, max_pixels)
+            image_meta["sent_size"] = [resized.width, resized.height]
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+            raw = buf.getvalue()
+            image_meta["sent_bytes"] = len(raw)
+            image_meta["scale_to_original"] = [
+                (rgb.width / resized.width) if resized.width else 1.0,
+                (rgb.height / resized.height) if resized.height else 1.0,
+            ]
+            return base64.b64encode(raw).decode("ascii"), image_meta
+    except Exception as exc:
+        image_meta["resize_error"] = str(exc)[:240]
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        image_meta["sent_bytes"] = len(raw)
+        return base64.b64encode(raw).decode("ascii"), image_meta
+
+
+def _rf100_scale_detections_to_original(
+    detections: List[Dict[str, Any]],
+    image_meta: Dict[str, Any],
+    sample: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    sent = image_meta.get("sent_size") or []
+    original = image_meta.get("original_size") or []
+    target_w = float(sample.get("image_width") or (original[0] if len(original) >= 1 else 0) or 0)
+    target_h = float(sample.get("image_height") or (original[1] if len(original) >= 2 else 0) or 0)
+    sent_w = float(sent[0]) if len(sent) >= 1 and sent[0] else target_w
+    sent_h = float(sent[1]) if len(sent) >= 2 and sent[1] else target_h
+    if not target_w or not target_h or not sent_w or not sent_h:
+        return detections
+    sx = target_w / sent_w
+    sy = target_h / sent_h
+    if abs(sx - 1.0) < 0.01 and abs(sy - 1.0) < 0.01:
+        return detections
+    scaled: List[Dict[str, Any]] = []
+    for det in detections:
+        item = dict(det)
+        bbox = item.get("bbox") or []
+        if isinstance(bbox, list) and len(bbox) >= 4:
+            item["bbox_sent"] = list(bbox)
+            x, y, w, h = [float(bbox[i]) for i in range(4)]
+            item["bbox"] = [
+                max(0.0, min(target_w, x * sx)),
+                max(0.0, min(target_h, y * sy)),
+                max(0.0, min(target_w, w * sx)),
+                max(0.0, min(target_h, h * sy)),
+            ]
+            item["bbox_scaled_to_original"] = True
+        scaled.append(item)
+    return scaled
+
+
+def _rf100_ap(gt: List[Dict[str, Any]], preds: List[Dict[str, Any]], threshold: float) -> float:
+    cats = sorted({int(g.get("category_id")) for g in gt if g.get("category_id") is not None})
+    if not cats:
+        return 0.0
+    ap_values: List[float] = []
+    for cat in cats:
+        gt_cat = [(idx, g) for idx, g in enumerate(gt) if int(g.get("category_id")) == cat]
+        pred_cat = sorted(
+            [p for p in preds if int(p.get("category_id", -1)) == cat],
+            key=lambda p: float(p.get("score") or 0),
+            reverse=True,
+        )
+        if not gt_cat:
+            continue
+        matched: set = set()
+        tp_flags: List[int] = []
+        fp_flags: List[int] = []
+        for pred in pred_cat:
+            best_idx = None
+            best_iou = 0.0
+            for gt_idx, g in gt_cat:
+                if gt_idx in matched:
+                    continue
+                if str(g.get("image_key")) != str(pred.get("image_key")):
+                    continue
+                iou = _bbox_iou_xywh(g.get("bbox") or [0, 0, 0, 0], pred.get("bbox") or [0, 0, 0, 0])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = gt_idx
+            if best_idx is not None and best_iou >= threshold:
+                matched.add(best_idx)
+                tp_flags.append(1)
+                fp_flags.append(0)
+            else:
+                tp_flags.append(0)
+                fp_flags.append(1)
+        if not pred_cat:
+            ap_values.append(0.0)
+            continue
+        cum_tp = []
+        cum_fp = []
+        t = f = 0
+        for tp_i, fp_i in zip(tp_flags, fp_flags):
+            t += tp_i
+            f += fp_i
+            cum_tp.append(t)
+            cum_fp.append(f)
+        recalls = [v / len(gt_cat) for v in cum_tp]
+        precisions = [cum_tp[i] / max(1, cum_tp[i] + cum_fp[i]) for i in range(len(cum_tp))]
+        ap = 0.0
+        for r in [i / 100 for i in range(101)]:
+            p_at_r = max([p for p, rec in zip(precisions, recalls) if rec >= r] or [0.0])
+            ap += p_at_r / 101.0
+        ap_values.append(ap)
+    value = sum(ap_values) / len(ap_values) if ap_values else 0.0
+    return max(0.0, min(1.0, value))
+
+
+def _rf100_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
+    rows = [r for r in (snap.get("results") or []) if not r.get("error")]
+    gt_all: List[Dict[str, Any]] = []
+    pred_all: List[Dict[str, Any]] = []
+    for r in rows:
+        image_key = str(r.get("question_id") or r.get("image_id"))
+        for g in r.get("ground_truth") or []:
+            item = dict(g)
+            item["image_key"] = image_key
+            gt_all.append(item)
+        for p in r.get("detections") or []:
+            item = dict(p)
+            item["image_key"] = image_key
+            pred_all.append(item)
+    thresholds = [0.50 + 0.05 * i for i in range(10)]
+    ap_by_threshold = {f"AP{int(t * 100)}": _rf100_ap(gt_all, pred_all, t) for t in thresholds}
+    map_value = sum(ap_by_threshold.values()) / len(ap_by_threshold) if ap_by_threshold else 0.0
+    by_group: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        group = r.get("dataset_name") or "unknown"
+        b = by_group.setdefault(group, {"rows": [], "gt": [], "preds": []})
+        b["rows"].append(r)
+        image_key = str(r.get("question_id") or r.get("image_id"))
+        for g in r.get("ground_truth") or []:
+            item = dict(g)
+            item["image_key"] = image_key
+            b["gt"].append(item)
+        for p in r.get("detections") or []:
+            item = dict(p)
+            item["image_key"] = image_key
+            b["preds"].append(item)
+    per_category = []
+    for group, b in sorted(by_group.items()):
+        ap50 = _rf100_ap(b["gt"], b["preds"], 0.5)
+        ap_all = sum(_rf100_ap(b["gt"], b["preds"], t) for t in thresholds) / len(thresholds) if thresholds else 0.0
+        per_category.append({
+            "category": group,
+            "total": len(b["rows"]),
+            "correct": sum(1 for r in b["rows"] if r.get("judge_correct")),
+            "accuracy": ap_all,
+            "average_score": ap50,
+            "ap": ap_all,
+            "ap50": ap50,
+        })
+    latencies = [r.get("latency_seconds") for r in rows if r.get("latency_seconds") is not None]
+    return {
+        "task": "object_detection",
+        "metric": "COCO-style AP@[.50:.95]",
+        "total_predictions": len(rows),
+        "total_ground_truth_boxes": len(gt_all),
+        "total_predicted_boxes": len(pred_all),
+        "map": map_value,
+        "ap": map_value,
+        "ap50": ap_by_threshold.get("AP50", 0.0),
+        "ap75": ap_by_threshold.get("AP75", 0.0),
+        "ap_by_threshold": ap_by_threshold,
+        "overall_accuracy": map_value,
+        "correct": sum(1 for r in rows if r.get("judge_correct")),
+        "per_category": per_category,
+        "average_latency_seconds": (sum(latencies) / len(latencies)) if latencies else None,
+    }
+
+
+def run_one_rf100_detection(
+    sample: Dict[str, Any],
+    model: str,
+    base_url: str,
+    headers: Dict[str, str],
+    *,
+    timeout: float = 600.0,
+) -> Dict[str, Any]:
+    if requests is None:
+        raise RuntimeError(f"requests import failed: {REQUESTS_IMPORT_ERROR}")
+    images = sample.get("images") or []
+    if not images:
+        raise RuntimeError("RF100-VL sample has no image path")
+    attempts: List[Dict[str, Any]] = []
+    response_body: Optional[Dict[str, Any]] = None
+    raw_text = ""
+    elapsed = 0.0
+    image_meta: Dict[str, Any] = {}
+    prompt_text = str(sample["question"])
+    prompt_variants = [prompt_text]
+    categories = sample.get("categories") or []
+    if categories:
+        compact_prompt = _rf100_prompt(
+            categories,
+            str(sample.get("dataset_name") or ""),
+            str(sample.get("category") or ""),
+            max_categories=max(20, min(RF100_VL_PROMPT_MAX_CATEGORIES, len(categories))),
+            max_chars=max(1200, RF100_VL_PROMPT_MAX_CHARS // 2),
+        )
+        if compact_prompt != prompt_text:
+            prompt_variants.append(compact_prompt)
+    last_exc: Optional[BaseException] = None
+    for prompt_index, attempt_prompt in enumerate(prompt_variants):
+        for max_pixels in _rf100_pixel_attempts():
+            b64, image_meta = _rf100_encode_image(images[0], max_pixels, RF100_VL_JPEG_QUALITY)
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": attempt_prompt},
+            ]
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Return object detections as strict JSON only."},
+                    {"role": "user", "content": content},
+                ],
+            }
+            transient_tries = max(1, RF100_VL_TRANSIENT_RETRIES + 1)
+            for transient_try in range(transient_tries):
+                started = time.monotonic()
+                try:
+                    resp = requests.post(
+                        base_url.rstrip("/") + "/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout,
+                    )
+                    elapsed = time.monotonic() - started
+                except Exception as exc:
+                    last_exc = exc
+                    attempts.append({
+                        **image_meta,
+                        "prompt_index": prompt_index,
+                        "transient_try": transient_try + 1,
+                        "error": str(exc)[:600],
+                    })
+                    if transient_try + 1 < transient_tries:
+                        time.sleep(min(8.0, 1.5 * (transient_try + 1)))
+                        continue
+                    break
+                if resp.status_code < 400:
+                    response_body = resp.json()
+                    image_meta = {**image_meta, "prompt_index": prompt_index, "attempts": attempts + [{**image_meta, "status_code": resp.status_code}]}
+                    break
+                body_text = resp.text[:1200]
+                context_error = _rf100_context_error(body_text)
+                attempts.append({
+                    **image_meta,
+                    "prompt_index": prompt_index,
+                    "status_code": resp.status_code,
+                    "error": body_text[:600],
+                    "context_error": context_error,
+                })
+                if context_error:
+                    last_exc = RuntimeError(f"NIM {resp.status_code}: {body_text[:600]}")
+                    break
+                raise RuntimeError(f"NIM {resp.status_code}: {body_text[:600]}")
+            if response_body is not None:
+                break
+        if response_body is not None:
+            break
+    if response_body is None:
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("RF100-VL request failed without a response")
+    try:
+        raw_text = response_body["choices"][0]["message"]["content"] or ""
+    except Exception:
+        raw_text = json.dumps(response_body)[:1000]
+    detections = _rf100_parse_predictions(raw_text, sample)
+    detections = _rf100_scale_detections_to_original(detections, image_meta, sample)
+    gt = sample.get("ground_truth") or []
+    image_metric = _rf100_match_counts(gt, detections, 0.5)
+    pred_summary = f"{len(detections)} detections; F1@0.50={image_metric['f1']:.3f}"
+    return {
+        "adapter": "rf100-vl",
+        "task": "object_detection",
+        "question_id": sample["question_id"],
+        "segment_id": sample["segment_id"],
+        "image_id": sample.get("image_id"),
+        "dataset_name": sample.get("dataset_name"),
+        "split": sample.get("split"),
+        "question": sample["question"],
+        "category": sample.get("category") or "uncategorized",
+        "model": model,
+        "raw_response": raw_text,
+        "reasoning_trace": _extract_think_block(raw_text),
+        "prediction": pred_summary,
+        "detections": detections,
+        "ground_truth": gt,
+        "references": sample.get("references") or [],
+        "judge_score": image_metric["f1"],
+        "judge_correct": image_metric["f1"] >= 0.5,
+        "image_metrics": image_metric,
+        "latency_seconds": elapsed,
+        "usage": response_body.get("usage") or {},
+        "images": images,
+        "image_request": image_meta,
+        "completed_epoch": time.time(),
+    }
+
+
 def _benchmark_run_dir(run_id: str) -> Path:
     path = BENCHMARK_RUN_ROOT / run_id
     path.mkdir(parents=True, exist_ok=True)
@@ -5256,6 +6316,195 @@ def _benchmark_snapshot_save(run_id: str, snap: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _benchmark_artifacts_dir(run_id: str) -> Path:
+    path = _benchmark_run_dir(run_id) / "artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _benchmark_leaderboard(snap: Dict[str, Any]) -> Dict[str, Any]:
+    summary = snap.get("summary") or _benchmark_summary_for_snap(snap)
+    adapter = snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or "")
+    metric_key = "map" if adapter == "rf100-vl" else "overall_accuracy"
+    metric_label = "COCO-style mAP" if adapter == "rf100-vl" else "Lingo-Judge accuracy"
+    return {
+        "run_id": snap.get("run_id"),
+        "adapter": adapter,
+        "dataset": snap.get("dataset"),
+        "metric": metric_label,
+        "generated_epoch": time.time(),
+        "models": [{
+            "rank": 1,
+            "model": snap.get("model") or "",
+            "endpoint": snap.get("base_url") or "",
+            "score": summary.get(metric_key) if summary.get(metric_key) is not None else summary.get("overall_accuracy"),
+            "summary": summary,
+        }],
+    }
+
+
+def _benchmark_write_trace_jsonl(run_id: str, snap: Dict[str, Any]) -> None:
+    path = _benchmark_run_dir(run_id) / "trace.jsonl"
+    tmp = path.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for row in snap.get("results") or []:
+            fh.write(json.dumps(row, default=str) + "\n")
+    tmp.replace(path)
+
+
+def _benchmark_write_lingoqa_predictions_csv(run_id: str, snap: Dict[str, Any]) -> Optional[Path]:
+    adapter = snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or "")
+    if adapter != "lingoqa":
+        return None
+    path = _benchmark_run_dir(run_id) / "predictions.csv"
+    tmp = path.with_suffix(".csv.tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["question_id", "segment_id", "answer"])
+        writer.writeheader()
+        for row in snap.get("results") or []:
+            prediction = row.get("prediction_answer_only")
+            if prediction is None:
+                prediction = _extract_final_answer(row.get("prediction") or "")
+            writer.writerow({
+                "question_id": row.get("question_id") or "",
+                "segment_id": row.get("segment_id") or "",
+                "answer": prediction or "",
+            })
+    tmp.replace(path)
+    return path
+
+
+def _benchmark_write_executive_pptx(snap: Dict[str, Any], path: Path) -> None:
+    summary = snap.get("summary") or _benchmark_summary_for_snap(snap)
+    adapter = snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or "")
+    metric_name = "COCO-style mAP" if adapter == "rf100-vl" else "Lingo-Judge accuracy"
+    score = summary.get("map") if adapter == "rf100-vl" else summary.get("overall_accuracy")
+    score_txt = percent_value(score) if score is not None else "n/a"
+    rows = [r for r in (snap.get("results") or []) if not r.get("error")]
+    misses = [r for r in rows if not r.get("judge_correct")]
+    wins = [r for r in rows if r.get("judge_correct")]
+    per_cat = sorted(summary.get("per_category") or [], key=lambda c: c.get("accuracy") or 0, reverse=True)
+    slides: List[List[str]] = []
+    slides.append([
+        ppt_text_shape(2, "Title", 0.65, 0.55, 11.8, 1.0, ["Benchmark Executive Summary"], 34, "76B900", True),
+        ppt_text_shape(3, "Subtitle", 0.7, 1.45, 11.6, 0.7, [f"{snap.get('dataset')} | {snap.get('model')} | {time.strftime('%Y-%m-%d')}"], 16, "666666"),
+        ppt_text_shape(4, "Metric", 0.7, 2.35, 5.6, 1.6, [score_txt, metric_name], 28, "FFFFFF", True, "1A1A1A"),
+        ppt_text_shape(5, "Coverage", 6.6, 2.35, 5.6, 1.6, [str(summary.get("total_predictions") or len(rows)), "trace rows"], 28, "FFFFFF", True, "1A1A1A"),
+        ppt_text_shape(6, "Claim", 0.7, 4.35, 11.5, 1.4, [
+            "Use the leaderboard, per-group breakdown, and full trace repository to identify where Cosmos3 is strong and where alternate models should be tested next."
+        ], 22, "1A1A1A", True, "F0F7E6"),
+    ])
+    slides.append([
+        ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Leaderboard readout"], 30, "1A1A1A", True),
+        ppt_text_shape(3, "Metrics", 0.8, 1.35, 11.7, 5.3, [
+            f"Model: {snap.get('model') or 'unknown'}",
+            f"Dataset: {snap.get('dataset') or 'unknown'}",
+            f"Metric: {metric_name}",
+            f"Score: {score_txt}",
+            f"Errors: {(snap.get('progress') or {}).get('errors', 0)}",
+            f"Run id: {snap.get('run_id')}",
+        ], 22, "1A1A1A", False, "F0F7E6"),
+    ])
+    strong_lines = [
+        f"{c.get('category')}: {percent_value(c.get('accuracy'))} on n={c.get('total')}"
+        for c in per_cat[:8]
+    ]
+    weak_lines = [
+        f"{c.get('category')}: {percent_value(c.get('accuracy'))} on n={c.get('total')}"
+        for c in list(reversed(per_cat[-8:]))
+    ]
+    slides.append([
+        ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Where it is strongest"], 30, "1A1A1A", True),
+        ppt_text_shape(3, "Strong", 0.8, 1.35, 11.7, 5.3, strong_lines or ["No completed scored groups yet."], 20),
+    ])
+    slides.append([
+        ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Where to improve or compare"], 30, "1A1A1A", True),
+        ppt_text_shape(3, "Weak", 0.8, 1.35, 11.7, 5.3, weak_lines or ["No misses available yet."], 20, "1A1A1A", False, "FFFBED"),
+    ])
+    example_lines = []
+    for row in (wins[:3] + misses[:5])[:8]:
+        example_lines.append(
+            f"{row.get('question_id')}: score {percent_value(row.get('judge_score')) or 'n/a'} - {bench_clip_for_ppt(row.get('prediction') or row.get('error') or '', 120)}"
+        )
+    slides.append([
+        ppt_text_shape(2, "Title", 0.7, 0.5, 11.5, 0.7, ["Trace examples to pull into slides"], 30, "1A1A1A", True),
+        ppt_text_shape(3, "Examples", 0.8, 1.35, 11.7, 5.3, example_lines or ["No examples yet."], 16),
+    ])
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        slide_overrides = "".join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' + slide_overrides + "</Types>")
+        zf.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
+        sld_ids = "".join(f'<p:sldId id="{255+i}" r:id="rId{i}"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("ppt/presentation.xml", f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>{sld_ids}</p:sldIdLst><p:sldSz cx="12192000" cy="6858000" type="wide"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>')
+        rels = "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i}.xml"/>' for i in range(1, len(slides) + 1))
+        zf.writestr("ppt/_rels/presentation.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels + "</Relationships>")
+        for i, shapes in enumerate(slides, 1):
+            zf.writestr(f"ppt/slides/slide{i}.xml", ppt_slide_xml(shapes))
+
+
+def bench_clip_for_ppt(value: Any, max_len: int) -> str:
+    text = str(value or "").replace("\n", " ")
+    return text[: max_len - 3] + "..." if len(text) > max_len else text
+
+
+def _benchmark_copy_pptx_to_claude_docs(run_id: str, pptx_path: Path) -> Optional[str]:
+    if not pptx_path.exists() or not CLAUDE_DOCS_PRESENTATIONS_DIR.exists():
+        return None
+    dest = CLAUDE_DOCS_PRESENTATIONS_DIR / f"{run_id}-executive-summary.pptx"
+    try:
+        shutil.copy2(pptx_path, dest)
+        return str(dest)
+    except Exception as exc:
+        log(f"[benchmark {run_id}] Claude Docs PPTX copy failed: {exc}")
+        return None
+
+
+def _benchmark_write_durable_artifacts(run_id: str, snap: Dict[str, Any], *, final: bool = False) -> Dict[str, Any]:
+    run_dir = _benchmark_run_dir(run_id)
+    artifacts_dir = _benchmark_artifacts_dir(run_id)
+    leaderboard_path = run_dir / "leaderboard.json"
+    leaderboard_path.write_text(json.dumps(_benchmark_leaderboard(snap), default=str, indent=2), encoding="utf-8")
+    _benchmark_write_trace_jsonl(run_id, snap)
+    metadata = {
+        "run_id": run_id,
+        "adapter": snap.get("adapter"),
+        "dataset": snap.get("dataset"),
+        "source_config": snap.get("source_config"),
+        "model": snap.get("model"),
+        "base_url": snap.get("base_url"),
+        "judge": snap.get("judge"),
+        "started_epoch": snap.get("started_epoch"),
+        "finished_epoch": snap.get("finished_epoch"),
+        "generated_epoch": time.time(),
+    }
+    (run_dir / "metadata.json").write_text(json.dumps(metadata, default=str, indent=2), encoding="utf-8")
+    artifact_urls = {
+        "leaderboard": f"/benchmark/leaderboard/{run_id}",
+        "trace": f"/benchmark/trace/{run_id}.jsonl",
+        "metadata": f"/benchmark/artifact/{run_id}/metadata.json",
+    }
+    predictions_path = _benchmark_write_lingoqa_predictions_csv(run_id, snap)
+    if predictions_path is not None:
+        artifact_urls["predictions_csv"] = f"/benchmark/artifact/{run_id}/predictions.csv"
+    if final:
+        report_path = artifacts_dir / "report.html"
+        pptx_path = artifacts_dir / "executive-summary.pptx"
+        try:
+            report_path.write_text(benchmark_render_report(run_id), encoding="utf-8")
+            artifact_urls["report_html"] = f"/benchmark/artifact/{run_id}/artifacts/report.html"
+        except Exception as exc:
+            log(f"[benchmark {run_id}] report artifact failed: {exc}")
+        try:
+            _benchmark_write_executive_pptx(snap, pptx_path)
+            artifact_urls["executive_pptx"] = f"/benchmark/artifact/{run_id}/artifacts/executive-summary.pptx"
+            copied = _benchmark_copy_pptx_to_claude_docs(run_id, pptx_path)
+            if copied:
+                artifact_urls["claude_docs_pptx"] = copied
+        except Exception as exc:
+            log(f"[benchmark {run_id}] PPTX artifact failed: {exc}")
+    return artifact_urls
+
+
 # ----------------------------------------------------------------------------
 # Drop-zone Benchmark View additions (sprint: "paste a URL → pick a model → hit Run")
 # ----------------------------------------------------------------------------
@@ -5266,12 +6515,45 @@ BENCHMARK_MULTI_NIM_GLOB = BENCHMARK_RUN_ROOT / "multi-nim-20260517"
 
 
 def _benchmark_history_load() -> List[Dict[str, Any]]:
+    def from_run_dirs() -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        for results_path in sorted(BENCHMARK_RUN_ROOT.glob("bench-*/results.json")):
+            try:
+                snap = json.loads(results_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            summary_obj = snap.get("summary") or _benchmark_summary_for_snap(snap)
+            entries.append({
+                "run_id": snap.get("run_id") or results_path.parent.name,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(snap.get("started_epoch") or results_path.stat().st_mtime)),
+                "epoch": snap.get("started_epoch") or results_path.stat().st_mtime,
+                "model": snap.get("model") or "",
+                "dataset": snap.get("dataset") or "",
+                "adapter": snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or ""),
+                "judge": snap.get("judge") or "",
+                "sample_size": snap.get("sample_size"),
+                "concurrency": snap.get("concurrency"),
+                "seed": snap.get("seed"),
+                "accuracy": summary_obj.get("overall_accuracy"),
+                "map": summary_obj.get("map"),
+                "total_predictions": summary_obj.get("total_predictions"),
+                "wall_seconds": snap.get("wall_seconds"),
+                "report_url": f"/benchmark/report/{snap.get('run_id') or results_path.parent.name}",
+            })
+        return entries
     try:
+        disk_entries = from_run_dirs()
         if not BENCHMARK_HISTORY_PATH.exists():
-            return []
+            return disk_entries[-BENCHMARK_HISTORY_MAX:]
         data = json.loads(BENCHMARK_HISTORY_PATH.read_text(encoding="utf-8"))
         if isinstance(data, list):
-            return data[-BENCHMARK_HISTORY_MAX:]
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for entry in disk_entries + data:
+                rid = entry.get("run_id")
+                if rid:
+                    by_id[str(rid)] = entry
+            merged = sorted(by_id.values(), key=lambda e: float(e.get("epoch") or 0))
+            return merged[-BENCHMARK_HISTORY_MAX:]
     except Exception as exc:
         log(f"[benchmark history] load failed: {exc}")
     return []
@@ -5295,6 +6577,376 @@ def _benchmark_history_find(run_id: str) -> Optional[Dict[str, Any]]:
         if entry.get("run_id") == run_id:
             return entry
     return None
+
+
+def _gate_number(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _gate_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _gate_percent(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value) * 100:.1f}%" if float(value) <= 1 else f"{float(value):.1f}%"
+    except Exception:
+        return "n/a"
+
+
+def _rf100_gate_status_load(path: Optional[Path] = None) -> Dict[str, Any]:
+    status_path = path or RF100_GATE_STATUS_PATH
+    if not status_path.exists():
+        return {
+            "ok": False,
+            "error": f"Gate status snapshot not found: {status_path}",
+            "path": str(status_path),
+            "results": [],
+            "statuses": {},
+        }
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Gate status snapshot unreadable: {exc}",
+            "path": str(status_path),
+            "results": [],
+            "statuses": {},
+        }
+    payload.setdefault("ok", True)
+    payload.setdefault("path", str(status_path))
+    payload.setdefault("results", [])
+    payload.setdefault("statuses", {})
+    return payload
+
+
+def _rf100_gate_lane_rows(status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    lanes: List[Dict[str, Any]] = []
+    for row in status.get("results") or []:
+        if not isinstance(row, dict):
+            continue
+        data = row.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        name = str(row.get("name") or "")
+        gpu_text = str(data.get("gpu") or "")
+        gpu_utils = []
+        for line in gpu_text.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2:
+                gpu_utils.append(_gate_int(parts[1]))
+        lanes.append({
+            "name": name,
+            "brev_status": row.get("brev_status") or (status.get("statuses") or {}).get(name),
+            "model": data.get("model") or "",
+            "run_id": data.get("run_id") or "",
+            "shard": f"{data.get('shard_index')}/{data.get('shard_count')}",
+            "concurrency": _gate_int(data.get("concurrency")),
+            "done": _gate_int(data.get("done")),
+            "total": _gate_int(data.get("total")),
+            "remaining": _gate_int(data.get("remaining")),
+            "errors": _gate_int(data.get("errors")),
+            "delta_done": _gate_int(data.get("delta_done")),
+            "delta_errors": _gate_int(data.get("delta_errors")),
+            "elapsed_h": _gate_number(data.get("elapsed_h")),
+            "rate_h": _gate_number(data.get("rate_h")),
+            "eta_h": _gate_number(data.get("eta_h"), default=-1.0),
+            "gpu_util_max": max(gpu_utils) if gpu_utils else None,
+            "gpu": gpu_text,
+            "df": data.get("df") or [],
+            "models": data.get("models") or {},
+        })
+    return lanes
+
+
+def _rf100_gate_aggregate(lanes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    done = sum(_gate_int(l.get("done")) for l in lanes)
+    total = sum(_gate_int(l.get("total")) for l in lanes)
+    errors = sum(_gate_int(l.get("errors")) for l in lanes)
+    delta_done = sum(_gate_int(l.get("delta_done")) for l in lanes)
+    delta_errors = sum(_gate_int(l.get("delta_errors")) for l in lanes)
+    rate_h = sum(_gate_number(l.get("rate_h")) for l in lanes)
+    remaining = max(0, total - done) if total else None
+    eta_h = (remaining / rate_h) if remaining is not None and rate_h > 0 else None
+    return {
+        "lanes": len(lanes),
+        "done": done,
+        "total": total,
+        "remaining": remaining,
+        "pct": (done / total) if total else None,
+        "errors": errors,
+        "delta_done": delta_done,
+        "delta_errors": delta_errors,
+        "rate_h": rate_h,
+        "eta_h": eta_h,
+    }
+
+
+def _rf100_gate_air_support_guidance(c3_lanes: List[Dict[str, Any]], cr2_lanes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Operational guidance learned from Gate 1.
+
+    The important product behavior: large RF100-VL runs should not start by
+    fanning out five expensive Brevs. The UI should ask for more capacity only
+    after a single lane has proved that endpoint, dataset staging, artifact
+    flush, and scoring are stable enough to make duplication worth the cost.
+    """
+    all_lanes = c3_lanes + cr2_lanes
+    stable_candidates = []
+    for lane in all_lanes:
+        done = _gate_int(lane.get("done"))
+        errors = _gate_int(lane.get("errors"))
+        elapsed_s = _gate_number(lane.get("elapsed_h")) * 3600
+        error_rate = (errors / done) if done else 0.0
+        gpu_ok = lane.get("gpu_util_max") is None or _gate_int(lane.get("gpu_util_max")) >= 50
+        stable = (
+            done >= AIR_SUPPORT_MIN_STABLE_IMAGES
+            and elapsed_s >= AIR_SUPPORT_MIN_STABLE_SECONDS
+            and error_rate <= AIR_SUPPORT_MAX_ERROR_RATE
+            and _gate_number(lane.get("rate_h")) > 0
+            and gpu_ok
+        )
+        stable_candidates.append({
+            "name": lane.get("name"),
+            "model": lane.get("model"),
+            "done": done,
+            "elapsed_minutes": round(elapsed_s / 60, 1) if elapsed_s else 0,
+            "error_rate": error_rate,
+            "rate_h": lane.get("rate_h"),
+            "gpu_util_max": lane.get("gpu_util_max"),
+            "stable": stable,
+        })
+    healthy_c3 = [l for l in c3_lanes if _gate_int(l.get("errors")) == 0 and _gate_number(l.get("rate_h")) > 0]
+    healthy_cr2 = [
+        l for l in cr2_lanes
+        if _gate_int(l.get("errors")) == 0 and _gate_number(l.get("rate_h")) > 0 and _gate_int(l.get("delta_done")) > 0
+    ]
+    blocked = [
+        l for l in cr2_lanes
+        if _gate_int(l.get("delta_done")) == 0 or _gate_int(l.get("delta_errors")) > 0 or _gate_int(l.get("gpu_util_max") or 0) == 0
+    ]
+    decision = "hold"
+    if len(healthy_c3) >= 1 and not blocked:
+        decision = "scale_to_two"
+    if len(healthy_c3) >= 2 and len(healthy_cr2) >= 1 and not blocked:
+        decision = "scale_to_five"
+    return {
+        "decision": decision,
+        "stable_lane_thresholds": {
+            "min_images": AIR_SUPPORT_MIN_STABLE_IMAGES,
+            "min_minutes": round(AIR_SUPPORT_MIN_STABLE_SECONDS / 60, 1),
+            "max_error_rate": AIR_SUPPORT_MAX_ERROR_RATE,
+            "required_signals": [
+                "model id confirmed through /v1/models",
+                "dataset rows are uniquely sharded with a manifest",
+                "trace.jsonl and results.json flush every checkpoint",
+                "throughput and error rate are stable over two windows",
+                "no operator SSH intervention required during the window",
+            ],
+        },
+        "stable_candidates": stable_candidates,
+        "recommendations": [
+            "Run one Brev lane for 30-45 minutes or at least 500 images before asking for air support.",
+            "Scale from one to two lanes first; only scale to five after two lanes prove unique sharding and comparable throughput.",
+            "Use a central manifest/lease file so new lanes claim non-overlapping image ids instead of duplicating work.",
+            "Auto-pause scale-out when a lane has zero delta, rising error rows, unreachable SSH, dead proxy ports, or idle loaded GPUs.",
+            "Surface cost burn, failed setup time, and duplicate inference risk in the UI before provisioning more GPUs.",
+        ],
+        "blocked_lanes": blocked,
+    }
+
+
+def _rf100_gate_learnings() -> List[Dict[str, str]]:
+    return [
+        {
+            "title": "Air support is a product workflow, not a shell trick",
+            "body": "Gate 1 needed constant human routing across Brev, SSH, vLLM, NIM, storage, endpoint identity, sharding, and cost. The UI should own that state explicitly.",
+        },
+        {
+            "title": "Scale only after a stable canary",
+            "body": "A single lane should prove model identity, request shape, dataset staging, artifact flushing, and low error rate for at least 30-45 minutes or 500 images before the UI asks for more Brevs.",
+        },
+        {
+            "title": "Sharding must be leased, not remembered",
+            "body": "Five machines should claim work from a durable manifest. Static modulo sharding is easy to duplicate or strand when a lane is restarted, replaced, or silently fails.",
+        },
+        {
+            "title": "Cost controls need first-class states",
+            "body": "Loaded-but-idle, dead proxy, stale progress, and SSH-unreachable are budget states. The UI should show them as billable risk with suggested actions rather than burying them in logs.",
+        },
+        {
+            "title": "Partial reports must say what they can prove",
+            "body": "A partial Gate 1 report can compare coverage, throughput, errors, and matched trace rows. It should not imply model quality parity unless the same image ids were scored by both models.",
+        },
+    ]
+
+
+def _rf100_gate_interim_payload(status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    status = status or _rf100_gate_status_load()
+    lanes = _rf100_gate_lane_rows(status)
+    c3_lanes = [l for l in lanes if str(l.get("model")) == "nvidia/Cosmos3-Super-Reasoner-May17"]
+    cr2_lanes = [l for l in lanes if str(l.get("model")) == "nvidia/cosmos-reason2-8b"]
+    cr2_productive = [
+        l for l in cr2_lanes
+        if _gate_int(l.get("errors")) == 0 and _gate_int(l.get("done")) > 0 and l.get("name") not in {"rf100-cr2-dual-1", "rf100-cr2-dual-3", "nim-mb-cr2-8b-rf100"}
+    ]
+    cr2_waste = [
+        l for l in cr2_lanes
+        if l.get("name") in {"rf100-cr2-dual-1", "rf100-cr2-dual-3", "nim-mb-cr2-8b-rf100"}
+        or _gate_int(l.get("delta_errors")) > 0
+        or (_gate_int(l.get("delta_done")) == 0 and _gate_int(l.get("done")) > 0)
+    ]
+    comparison_statuses = status.get("comparison_statuses") or {
+        key: (status.get("statuses") or {}).get(key)
+        for key in ("qw3-8b-05110800", "nim-mb-omni", "nim-mb-gemma", "nim-mb-nano12b", "nim-mb-reason1")
+    }
+    payload = {
+        "ok": bool(status.get("ok", True)),
+        "source_status_path": status.get("path") or str(RF100_GATE_STATUS_PATH),
+        "generated_epoch": time.time(),
+        "dataset": "RF100-VL",
+        "method": {
+            "source": "RF100-VL official task framing: detection prompts over Roboflow 100 Vision Language image groups.",
+            "metric": "COCO-style AP@[.50:.95], AP50, AP75, and per-group AP when matched trace rows are available.",
+            "interim_caveat": "This Gate 1 interim report is based on partial live progress. Apples-to-apples quality comparison requires matched question_id/image_id trace rows for both models.",
+        },
+        "aggregates": {
+            "c3": _rf100_gate_aggregate(c3_lanes),
+            "cr2_all_attempted": _rf100_gate_aggregate(cr2_lanes),
+            "cr2_productive": _rf100_gate_aggregate(cr2_productive),
+            "cr2_waste": _rf100_gate_aggregate(cr2_waste),
+        },
+        "lanes": {
+            "c3": c3_lanes,
+            "cr2": cr2_lanes,
+            "cr2_productive": cr2_productive,
+            "cr2_waste": cr2_waste,
+        },
+        "comparison_statuses": comparison_statuses,
+        "air_support": _rf100_gate_air_support_guidance(c3_lanes, cr2_lanes),
+        "learnings": _rf100_gate_learnings(),
+        "next_gate": [
+            "Generate an interim report now, clearly marked partial.",
+            "Merge raw trace rows by question_id before claiming apples-to-apples model quality.",
+            "Run Cosmos3 on a matched CR2 subset or score only the intersection of completed rows.",
+            "Add manifest-based sharding and scale-readiness prompts before any future RF100 full gate.",
+            "Keep cost/risk visible: idle loaded GPU, proxy failure, SSH unreachable, stale delta, duplicate trace rows.",
+        ],
+    }
+    return payload
+
+
+def benchmark_render_rf100_gate_interim(payload: Optional[Dict[str, Any]] = None) -> str:
+    payload = payload or _rf100_gate_interim_payload()
+    generated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(payload.get("generated_epoch") or time.time()))
+    ag = payload.get("aggregates") or {}
+    c3 = ag.get("c3") or {}
+    cr2_prod = ag.get("cr2_productive") or {}
+    cr2_waste = ag.get("cr2_waste") or {}
+    air = payload.get("air_support") or {}
+
+    def esc(v: Any) -> str:
+        return html.escape(str(v if v is not None else ""))
+
+    def n(v: Any) -> str:
+        try:
+            return f"{int(float(v)):,}"
+        except Exception:
+            return "0"
+
+    def h(v: Any) -> str:
+        try:
+            if v is None or float(v) < 0:
+                return "n/a"
+            return f"{float(v):.1f}h"
+        except Exception:
+            return "n/a"
+
+    def lane_rows(lanes: List[Dict[str, Any]]) -> str:
+        if not lanes:
+            return "<tr><td colspan='9'>No lanes.</td></tr>"
+        rows = []
+        for lane in lanes:
+            rows.append(
+                "<tr>"
+                f"<td>{esc(lane.get('name'))}</td>"
+                f"<td>{esc(lane.get('model'))}</td>"
+                f"<td>{esc(lane.get('run_id'))}</td>"
+                f"<td>{esc(lane.get('shard'))}</td>"
+                f"<td>{n(lane.get('done'))}/{n(lane.get('total'))}</td>"
+                f"<td>{n(lane.get('delta_done'))}</td>"
+                f"<td>{n(lane.get('errors'))}</td>"
+                f"<td>{esc(lane.get('gpu_util_max') if lane.get('gpu_util_max') is not None else 'n/a')}%</td>"
+                f"<td>{h(lane.get('eta_h'))}</td>"
+                "</tr>"
+            )
+        return "".join(rows)
+
+    learnings = "".join(
+        f"<li><strong>{esc(item.get('title'))}</strong><br>{esc(item.get('body'))}</li>"
+        for item in payload.get("learnings") or []
+    )
+    recs = "".join(f"<li>{esc(item)}</li>" for item in (air.get("recommendations") or []))
+    next_gate = "".join(f"<li>{esc(item)}</li>" for item in payload.get("next_gate") or [])
+    comparisons = payload.get("comparison_statuses") or {}
+    comparison_rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>" for k, v in sorted(comparisons.items()))
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>RF100-VL Gate 1 Interim Report</title>
+<style>
+:root{{--green:#76B900;--dark:#1A1A1A;--line:#d8dee8;--soft:#F0F5E8;--warn:#92400e;--bad:#b91c1c;}}
+body{{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--dark);line-height:1.5;background:#fff;}}
+header{{background:var(--dark);color:#fff;padding:34px 42px;border-left:8px solid var(--green);}}
+h1{{margin:0 0 8px;font-size:36px;}} main{{max-width:1220px;margin:0 auto;padding:32px;}}
+section{{margin:0 0 34px;}} h2{{font-size:18px;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--green);padding-bottom:6px;}}
+.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}} .tile{{border:1px solid var(--line);border-left:5px solid var(--green);border-radius:8px;padding:16px;background:#fff;}}
+.tile .v{{font-size:28px;font-weight:800;color:var(--green);}} .tile .l{{font-size:12px;color:#64748b;text-transform:uppercase;}}
+.note{{background:var(--soft);border-left:5px solid var(--green);padding:14px 18px;border-radius:0 8px 8px 0;}}
+.warn{{background:#fff7ed;border-left-color:var(--warn);}} .bad{{background:#fef2f2;border-left-color:var(--bad);}}
+table{{width:100%;border-collapse:collapse;font-size:13px;}} th{{background:var(--dark);color:#fff;text-align:left;padding:9px;}} td{{border-bottom:1px solid var(--line);padding:8px;vertical-align:top;}}
+.cols{{display:grid;grid-template-columns:1fr 1fr;gap:18px;}} code{{font-family:ui-monospace,Menlo,monospace;}}
+@media(max-width:850px){{.tiles,.cols{{grid-template-columns:1fr;}}}}
+</style></head><body>
+<header><h1>RF100-VL Gate 1 Interim Report</h1>
+<div>Generated {esc(generated)} | Source: <code>{esc(payload.get('source_status_path'))}</code></div></header>
+<main>
+<section><h2>Executive Readout</h2><div class='tiles'>
+<div class='tile'><div class='v'>{_gate_percent(c3.get('pct'))}</div><div class='l'>Cosmos3 coverage</div></div>
+<div class='tile'><div class='v'>{n(c3.get('done'))}</div><div class='l'>Cosmos3 images</div></div>
+<div class='tile'><div class='v'>{n(cr2_prod.get('delta_done'))}</div><div class='l'>CR2 useful delta</div></div>
+<div class='tile'><div class='v'>{n(cr2_waste.get('lanes'))}</div><div class='l'>CR2 waste lanes</div></div>
+</div></section>
+<section><h2>Method Guardrail</h2><div class='note warn'>
+RF100-VL quality must be scored with COCO-style AP on matched image ids. This interim report can compare coverage, throughput, operational stability, and partial trace availability. It should not claim a model-quality winner until C3 and CR2 rows are joined by <code>question_id</code>/<code>image_id</code>.
+</div></section>
+<section><h2>Current Progress</h2>
+<table><thead><tr><th>Track</th><th>Lanes</th><th>Done / Total</th><th>Delta</th><th>Errors</th><th>Rate</th><th>ETA</th></tr></thead><tbody>
+<tr><td>Cosmos3 Super Reasoner May17</td><td>{n(c3.get('lanes'))}</td><td>{n(c3.get('done'))} / {n(c3.get('total'))}</td><td>{n(c3.get('delta_done'))}</td><td>{n(c3.get('errors'))}</td><td>{n(c3.get('rate_h'))}/h</td><td>{h(c3.get('eta_h'))}</td></tr>
+<tr><td>Cosmos Reason 2 productive lanes</td><td>{n(cr2_prod.get('lanes'))}</td><td>{n(cr2_prod.get('done'))} / {n(cr2_prod.get('total'))}</td><td>{n(cr2_prod.get('delta_done'))}</td><td>{n(cr2_prod.get('errors'))}</td><td>{n(cr2_prod.get('rate_h'))}/h</td><td>{h(cr2_prod.get('eta_h'))}</td></tr>
+<tr><td>Cosmos Reason 2 waste/stuck lanes</td><td>{n(cr2_waste.get('lanes'))}</td><td>{n(cr2_waste.get('done'))} / {n(cr2_waste.get('total'))}</td><td>{n(cr2_waste.get('delta_done'))}</td><td>{n(cr2_waste.get('errors'))}</td><td>{n(cr2_waste.get('rate_h'))}/h</td><td>{h(cr2_waste.get('eta_h'))}</td></tr>
+</tbody></table></section>
+<section><h2>Air Support Readiness</h2><div class='note bad'>
+Decision: <strong>{esc(air.get('decision'))}</strong>. Gate 1 shows that scaling to five Brevs before a stable canary creates duplicate work, expensive idle states, and heavy SRE load.
+</div><ul>{recs}</ul></section>
+<section><h2>Lane Details</h2>
+<h3>Cosmos3 Super Reasoner</h3><table><thead><tr><th>Brev</th><th>Model</th><th>Run id</th><th>Shard</th><th>Done</th><th>Delta</th><th>Errors</th><th>GPU</th><th>ETA</th></tr></thead><tbody>{lane_rows(payload.get('lanes', {}).get('c3') or [])}</tbody></table>
+<h3>Cosmos Reason 2</h3><table><thead><tr><th>Brev</th><th>Model</th><th>Run id</th><th>Shard</th><th>Done</th><th>Delta</th><th>Errors</th><th>GPU</th><th>ETA</th></tr></thead><tbody>{lane_rows(payload.get('lanes', {}).get('cr2') or [])}</tbody></table></section>
+<section><h2>Gate 1 Learnings</h2><ul>{learnings}</ul></section>
+<section><h2>Next Gate Product Changes</h2><ul>{next_gate}</ul></section>
+<section><h2>Stopped Comparisons</h2><table><thead><tr><th>Lane</th><th>Status</th></tr></thead><tbody>{comparison_rows}</tbody></table></section>
+</main></body></html>"""
 
 
 # URL kind detection: HuggingFace, Arxiv, GitHub, GDrive.
@@ -5321,6 +6973,10 @@ def _resolve_url_kind(url: str) -> Tuple[str, Optional[str]]:
     if not s:
         return ("unknown", None)
     low = s.lower()
+    if _is_rf100_source_text(s):
+        return ("rf100_vl", "rf100-vl")
+    if _is_lingoqa_source_text(s) and ("github.com" in low or "arxiv.org" in low):
+        return ("lingoqa", "lingoqa-official")
     # Bare keyword shortcut only — typed text, not a URL.
     if low == "lingoqa":
         return ("lingoqa", "lingoqa-official")
@@ -5364,6 +7020,31 @@ def _resolve_url_to_dataset(url: str) -> Dict[str, Any]:
             "judge": "lingo-judge",
         }
         result["display"] = "LingoQA detected (local cache)"
+        return result
+    if kind == "rf100_vl":
+        profile = _rf100_discover(download=False)
+        result["dataset_config"] = {
+            "id": "rf100-vl",
+            "name": "RF100-VL (Roboflow 100 Vision Language)",
+            "adapter": "rf100-vl",
+            "task": "object_detection",
+            "judge": "coco-ap",
+            "metric": profile.get("metric"),
+            "ready": bool(profile.get("ready")),
+            "path": profile.get("path"),
+            "rows": profile.get("image_count") or None,
+            "groups": profile.get("group_count") or 0,
+            "expected_groups": profile.get("expected_groups"),
+            "full_gate_ready": bool(profile.get("full_gate_ready")),
+            "blockers": profile.get("blockers") or [],
+            "source_urls": profile.get("source_urls") or [],
+        }
+        result["display"] = (
+            f"RF100-VL detected: {profile.get('group_count') or 0}/"
+            f"{profile.get('expected_groups')} groups staged, "
+            f"{profile.get('image_count') or 0} images."
+        )
+        result["profile"] = profile
         return result
     if kind == "hf_dataset":
         result["dataset_config"] = {
@@ -5434,6 +7115,126 @@ def _resolve_url_to_dataset_cached(url: str) -> Dict[str, Any]:
     return payload
 
 
+def _benchmark_adapter_for_dataset(dataset_id: str) -> str:
+    ds = str(dataset_id or "")
+    if ds == "rf100-vl" or ds.startswith("rf100-vl:"):
+        return "rf100-vl"
+    return "lingoqa"
+
+
+def _benchmark_analyze_source(url: str) -> Dict[str, Any]:
+    resolved = _resolve_url_to_dataset_cached(url)
+    cfg = resolved.get("dataset_config") or {}
+    adapter = cfg.get("adapter") or _benchmark_adapter_for_dataset(cfg.get("id") or "")
+    if adapter == "rf100-vl":
+        profile = resolved.get("profile") or _rf100_discover(download=False)
+        return {
+            "ok": True,
+            "adapter": "rf100-vl",
+            "dataset_config": cfg,
+            "resolved": resolved,
+            "summary": {
+                "title": "RF100-VL",
+                "task": "Object detection over 100 Roboflow Universe datasets",
+                "metric": "COCO-style AP@[.50:.95], AP50, AP75, per-group AP",
+                "dataset": "164,149 images and 1,355,491 annotations across seven domains when fully staged",
+                "flow": "Analyze source, stage/download COCO folders, scope groups, preview prompts, run model, score detections, export leaderboard and trace.",
+            },
+            "readiness": {
+                "ready": bool(profile.get("ready")),
+                "full_gate_ready": bool(profile.get("full_gate_ready")),
+                "blockers": profile.get("blockers") or [],
+                "path": profile.get("path"),
+                "groups": profile.get("group_count") or 0,
+                "expected_groups": profile.get("expected_groups"),
+                "images": profile.get("image_count") or 0,
+            },
+            "stages": ["Source", "Understand", "Scope", "Preview", "Run", "Review", "Export"],
+            "profile": profile,
+        }
+    base = _lingoqa_dataset_dir()
+    return {
+        "ok": True,
+        "adapter": "lingoqa",
+        "dataset_config": cfg or {
+            "id": "lingoqa-official",
+            "name": "LingoQA (1000 rows)",
+            "adapter": "lingoqa",
+            "judge": "lingo-judge",
+        },
+        "resolved": resolved,
+        "summary": {
+            "title": "LingoQA",
+            "task": "Autonomous-driving visual question answering",
+            "metric": "Lingo-Judge text classifier, max over two reference answers",
+            "dataset": "Evaluation split has 100 scenarios and 1000 QA pairs.",
+            "flow": "Analyze source, use local GDrive cache, scope rows, preview frames and questions, run VQA, score with Lingo-Judge, export trace.",
+        },
+        "readiness": {
+            "ready": bool(base and (base / "val.parquet").exists()),
+            "full_gate_ready": bool(base and (base / "val.parquet").exists()),
+            "blockers": [] if base else ["Stage LingoQA evaluation data under /home/horde/lingoqa-data or /tmp/lingoqa-data."],
+            "path": str(base) if base else None,
+            "groups": 1,
+            "expected_groups": 1,
+            "images": 1000,
+        },
+        "stages": ["Source", "Understand", "Scope", "Preview", "Run", "Review", "Export"],
+    }
+
+
+def _benchmark_preview_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "question_id": row.get("question_id"),
+        "dataset_name": row.get("dataset_name"),
+        "category": row.get("category"),
+        "task": row.get("task") or "vqa",
+        "question": row.get("question"),
+        "references": row.get("references") or [],
+        "images": row.get("images") or [],
+        "ground_truth_count": len(row.get("ground_truth") or []),
+        "categories": row.get("categories") or [],
+    }
+
+
+def _benchmark_load_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
+    dataset_id = str(payload.get("dataset") or payload.get("dataset_id") or "").strip()
+    if not dataset_id and payload.get("url"):
+        resolved = _resolve_url_to_dataset_cached(str(payload.get("url") or ""))
+        dataset_id = ((resolved.get("dataset_config") or {}).get("id") or "")
+    if not dataset_id:
+        dataset_id = "lingoqa-official"
+    source_config = payload.get("source_config")
+    if not isinstance(source_config, dict):
+        source_config = None
+    adapter = _benchmark_adapter_for_dataset(dataset_id)
+    if adapter == "rf100-vl":
+        profile = _rf100_discover(download=False)
+        if not profile.get("ready"):
+            return {
+                "ok": False,
+                "adapter": adapter,
+                "dataset": dataset_id,
+                "profile": profile,
+                "blockers": profile.get("blockers") or [],
+                "preview": [],
+            }
+        rows = _load_rf100vl_dataset({**(source_config or {}), "download": False}, download=False)
+    else:
+        rows = load_dataset_by_id(dataset_id, source_config)
+    limit = max(1, min(20, int(payload.get("preview_size") or 5)))
+    groups = sorted({str(r.get("dataset_name") or r.get("category") or "default") for r in rows})
+    return {
+        "ok": True,
+        "adapter": adapter,
+        "dataset": dataset_id,
+        "total": len(rows),
+        "group_count": len(groups),
+        "groups": groups[:200],
+        "preview": [_benchmark_preview_row(r) for r in rows[:limit]],
+    }
+
+
 def _benchmark_available_models() -> List[Dict[str, Any]]:
     """Return [{id, name, endpoint, status, host}, ...].
 
@@ -5458,6 +7259,56 @@ def _benchmark_available_models() -> List[Dict[str, Any]]:
                 "status": ident.get("status") or "ready",
                 "host": ident.get("host") or ident.get("gpu") or "",
             })
+    # Operator-supplied external endpoints. This lets the same workflow compare
+    # local and sibling Horde/NIM instances without hardcoding one-off IPs.
+    # Preferred JSON:
+    #   BENCHMARK_EXTRA_MODELS_JSON='[{"id":"model","endpoint":"http://host:8000/v1","host":"horde"}]'
+    # Compact fallback:
+    #   BENCHMARK_EXTRA_MODELS='model=http://host:8000/v1,other=http://host2:8000/v1'
+    extra_json = os.getenv("BENCHMARK_EXTRA_MODELS_JSON", "").strip()
+    if extra_json:
+        try:
+            extra = json.loads(extra_json)
+            if isinstance(extra, dict):
+                extra = [extra]
+            for item in extra or []:
+                if not isinstance(item, dict):
+                    continue
+                if not item.get("id") or not item.get("endpoint"):
+                    continue
+                out.append({
+                    "id": str(item.get("id")),
+                    "name": str(item.get("name") or item.get("id")),
+                    "endpoint": str(item.get("endpoint")),
+                    "status": str(item.get("status") or "ready"),
+                    "host": str(item.get("host") or "external"),
+                })
+        except Exception as exc:
+            out.append({
+                "id": "extra-model-config-error",
+                "name": "Extra model config error",
+                "endpoint": "",
+                "status": "error",
+                "host": "env",
+                "error": str(exc),
+            })
+    extra_csv = os.getenv("BENCHMARK_EXTRA_MODELS", "").strip()
+    if extra_csv:
+        for chunk in extra_csv.split(","):
+            chunk = chunk.strip()
+            if not chunk or "=" not in chunk:
+                continue
+            model_id, endpoint = chunk.split("=", 1)
+            model_id = model_id.strip()
+            endpoint = endpoint.strip()
+            if model_id and endpoint:
+                out.append({
+                    "id": model_id,
+                    "name": model_id,
+                    "endpoint": endpoint,
+                    "status": "ready",
+                    "host": urllib.parse.urlparse(endpoint).hostname or "external",
+                })
     # Always include the local detection as the default option.
     try:
         local_model = benchmark_detect_model()
@@ -5481,13 +7332,53 @@ def _benchmark_available_models() -> List[Dict[str, Any]]:
             "host": "horde (local)",
             "error": str(exc),
         })
-    return out
+    deduped: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    for item in out:
+        key = str(item.get("id") or "")
+        if key and key in seen_ids:
+            continue
+        if key:
+            seen_ids.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _benchmark_model_config(selected_model: Optional[str] = None) -> Dict[str, Any]:
+    selected = str(selected_model or "").strip()
+    models = _benchmark_available_models()
+    if selected:
+        for item in models:
+            if item.get("id") == selected:
+                endpoint = item.get("endpoint") or benchmark_nim_base_url()
+                return {
+                    "id": item.get("id") or selected,
+                    "endpoint": endpoint,
+                    "headers": benchmark_nim_headers(),
+                    "host": item.get("host") or "",
+                    "status": item.get("status") or "ready",
+                }
+    model = benchmark_detect_model()
+    return {
+        "id": model,
+        "endpoint": benchmark_nim_base_url(),
+        "headers": benchmark_nim_headers(),
+        "host": "horde (local)",
+        "status": "ready",
+    }
 
 
 def benchmark_get(run_id: str) -> Optional[Dict[str, Any]]:
     with BENCHMARK_LOCK:
         snap = BENCHMARK_STATE["runs"].get(run_id)
-        return json.loads(json.dumps(snap, default=str)) if snap else None
+        if snap:
+            return json.loads(json.dumps(snap, default=str))
+    disk = _benchmark_snapshot_load_from_disk(run_id)
+    if disk:
+        with BENCHMARK_LOCK:
+            BENCHMARK_STATE["runs"][run_id] = disk
+        return json.loads(json.dumps(disk, default=str))
+    return None
 
 
 def _benchmark_update(rid: str, **fields: Any) -> Dict[str, Any]:
@@ -5503,13 +7394,24 @@ def _benchmark_append_result(rid: str, record: Dict[str, Any]) -> Dict[str, Any]
     with BENCHMARK_LOCK:
         snap = BENCHMARK_STATE["runs"].setdefault(rid, {})
         results = snap.setdefault("results", [])
+        record.setdefault("completed_epoch", time.time())
         results.append(record)
+        now = time.time()
+        recent = [
+            float(r.get("completed_epoch"))
+            for r in results
+            if r.get("completed_epoch") is not None
+            and now - float(r.get("completed_epoch")) <= 15 * 60
+        ]
         snap["progress"] = {
             "done": len(results),
             "total": snap.get("total") or 0,
             "errors": sum(1 for r in results if r.get("error")),
+            "last_result_epoch": record.get("completed_epoch"),
+            "recent_15m_done": len(recent),
+            "recent_15m_images_per_hour": round(len(recent) * 4.0, 1),
         }
-        snap["updated_epoch"] = time.time()
+        snap["updated_epoch"] = now
         return json.loads(json.dumps(snap, default=str))
 
 
@@ -5595,6 +7497,13 @@ def _benchmark_summarize(snap: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _benchmark_summary_for_snap(snap: Dict[str, Any]) -> Dict[str, Any]:
+    adapter = snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or "")
+    if adapter == "rf100-vl":
+        return _rf100_summarize(snap)
+    return _benchmark_summarize(snap)
+
+
 def run_lingoqa_benchmark(
     run_id: str,
     dataset_id: str,
@@ -5604,6 +7513,7 @@ def run_lingoqa_benchmark(
     seed: int,
     source_config: Optional[Dict[str, Any]] = None,
     judge_mode: str = "standard",
+    model_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Benchmark worker thread. Mutates BENCHMARK_STATE['runs'][run_id].
 
@@ -5631,6 +7541,7 @@ def run_lingoqa_benchmark(
     try:
         _benchmark_update(
             run_id,
+            adapter="lingoqa",
             dataset=dataset_id,
             judge=judge_id,
             judge_mode=judge_mode,
@@ -5660,9 +7571,10 @@ def run_lingoqa_benchmark(
             results=[],
         )
 
-        model = benchmark_detect_model()
-        base = benchmark_nim_base_url()
-        headers = benchmark_nim_headers()
+        model_info = model_config or _benchmark_model_config(None)
+        model = model_info["id"]
+        base = model_info["endpoint"]
+        headers = model_info.get("headers") or benchmark_nim_headers()
         _benchmark_update(run_id, model=model, base_url=base, status="loading_judge")
 
         if judge_id == "lingo-judge":
@@ -5792,17 +7704,21 @@ def run_lingoqa_benchmark(
                 snap = _benchmark_append_result(run_id, result)
                 results_collected += 1
                 if results_collected % flush_every == 0 or results_collected == len(questions):
-                    summary = _benchmark_summarize(snap)
+                    summary = _benchmark_summary_for_snap(snap)
                     snap = _benchmark_update(run_id, summary=summary)
                     _benchmark_snapshot_save(run_id, snap)
+                    _benchmark_write_durable_artifacts(run_id, snap, final=False)
 
         final = _benchmark_update(
             run_id,
             status="complete",
             finished_epoch=time.time(),
             wall_seconds=time.time() - started,
-            summary=_benchmark_summarize(benchmark_get(run_id) or {}),
+            summary=_benchmark_summary_for_snap(benchmark_get(run_id) or {}),
         )
+        _benchmark_snapshot_save(run_id, final)
+        artifacts = _benchmark_write_durable_artifacts(run_id, final, final=True)
+        final = _benchmark_update(run_id, artifacts=artifacts)
         _benchmark_snapshot_save(run_id, final)
         # Persist a one-line summary to /tmp/benchmark-runs/history.json so the
         # Benchmark View "Last run" tile + run-history modal survive restarts.
@@ -5819,6 +7735,7 @@ def run_lingoqa_benchmark(
                 "concurrency": final.get("concurrency"),
                 "seed": final.get("seed"),
                 "accuracy": summary_obj.get("overall_accuracy"),
+                "map": summary_obj.get("map"),
                 "total_predictions": summary_obj.get("total_predictions"),
                 "wall_seconds": final.get("wall_seconds"),
                 "report_url": f"/benchmark/report/{run_id}",
@@ -5838,6 +7755,239 @@ def run_lingoqa_benchmark(
             _benchmark_snapshot_save(run_id, final)
         except Exception:
             pass
+
+
+def run_rf100vl_benchmark(
+    run_id: str,
+    dataset_id: str,
+    sample_size: int,
+    concurrency: int,
+    seed: int,
+    source_config: Optional[Dict[str, Any]] = None,
+    model_config: Optional[Dict[str, Any]] = None,
+) -> None:
+    started = time.time()
+    source_config = source_config or {}
+    try:
+        _benchmark_update(
+            run_id,
+            adapter="rf100-vl",
+            dataset=dataset_id,
+            judge="coco-ap",
+            sample_size=sample_size,
+            concurrency=concurrency,
+            seed=seed,
+            started_epoch=started,
+            status="loading_dataset",
+        )
+        questions = load_dataset_by_id(dataset_id, source_config)
+        if not questions:
+            raise RuntimeError("RF100-VL loader returned 0 images")
+        group_count = len({q.get("dataset_name") for q in questions})
+        if source_config.get("gate_run") and group_count < RF100_VL_EXPECTED_GROUPS:
+            raise RuntimeError(
+                f"RF100-VL full gate requires {RF100_VL_EXPECTED_GROUPS} groups; "
+                f"loaded {group_count}. Stage the official RF100-VL COCO download or provide missing groups."
+            )
+        shard_count = int(source_config.get("shard_count") or 1)
+        shard_index = int(source_config.get("shard_index") or 0)
+        if shard_count > 1:
+            if shard_index < 0 or shard_index >= shard_count:
+                raise RuntimeError(f"RF100-VL shard_index must be in [0, {shard_count - 1}], got {shard_index}")
+            questions = [q for idx, q in enumerate(questions) if idx % shard_count == shard_index]
+            if not questions:
+                raise RuntimeError(f"RF100-VL shard {shard_index}/{shard_count} has 0 images")
+        if sample_size and sample_size > 0 and sample_size < len(questions):
+            import random as _random
+            rng = _random.Random(seed)
+            questions = rng.sample(questions, sample_size)
+        model_info = model_config or _benchmark_model_config(None)
+        model = model_info["id"]
+        base = model_info["endpoint"]
+        headers = model_info.get("headers") or benchmark_nim_headers()
+        resume_existing = os.getenv("BENCHMARK_RESUME_EXISTING", "1").lower() not in ("0", "false", "no")
+        retry_errors = os.getenv("BENCHMARK_RETRY_ERRORS", "1").lower() not in ("0", "false", "no")
+        existing_results: List[Dict[str, Any]] = []
+        if resume_existing:
+            prior = _benchmark_snapshot_load_from_disk(run_id) or {}
+            seen_question_ids: set = set()
+            retry_count = 0
+            for row in prior.get("results") or []:
+                question_id = str(row.get("question_id") or "")
+                if not question_id or question_id in seen_question_ids:
+                    continue
+                if row.get("error") and retry_errors:
+                    retry_count += 1
+                    continue
+                existing_results.append(row)
+                seen_question_ids.add(question_id)
+            if seen_question_ids:
+                original_count = len(questions)
+                questions = [q for q in questions if str(q.get("question_id") or "") not in seen_question_ids]
+                log(
+                    f"[benchmark {run_id}] resume enabled: seeded {len(existing_results)} existing results; "
+                    f"retrying {retry_count} errors; remaining {len(questions)}/{original_count}"
+                )
+        _benchmark_update(
+            run_id,
+            status="running",
+            total=len(questions) + len(existing_results),
+            model=model,
+            base_url=base,
+            results=existing_results,
+            rf100_group_count=group_count,
+            rf100_expected_groups=RF100_VL_EXPECTED_GROUPS,
+            shard_count=shard_count,
+            shard_index=shard_index,
+            in_flight_limit=max(1, concurrency) * max(1, RF100_VL_MAX_IN_FLIGHT_MULTIPLIER),
+            source_config=source_config,
+        )
+        flush_every = 25
+        results_collected = 0
+        pending = deque(questions)
+        in_flight_limit = max(max(1, concurrency), max(1, concurrency) * max(1, RF100_VL_MAX_IN_FLIGHT_MULTIPLIER))
+        last_flush = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
+            futures: Dict[Any, Dict[str, Any]] = {}
+
+            def submit_more() -> None:
+                while pending and len(futures) < in_flight_limit:
+                    q_next = pending.popleft()
+                    futures[ex.submit(run_one_rf100_detection, q_next, model, base, headers)] = q_next
+
+            submit_more()
+            while futures:
+                done_futures, _ = concurrent.futures.wait(
+                    futures,
+                    timeout=30,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not done_futures:
+                    snap_idle = benchmark_get(run_id) or {}
+                    if snap_idle:
+                        _benchmark_snapshot_save(run_id, snap_idle)
+                    continue
+                for fut in done_futures:
+                    q = futures.pop(fut)
+                    try:
+                        result = fut.result()
+                        result["error"] = None
+                    except Exception as exc:
+                        log(f"[benchmark {run_id}] RF100-VL error on image={q.get('question_id')}: {exc}")
+                        result = {
+                            "adapter": "rf100-vl",
+                            "task": "object_detection",
+                            "question_id": q.get("question_id"),
+                            "segment_id": q.get("segment_id"),
+                            "image_id": q.get("image_id"),
+                            "dataset_name": q.get("dataset_name"),
+                            "split": q.get("split"),
+                            "question": q.get("question"),
+                            "category": q.get("category"),
+                            "references": q.get("references") or [],
+                            "ground_truth": q.get("ground_truth") or [],
+                            "detections": [],
+                            "error": str(exc),
+                            "judge_score": 0.0,
+                            "judge_correct": False,
+                            "prediction": "",
+                            "raw_response": "",
+                            "reasoning_trace": "",
+                            "latency_seconds": None,
+                            "images": q.get("images") or [],
+                            "model": model,
+                            "completed_epoch": time.time(),
+                        }
+                    snap = _benchmark_append_result(run_id, result)
+                    results_collected += 1
+                    now_flush = time.time()
+                    if (
+                        results_collected % flush_every == 0
+                        or results_collected == len(questions)
+                        or now_flush - last_flush >= 60
+                    ):
+                        summary = _benchmark_summary_for_snap(snap)
+                        snap = _benchmark_update(run_id, summary=summary)
+                        _benchmark_snapshot_save(run_id, snap)
+                        _benchmark_write_durable_artifacts(run_id, snap, final=False)
+                        last_flush = now_flush
+                submit_more()
+        final = _benchmark_update(
+            run_id,
+            status="complete",
+            finished_epoch=time.time(),
+            wall_seconds=time.time() - started,
+            summary=_benchmark_summary_for_snap(benchmark_get(run_id) or {}),
+        )
+        _benchmark_snapshot_save(run_id, final)
+        artifacts = _benchmark_write_durable_artifacts(run_id, final, final=True)
+        final = _benchmark_update(run_id, artifacts=artifacts)
+        _benchmark_snapshot_save(run_id, final)
+        try:
+            summary_obj = final.get("summary") or {}
+            _benchmark_history_append({
+                "run_id": run_id,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "epoch": time.time(),
+                "adapter": "rf100-vl",
+                "model": final.get("model") or "",
+                "dataset": final.get("dataset") or "",
+                "judge": "coco-ap",
+                "sample_size": final.get("sample_size"),
+                "concurrency": final.get("concurrency"),
+                "seed": final.get("seed"),
+                "accuracy": summary_obj.get("overall_accuracy"),
+                "map": summary_obj.get("map"),
+                "total_predictions": summary_obj.get("total_predictions"),
+                "wall_seconds": final.get("wall_seconds"),
+                "report_url": f"/benchmark/report/{run_id}",
+            })
+        except Exception as exc:
+            log(f"[benchmark {run_id}] history append failed: {exc}")
+        log(f"[benchmark {run_id}] RF100-VL complete in {final['wall_seconds']:.1f}s")
+    except Exception as exc:
+        log(f"[benchmark {run_id}] RF100-VL FAILED: {exc}")
+        final = _benchmark_update(run_id, status="error", error=str(exc), finished_epoch=time.time())
+        try:
+            _benchmark_snapshot_save(run_id, final)
+            artifacts = _benchmark_write_durable_artifacts(run_id, final, final=True)
+            _benchmark_update(run_id, artifacts=artifacts)
+        except Exception:
+            pass
+
+
+def run_benchmark_worker(
+    run_id: str,
+    dataset_id: str,
+    judge_id: str,
+    sample_size: int,
+    concurrency: int,
+    seed: int,
+    source_config: Optional[Dict[str, Any]],
+    judge_mode: str,
+    selected_model: Optional[str],
+) -> None:
+    model_config = None
+    try:
+        model_config = _benchmark_model_config(selected_model)
+    except Exception as exc:
+        _benchmark_update(run_id, status="error", error=f"model endpoint not ready: {exc}", finished_epoch=time.time())
+        return
+    adapter = _benchmark_adapter_for_dataset(dataset_id)
+    if adapter == "rf100-vl":
+        run_rf100vl_benchmark(run_id, dataset_id, sample_size, concurrency, seed, source_config, model_config)
+        return
+    run_lingoqa_benchmark(
+        run_id,
+        dataset_id,
+        judge_id,
+        sample_size,
+        concurrency,
+        seed,
+        source_config,
+        judge_mode=judge_mode,
+        model_config=model_config,
+    )
 
 
 # =============================================================================
@@ -6262,9 +8412,88 @@ def _traceability_examples(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def benchmark_render_rf100_report(run_id: str, snap: Dict[str, Any]) -> str:
+    summary = snap.get("summary") or _rf100_summarize(snap)
+    results = [r for r in (snap.get("results") or []) if not r.get("error")]
+    errors = [r for r in (snap.get("results") or []) if r.get("error")]
+    per_group = sorted(summary.get("per_category") or [], key=lambda c: c.get("accuracy") or 0, reverse=True)
+    strong = per_group[:10]
+    weak = list(reversed(per_group[-10:])) if per_group else []
+    examples_good = [r for r in results if r.get("judge_correct")][:4]
+    examples_miss = [r for r in results if not r.get("judge_correct")][:6]
+
+    def _esc(s: Any) -> str:
+        return html.escape(str(s or ""))
+
+    def pct(v: Any) -> str:
+        return percent_value(v) or "n/a"
+
+    group_rows = "".join(
+        f"<tr><td>{_esc(c.get('category'))}</td><td>{c.get('total')}</td>"
+        f"<td>{pct(c.get('ap'))}</td><td>{pct(c.get('ap50'))}</td></tr>"
+        for c in per_group[:100]
+    )
+    example_rows = "".join(
+        f"<tr><td>{_esc(r.get('question_id'))}</td><td>{_esc(r.get('dataset_name'))}</td>"
+        f"<td>{_esc(len(r.get('ground_truth') or []))}</td><td>{_esc(len(r.get('detections') or []))}</td>"
+        f"<td>{pct(r.get('judge_score'))}</td><td>{_esc(r.get('prediction'))}</td></tr>"
+        for r in (examples_good + examples_miss)
+    )
+    weak_rows = "".join(
+        f"<li>{_esc(c.get('category'))}: AP {pct(c.get('ap'))}, AP50 {pct(c.get('ap50'))}, n={c.get('total')}</li>"
+        for c in weak
+    )
+    strong_rows = "".join(
+        f"<li>{_esc(c.get('category'))}: AP {pct(c.get('ap'))}, AP50 {pct(c.get('ap50'))}, n={c.get('total')}</li>"
+        for c in strong
+    )
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>RF100-VL Benchmark Report - {_esc(run_id)}</title>
+<style>
+:root{{--green:#76B900;--dark:#1A1A1A;--line:#d8dee8;--soft:#F0F5E8;--bad:#b91c1c;}}
+body{{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--dark);line-height:1.5;background:#fff;}}
+header{{background:var(--dark);color:#fff;padding:34px 42px;border-left:8px solid var(--green);}}
+h1{{margin:0 0 8px;font-size:38px;}} main{{max-width:1180px;margin:0 auto;padding:32px;}}
+section{{margin:0 0 34px;}} h2{{font-size:18px;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid var(--green);padding-bottom:6px;}}
+.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}} .tile{{border:1px solid var(--line);border-left:5px solid var(--green);border-radius:8px;padding:16px;background:#fff;}}
+.tile .v{{font-size:30px;font-weight:800;color:var(--green);}} .tile .l{{font-size:12px;color:#64748b;text-transform:uppercase;}}
+table{{width:100%;border-collapse:collapse;font-size:13px;}} th{{background:var(--dark);color:#fff;text-align:left;padding:9px;}} td{{border-bottom:1px solid var(--line);padding:8px;vertical-align:top;}}
+.cols{{display:grid;grid-template-columns:1fr 1fr;gap:18px;}} .note{{background:var(--soft);border-left:5px solid var(--green);padding:14px 18px;border-radius:0 8px 8px 0;}}
+.bad{{color:var(--bad);font-weight:700;}} code{{font-family:ui-monospace,Menlo,monospace;}}
+@media(max-width:800px){{.tiles,.cols{{grid-template-columns:1fr;}}}}
+</style></head><body>
+<header><h1>RF100-VL Benchmark Report</h1>
+<div>Run {_esc(run_id)} | {_esc(snap.get('model'))} | {_esc(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(snap.get('started_epoch') or time.time())))}</div></header>
+<main>
+<section><h2>Leaderboard</h2><div class='tiles'>
+<div class='tile'><div class='v'>{pct(summary.get('map'))}</div><div class='l'>COCO-style mAP</div></div>
+<div class='tile'><div class='v'>{pct(summary.get('ap50'))}</div><div class='l'>AP50</div></div>
+<div class='tile'><div class='v'>{_esc(summary.get('total_predictions') or 0)}</div><div class='l'>images scored</div></div>
+<div class='tile'><div class='v'>{_esc(summary.get('total_predicted_boxes') or 0)}</div><div class='l'>predicted boxes</div></div>
+</div></section>
+<section><h2>Gate Status</h2><div class='note'>
+Dataset groups loaded: {_esc(snap.get('rf100_group_count') or 'unknown')} / {_esc(snap.get('rf100_expected_groups') or RF100_VL_EXPECTED_GROUPS)}.
+Errors: {_esc(len(errors))}. Artifacts: <code>/tmp/benchmark-runs/{_esc(run_id)}</code>.
+</div></section>
+<section><h2>Where Cosmos3 Looks Strongest</h2><div class='cols'><div><h3>Strong groups</h3><ul>{strong_rows or '<li>No scored groups yet.</li>'}</ul></div><div><h3>Weak groups</h3><ul>{weak_rows or '<li>No misses yet.</li>'}</ul></div></div></section>
+<section><h2>Per-Group Leaderboard</h2><table><thead><tr><th>Group</th><th>Images</th><th>AP</th><th>AP50</th></tr></thead><tbody>{group_rows}</tbody></table></section>
+<section><h2>Trace Examples</h2><table><thead><tr><th>Image</th><th>Dataset</th><th>GT boxes</th><th>Pred boxes</th><th>F1@0.50</th><th>Prediction summary</th></tr></thead><tbody>{example_rows}</tbody></table></section>
+<section><h2>Reproducibility</h2><table><tbody>
+<tr><td>Dataset</td><td>{_esc(snap.get('dataset'))}</td></tr>
+<tr><td>Model</td><td>{_esc(snap.get('model'))}</td></tr>
+<tr><td>Endpoint</td><td>{_esc(snap.get('base_url'))}</td></tr>
+<tr><td>Trace</td><td><a href='/benchmark/trace/{_esc(run_id)}.jsonl'>trace.jsonl</a></td></tr>
+<tr><td>Leaderboard JSON</td><td><a href='/benchmark/leaderboard/{_esc(run_id)}'>leaderboard.json</a></td></tr>
+</tbody></table></section>
+</main></body></html>"""
+
+
 def benchmark_render_report(run_id: str) -> str:
     """Render the in-app HTML report (arxiv-2312.14115 12-section layout)."""
-    snap = benchmark_get(run_id) or {}
+    snap = _benchmark_load_any(run_id) or {}
+    if (snap.get("adapter") or _benchmark_adapter_for_dataset(snap.get("dataset") or "")) == "rf100-vl":
+        return benchmark_render_rf100_report(run_id, snap)
     summary = snap.get("summary") or _benchmark_summarize(snap) or {}
     results = [r for r in (snap.get("results") or []) if not r.get("error")]
     model = snap.get("model") or ""
@@ -6702,6 +8931,27 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
 .bench-ghost-link { color:#76B900; text-decoration:none; font-size:13px; font-weight:600; padding:6px 10px; border-radius:6px; border:1px solid transparent; }
 .bench-ghost-link:hover { border-color:#76B900; }
 .bench-dropzone-status { margin:8px 0 0; min-height:18px; }
+.bench-flow { display:grid; grid-template-columns:repeat(7, minmax(96px, 1fr)); gap:8px; margin:12px 0 18px; }
+.bench-flow-step { border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:#fff; font-size:12px; color:#64748b; min-height:54px; }
+.bench-flow-step.active { border-color:#76B900; background:#F0F5E8; color:#1A1A1A; }
+.bench-flow-step.blocked { border-color:#F59E0B; background:#FEF3C7; color:#78350F; }
+.bench-analysis { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:18px; }
+.bench-analysis-grid { display:grid; grid-template-columns:minmax(240px, 0.9fr) minmax(0, 1.1fr); gap:14px; }
+.bench-blockers { border-left:4px solid #F59E0B; background:#FEF3C7; padding:10px 12px; border-radius:0 6px 6px 0; color:#78350F; font-size:13px; }
+.bench-gate-panel { background:#fff; border:1px solid var(--line); border-left:4px solid #76B900; border-radius:8px; padding:16px; margin:0 0 18px; }
+.bench-gate-head { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:12px; }
+.bench-gate-head h3 { margin:0 0 4px; font-size:14px; color:#475569; text-transform:uppercase; letter-spacing:0.04em; }
+.bench-gate-grid { display:grid; grid-template-columns:repeat(4, minmax(120px, 1fr)); gap:10px; margin:12px 0; }
+.bench-gate-stat { border:1px solid var(--line); border-radius:6px; padding:10px 12px; background:#f8fafc; min-width:0; }
+.bench-gate-stat .value { font-size:20px; font-weight:800; color:#76B900; white-space:nowrap; }
+.bench-gate-stat .label { font-size:11px; color:#64748b; text-transform:uppercase; }
+.bench-gate-note { border-left:4px solid #76B900; background:#F0F5E8; padding:10px 12px; border-radius:0 6px 6px 0; font-size:13px; color:#1A1A1A; }
+.bench-gate-note.hold { border-left-color:#F59E0B; background:#FEF3C7; color:#78350F; }
+.bench-preview-list { display:grid; gap:8px; max-height:260px; overflow:auto; }
+.bench-preview-row { border:1px solid var(--line); border-radius:6px; padding:8px; background:#f8fafc; font-size:12px; }
+.bench-scope-controls { display:grid; gap:6px; font-size:13px; }
+.bench-scope-controls label { display:flex; align-items:center; gap:6px; margin:2px 0; color:#1A1A1A; }
+.bench-scope-controls input[type=radio] { width:auto; }
 .bench-advanced { background:#f8fafc; border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:18px; }
 .bench-history { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:18px; }
 .bench-history-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px; }
@@ -6722,6 +8972,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   aside { position:static; max-height:none; overflow:visible; }
   .actions button { flex:1 1 100%; }
   .params, .export-sections { grid-template-columns:1fr; }
+  .bench-flow, .bench-analysis-grid, .bench-gate-grid { grid-template-columns:1fr; }
 }
 </style>
 </head>
@@ -6866,14 +9117,54 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
       </div>
       <div class="bench-dropzone-row" style="display:flex; gap:8px; align-items:center;">
         <button id="benchRunBtn" class="bench-primary-btn">▶ Run Benchmark</button>
+        <button id="benchAnalyzeBtn" class="bench-ghost-btn">Analyze Source</button>
+        <button id="benchLoadPreviewBtn" class="bench-ghost-btn">Load Preview</button>
         <button id="benchAuditBtn" class="bench-ghost-btn" disabled title="Run all 5 judge methods (lingo_judge x4 + llm_as_judge) on the last completed run">🔬 Fairness Audit</button>
       </div>
       <div class="bench-dropzone-row bench-ghost-row">
         <button id="benchRerunLastBtn" class="bench-ghost-btn" disabled>↻ Re-run last</button>
         <button id="benchToggleAdvBtn" class="bench-ghost-btn" aria-expanded="false">⚙ Advanced</button>
         <button id="benchToggleHistBtn" class="bench-ghost-btn" aria-expanded="false">≡ Run history</button>
+        <button id="benchGateReportBtn" class="bench-ghost-btn">Gate 1 report</button>
       </div>
       <p class="bench-dropzone-status hint" id="benchDropzoneStatus"></p>
+    </div>
+
+    <div class="bench-flow" id="benchFlow">
+      <div class="bench-flow-step active" data-stage="Source"><strong>Source</strong><br/>Paste site, repo, paper, or dataset.</div>
+      <div class="bench-flow-step" data-stage="Understand"><strong>Understand</strong><br/>Task, metric, readiness.</div>
+      <div class="bench-flow-step" data-stage="Scope"><strong>Scope</strong><br/>Full, smoke, or selected groups.</div>
+      <div class="bench-flow-step" data-stage="Preview"><strong>Preview</strong><br/>Prompt, media, ground truth.</div>
+      <div class="bench-flow-step" data-stage="Run"><strong>Run</strong><br/>Dispatch selected model.</div>
+      <div class="bench-flow-step" data-stage="Review"><strong>Review</strong><br/>Leaderboard and traces.</div>
+      <div class="bench-flow-step" data-stage="Export"><strong>Export</strong><br/>HTML, PPTX, trace repo.</div>
+    </div>
+
+    <div id="benchGatePanel" class="bench-gate-panel" style="display:none;">
+      <div class="bench-gate-head">
+        <div>
+          <h3>RF100-VL Gate 1 interim</h3>
+          <div id="benchGateSummary" class="hint">Loading partial benchmark state...</div>
+        </div>
+        <a id="benchGateReportLink" class="bench-ghost-link" href="/benchmark/gate_report/latest" target="_blank">Open report</a>
+      </div>
+      <div id="benchGateStats" class="bench-gate-grid"></div>
+      <div id="benchGateAirSupport" class="bench-gate-note"></div>
+    </div>
+
+    <div id="benchAnalysisPanel" class="bench-analysis" style="display:none;">
+      <div class="bench-analysis-grid">
+        <div>
+          <h3 style="margin:0 0 8px; font-size:14px; color:#475569;">Source analysis</h3>
+          <div class="kv" id="benchAnalysisKv"></div>
+          <div id="benchReadinessBlockers" style="margin-top:10px;"></div>
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px; font-size:14px; color:#475569;">Dataset preview</h3>
+          <div id="benchPreviewSummary" class="hint">Load preview to inspect prompts and ground truth.</div>
+          <div id="benchPreviewRows" class="bench-preview-list"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Advanced panel: the prior 5-knob form. Collapsed by default. -->
@@ -6922,8 +9213,18 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
         </div>
         <div class="bench-card">
           <h3>Run Configuration</h3>
+          <label>Scope</label>
+          <div class="bench-scope-controls" id="benchScopeControls">
+            <label><input type="radio" name="benchScopeMode" value="full" checked /> Full benchmark gate</label>
+            <label><input type="radio" name="benchScopeMode" value="smoke" /> Smoke subset</label>
+            <label><input type="radio" name="benchScopeMode" value="custom" /> Custom sample size</label>
+          </div>
           <label>Sample size: <span id="benchSampleSizeVal">1000</span></label>
           <input id="benchSampleSize" type="range" min="10" max="1000" step="10" value="1000" />
+          <label style="margin-top:10px;">Include groups (optional, comma-separated)</label>
+          <input id="benchIncludeGroups" value="" placeholder="leave blank for all groups" />
+          <label style="margin-top:10px;">Exclude groups (optional, comma-separated)</label>
+          <input id="benchExcludeGroups" value="" placeholder="leave blank for none" />
           <label style="margin-top:10px;">Concurrency: <span id="benchConcurrencyVal">8</span></label>
           <input id="benchConcurrency" type="range" min="1" max="16" step="1" value="8" />
           <label style="margin-top:10px;">Seed: <span id="benchSeedVal">42</span></label>
@@ -6951,7 +9252,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
       <div class="bench-hero">
         <div>
           <div class="num" id="benchAccuracy">--</div>
-          <div style="font-size:14px; color:#475569;">Lingo-Judge Accuracy</div>
+          <div id="benchMetricLabel" style="font-size:14px; color:#475569;">Lingo-Judge Accuracy</div>
         </div>
         <div class="ref-row">
           <span>Human (multi-frame) 96.6</span>
@@ -6980,6 +9281,9 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
       <div class="actions">
         <a id="benchReportLink" class="export-link" href="#" target="_blank">Open report</a>
         <a id="benchJsonLink" class="export-link" href="#" target="_blank">Download results.json</a>
+        <a id="benchLeaderboardLink" class="export-link" href="#" target="_blank">Leaderboard JSON</a>
+        <a id="benchTraceLink" class="export-link" href="#" target="_blank">Trace JSONL</a>
+        <a id="benchPptxLink" class="export-link" href="#" target="_blank">Executive PPTX</a>
       </div>
     </div>
   </div>
@@ -7245,8 +9549,12 @@ function benchRenderSnap(snap){
     ['reasoning trace', summary.reasoning_trace_pct!==undefined ? benchPct(summary.reasoning_trace_pct) : ''],
   ];
   el('benchProgressKv').innerHTML = rows.filter(([_,v])=>v).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
-  const acc = summary.overall_accuracy;
+  const isRf100 = (snap.adapter === 'rf100-vl') || String(snap.dataset||'').startsWith('rf100-vl');
+  if(el('benchMetricLabel')) el('benchMetricLabel').textContent = isRf100 ? 'COCO-style mAP' : 'Lingo-Judge Accuracy';
+  const acc = isRf100 ? (summary.map ?? summary.overall_accuracy) : summary.overall_accuracy;
   el('benchAccuracy').textContent = acc !== undefined && acc !== null ? (acc*100).toFixed(1)+'%' : '--';
+  if(snap.status === 'complete'){ benchSetStage('Review'); }
+  if(snap.status === 'error'){ benchSetStage('Run', true); }
   // Per-category chips
   const cats = summary.per_category || [];
   const chipsHtml = cats.map(c=>{
@@ -7329,7 +9637,7 @@ function benchRenderSnap(snap){
       score = r.judge_score!==null && r.judge_score!==undefined ? (r.judge_score*100).toFixed(0)+'%' : '';
     }
     const truncFlag = (r.judge_truncated_a || r.judge_truncated_b)
-      ? '<span class="trunc-flag" title="Judge input (standard mode) was truncated at 128 tokens (the protocol\'s hardcoded max_length=128 in benchmark/judge.py — more aggressive than DeBERTa\'s 512 architectural cap). Final answer may not have reached the judge.">⚠️ trunc</span>'
+      ? `<span class="trunc-flag" title="Judge input (standard mode) was truncated at 128 tokens (the protocol's hardcoded max_length=128 in benchmark/judge.py — more aggressive than DeBERTa's 512 architectural cap). Final answer may not have reached the judge.">⚠️ trunc</span>`
       : '';
     let thumbs = '';
     if(r.segment_id){
@@ -7360,6 +9668,9 @@ function benchRenderSnap(snap){
   if(snap.run_id){
     el('benchReportLink').href = '/benchmark/report/'+snap.run_id;
     el('benchJsonLink').href = '/benchmark/results/'+snap.run_id+'.json';
+    if(el('benchLeaderboardLink')) el('benchLeaderboardLink').href = '/benchmark/leaderboard/'+snap.run_id;
+    if(el('benchTraceLink')) el('benchTraceLink').href = '/benchmark/trace/'+snap.run_id+'.jsonl';
+    if(el('benchPptxLink')) el('benchPptxLink').href = '/benchmark/artifact/'+snap.run_id+'/artifacts/executive-summary.pptx';
   }
 }
 
@@ -7516,14 +9827,22 @@ async function benchStart(sample_size){
     // Phase J amendment: dual judge-mode A/B.
     const jmRadio = document.querySelector('input[name="benchJudgeMode"]:checked');
     const judge_mode = jmRadio ? jmRadio.value : 'standard';
+    const scope = benchScopePayload(sample_size);
+    if(sample_size!==undefined){
+      scope.mode = 'smoke';
+      scope.sample_size = sample_size;
+      scope.gate_run = false;
+    }
     const body = {
       dataset: dsValue,
       judge: el('benchJudge').value,
       judge_mode: judge_mode,
-      sample_size: sample_size!==undefined ? sample_size : Number(el('benchSampleSize').value),
+      sample_size: scope.sample_size,
       concurrency: Number(el('benchConcurrency').value),
       seed: Number(el('benchSeed').value),
       source_config: source_config,
+      scope: scope,
+      selected_model: el('benchModelSelect') ? el('benchModelSelect').value : '',
     };
     const j = await api('/benchmark/run', body);
     benchRunId = j.run_id;
@@ -7549,6 +9868,186 @@ document.getElementById('benchSmokeBtn').onclick = ()=>benchStart(5);
 let benchUrlResolution = null;       // {kind, dataset_config, display, ...}
 let benchHistoryCache = [];          // raw array from /benchmark/history
 let benchUrlDebounce = null;
+let benchAnalysisCache = null;
+let benchPreviewCache = null;
+
+function benchSetStage(activeStage, blocked=false){
+  document.querySelectorAll('.bench-flow-step').forEach(step=>{
+    const isActive = step.dataset.stage === activeStage;
+    step.classList.toggle('active', isActive && !blocked);
+    step.classList.toggle('blocked', isActive && blocked);
+  });
+}
+
+function benchSplitGroups(value){
+  return String(value||'').split(',').map(s=>s.trim()).filter(Boolean);
+}
+
+function benchScopePayload(sampleOverride){
+  const modeEl = document.querySelector('input[name="benchScopeMode"]:checked');
+  const mode = modeEl ? modeEl.value : 'full';
+  const sample = sampleOverride!==undefined ? sampleOverride : Number(el('benchSampleSize').value);
+  return {
+    mode: mode,
+    sample_size: mode === 'full' ? 0 : (mode === 'smoke' ? 5 : sample),
+    include_groups: benchSplitGroups(el('benchIncludeGroups')?.value),
+    exclude_groups: benchSplitGroups(el('benchExcludeGroups')?.value),
+    gate_run: mode === 'full',
+    download: true,
+    hf_repo: 'probicheaux/rf100-vl',
+  };
+}
+
+function benchRenderAnalysis(analysis){
+  benchAnalysisCache = analysis;
+  const panel = el('benchAnalysisPanel');
+  if(panel) panel.style.display = 'block';
+  const summary = analysis.summary || {};
+  const ready = analysis.readiness || {};
+  const rows = [
+    ['adapter', analysis.adapter || ''],
+    ['task', summary.task || ''],
+    ['metric', summary.metric || ''],
+    ['dataset', summary.dataset || ''],
+    ['groups', ready.expected_groups ? `${ready.groups||0}/${ready.expected_groups}` : String(ready.groups||'')],
+    ['images', ready.images!=null ? String(ready.images) : ''],
+    ['path', ready.path || ''],
+  ];
+  el('benchAnalysisKv').innerHTML = rows.filter(([_,v])=>v).map(([k,v])=>`<div>${esc(k)}</div><div>${esc(v)}</div>`).join('');
+  const blockers = ready.blockers || [];
+  if(blockers.length){
+    el('benchReadinessBlockers').innerHTML = `<div class="bench-blockers"><strong>Readiness blockers</strong><ul>${blockers.map(b=>`<li>${esc(b)}</li>`).join('')}</ul></div>`;
+    benchSetStage('Understand', true);
+  } else {
+    el('benchReadinessBlockers').innerHTML = '<div class="hint" style="color:#76B900;">Ready for preview and run.</div>';
+    benchSetStage('Scope');
+  }
+}
+
+function benchRenderPreview(data){
+  benchPreviewCache = data;
+  const total = data.total || 0;
+  const groups = data.group_count || 0;
+  const blockers = data.blockers || [];
+  if(blockers.length){
+    el('benchPreviewSummary').innerHTML = `<div class="bench-blockers"><strong>Preview blocked</strong><ul>${blockers.map(b=>`<li>${esc(b)}</li>`).join('')}</ul></div>`;
+    el('benchPreviewRows').innerHTML = '';
+    benchSetStage('Preview', true);
+    return;
+  }
+  el('benchPreviewSummary').textContent = `${total} rows across ${groups} groups. Showing ${Math.min((data.preview||[]).length, 20)} preview rows.`;
+  el('benchPreviewRows').innerHTML = (data.preview||[]).map(r=>{
+    const gt = r.ground_truth_count ? `${r.ground_truth_count} GT boxes` : benchClipText((r.references||[''])[0]||'', 100);
+    return `<div class="bench-preview-row"><strong>${esc(r.question_id||'')}</strong><br/>
+      <span>${esc(r.dataset_name || r.category || '')}</span><br/>
+      <span>${esc(benchClipText(r.question||'', 180))}</span><br/>
+      <span style="color:#64748b;">${esc(gt)}</span></div>`;
+  }).join('') || '<div class="hint">No preview rows available.</div>';
+  benchSetStage('Preview');
+}
+
+function benchGateInt(v){
+  const n = Number(v || 0);
+  return Number.isFinite(n) ? Math.round(n).toLocaleString() : '0';
+}
+
+function benchGatePct(v){
+  const n = Number(v);
+  return Number.isFinite(n) ? (n * 100).toFixed(1) + '%' : '--';
+}
+
+function benchGateEta(v){
+  const n = Number(v);
+  if(!Number.isFinite(n) || n < 0) return 'n/a';
+  if(n < 1) return Math.round(n * 60) + 'm';
+  return n.toFixed(1) + 'h';
+}
+
+function benchRenderGateReport(payload){
+  const panel = el('benchGatePanel');
+  if(!panel) return;
+  panel.style.display = 'block';
+  const ag = payload.aggregates || {};
+  const c3 = ag.c3 || {};
+  const cr2 = ag.cr2_productive || {};
+  const waste = ag.cr2_waste || {};
+  const air = payload.air_support || {};
+  const generated = payload.generated_epoch ? new Date(Number(payload.generated_epoch) * 1000).toLocaleString() : '';
+  el('benchGateSummary').textContent = generated
+    ? `Partial RF100-VL status generated ${generated}. Quality comparisons remain restricted to matched trace rows.`
+    : 'Partial RF100-VL status. Quality comparisons remain restricted to matched trace rows.';
+  el('benchGateStats').innerHTML = [
+    ['C3 coverage', benchGatePct(c3.pct), `${benchGateInt(c3.done)} / ${benchGateInt(c3.total)} images`],
+    ['C3 ETA', benchGateEta(c3.eta_h), `${benchGateInt(c3.rate_h)} images/hour`],
+    ['CR2 useful coverage', benchGatePct(cr2.pct), `${benchGateInt(cr2.done)} / ${benchGateInt(cr2.total)} images`],
+    ['CR2 stuck/waste lanes', benchGateInt(waste.lanes), `${benchGateInt(waste.errors)} errors observed`],
+  ].map(([label,value,sub])=>`<div class="bench-gate-stat"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div><div class="hint">${esc(sub)}</div></div>`).join('');
+  const decision = air.decision || 'hold';
+  const recs = (air.recommendations || []).slice(0, 3).map(r=>`<li>${esc(r)}</li>`).join('');
+  const note = el('benchGateAirSupport');
+  note.classList.toggle('hold', decision === 'hold');
+  note.innerHTML = `<strong>Air support decision: ${esc(decision)}</strong><ul>${recs}</ul>`;
+  const link = el('benchGateReportLink');
+  if(link) link.href = '/benchmark/gate_report/latest';
+}
+
+async function benchLoadGateReport(){
+  try{
+    const r = await fetch('/benchmark/gate_report/latest.json');
+    const payload = await r.json();
+    if(payload.error){ throw new Error(payload.error); }
+    benchRenderGateReport(payload);
+    benchSetStage('Review');
+  }catch(e){
+    const panel = el('benchGatePanel');
+    if(panel) panel.style.display = 'block';
+    el('benchGateSummary').textContent = 'Gate report unavailable: '+e.message;
+    el('benchGateStats').innerHTML = '';
+    const note = el('benchGateAirSupport');
+    note.classList.add('hold');
+    note.textContent = 'No Gate 1 status snapshot is available on this host.';
+    benchSetStage('Review', true);
+  }
+}
+
+async function benchAnalyzeSource(){
+  const url = (el('benchUrlInput').value||'').trim() || 'lingoqa';
+  try{
+    const resp = await api('/benchmark/analyze_source', {url});
+    benchRenderAnalysis(resp);
+    if(resp.dataset_config && resp.dataset_config.id){
+      const ds = el('benchDataset');
+      let opt = Array.from(ds.options).find(o=>o.value===resp.dataset_config.id);
+      if(!opt){
+        opt = document.createElement('option');
+        opt.value = resp.dataset_config.id;
+        ds.appendChild(opt);
+      }
+      opt.textContent = resp.dataset_config.name || resp.dataset_config.id;
+      ds.value = resp.dataset_config.id;
+    }
+  }catch(e){
+    el('benchDropzoneStatus').textContent = 'Analyze failed: '+e.message;
+    benchSetStage('Understand', true);
+  }
+}
+
+async function benchLoadPreview(){
+  try{
+    const body = {
+      dataset: el('benchDataset').value,
+      source_config: benchUrlResolution && benchUrlResolution.dataset_config ? benchUrlResolution.dataset_config : null,
+      scope: benchScopePayload(),
+      preview_size: 5,
+    };
+    if(body.source_config){ body.source_config = {...body.source_config, ...body.scope}; }
+    const data = await api('/benchmark/load', body);
+    benchRenderPreview(data);
+  }catch(e){
+    el('benchPreviewSummary').textContent = 'Preview failed: '+e.message;
+    benchSetStage('Preview', true);
+  }
+}
 
 function benchSetChip(text, kind){
   const chip = el('benchUrlChip');
@@ -7610,9 +10109,11 @@ async function benchResolveUrl(raw){
         ds.value = cfg.id;
       }
     }
+    await benchAnalyzeSource();
   }catch(e){
     benchSetChip('? resolve failed', 'unknown');
     el('benchDropzoneStatus').textContent = 'Resolve failed: '+e.message;
+    benchSetStage('Source', true);
   }
 }
 
@@ -7760,11 +10261,18 @@ document.getElementById('benchRunBtn').onclick = async function(){
       if(!confirm('URL kind unknown — run with the cached LingoQA dataset anyway?')) return;
     }
   }
+  if(!benchAnalysisCache){
+    await benchAnalyzeSource();
+  }
   // Sync the selected model into the hidden auto-detected field so existing
-  // /benchmark/run flow keeps using auto-detection on the local NIM. Multi-NIM
-  // dispatch is a future hop; for now we surface the choice in the UI.
+  // /benchmark/run flow can dispatch the selected local or discovered endpoint.
+  benchSetStage('Run');
   benchStart();
 };
+const benchAnalyzeBtn = document.getElementById('benchAnalyzeBtn');
+if(benchAnalyzeBtn){ benchAnalyzeBtn.onclick = benchAnalyzeSource; }
+const benchLoadPreviewBtn = document.getElementById('benchLoadPreviewBtn');
+if(benchLoadPreviewBtn){ benchLoadPreviewBtn.onclick = benchLoadPreview; }
 const benchRerunLastBtn = document.getElementById('benchRerunLastBtn');
 if(benchRerunLastBtn){
   benchRerunLastBtn.onclick = ()=>{
@@ -7828,6 +10336,8 @@ if(benchToggleHistBtn){
     benchToggleHistBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
   };
 }
+const benchGateReportBtn = document.getElementById('benchGateReportBtn');
+if(benchGateReportBtn){ benchGateReportBtn.onclick = benchLoadGateReport; }
 </script>
 </body>
 </html>
@@ -7869,6 +10379,18 @@ class Handler(BaseHTTPRequestHandler):
                 "ready": bool(ready),
                 "path": str(base) if base else None,
             }]
+            rf_profile = _rf100_discover(download=False)
+            out_datasets.append({
+                "id": "rf100-vl",
+                "name": "RF100-VL (Roboflow 100 Vision Language)",
+                "rows": rf_profile.get("image_count") or None,
+                "groups": rf_profile.get("group_count") or 0,
+                "expected_groups": rf_profile.get("expected_groups"),
+                "ready": bool(rf_profile.get("ready")),
+                "full_gate_ready": bool(rf_profile.get("full_gate_ready")),
+                "path": rf_profile.get("path"),
+                "blockers": rf_profile.get("blockers") or [],
+            })
             # Session-resolved datasets — populated by /benchmark/resolve_url.
             with BENCHMARK_LOCK:
                 resolved = dict(BENCHMARK_STATE.get("resolved_datasets") or {})
@@ -7889,6 +10411,11 @@ class Handler(BaseHTTPRequestHandler):
                 "name": "Lingo-Judge (DeBERTa-v3-base, Wayve)",
                 "loaded": bool(BENCHMARK_STATE.get("judge_loaded")),
                 "error": BENCHMARK_STATE.get("judge_error"),
+            }, {
+                "id": "coco-ap",
+                "name": "COCO-style AP evaluator (RF100-VL)",
+                "loaded": True,
+                "error": None,
             }])
         elif self.path == "/benchmark/judge_protocol_note":
             # Lazy-fetch documentation: explains the 128 vs 512 distinction so
@@ -7958,11 +10485,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(_benchmark_available_models())
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=500)
+        elif self.path == "/benchmark/gate_report/latest.json":
+            try:
+                self.send_json(_rf100_gate_interim_payload())
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
+        elif self.path == "/benchmark/gate_report/latest":
+            try:
+                self.send_text(benchmark_render_rf100_gate_interim(), "text/html")
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
         elif self.path == "/benchmark/history":
             try:
                 self.send_json(_benchmark_history_load())
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=500)
+        elif self.path.startswith("/benchmark/leaderboard/"):
+            run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
+            snap = benchmark_get(run_id)
+            if not snap:
+                self.send_error(404)
+                return
+            self.send_json(_benchmark_leaderboard(snap))
+        elif self.path.startswith("/benchmark/trace/") and self.path.endswith(".jsonl"):
+            run_id = self.path.rsplit("/", 1)[-1][:-6]
+            trace_path = BENCHMARK_RUN_ROOT / run_id / "trace.jsonl"
+            if not trace_path.exists():
+                snap = benchmark_get(run_id)
+                if snap:
+                    _benchmark_write_trace_jsonl(run_id, snap)
+            if not trace_path.exists():
+                self.send_error(404)
+                return
+            self.send_file(trace_path, "application/jsonl", download_name=trace_path.name)
         elif self.path.startswith("/benchmark/status/"):
             run_id = self.path.rsplit("/", 1)[-1].split("?")[0]
             snap = benchmark_get(run_id)
@@ -7992,20 +10547,39 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_text(benchmark_render_report(run_id), "text/html")
         elif self.path.startswith("/benchmark/artifact/"):
-            # /benchmark/artifact/<run_id>/<model_safe>/<question_id>/<filename>
+            # Supports both durable run artifacts:
+            #   /benchmark/artifact/<run_id>/artifacts/report.html
+            #   /benchmark/artifact/<run_id>/artifacts/executive-summary.pptx
+            # and legacy traceability images:
+            #   /benchmark/artifact/<run_id>/<model_safe>/<question_id>/<filename>
             tail = urllib.parse.urlparse(self.path).path[len("/benchmark/artifact/"):]
             parts = [urllib.parse.unquote(p) for p in tail.split("/") if p]
+            if len(parts) >= 2:
+                run_id = parts[0]
+                rel = Path(*parts[1:])
+                artifact = BENCHMARK_RUN_ROOT / run_id / rel
+                try:
+                    resolved = artifact.resolve()
+                    root_resolved = (BENCHMARK_RUN_ROOT / run_id).resolve()
+                    if root_resolved not in resolved.parents and resolved != root_resolved:
+                        self.send_error(404)
+                        return
+                except Exception:
+                    self.send_error(404)
+                    return
+                if resolved.exists() and resolved.is_file():
+                    ctype = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+                    self.send_file(resolved, ctype, download_name=resolved.name)
+                    return
             if len(parts) != 4:
                 self.send_error(404)
                 return
             run_id, model_safe, qid, fname = parts
-            # Defensive: filename whitelist only.
             if fname not in ("frame_strip.png", "frame_gif.gif", "ui_card.png", "reasoning.png"):
                 self.send_error(404)
                 return
             safe_model = _safe_model_dir(model_safe)
             artifact = TRACEABILITY_ROOT / run_id / safe_model / qid / fname
-            # Resolve and sandbox under TRACEABILITY_ROOT to avoid path traversal.
             try:
                 resolved = artifact.resolve()
                 root_resolved = TRACEABILITY_ROOT.resolve()
@@ -8173,6 +10747,14 @@ class Handler(BaseHTTPRequestHandler):
                     "url": "/api/export/" + urllib.parse.quote(path.name),
                     "bytes": path.stat().st_size,
                 })
+            elif self.path == "/benchmark/analyze_source":
+                url = str(payload.get("url") or payload.get("source") or "")
+                if not url:
+                    self.send_json({"error": "url required"}, status=400)
+                    return
+                self.send_json(_benchmark_analyze_source(url))
+            elif self.path == "/benchmark/load":
+                self.send_json(_benchmark_load_preview(payload))
             elif self.path == "/benchmark/run":
                 dataset_id = str(payload.get("dataset") or "lingoqa-official")
                 judge_id = str(payload.get("judge") or "lingo-judge")
@@ -8190,10 +10772,22 @@ class Handler(BaseHTTPRequestHandler):
                 source_config = payload.get("source_config")
                 if not isinstance(source_config, dict):
                     source_config = None
+                scope = payload.get("scope")
+                if isinstance(scope, dict):
+                    source_config = {**(source_config or {}), **scope}
+                    if scope.get("mode") == "full":
+                        sample_size = 0
+                    elif scope.get("mode") == "smoke":
+                        sample_size = int(scope.get("sample_size") or 5)
+                    elif scope.get("sample_size") is not None:
+                        sample_size = int(scope.get("sample_size") or sample_size)
+                selected_model = str(payload.get("selected_model") or "").strip() or None
                 run_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+                adapter = _benchmark_adapter_for_dataset(dataset_id)
                 _benchmark_update(
                     run_id,
                     status="queued",
+                    adapter=adapter,
                     dataset=dataset_id,
                     judge=judge_id,
                     judge_mode=judge_mode,
@@ -8201,25 +10795,27 @@ class Handler(BaseHTTPRequestHandler):
                     concurrency=concurrency,
                     seed=seed,
                     source_config=source_config,
+                    selected_model=selected_model,
                     results=[],
                     progress={"done": 0, "total": 0, "errors": 0},
                 )
                 thread = threading.Thread(
-                    target=run_lingoqa_benchmark,
-                    args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
-                    kwargs={"judge_mode": judge_mode},
+                    target=run_benchmark_worker,
+                    args=(run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config, judge_mode, selected_model),
                     daemon=True,
                 )
                 thread.start()
                 self.send_json({
                     "ok": True,
                     "run_id": run_id,
+                    "adapter": adapter,
                     "dataset": dataset_id,
                     "judge": judge_id,
                     "judge_mode": judge_mode,
                     "sample_size": sample_size,
                     "concurrency": concurrency,
                     "seed": seed,
+                    "selected_model": selected_model,
                 })
             elif self.path.startswith("/benchmark/rerun/"):
                 # POST /benchmark/rerun/<run_id> — clone params from history and fire a new run.
@@ -8240,15 +10836,18 @@ class Handler(BaseHTTPRequestHandler):
                 source_config = prior_snap.get("source_config")
                 if not isinstance(source_config, dict):
                     source_config = None
+                selected_model = str(prior_snap.get("selected_model") or hist.get("model") or "").strip() or None
                 # Carry the judge_mode forward from the prior run when
                 # available; default to standard otherwise.
                 judge_mode = str(prior_snap.get("judge_mode") or hist.get("judge_mode") or "standard")
                 if judge_mode not in ("standard", "answer-only", "both"):
                     judge_mode = "standard"
+                adapter = _benchmark_adapter_for_dataset(dataset_id)
                 new_run_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
                 _benchmark_update(
                     new_run_id,
                     status="queued",
+                    adapter=adapter,
                     dataset=dataset_id,
                     judge=judge_id,
                     judge_mode=judge_mode,
@@ -8256,14 +10855,14 @@ class Handler(BaseHTTPRequestHandler):
                     concurrency=concurrency,
                     seed=seed,
                     source_config=source_config,
+                    selected_model=selected_model,
                     results=[],
                     progress={"done": 0, "total": 0, "errors": 0},
                     rerun_of=old_run_id,
                 )
                 thread = threading.Thread(
-                    target=run_lingoqa_benchmark,
-                    args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config),
-                    kwargs={"judge_mode": judge_mode},
+                    target=run_benchmark_worker,
+                    args=(new_run_id, dataset_id, judge_id, sample_size, concurrency, seed, source_config, judge_mode, selected_model),
                     daemon=True,
                 )
                 thread.start()
@@ -8271,12 +10870,14 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "run_id": new_run_id,
                     "rerun_of": old_run_id,
+                    "adapter": adapter,
                     "dataset": dataset_id,
                     "judge": judge_id,
                     "judge_mode": judge_mode,
                     "sample_size": sample_size,
                     "concurrency": concurrency,
                     "seed": seed,
+                    "selected_model": selected_model,
                 })
             elif self.path == "/benchmark/rejudge":
                 # Re-score an existing run through ONE alternate judge method.

@@ -270,18 +270,16 @@ function parseAspectRatio(aspectRatio) {
   return [16, 9];
 }
 
-function normalizeNimFrameCount(value) {
-  const requested = Math.max(25, Math.round(Number(value ?? 121)));
-  const remainder = (requested - 1) % 4;
-  if (remainder === 0) return requested;
-  return requested + (4 - remainder);
+function finiteOrFallback(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function payloadParamsForNim(params = {}) {
   return {
     resolution: String(params.resolution ?? "256"),
-    num_output_frames: normalizeNimFrameCount(params.num_frames ?? params.frames_count ?? 121),
-    fps: Math.max(1, Number(params.fps ?? params.frames_per_sec ?? 24))
+    num_output_frames: finiteOrFallback(params.num_frames ?? params.frames_count, 121),
+    fps: finiteOrFallback(params.fps ?? params.frames_per_sec, 24)
   };
 }
 

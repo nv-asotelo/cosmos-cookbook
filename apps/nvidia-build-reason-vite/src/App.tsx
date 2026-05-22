@@ -164,6 +164,24 @@ type MediaState = {
   dataUrl: string;
 };
 
+type ImageSize = {
+  width: number;
+  height: number;
+};
+
+type SpatialMark = {
+  id: string;
+  kind: "point" | "bbox";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  centerX: number;
+  centerY: number;
+  label: string;
+  sequence: number;
+};
+
 type ExampleItem = {
   id: string;
   title: string;
@@ -588,6 +606,188 @@ function parseReasoning(content?: string, explicitReasoning?: string) {
   return { reasoning, answer, steps };
 }
 
+const POINT_KEYS = ["point_2d", "point", "position", "coordinate", "coordinates"];
+const BBOX_KEYS = ["bbox", "bbox_2d", "box", "box_2d", "bounding_box"];
+const TRAJECTORY_KEYS = ["annotations", "detections", "objects", "points", "steps", "trajectory"];
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function numberArray(value: unknown): number[] | null {
+  if (Array.isArray(value)) {
+    const numbers = value.map((item) => Number(item));
+    return numbers.every((item) => Number.isFinite(item)) ? numbers : null;
+  }
+  if (isObjectRecord(value)) {
+    const x = Number(value.x ?? value.left ?? value.cx);
+    const y = Number(value.y ?? value.top ?? value.cy);
+    const width = Number(value.width ?? value.w);
+    const height = Number(value.height ?? value.h);
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(width) && Number.isFinite(height)) {
+      return [x, y, width, height];
+    }
+    if (Number.isFinite(x) && Number.isFinite(y)) return [x, y];
+  }
+  return null;
+}
+
+function parseJsonCandidate(candidate: string): unknown | null {
+  const trimmed = candidate
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function parseResponseJsonPayload(text: string): unknown | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  if (fenced.length > 0) {
+    const parsedFence = parseJsonCandidate(fenced[fenced.length - 1][1]);
+    if (parsedFence !== null) return parsedFence;
+  }
+
+  const direct = parseJsonCandidate(trimmed);
+  if (direct !== null) return direct;
+
+  const firstObject = text.indexOf("{");
+  const lastObject = text.lastIndexOf("}");
+  if (firstObject >= 0 && lastObject > firstObject) {
+    const parsedObject = parseJsonCandidate(text.slice(firstObject, lastObject + 1));
+    if (parsedObject !== null) return parsedObject;
+  }
+
+  const firstArray = text.indexOf("[");
+  const lastArray = text.lastIndexOf("]");
+  if (firstArray >= 0 && lastArray > firstArray) return parseJsonCandidate(text.slice(firstArray, lastArray + 1));
+
+  return null;
+}
+
+function collectSpatialRecords(value: unknown, records: Record<string, unknown>[] = [], depth = 0) {
+  if (depth > 8) return records;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectSpatialRecords(item, records, depth + 1));
+    return records;
+  }
+  if (!isObjectRecord(value)) return records;
+
+  const hasSpatialField = [...POINT_KEYS, ...BBOX_KEYS].some((key) => value[key] !== undefined);
+  if (hasSpatialField) records.push(value);
+
+  for (const key of TRAJECTORY_KEYS) {
+    const nested = value[key];
+    if (nested !== undefined) collectSpatialRecords(nested, records, depth + 1);
+  }
+  return records;
+}
+
+function scalePair(x: number, y: number, imageSize: ImageSize) {
+  if (Math.abs(x) <= 1 && Math.abs(y) <= 1) return [x * imageSize.width, y * imageSize.height];
+  return [x, y];
+}
+
+function normalizePoint(value: unknown, imageSize: ImageSize): [number, number] | null {
+  const numbers = numberArray(value);
+  if (!numbers || numbers.length < 2) return null;
+  const [x, y] = scalePair(numbers[0], numbers[1], imageSize);
+  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+}
+
+function normalizeBbox(key: string, value: unknown, imageSize: ImageSize): [number, number, number, number] | null {
+  const numbers = numberArray(value);
+  if (!numbers || numbers.length < 4) return null;
+  let [x, y, width, height] = numbers;
+  const normalized = numbers.every((item) => Math.abs(item) <= 1);
+  if (normalized) {
+    x *= imageSize.width;
+    width *= imageSize.width;
+    y *= imageSize.height;
+    height *= imageSize.height;
+  }
+  const likelyXyxy = key.includes("2d");
+  if (likelyXyxy) {
+    width = width - x;
+    height = height - y;
+  }
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return [x, y, width, height];
+}
+
+function spatialLabel(record: Record<string, unknown>, fallback: string) {
+  const value = record.label ?? record.category_name ?? record.name ?? record.class ?? record.description;
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function spatialSequence(record: Record<string, unknown>, fallback: number) {
+  const value = Number(record.sequence ?? record.step ?? record.index ?? record.id);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function hasSpatialPayload(text: string) {
+  const payload = parseResponseJsonPayload(text);
+  return payload !== null && collectSpatialRecords(payload).length > 0;
+}
+
+function parseSpatialMarks(text: string, imageSize: ImageSize) {
+  const payload = parseResponseJsonPayload(text);
+  const records = payload === null ? [] : collectSpatialRecords(payload);
+  const marks: SpatialMark[] = [];
+  records.forEach((record, index) => {
+    const sequence = spatialSequence(record, index + 1);
+    const label = spatialLabel(record, `point ${sequence}`);
+
+    for (const key of POINT_KEYS) {
+      const point = normalizePoint(record[key], imageSize);
+      if (!point) continue;
+      const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
+      const [centerX, centerY] = point;
+      marks.push({
+        id: `${key}-${index}-point`,
+        kind: "point",
+        x: centerX - side / 2,
+        y: centerY - side / 2,
+        width: side,
+        height: side,
+        centerX,
+        centerY,
+        label,
+        sequence
+      });
+      break;
+    }
+
+    for (const key of BBOX_KEYS) {
+      const bbox = normalizeBbox(key, record[key], imageSize);
+      if (!bbox) continue;
+      const [x, y, width, height] = bbox;
+      marks.push({
+        id: `${key}-${index}-bbox`,
+        kind: "bbox",
+        x,
+        y,
+        width,
+        height,
+        centerX: x + width / 2,
+        centerY: y + height / 2,
+        label,
+        sequence
+      });
+      break;
+    }
+  });
+  return marks.slice(0, 160);
+}
+
 function makeStreamState(model: string): StreamState {
   return {
     phase: "waiting_first_token",
@@ -814,7 +1014,7 @@ export default function App() {
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
-  const [reasoningExpanded, setReasoningExpanded] = useState(true);
+  const [reasoningExpanded, setReasoningExpanded] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [media, setMedia] = useState<MediaState | null>(null);
   const [userPrompt, setUserPrompt] = useState(DEFAULT_USER_PROMPT);
@@ -1119,7 +1319,7 @@ export default function App() {
     setPresencePenalty(DEFAULT_PRESENCE_PENALTY);
     setSeed(DEFAULT_SEED);
     setParametersOpen(false);
-    setReasoningExpanded(true);
+    setReasoningExpanded(false);
     setOutputTab("preview");
     setStatus("Ready");
     setResult(null);
@@ -1142,7 +1342,7 @@ export default function App() {
     const initialStreamState = makeStreamState(model);
     setStreamState(initialStreamState);
     setOutputTab("preview");
-    setReasoningExpanded(true);
+    setReasoningExpanded(false);
     setStatus(statusForPhase("waiting_first_token"));
 
     let reasoning = "";
@@ -1778,6 +1978,7 @@ function ExperiencePanel({
             ) : (
               <PreviewOutput
                 isRunning={isRunning}
+                media={media}
                 parsedOutput={parsedOutput}
                 reasoningExpanded={reasoningExpanded}
                 result={result}
@@ -1923,8 +2124,90 @@ function ExampleModal({
   );
 }
 
+function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; text: string }) {
+  const [imageSize, setImageSize] = useState<ImageSize | null>(null);
+  const canParseSpatial = useMemo(() => hasSpatialPayload(text), [text]);
+  const marks = useMemo(() => (imageSize ? parseSpatialMarks(text, imageSize) : []), [imageSize, text]);
+  const points = marks.filter((mark) => mark.kind === "point");
+  const boxes = marks.filter((mark) => mark.kind === "bbox");
+
+  if (!media || media.kind !== "image" || !canParseSpatial) return null;
+
+  return (
+    <article className="spatialOverlayCard">
+      <div className="spatialTopline">
+        <div>
+          <p className="responseLabel">Response JSON boxes</p>
+          <h3>Point and bbox fields rendered from the final answer only</h3>
+        </div>
+        <span>
+          {points.length} points · {boxes.length} boxes
+        </span>
+      </div>
+      <div className="spatialCanvas">
+        <img
+          className="spatialImage"
+          src={media.previewUrl}
+          alt={`${media.name} with generated point and box overlay`}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            setImageSize({
+              width: image.naturalWidth || image.clientWidth,
+              height: image.naturalHeight || image.clientHeight
+            });
+          }}
+        />
+        {imageSize && marks.length > 0 ? (
+          <svg
+            aria-hidden="true"
+            className="spatialSvg"
+            preserveAspectRatio="xMidYMid meet"
+            viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
+          >
+            {points.length > 1 ? (
+              <polyline className="spatialPath" points={points.map((point) => `${point.centerX},${point.centerY}`).join(" ")} />
+            ) : null}
+            {marks.map((mark) => (
+              <g key={mark.id}>
+                <rect
+                  className={mark.kind === "point" ? "spatialPointBox" : "spatialBbox"}
+                  height={mark.height}
+                  rx={Math.max(4, Math.min(mark.width, mark.height) * 0.08)}
+                  width={mark.width}
+                  x={mark.x}
+                  y={mark.y}
+                />
+                {mark.kind === "point" ? <circle className="spatialPointDot" cx={mark.centerX} cy={mark.centerY} r={5} /> : null}
+                <text className="spatialPointLabel" x={mark.x + 8} y={Math.max(18, mark.y - 8)}>
+                  {mark.sequence}
+                </text>
+              </g>
+            ))}
+          </svg>
+        ) : null}
+      </div>
+      {marks.length > 0 ? (
+        <ol className="spatialSequence" aria-label="Generated coordinate sequence">
+          {marks.map((mark) => (
+            <li className="spatialSequenceItem" key={`sequence-${mark.id}`}>
+              <strong>#{mark.sequence}</strong>
+              <span>{mark.label}</span>
+              <code>
+                {Math.round(mark.centerX)}, {Math.round(mark.centerY)}
+              </code>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="spatialLoading">Loading image dimensions for overlay alignment...</p>
+      )}
+    </article>
+  );
+}
+
 function PreviewOutput({
   isRunning,
+  media,
   parsedOutput,
   reasoningExpanded,
   result,
@@ -1932,6 +2215,7 @@ function PreviewOutput({
   streamPhase
 }: {
   isRunning: boolean;
+  media: MediaState | null;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
   reasoningExpanded: boolean;
   result: ApiResult | null;
@@ -1974,8 +2258,16 @@ function PreviewOutput({
 
   if (result?.content || result?.reasoning) {
     const hasAnswer = Boolean(parsedOutput.answer || result.content);
+    const answerText = parsedOutput.answer || result.content || "";
     return (
       <div className="responseStack">
+        <SpatialTrajectoryOverlay media={media} text={answerText} />
+        {hasAnswer ? (
+          <article className={isRunning ? "answer streamingAnswer" : "answer"}>
+            <p className="responseLabel">Response</p>
+            <FormattedText text={answerText || "No final response returned."} />
+          </article>
+        ) : null}
         {parsedOutput.reasoning ? (
           <ReasoningCard
             complete={!isRunning || streamPhase === "answer" || streamPhase === "complete"}
@@ -1985,12 +2277,6 @@ function PreviewOutput({
             steps={parsedOutput.steps}
             setExpanded={setReasoningExpanded}
           />
-        ) : null}
-        {hasAnswer ? (
-          <article className={isRunning ? "answer streamingAnswer" : "answer"}>
-            <p className="responseLabel">Response</p>
-            <FormattedText text={parsedOutput.answer || result.content || "No final response returned."} />
-          </article>
         ) : null}
       </div>
     );

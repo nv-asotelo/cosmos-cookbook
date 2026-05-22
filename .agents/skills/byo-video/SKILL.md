@@ -105,6 +105,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 
 - `references/byo-video-runbook.md`: complete deployment protocol, model picker,
   NIM-local operations, runtime monitor, and recovery rules.
+- `references/rf100-air-support-runbook.md`: RF100-VL large-batch SRE guidance
+  for shard role discovery, forward/reverse lanes, throughput decay, evidence
+  freeze, deletion-safety updates, and user check-ins.
 - `scripts/byo_video_setup.py`: remote setup and launch script.
 - `scripts/byo_video_batch_inference.py`: browser batch-inference frontend for HF
   dataset selection, concurrent inference, FiftyOne launch/result writeback,
@@ -134,6 +137,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 
 - Do all credential checks before provisioning or model downloads.
 - Never put HuggingFace, NGC, or Brev credentials in command-line arguments.
+- For RF100-VL air support, classify every active Brev by current-run metadata,
+  results pointers, process state, and model endpoint before using the instance
+  name. Former CR2 hosts may be reverse Cosmos-3-Super-Reasoner lanes.
 - For NIM-local mode, refresh `nim_catalog.py upstream` before presenting a model
   list, and warn if upstream docs include a model missing from `KNOWN_VLM_NIMS`.
 - If a remote setup fails, capture the phase, instance, and one-line error in

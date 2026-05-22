@@ -1179,6 +1179,140 @@ select {
   pointer-events: auto;
 }
 
+.spatialOverlayCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #070707;
+  padding: 14px;
+}
+
+.spatialTopline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.spatialTopline h3 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.spatialTopline > span {
+  flex: 0 0 auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.spatialCanvas {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #000000;
+}
+
+.spatialImage {
+  display: block;
+  width: 100%;
+  max-height: min(52vh, 520px);
+  object-fit: contain;
+}
+
+.spatialSvg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.spatialPath {
+  fill: none;
+  stroke: var(--aqua);
+  stroke-dasharray: 8 6;
+  stroke-linecap: round;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spatialPointBox,
+.spatialBbox {
+  fill: rgb(118 185 0 / 10%);
+  stroke: var(--green);
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.spatialBbox {
+  fill: rgb(0 141 255 / 8%);
+  stroke: var(--blue);
+}
+
+.spatialPointDot {
+  fill: var(--aqua);
+  stroke: #000000;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.spatialPointLabel {
+  fill: #ffffff;
+  font-size: 18px;
+  font-weight: 800;
+  paint-order: stroke;
+  stroke: #000000;
+  stroke-linejoin: round;
+  stroke-width: 5;
+}
+
+.spatialSequence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.spatialSequenceItem {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: #101010;
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.spatialSequenceItem strong {
+  color: var(--green);
+}
+
+.spatialSequenceItem code {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.spatialLoading {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .replaceMediaButton {
   display: inline-flex;
   min-height: 34px;
