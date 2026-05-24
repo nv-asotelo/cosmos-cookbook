@@ -35,6 +35,37 @@ Prefer running `BREV_INSTANCE_NAME=<name> python3 /tmp/rf100_brev_status.py`
 when the helper is present. That helper should report lane role, traversal
 direction, shard index/count, current job, health, throughput, and action hints.
 
+## Nemoclaw/OpenClaw Brev Experiment
+
+Use this mode only when the BYO-video picker resolves `BREV_PROVISIONER=nemoclaw`.
+It is an H200-only RF100-VL air-support experiment for
+`nvidia/Cosmos3-Super-Reasoner` served by vLLM. The launchable URL is:
+`https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Azt0aYgVNFEuz7opyx3gscmowS`.
+
+Before inference starts, Nemoclaw must:
+
+- confirm Brev login, H200 GPU, disk headroom, HF token presence, and Roboflow
+  key presence without printing secret values
+- confirm `/v1/models` reports Cosmos3-Super-Reasoner
+- read horde `10.57.233.243` report/artifact state
+- build a completed-key manifest keyed by `dataset_name`, `image_id`,
+  `question_id`, and `model_id`
+- infer only missing RF100-VL rows and write versioned artifacts, never
+  overwriting existing horde evidence in place
+
+Nemoclaw may autonomously perform safe recovery: restart vLLM or the local
+runner, resume checkpoints, dedupe outputs, clean non-evidence logs, and reduce
+concurrency after repeated errors. It must escalate to Captain before deleting
+instances, provisioning more compute, changing model scope, deleting evidence,
+or overwriting horde artifacts.
+
+For a 12-hour smoke, run 48 observation windows at 15-minute cadence. Each
+Captain check-in must include Brev name, model, run id, rows done/remaining,
+throughput, ETA, GPU/disk, horde writeback status, duplicate count, newest error
+class, and corrective action. If Captain is disconnected, Nemoclaw continues
+writing `/tmp/nemoclaw_rf100_status.json` on the Brev and mirrors status to
+horde when reachable; the next check resumes from those files.
+
 ## Classify Current Job
 
 Classify by metadata first, then by model/process evidence, then by name as the

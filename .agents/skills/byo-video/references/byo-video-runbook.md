@@ -276,10 +276,20 @@ questions in a single call (see PICKER section below for the full call).
 - `{ label: "SSH target", description: "Provide user@host or IP — any GPU machine you can SSH into" }` → follow-up AskUserQuestion for host.
 - `{ label: "Local machine", description: "Run on this Mac — agent checks nvidia-smi locally first" }` → `DEPLOY_TARGET=local`.
 
+If Q3 answer is **New Brev instance**, fire one follow-up `AskUserQuestion` before spawning
+the observer:
+
+- `{ label: "Standard Brev (Recommended)", description: "Use the normal BYO-video Brev provisioning path." }` → `BREV_PROVISIONER=standard`.
+- `{ label: "Nemoclaw/OpenClaw Brev", description: "Use the Nemoclaw launchable and local agent supervision for long RF100-VL runs." }` → `BREV_PROVISIONER=nemoclaw`, `BREV_LAUNCHABLE_URL=https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Azt0aYgVNFEuz7opyx3gscmowS`.
+
+The Nemoclaw option is only valid for H200-class Cosmos3-Super-Reasoner / RF100-VL
+air-support experiments. If selected with a different model, ask the user to switch to
+`nvidia/Cosmos3-Super-Reasoner` (`MODEL_SIZE=C3-super`) or use Standard Brev.
+
 If the user wants to restart a specific stopped Brev instance, they pick **New Brev instance** and the observer's brev path probes `brev ls` itself at PHASE 2 — moving the brev dependency out of pre-checks and into the path that actually uses it.
 
 Once all answers are received, resolve `MODEL_ID`, `MODEL_SIZE`, `INFERENCE_BACKEND`,
-`DEPLOY_TARGET` per the answer→env var mapping table.
+`DEPLOY_TARGET`, and optional `BREV_PROVISIONER` per the answer→env var mapping table.
 
 If Q3 answer is "Existing Brev" or "SSH target", fire one follow-up `AskUserQuestion` to collect
 the instance name or host.
@@ -346,10 +356,30 @@ AskUserQuestion({
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
 | Q2 Model | Something else | Fire SOMETHING ELSE sub-picker (see below) |
-| Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` |
+| Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` · fire the New Brev provisioner follow-up below |
+| Q3 Follow-up | Standard Brev | `BREV_PROVISIONER=standard` |
+| Q3 Follow-up | Nemoclaw/OpenClaw Brev | `BREV_PROVISIONER=nemoclaw` · `BREV_LAUNCHABLE_URL=https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Azt0aYgVNFEuz7opyx3gscmowS` · require `MODEL_ID=nvidia/Cosmos3-Super-Reasoner`, `MODEL_SIZE=C3-super`, `INFERENCE_BACKEND=vllm`, H200 |
 | Q3 Env | Existing Brev | Follow-up AskUserQuestion: "Instance name?" → `DEPLOY_TARGET=brev:<name>` |
 | Q3 Env | SSH target | Follow-up AskUserQuestion: "user@host or IP?" → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
+
+**NEW BREV provisioner sub-picker** — fire immediately when Q3 is "New Brev instance":
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "New Brev type?",
+      header: "Brev",
+      multiSelect: false,
+      options: [
+        { label: "Standard Brev (Recommended)", description: "Normal BYO-video provisioning; no local OpenClaw supervision." },
+        { label: "Nemoclaw/OpenClaw Brev", description: "H200 launchable with local agent supervision for RF100-VL Cosmos3-Super-Reasoner smoke runs." }
+      ]
+    }
+  ]
+})
+```
 
 **SOMETHING ELSE sub-picker** — fire immediately when user selects "Something else" for Q2. Because `AskUserQuestion` caps at 4 options per question, fan out by family:
 
@@ -496,6 +526,8 @@ Inherited state (fill in actual values):
   MODEL_ID:            <model_id>
   MODEL_SIZE:          <model_size>
   INFERENCE_BACKEND:   <backend>
+  BREV_PROVISIONER:    <standard | nemoclaw | unset>
+  BREV_LAUNCHABLE_URL: <url when BREV_PROVISIONER=nemoclaw>
   RATE:                <rate_per_hour>
   PROVISION_START_TS:  <epoch_seconds>
 
@@ -549,11 +581,21 @@ When the task completion notification fires, OR when the progress loop detects a
 **HF_TOKEN:** Auto-read by the setup script from `~/.cache/huggingface/token` on the remote
 instance. Do NOT ask. Do NOT pass as a CLI arg.
 
+**Credential safety:** Never print, persist, or echo Hugging Face, Roboflow, NGC, Brev,
+or OpenAI secret values. Checks may report only `present` or `missing`. Redact token-like
+strings before writing progress, monitor, report, or failure JSON.
+
 **For `DEPLOY_TARGET=brev:new`:**
 1. Look up MODEL_SIZE in MODEL_GPU_REQUIREMENTS to select provider type.
-2. Run `brev create <name> --type <provider_type>` — one Bash call.
-   Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`)
-3. `brev create` blocks until shell ready. Proceed to PHASE 4.
+2. If `BREV_PROVISIONER` is unset, treat it as `standard`.
+3. If `BREV_PROVISIONER=standard`, run `brev create <name> --type <provider_type>` — one Bash call.
+   Name convention: `cr2-<modelsize>-<timestamp-short>` (e.g., `cr2-2b-0505`).
+4. If `BREV_PROVISIONER=nemoclaw`, enforce `MODEL_SIZE=C3-super`, `MODEL_ID=nvidia/Cosmos3-Super-Reasoner`, `INFERENCE_BACKEND=vllm`, and H200 provider type. Name convention: `nemoclaw-c3super-rf100-<timestamp-short>`. Run one launchable start command:
+   ```bash
+   brev start "$BREV_LAUNCHABLE_URL" --name "$INSTANCE_NAME" --gpu "$PROVIDER_TYPE"
+   ```
+   If this CLI version rejects the launchable URL or does not produce a shell-ready instance, write failure JSON and ask for recovery; do not silently fall back to Standard Brev.
+5. `brev create`/`brev start` blocks until shell ready when supported. Proceed to PHASE 4.
 
 **CRITICAL — `cloudCredId` error halt:** If `brev create` output contains `cloudCredId or workspaceGroupId must be specified on request`, do NOT rotate to a fallback provider — this error is an org-level credential gap that applies to all provider types. Write failure JSON immediately and exit:
 `{"status":"failed","phase":2,"error":"Brev org missing cloud credential — brev create blocked for all providers. Fix in Brev dashboard org settings.","instance":"<name>"}`
