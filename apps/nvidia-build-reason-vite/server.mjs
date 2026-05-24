@@ -149,6 +149,12 @@ function frameFallbackLimit() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_NIM_FRAME_FALLBACK_IMAGES;
 }
 
+function frameFallbackAllowed() {
+  if (process.env.REASONER_ENABLE_FRAME_FALLBACK === "1") return true;
+  if (process.env.REASONER_DISABLE_FRAME_FALLBACK === "1") return false;
+  return String(process.env.REASONER_MEDIA_MODE || "").toLowerCase() !== "video_url";
+}
+
 function nativeVideoFallbackMessage(message) {
   return /video resolution or format not supported|cuvid|getdecodercaps|reconfiguredecoder|handlevideosequence|pynvvideocodec|at most \d+ image/i.test(
     String(message || "")
@@ -160,7 +166,12 @@ function shouldRetryWithFrameFallback(prepared, resultOrError) {
     resultOrError?.message ||
     resultOrError?.raw?.error?.message ||
     (resultOrError instanceof Error ? resultOrError.message : "");
-  return prepared?.media?.mode === "video_url" && backend === "nim_local" && nativeVideoFallbackMessage(message);
+  return (
+    prepared?.media?.mode === "video_url" &&
+    backend === "nim_local" &&
+    frameFallbackAllowed() &&
+    nativeVideoFallbackMessage(message)
+  );
 }
 
 function runFrameExtractor(videoPath, outputDir, framesPerSecond, maxFrames) {
@@ -773,7 +784,7 @@ async function prepareReasonRequest(body = {}, options = {}) {
       fps: mediaFrames?.length ? params.frames_per_second : undefined,
       fallback_from: forceFrameFallback ? "video_url" : undefined,
       fallback_error: forceFrameFallback ? options.fallbackError : undefined,
-      max_frames: forceFrameFallback || backend === "nim_local" ? frameFallbackLimit() : undefined
+      max_frames: mediaMode === "image-frame-fallback" ? frameFallbackLimit() : undefined
     }
   };
 }
