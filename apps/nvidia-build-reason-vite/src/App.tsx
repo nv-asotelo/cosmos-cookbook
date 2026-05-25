@@ -172,6 +172,8 @@ type ImageSize = {
 type SpatialMark = {
   id: string;
   kind: "point" | "bbox";
+  sourceKey: string;
+  coordinateMode: "cosmos-1000" | "unit" | "pixel";
   x: number;
   y: number;
   width: number;
@@ -374,7 +376,7 @@ const EXAMPLES: ExampleItem[] = [
     mediaName: "robot_tape.png",
     mediaKind: "image",
     userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
+      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow. Return Cosmos grounding JSON using coordinates normalized to a 0-1000 image plane, like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
     systemPrompt: "You are a helpful assistant.",
     reasoning: true,
     parameters: {
@@ -427,7 +429,7 @@ const EXAMPLES: ExampleItem[] = [
     mediaName: "forklift-load.jpg",
     mediaKind: "image",
     userPrompt:
-      "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.",
+      'Locate the bounding box of the load and determine if its size and weight of load within the forklift\'s limits. Estimate weights. Return valid JSON using Cosmos grounding coordinates, not COCO boxes: {"bbox_2d":[x1,y1,x2,y2],"label":"load","estimated_weight":"...","within_limit":true}. bbox_2d coordinates must be normalized to a 0-1000 image plane.',
     systemPrompt: "You are a helpful assistant.",
     reasoning: false,
     parameters: {
@@ -607,8 +609,9 @@ function parseReasoning(content?: string, explicitReasoning?: string) {
 }
 
 const POINT_KEYS = ["point_2d", "point", "position", "coordinate", "coordinates"];
-const BBOX_KEYS = ["bbox", "bbox_2d", "box", "box_2d", "bounding_box"];
+const BBOX_KEYS = ["bbox_2d", "box_2d", "bounding_box", "bbox", "box"];
 const TRAJECTORY_KEYS = ["annotations", "detections", "objects", "points", "steps", "trajectory"];
+const COSMOS_COORD_MAX = 1000;
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -691,36 +694,82 @@ function collectSpatialRecords(value: unknown, records: Record<string, unknown>[
   return records;
 }
 
-function scalePair(x: number, y: number, imageSize: ImageSize) {
-  if (Math.abs(x) <= 1 && Math.abs(y) <= 1) return [x * imageSize.width, y * imageSize.height];
-  return [x, y];
+function scaleCoordinate(value: number, axisSize: number, mode: "cosmos-1000" | "unit" | "pixel") {
+  if (mode === "unit") return value * axisSize;
+  if (mode === "cosmos-1000") return (value / COSMOS_COORD_MAX) * axisSize;
+  return value;
 }
 
-function normalizePoint(value: unknown, imageSize: ImageSize): [number, number] | null {
+function inferPointCoordinateMode(numbers: number[], key: string): "cosmos-1000" | "unit" | "pixel" {
+  if (numbers.every((item) => Math.abs(item) <= 1)) return "unit";
+  const lowerKey = key.toLowerCase();
+  const looksLikeCosmosKey = lowerKey.includes("2d") || lowerKey.includes("coordinate") || lowerKey.includes("position");
+  const allInCosmosPlane = numbers.every((item) => item >= 0 && item <= COSMOS_COORD_MAX);
+  return looksLikeCosmosKey && allInCosmosPlane ? "cosmos-1000" : "pixel";
+}
+
+function scalePair(key: string, x: number, y: number, imageSize: ImageSize): [number, number, "cosmos-1000" | "unit" | "pixel"] {
+  const mode = inferPointCoordinateMode([x, y], key);
+  return [scaleCoordinate(x, imageSize.width, mode), scaleCoordinate(y, imageSize.height, mode), mode];
+}
+
+function normalizePoint(key: string, value: unknown, imageSize: ImageSize): [number, number, "cosmos-1000" | "unit" | "pixel"] | null {
   const numbers = numberArray(value);
   if (!numbers || numbers.length < 2) return null;
-  const [x, y] = scalePair(numbers[0], numbers[1], imageSize);
-  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  const [x, y, mode] = scalePair(key, numbers[0], numbers[1], imageSize);
+  const clampedX = Math.max(0, Math.min(imageSize.width, x));
+  const clampedY = Math.max(0, Math.min(imageSize.height, y));
+  return Number.isFinite(clampedX) && Number.isFinite(clampedY) ? [clampedX, clampedY, mode] : null;
 }
 
-function normalizeBbox(key: string, value: unknown, imageSize: ImageSize): [number, number, number, number] | null {
+function inferBboxCoordinateMode(key: string, numbers: number[]): "cosmos-1000" | "unit" | "pixel" {
+  if (numbers.every((item) => Math.abs(item) <= 1)) return "unit";
+  const lowerKey = key.toLowerCase();
+  const allInCosmosPlane = numbers.every((item) => item >= 0 && item <= COSMOS_COORD_MAX);
+  const explicitlyCosmos = lowerKey.includes("2d") || lowerKey === "box" || lowerKey === "bounding_box";
+  return explicitlyCosmos && allInCosmosPlane ? "cosmos-1000" : "pixel";
+}
+
+function isCosmosXyxyBbox(key: string, mode: "cosmos-1000" | "unit" | "pixel") {
+  const lowerKey = key.toLowerCase();
+  return mode === "cosmos-1000" || lowerKey.includes("2d") || lowerKey === "bounding_box" || lowerKey === "box";
+}
+
+function clampRect(x: number, y: number, width: number, height: number, imageSize: ImageSize): [number, number, number, number] | null {
+  const x1 = Math.max(0, Math.min(imageSize.width, x));
+  const y1 = Math.max(0, Math.min(imageSize.height, y));
+  const x2 = Math.max(0, Math.min(imageSize.width, x + width));
+  const y2 = Math.max(0, Math.min(imageSize.height, y + height));
+  const nextWidth = x2 - x1;
+  const nextHeight = y2 - y1;
+  if (![x1, y1, nextWidth, nextHeight].every(Number.isFinite) || nextWidth <= 0 || nextHeight <= 0) return null;
+  return [x1, y1, nextWidth, nextHeight];
+}
+
+function normalizeBbox(
+  key: string,
+  value: unknown,
+  imageSize: ImageSize
+): [number, number, number, number, "cosmos-1000" | "unit" | "pixel"] | null {
   const numbers = numberArray(value);
   if (!numbers || numbers.length < 4) return null;
+  const mode = inferBboxCoordinateMode(key, numbers);
   let [x, y, width, height] = numbers;
-  const normalized = numbers.every((item) => Math.abs(item) <= 1);
-  if (normalized) {
-    x *= imageSize.width;
-    width *= imageSize.width;
-    y *= imageSize.height;
-    height *= imageSize.height;
+  if (isCosmosXyxyBbox(key, mode)) {
+    const x1 = scaleCoordinate(numbers[0], imageSize.width, mode);
+    const y1 = scaleCoordinate(numbers[1], imageSize.height, mode);
+    const x2 = scaleCoordinate(numbers[2], imageSize.width, mode);
+    const y2 = scaleCoordinate(numbers[3], imageSize.height, mode);
+    const rect = clampRect(x1, y1, x2 - x1, y2 - y1, imageSize);
+    return rect ? [...rect, mode] : null;
   }
-  const likelyXyxy = key.includes("2d");
-  if (likelyXyxy) {
-    width = width - x;
-    height = height - y;
-  }
-  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-  return [x, y, width, height];
+
+  x = scaleCoordinate(x, imageSize.width, mode);
+  y = scaleCoordinate(y, imageSize.height, mode);
+  width = scaleCoordinate(width, imageSize.width, mode);
+  height = scaleCoordinate(height, imageSize.height, mode);
+  const rect = clampRect(x, y, width, height, imageSize);
+  return rect ? [...rect, mode] : null;
 }
 
 function spatialLabel(record: Record<string, unknown>, fallback: string) {
@@ -747,13 +796,15 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
     const label = spatialLabel(record, `point ${sequence}`);
 
     for (const key of POINT_KEYS) {
-      const point = normalizePoint(record[key], imageSize);
+      const point = normalizePoint(key, record[key], imageSize);
       if (!point) continue;
       const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
-      const [centerX, centerY] = point;
+      const [centerX, centerY, coordinateMode] = point;
       marks.push({
         id: `${key}-${index}-point`,
         kind: "point",
+        sourceKey: key,
+        coordinateMode,
         x: centerX - side / 2,
         y: centerY - side / 2,
         width: side,
@@ -769,10 +820,12 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
     for (const key of BBOX_KEYS) {
       const bbox = normalizeBbox(key, record[key], imageSize);
       if (!bbox) continue;
-      const [x, y, width, height] = bbox;
+      const [x, y, width, height, coordinateMode] = bbox;
       marks.push({
         id: `${key}-${index}-bbox`,
         kind: "bbox",
+        sourceKey: key,
+        coordinateMode,
         x,
         y,
         width,
@@ -2193,7 +2246,10 @@ function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; t
               <strong>#{mark.sequence}</strong>
               <span>{mark.label}</span>
               <code>
-                {Math.round(mark.centerX)}, {Math.round(mark.centerY)}
+                {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
+                {mark.kind === "bbox"
+                  ? `${Math.round(mark.x)}, ${Math.round(mark.y)}, ${Math.round(mark.width)}×${Math.round(mark.height)}`
+                  : `${Math.round(mark.centerX)}, ${Math.round(mark.centerY)}`}
               </code>
             </li>
           ))}
