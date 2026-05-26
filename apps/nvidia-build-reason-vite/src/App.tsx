@@ -376,7 +376,7 @@ const EXAMPLES: ExampleItem[] = [
     mediaName: "robot_tape.png",
     mediaKind: "image",
     userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow. Return Cosmos grounding JSON using coordinates normalized to a 0-1000 image plane, like this: {"point_2d": [x, y], "label": "gripper trajectory"}.',
+      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.\n\nPrompt format:\nAnswer the question using the following format:\n<think>\nYour reasoning.\n</think>\nWrite your final answer immediately after the </think> tag.',
     systemPrompt: "You are a helpful assistant.",
     reasoning: true,
     parameters: {
@@ -429,7 +429,7 @@ const EXAMPLES: ExampleItem[] = [
     mediaName: "forklift-load.jpg",
     mediaKind: "image",
     userPrompt:
-      'Locate the bounding box of the load and determine if its size and weight of load within the forklift\'s limits. Estimate weights. Return valid JSON using Cosmos grounding coordinates, not COCO boxes: {"bbox_2d":[x1,y1,x2,y2],"label":"load","estimated_weight":"...","within_limit":true}. bbox_2d coordinates must be normalized to a 0-1000 image plane.',
+      "Locate the bounding box of the load and determine if its size and weight of load within the forklift's limits. Estimate weights. Return all as json. Include json location, estimated weight of the load, and if it's in the limit.",
     systemPrompt: "You are a helpful assistant.",
     reasoning: false,
     parameters: {

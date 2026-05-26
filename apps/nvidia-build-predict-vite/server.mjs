@@ -281,7 +281,6 @@ app.post("/api/predict", async (request, response) => {
   }
 
   const model = body.model || defaultModel;
-  const fixedSeed = Number(process.env.PREDICT_SEED ?? 0);
   const mediaKind =
     body.mediaKind === "video" || mode === "Action Policy"
       ? "video"
@@ -297,17 +296,75 @@ app.post("/api/predict", async (request, response) => {
     aspect_ratio: QUICK_VIDEO_PARAMS.aspect_ratio,
     fps: requestNumber(request, body, "fps", "fps", QUICK_VIDEO_PARAMS.frames_per_sec),
     vision_path: body.visionPath || null,
-    model_mode: mode === "Action Policy" ? "policy" : "image2video"
+    model_mode: body.modelMode || body.model_mode || (mode === "Action Policy" ? "policy" : "image2video")
   };
-  if (Number.isFinite(fixedSeed) && fixedSeed >= 0) params.seed = fixedSeed;
-  if (process.env.PREDICT_NEGATIVE_PROMPT) params.negative_prompt = process.env.PREDICT_NEGATIVE_PROMPT;
+  const seedValue =
+    process.env.PREDICT_SEED !== undefined
+      ? finiteNumber(process.env.PREDICT_SEED, undefined)
+      : requestNumber(request, body, "seed", "seed", undefined);
+  if (Number.isFinite(seedValue) && seedValue >= 0) params.seed = Math.floor(seedValue);
+
+  const negativePrompt = body.negativePrompt ?? body.negative_prompt ?? process.env.PREDICT_NEGATIVE_PROMPT;
+  if (typeof negativePrompt === "string" && negativePrompt.length > 0) params.negative_prompt = negativePrompt;
+
+  const shift = requestNumber(request, body, "shift", "shift", undefined);
+  if (Number.isFinite(shift)) params.shift = shift;
+  const imageSize = requestNumber(request, body, "imageSize", "image_size", undefined);
+  if (Number.isFinite(imageSize)) params.image_size = imageSize;
+  const sigmaMax = requestNumber(request, body, "sigmaMax", "sigma_max", undefined);
+  if (Number.isFinite(sigmaMax)) params.sigma_max = sigmaMax;
+  const guidanceIntervalRaw = body.guidanceInterval ?? body.guidance_interval;
+  if (guidanceIntervalRaw === null) {
+    params.guidance_interval = null;
+  } else {
+    const guidanceInterval = finiteNumber(guidanceIntervalRaw, undefined);
+    if (Number.isFinite(guidanceInterval)) params.guidance_interval = guidanceInterval;
+  }
+  const normalizeCfg = body.normalizeCfg ?? body.normalize_cfg;
+  if (typeof normalizeCfg === "boolean") {
+    params.normalize_cfg = normalizeCfg;
+  } else if (normalizeCfg !== undefined) {
+    params.normalize_cfg = String(normalizeCfg).toLowerCase() === "true";
+  }
+  const conditionVideoKeep = body.conditionVideoKeep ?? body.condition_video_keep;
+  if (typeof conditionVideoKeep === "string" && conditionVideoKeep.length > 0) {
+    params.condition_video_keep = conditionVideoKeep;
+  }
+  const videoSaveQuality = requestNumber(request, body, "videoSaveQuality", "video_save_quality", undefined);
+  if (Number.isFinite(videoSaveQuality)) params.video_save_quality = videoSaveQuality;
+  const imageSaveQuality = requestNumber(request, body, "imageSaveQuality", "image_save_quality", undefined);
+  if (Number.isFinite(imageSaveQuality)) params.image_save_quality = imageSaveQuality;
+  const numOutputs = requestNumber(request, body, "numOutputs", "num_outputs", undefined);
+  if (Number.isFinite(numOutputs)) params.num_outputs = Math.max(1, Math.floor(numOutputs));
+  const enableSound = body.enableSound ?? body.enable_sound;
+  if (typeof enableSound === "boolean") {
+    params.enable_sound = enableSound;
+  } else if (enableSound !== undefined) {
+    params.enable_sound = String(enableSound).toLowerCase() === "true";
+  }
+  const negativeMetadataMode = body.negativeMetadataMode ?? body.negative_metadata_mode;
+  if (typeof negativeMetadataMode === "string" && negativeMetadataMode.length > 0) {
+    params.negative_metadata_mode = negativeMetadataMode;
+  }
+  const negativePromptKeepMetadata = body.negativePromptKeepMetadata ?? body.negative_prompt_keep_metadata;
+  if (typeof negativePromptKeepMetadata === "boolean") {
+    params.negative_prompt_keep_metadata = negativePromptKeepMetadata;
+  } else if (negativePromptKeepMetadata !== undefined) {
+    params.negative_prompt_keep_metadata = String(negativePromptKeepMetadata).toLowerCase() === "true";
+  }
+  const conditionFrameIndexesVision = body.conditionFrameIndexesVision ?? body.condition_frame_indexes_vision;
+  if (Array.isArray(conditionFrameIndexesVision)) {
+    params.condition_frame_indexes_vision = conditionFrameIndexesVision
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+  }
   if (mode === "Action Policy") {
     params.action_mode = body.actionMode || "policy";
     params.domain_name = body.domainName || "bridge_orig_lerobot";
-    params.image_size = finiteNumber(body.imageSize, Number(params.resolution));
+    params.image_size = finiteNumber(body.imageSize, params.image_size ?? Number(params.resolution));
     params.action_chunk_size = finiteNumber(body.actionChunkSize, 16);
     params.raw_action_dim = finiteNumber(body.rawActionDim, 10);
-    params.shift = finiteNumber(body.shift, 5);
+    params.shift = finiteNumber(body.shift, params.shift ?? 5);
   }
 
   // Stream a chunked response with a heartbeat byte every 20 s so the browser
@@ -359,6 +416,7 @@ app.post("/api/predict", async (request, response) => {
           ],
           raw: result?.raw
         },
+        budget: result?.budget,
         payload: result?.payload ? redactPayload(result.payload) : undefined,
         status: result?.status,
         files: []

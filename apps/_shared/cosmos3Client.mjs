@@ -30,7 +30,7 @@
 // large generations complete cleanly.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -156,6 +156,67 @@ async function persistUpload(dataUrl) {
   const filepath = path.join(UPLOAD_DIR, `${sha1}.${ext}`);
   await writeFile(filepath, buf);
   return filepath;
+}
+
+function publicAssetRoots() {
+  const roots = [
+    process.env.PREDICT_VITE_PUBLIC_DIR,
+    process.env.VITE_PUBLIC_DIR,
+    process.env.PREDICT_VITE_APP_DIR ? path.join(process.env.PREDICT_VITE_APP_DIR, "public") : null,
+    process.cwd() ? path.join(process.cwd(), "public") : null,
+    path.resolve("apps/nvidia-build-predict-vite/public"),
+    "/home/horde/cookbook-apps/nvidia-build-predict-vite/public"
+  ].filter(Boolean);
+  return Array.from(new Set(roots.map((root) => path.resolve(root))));
+}
+
+function isPathInside(candidate, root) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function localPublicAssetPathname(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith("/")) return raw;
+
+  try {
+    const url = new URL(raw);
+    const isHttp = url.protocol === "http:" || url.protocol === "https:";
+    const isViteHost = ["localhost", "127.0.0.1", "10.57.233.111"].includes(url.hostname);
+    const isVitePort = url.port === "5175" || url.port === "";
+    if (isHttp && isViteHost && isVitePort) return url.pathname;
+  } catch {
+    // Not a URL; keep it as-is for Ray to handle if it is already a local path.
+  }
+  return null;
+}
+
+async function resolveLocalPublicAsset(value) {
+  const pathname = localPublicAssetPathname(value);
+  if (!pathname) return null;
+
+  let decodedPathname;
+  try {
+    decodedPathname = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+
+  const relativePath = decodedPathname.replace(/^\/+/, "");
+  if (!relativePath || relativePath.split(/[\\/]+/).includes("..")) return null;
+
+  for (const root of publicAssetRoots()) {
+    const candidate = path.resolve(root, relativePath);
+    if (!isPathInside(candidate, root)) continue;
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try the next public root.
+    }
+  }
+  return null;
 }
 
 async function mediaFromDataUrl(dataUrl) {
@@ -546,11 +607,19 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
   if (mediaDataUrl) {
     uploadedVisionPath = await persistUpload(mediaDataUrl);
   }
-  const resolvedVisionPath = uploadedVisionPath || p.vision_path || visionPath || null;
+  const requestedVisionPath = p.vision_path || visionPath || null;
+  const localVisionPath = uploadedVisionPath ? null : await resolveLocalPublicAsset(requestedVisionPath);
+  const resolvedVisionPath = uploadedVisionPath || localVisionPath || requestedVisionPath;
+  const rayModel =
+    process.env.COSMOS3_RAY_MODEL_NAME !== undefined
+      ? process.env.COSMOS3_RAY_MODEL_NAME
+      : process.env.COSMOS3_MODEL_NAME !== undefined
+        ? process.env.COSMOS3_MODEL_NAME
+        : p.model ?? "";
 
   const body = {
     name: `req-${Date.now()}`,
-    model: process.env.MODEL_NAME || p.model || "",
+    model: rayModel,
     prompt: prompt || "",
     negative_prompt: p.negative_prompt || "",
     vision_path: resolvedVisionPath,
@@ -561,6 +630,7 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
     fps: p.fps,
     num_steps: p.num_steps ?? 50,
     guidance: p.guidance ?? 6.0,
+    guidance_interval: p.guidance_interval,
     seed: p.seed ?? null,
     model_mode: p.model_mode,
     action_path: p.action_path,
@@ -570,7 +640,14 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
     action_chunk_size: p.action_chunk_size,
     raw_action_dim: p.raw_action_dim,
     shift: p.shift,
-    condition_frame_indexes_vision: p.condition_frame_indexes_vision
+    sigma_max: p.sigma_max,
+    normalize_cfg: p.normalize_cfg,
+    condition_frame_indexes_vision: p.condition_frame_indexes_vision,
+    video_save_quality: p.video_save_quality,
+    image_save_quality: p.image_save_quality,
+    negative_metadata_mode: p.negative_metadata_mode,
+    negative_prompt_keep_metadata: p.negative_prompt_keep_metadata,
+    num_outputs: p.num_outputs
   };
 
   let response;

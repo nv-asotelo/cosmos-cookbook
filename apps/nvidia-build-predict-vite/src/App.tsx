@@ -69,6 +69,33 @@ type MediaState = {
   dataUrl?: string;
   sourceUrl?: string;
 };
+type GenerationParams = {
+  resolution?: string;
+  numFrames?: number;
+  fps?: number;
+  steps?: number;
+  guidance?: number;
+  seed?: number;
+  shift?: number;
+  imageSize?: number;
+  actionChunkSize?: number;
+  rawActionDim?: number;
+  domainName?: string;
+  actionMode?: string;
+  negativePrompt?: string;
+  conditionFrameIndexesVision?: number[];
+  conditionVideoKeep?: string;
+  modelMode?: string;
+  sigmaMax?: number;
+  guidanceInterval?: number | null;
+  normalizeCfg?: boolean;
+  videoSaveQuality?: number;
+  imageSaveQuality?: number;
+  enableSound?: boolean;
+  negativeMetadataMode?: string;
+  negativePromptKeepMetadata?: boolean;
+  numOutputs?: number;
+};
 type ExampleItem = {
   id: string;
   label: string;
@@ -79,20 +106,7 @@ type ExampleItem = {
   mediaName?: string;
   mediaKind?: "image" | "video";
   hidden?: boolean;
-  params?: {
-    resolution?: string;
-    numFrames?: number;
-    fps?: number;
-    steps?: number;
-    guidance?: number;
-    seed?: number;
-    shift?: number;
-    imageSize?: number;
-    actionChunkSize?: number;
-    rawActionDim?: number;
-    domainName?: string;
-    actionMode?: string;
-  };
+  params?: GenerationParams;
 };
 type ContentSelectItem = {
   id: string;
@@ -104,6 +118,7 @@ type ContentSelectItem = {
   mediaName: string;
   previewVideoUrl: string;
   previewVideoName: string;
+  params?: GenerationParams;
 };
 type ContentSelectGroup = {
   title: string;
@@ -129,6 +144,16 @@ type ApiResult = {
   diagnostic?: Record<string, unknown>;
   payload?: unknown;
   raw?: unknown;
+  budget?: BudgetInfo;
+};
+type BudgetSuggestion = {
+  resolution: string;
+  num_frames: number;
+  num_steps: number;
+  est_seconds?: number;
+};
+type BudgetInfo = {
+  suggestions?: BudgetSuggestion[];
 };
 type BackendInfo = {
   checkpoint?: string;
@@ -158,10 +183,43 @@ type BackendInfo = {
   };
 };
 
+const CANONICAL_SAMPLE_NEGATIVE_PROMPT =
+  "The video captures a series of frames showing macroblocking artifacts, chromatic aberration, high-frequency noise, and rolling shutter distortion. It includes static with no motion, motion blur, over-saturation, shaky footage, low resolution, grainy texture, pixelated images, poorly lit areas, underexposed and overexposed scenes, poor color balance, washed out colors, choppy sequences, jerky movements, low frame rate, bit-depth compression artifacts, color banding, unnatural transitions, outdated special effects, fake elements, unconvincing visuals, poorly edited content, jump cuts, visual noise, and flickering. Avoid moire patterns, edge halos, and temporal aliasing. Furthermore, the content defies common sense, generating illogical scenarios, nonsensical entities, absurd character behaviors, and conceptual paradoxes that violate basic human reasoning and everyday reality. The video looks like a surreal or glitchy hallucination. Overall, the video is of poor quality.";
+const CANONICAL_SAMPLE_PARAMS: GenerationParams = {
+  resolution: "720",
+  numFrames: 189,
+  fps: 24,
+  steps: 35,
+  guidance: 6,
+  shift: 10,
+  imageSize: 256,
+  conditionFrameIndexesVision: [0],
+  conditionVideoKeep: "first",
+  modelMode: "image2video",
+  sigmaMax: 80,
+  guidanceInterval: null,
+  normalizeCfg: false,
+  videoSaveQuality: 10,
+  imageSaveQuality: 95,
+  enableSound: false,
+  negativeMetadataMode: "same",
+  negativePromptKeepMetadata: true,
+  numOutputs: 1,
+  negativePrompt: CANONICAL_SAMPLE_NEGATIVE_PROMPT
+};
+const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022", GenerationParams> = {
+  "001": { ...CANONICAL_SAMPLE_PARAMS, seed: 100 },
+  "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
+  "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 105 },
+  "009": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
+  "021": { ...CANONICAL_SAMPLE_PARAMS, seed: 103 },
+  "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 }
+};
+
 const CANONICAL_PROMPTS = {
-  "001": `The robotic arm picks up the pear and place it in the dark-color bowl`,
-  "005": `The robotic hand picks up the bok choy and places it to the left of the frying pan`,
-  "007": `A robotic arm interacts with various objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a red tomato with green leaves, a piece of salmon with a pinkish-orange hue, and a small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the salmon. It lifts the carrot slightly off the board, moves it towards the orange bowl, and releases it, causing the salmon to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.`,
+  "001": `The video opens with a top-down medium shot of a clean white laboratory workbench. At the top of the frame, a black robotic arm with a metallic two-finger gripper hovers above the table. A small dark gray bowl sits in the upper-left of the workspace, a pink rounded object rests to its right, and a yellow-green pear sits front-and-center, slightly closer to the camera. The lighting is bright and even, with soft shadows cast directly beneath each object. As the video progresses, the robotic arm descends smoothly along a vertical axis toward the pear. The gripper opens, lowers around the pear, and closes gently to grasp it. The arm lifts the pear several centimeters above the workbench, then translates laterally toward the dark bowl in the upper left, keeping the pear level throughout the motion. Once positioned over the bowl, the arm pauses briefly, then descends and releases the pear, allowing it to settle into the bowl with a small natural roll. The arm retracts upward and slightly to the right, returning to a neutral position above the workspace. The pink object remains untouched throughout, and the lighting, background, and camera angle stay constant - the only motion in the scene is the controlled, deliberate manipulation of the pear by the robotic arm.`,
+  "005": `The video opens with a top-down medium shot of a wooden tabletop in a workshop setting. A large white frying pan with a brown handle is positioned in the left half of the table, oriented with its handle pointing toward the lower-left of the frame. To the right of the pan sits a single head of bok choy with a pale white stem and bright green leaves splaying outward. Two humanoid black robotic arms with dextrous grippers enter the scene from the left and right edges of the frame, suspended just above the work surface. Workshop equipment - tools, metal frames, and cables - is visible in the corners of the background, but the central tabletop is well-lit and uncluttered. As the video progresses, the right robotic arm extends toward the bok choy, its gripper opening as it approaches. The gripper closes around the white stem of the bok choy, secures it firmly, and lifts it cleanly off the tabletop. The arm moves smoothly to the left, carrying the bok choy across the table and over the frying pan, then continues past the pan and lowers the bok choy onto the table surface to the left of the pan. The gripper releases, and the arm retracts back toward the right side of the frame. The left robotic arm remains stationary throughout the sequence. The frying pan, the workshop background, the lighting, and the camera angle remain constant - the only motion is the right arm's pick-and-place action.`,
+  "007": `A robotic arm interacts with various toy food objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a toy red tomato with green leaves, a toy piece of salmon sashimi with a pinkish-orange hue, and a toy small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the toy salmon sashimi. It lifts the toy salmon sashimi slightly off the board, moves it towards the orange bowl, and releases it, causing the toy salmon sashimi to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.`,
   "009": `The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.`,
   "010": `A close-up view captures a melting popsicle on a white plate. The popsicle features a vibrant red top, likely strawberry-flavored, transitioning into a creamy white base, possibly vanilla or yogurt-based. The popsicle stick is visible on the right side, and the surface of the popsicle shows signs of melting, with the red portion becoming more fluid and spreading outward. The creamy white base remains relatively intact initially but eventually starts to soften and blend with the red, creating a smooth transition between the two flavors. The camera remains steady, focusing on the popsicle as it transforms from a solid form into a liquid, with the background remaining plain and white to ensure all attention is on the melting process. The lighting is consistent throughout, highlighting the colors and textures of the ice cream.`,
   "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`
@@ -229,7 +287,8 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         mediaUrl: "/examples/canonical/007.png",
         mediaName: "Robot Cutting Board Sorting.png",
         previewVideoUrl: "/examples/canonical/007.mp4",
-        previewVideoName: "Robot Cutting Board Sorting.mp4"
+        previewVideoName: "Robot Cutting Board Sorting.mp4",
+        params: SAMPLE_PARAMS_BY_ID["007"]
       },
       {
         id: "robot-pear-bowl-placement",
@@ -240,7 +299,8 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         mediaUrl: "/examples/canonical/001.png",
         mediaName: "Robot Pear Bowl Placement.png",
         previewVideoUrl: "/examples/canonical/001.mp4",
-        previewVideoName: "Robot Pear Bowl Placement.mp4"
+        previewVideoName: "Robot Pear Bowl Placement.mp4",
+        params: SAMPLE_PARAMS_BY_ID["001"]
       },
       {
         id: "robot-bok-choy-pan-placement",
@@ -251,7 +311,8 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         mediaUrl: "/examples/canonical/005.png",
         mediaName: "Robot Bok Choy Pan Placement.png",
         previewVideoUrl: "/examples/canonical/005.mp4",
-        previewVideoName: "Robot Bok Choy Pan Placement.mp4"
+        previewVideoName: "Robot Bok Choy Pan Placement.mp4",
+        params: SAMPLE_PARAMS_BY_ID["005"]
       }
     ]
   },
@@ -268,7 +329,8 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         mediaUrl: "/examples/canonical/009.png",
         mediaName: "Suburban Intersection Yield.png",
         previewVideoUrl: "/examples/canonical/009.mp4",
-        previewVideoName: "Suburban Intersection Yield.mp4"
+        previewVideoName: "Suburban Intersection Yield.mp4",
+        params: SAMPLE_PARAMS_BY_ID["009"]
       }
     ]
   },
@@ -304,6 +366,18 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
 const DEFAULT_CONTENT_ITEM =
   findContentItem(CONTENT_SELECT_GROUPS, "robot-cutting-board-sorting") ?? CONTENT_SELECT_GROUPS[0].items[0];
 const DEFAULT_PROMPT = DEFAULT_CONTENT_ITEM.prompt;
+const DEFAULT_CONTENT_PARAMS = visibleParams(DEFAULT_CONTENT_ITEM.params);
+
+function visibleParams(params?: GenerationParams) {
+  return {
+    resolution: params?.resolution ?? QUICK_VIDEO_PARAMS.resolution,
+    numFrames: params?.numFrames ?? QUICK_VIDEO_PARAMS.frames_count,
+    fps: params?.fps ?? QUICK_VIDEO_PARAMS.frames_per_sec,
+    steps: params?.steps ?? QUICK_VIDEO_PARAMS.num_steps,
+    guidance: params?.guidance ?? QUICK_VIDEO_PARAMS.guidance,
+    seed: params?.seed ?? 0
+  };
+}
 
 function estimateWallSeconds(resolution: string | number, numFrames: number, numSteps: number, isNimBackend: boolean): number {
   const px = ETA_PIXELS_BY_RESOLUTION[String(resolution)] || ETA_PIXELS_BY_RESOLUTION["480"];
@@ -490,12 +564,12 @@ export default function Page() {
   const [generatorMode, setGeneratorMode] = useState<GeneratorMode>("Image-to-Video");
   const [media, setMedia] = useState<MediaState | null>(() => contentItemToMedia(DEFAULT_CONTENT_ITEM));
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [resolution, setResolution] = useState(QUICK_VIDEO_PARAMS.resolution);
-  const [numFrames, setNumFrames] = useState(QUICK_VIDEO_PARAMS.frames_count);
-  const [fps, setFps] = useState(QUICK_VIDEO_PARAMS.frames_per_sec);
-  const [guidanceScale, setGuidanceScale] = useState(QUICK_VIDEO_PARAMS.guidance);
-  const [steps, setSteps] = useState(QUICK_VIDEO_PARAMS.num_steps);
-  const [seed, setSeed] = useState(0);
+  const [resolution, setResolution] = useState(DEFAULT_CONTENT_PARAMS.resolution);
+  const [numFrames, setNumFrames] = useState(DEFAULT_CONTENT_PARAMS.numFrames);
+  const [fps, setFps] = useState(DEFAULT_CONTENT_PARAMS.fps);
+  const [guidanceScale, setGuidanceScale] = useState(DEFAULT_CONTENT_PARAMS.guidance);
+  const [steps, setSteps] = useState(DEFAULT_CONTENT_PARAMS.steps);
+  const [seed, setSeed] = useState(DEFAULT_CONTENT_PARAMS.seed);
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
@@ -517,6 +591,10 @@ export default function Page() {
   const activeExample = useMemo(
     () => EXAMPLES.find((example) => example.id === selectedExampleId) ?? EXAMPLES[0],
     [selectedExampleId]
+  );
+  const activeContentItem = useMemo(
+    () => findContentItem(CONTENT_SELECT_GROUPS, selectedContentItemId),
+    [selectedContentItemId]
   );
   const mediaRequired = true;
   const accepts = ".jpg,.jpeg,.png,.webp";
@@ -619,15 +697,16 @@ export default function Page() {
   }
 
   function applyExample(example: ExampleItem) {
+    const params = visibleParams(example.params);
     setSelectedExampleId(example.id);
     setGeneratorMode(example.mode);
     setPrompt(example.prompt);
-    setResolution(example.params?.resolution ?? QUICK_VIDEO_PARAMS.resolution);
-    setNumFrames(example.params?.numFrames ?? QUICK_VIDEO_PARAMS.frames_count);
-    setFps(example.params?.fps ?? QUICK_VIDEO_PARAMS.frames_per_sec);
-    setSteps(example.params?.steps ?? QUICK_VIDEO_PARAMS.num_steps);
-    setGuidanceScale(example.params?.guidance ?? QUICK_VIDEO_PARAMS.guidance);
-    setSeed(example.params?.seed ?? 0);
+    setResolution(params.resolution);
+    setNumFrames(params.numFrames);
+    setFps(params.fps);
+    setSteps(params.steps);
+    setGuidanceScale(params.guidance);
+    setSeed(params.seed);
     setMedia(
       example.mediaUrl
         ? {
@@ -665,15 +744,16 @@ export default function Page() {
         waitForContentLoad(450)
       ]);
       if (contentLoadTokenRef.current !== loadToken) return;
+      const params = visibleParams(item.params);
       setSelectedContentItemId(item.id);
       setGeneratorMode("Image-to-Video");
       setPrompt(item.prompt);
-      setResolution(QUICK_VIDEO_PARAMS.resolution);
-      setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
-      setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
-      setSteps(QUICK_VIDEO_PARAMS.num_steps);
-      setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
-      setSeed(0);
+      setResolution(params.resolution);
+      setNumFrames(params.numFrames);
+      setFps(params.fps);
+      setSteps(params.steps);
+      setGuidanceScale(params.guidance);
+      setSeed(params.seed);
       setMedia(contentItemToMedia(item));
       setSelectedPreviewVideo({ url: item.previewVideoUrl, name: item.previewVideoName });
       setStatus("Ready");
@@ -697,18 +777,19 @@ export default function Page() {
   }
 
   function reset() {
+    const params = visibleParams(DEFAULT_CONTENT_ITEM.params);
     contentLoadTokenRef.current += 1;
     setLoadingContentItemId(null);
     setModel(DEFAULT_MODEL);
     setGeneratorMode("Image-to-Video");
     setMedia(contentItemToMedia(DEFAULT_CONTENT_ITEM));
     setPrompt(DEFAULT_PROMPT);
-    setResolution(QUICK_VIDEO_PARAMS.resolution);
-    setNumFrames(QUICK_VIDEO_PARAMS.frames_count);
-    setFps(QUICK_VIDEO_PARAMS.frames_per_sec);
-    setGuidanceScale(QUICK_VIDEO_PARAMS.guidance);
-    setSteps(QUICK_VIDEO_PARAMS.num_steps);
-    setSeed(0);
+    setResolution(params.resolution);
+    setNumFrames(params.numFrames);
+    setFps(params.fps);
+    setGuidanceScale(params.guidance);
+    setSteps(params.steps);
+    setSeed(params.seed);
     setSelectedExampleId(EXAMPLES[0].id);
     setSelectedContentItemId(DEFAULT_CONTENT_ITEM.id);
     setSelectedPreviewVideo({ url: DEFAULT_CONTENT_ITEM.previewVideoUrl, name: DEFAULT_CONTENT_ITEM.previewVideoName });
@@ -725,7 +806,7 @@ export default function Page() {
     await loadFile(event.dataTransfer.files?.[0] ?? null);
   }
 
-  async function run() {
+  async function run(overrides: { resolution?: string; numFrames?: number; steps?: number } = {}) {
     if (isContentLoading) {
       setStatus("Still loading example");
       return;
@@ -745,6 +826,10 @@ export default function Page() {
       return;
     }
 
+    const runResolution = overrides.resolution ?? resolution;
+    const runNumFrames = overrides.numFrames ?? numFrames;
+    const runSteps = overrides.steps ?? steps;
+
     setSubmittedAt(Date.now());
     setElapsedSeconds(0);
     setIsRunning(true);
@@ -753,6 +838,7 @@ export default function Page() {
     setStatus("Predicting frames");
     setMobilePanel("output");
     try {
+      const generationParams = generatorMode === "Action Policy" ? activeExample.params : activeContentItem?.params;
       const response = await fetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -764,17 +850,28 @@ export default function Page() {
           prompt,
           model,
           guidanceScale,
-          steps,
-          resolution,
-          numFrames,
+          steps: runSteps,
+          resolution: runResolution,
+          numFrames: runNumFrames,
           fps,
           seed,
           actionMode: generatorMode === "Action Policy" ? activeExample.params?.actionMode ?? "policy" : undefined,
           domainName: generatorMode === "Action Policy" ? activeExample.params?.domainName : undefined,
-          imageSize: generatorMode === "Action Policy" ? activeExample.params?.imageSize : undefined,
+          imageSize: generationParams?.imageSize,
           actionChunkSize: generatorMode === "Action Policy" ? activeExample.params?.actionChunkSize : undefined,
           rawActionDim: generatorMode === "Action Policy" ? activeExample.params?.rawActionDim : undefined,
-          shift: generatorMode === "Action Policy" ? activeExample.params?.shift : undefined
+          shift: generationParams?.shift,
+          negativePrompt: generationParams?.negativePrompt,
+          conditionFrameIndexesVision: generationParams?.conditionFrameIndexesVision,
+          modelMode: generationParams?.modelMode,
+          sigmaMax: generationParams?.sigmaMax,
+          guidanceInterval: generationParams?.guidanceInterval,
+          normalizeCfg: generationParams?.normalizeCfg,
+          videoSaveQuality: generationParams?.videoSaveQuality,
+          imageSaveQuality: generationParams?.imageSaveQuality,
+          negativeMetadataMode: generationParams?.negativeMetadataMode,
+          negativePromptKeepMetadata: generationParams?.negativePromptKeepMetadata,
+          numOutputs: generationParams?.numOutputs
         })
       });
 
@@ -830,6 +927,18 @@ export default function Page() {
       setIsRunning(false);
       setSubmittedAt(null);
     }
+  }
+
+  function applyBudgetSuggestionAndRun(suggestion: BudgetSuggestion) {
+    const nextResolution = String(suggestion.resolution);
+    const nextFrames = Number(suggestion.num_frames);
+    const nextSteps = Number(suggestion.num_steps);
+    if (!nextResolution || !Number.isFinite(nextFrames) || !Number.isFinite(nextSteps)) return;
+    setResolution(nextResolution);
+    setNumFrames(nextFrames);
+    setSteps(nextSteps);
+    setStatus("Using suggested parameters");
+    void run({ resolution: nextResolution, numFrames: nextFrames, steps: nextSteps });
   }
 
   return (
@@ -1001,7 +1110,7 @@ export default function Page() {
             <PromptBox
               label="Prompt (Read Only)"
               hint="Describe the future world state to generate."
-              max={1000}
+              max={2400}
               value={prompt}
               onChange={setPrompt}
               readOnly
@@ -1013,7 +1122,7 @@ export default function Page() {
                 <RotateCcw size={16} />
                 Reset
               </button>
-              <button className="runButton" onClick={run} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
+              <button className="runButton" onClick={() => run()} disabled={isRunning || isContentLoading || (mediaRequired && !media)}>
                 <Play size={16} fill="currentColor" />
                 {isContentLoading ? "Loading" : isRunning ? "Generating" : "Generate New Video"}
               </button>
@@ -1054,7 +1163,7 @@ export default function Page() {
                   totalFrames={numFrames}
                 />
               ) : result?.error ? (
-                <FailureReport result={result} />
+                <FailureReport result={result} onApplySuggestedParams={applyBudgetSuggestionAndRun} />
               ) : result?.videoDataUrl ? (
                 <video className="resultVideo" src={result.videoDataUrl} controls />
               ) : result?.imageDataUrl ? (
@@ -1250,13 +1359,26 @@ function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | nul
   );
 }
 
-function FailureReport({ result }: { result: ApiResult }) {
+function FailureReport({
+  result,
+  onApplySuggestedParams
+}: {
+  result: ApiResult;
+  onApplySuggestedParams?: (suggestion: BudgetSuggestion) => void;
+}) {
   const diagnostic = result.diagnostic ?? {};
   const layer = typeof diagnostic.layer === "string" ? diagnostic.layer : "unknown";
   const issue = typeof diagnostic.issue === "string" ? diagnostic.issue : result.error ?? "Request failed";
   const likelyCause = typeof diagnostic.likelyCause === "string" ? diagnostic.likelyCause : "No structured cause was returned.";
   const endpoint = typeof diagnostic.endpoint === "string" ? diagnostic.endpoint : null;
   const suggestions = Array.isArray(diagnostic.suggestions) ? diagnostic.suggestions.map(String) : [];
+  const budgetSuggestion = result.budget?.suggestions?.find(
+    (suggestion) =>
+      suggestion &&
+      typeof suggestion.resolution === "string" &&
+      Number.isFinite(Number(suggestion.num_frames)) &&
+      Number.isFinite(Number(suggestion.num_steps))
+  );
   const layerLabel =
     layer === "backend" ? "Backend" : layer === "frontend" ? "Frontend/API" : layer === "parameters" ? "Parameters" : "Unknown";
 
@@ -1293,9 +1415,15 @@ function FailureReport({ result }: { result: ApiResult }) {
           </ul>
         </div>
       ) : null}
+      {budgetSuggestion && onApplySuggestedParams ? (
+        <button className="suggestedParamsButton" type="button" onClick={() => onApplySuggestedParams(budgetSuggestion)}>
+          Use suggested parameters and regenerate
+          {budgetSuggestion.est_seconds ? <small>~{formatDuration(budgetSuggestion.est_seconds)}</small> : null}
+        </button>
+      ) : null}
       <details>
         <summary>Diagnostic JSON</summary>
-        <pre>{JSON.stringify({ diagnostic, payload: result.payload, raw: result.raw }, null, 2)}</pre>
+        <pre>{JSON.stringify({ diagnostic, budget: result.budget, payload: result.payload, raw: result.raw }, null, 2)}</pre>
       </details>
     </article>
   );
