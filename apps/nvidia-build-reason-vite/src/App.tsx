@@ -696,6 +696,7 @@ function collectBalancedJsonCandidates(text: string): string[] {
         if (stack.pop() !== char) break;
         if (stack.length === 0) {
           candidates.push(text.slice(start, index + 1));
+          start = index;
           break;
         }
       }
@@ -2301,23 +2302,32 @@ function SpatialTrajectoryOverlay({
   reasoningText: string;
 }) {
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
+  const [showReasoningTrace, setShowReasoningTrace] = useState(false);
+  useEffect(() => {
+    setShowReasoningTrace(false);
+  }, [answerText, media?.previewUrl, reasoningText]);
   const canParseSpatial = useMemo(
     () => hasSpatialPayload(reasoningText) || hasSpatialPayload(answerText),
     [answerText, reasoningText]
   );
-  const marks = useMemo(() => {
+  const allMarks = useMemo(() => {
     if (!imageSize) return [];
     return [
       ...parseSpatialMarks(reasoningText, imageSize, "thinking"),
       ...parseSpatialMarks(answerText, imageSize, "final")
     ];
   }, [answerText, imageSize, reasoningText]);
+  const thinkingMarks = allMarks.filter((mark) => mark.source === "thinking");
+  const finalMarks = allMarks.filter((mark) => mark.source === "final");
+  const marks = showReasoningTrace ? allMarks : finalMarks;
   const points = marks.filter((mark) => mark.kind === "point");
   const boxes = marks.filter((mark) => mark.kind === "bbox");
-  const thinkingMarks = marks.filter((mark) => mark.source === "thinking");
-  const finalMarks = marks.filter((mark) => mark.source === "final");
   const thinkingPoints = thinkingMarks.filter((mark) => mark.kind === "point");
   const finalPoints = finalMarks.filter((mark) => mark.kind === "point");
+  const visibleThinkingPoints = showReasoningTrace ? thinkingPoints : [];
+  const visibleThinkingMarks = showReasoningTrace ? thinkingMarks : [];
+  const visibleFinalMarks = finalMarks;
+  const traceState = showReasoningTrace ? "shown" : "hidden";
 
   if (!media || media.kind !== "image" || !canParseSpatial) return null;
 
@@ -2325,13 +2335,33 @@ function SpatialTrajectoryOverlay({
     <article className="spatialOverlayCard">
       <div className="spatialTopline">
         <div>
-          <p className="responseLabel">Robot reasoning trace</p>
-          <h3>Thinking and final JSON rendered in image coordinate space</h3>
+          <p className="responseLabel">Spatial trajectory</p>
+          <h3>Final path in image coordinate space</h3>
         </div>
-        <span>
-          {thinkingMarks.length} thinking · {finalMarks.length} final · {points.length} points · {boxes.length} boxes
-        </span>
+        <div className="spatialToolbar">
+          <span>
+            {finalMarks.length} final · {thinkingMarks.length} trace {traceState} · {points.length} points · {boxes.length} boxes
+          </span>
+          {thinkingMarks.length > 0 ? (
+            <button
+              aria-checked={showReasoningTrace}
+              className={showReasoningTrace ? "spatialTraceToggle checked" : "spatialTraceToggle"}
+              onClick={() => setShowReasoningTrace((value) => !value)}
+              role="switch"
+              type="button"
+            >
+              <span />
+              {showReasoningTrace ? "Hide reasoning trace" : "Show reasoning trace"}
+            </button>
+          ) : null}
+        </div>
       </div>
+      {thinkingMarks.length > 0 ? (
+        <div className="spatialLegend" aria-label="Spatial overlay legend">
+          <span className="finalLegend">Final answer</span>
+          <span className={showReasoningTrace ? "traceLegend" : "traceLegend mutedLegend"}>Reasoning trace</span>
+        </div>
+      ) : null}
       <div className="spatialCanvas">
         <img
           className="spatialImage"
@@ -2352,10 +2382,10 @@ function SpatialTrajectoryOverlay({
             preserveAspectRatio="xMidYMid meet"
             viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
           >
-            {thinkingPoints.length > 1 ? (
+            {visibleThinkingPoints.length > 1 ? (
               <polyline
                 className="spatialPath spatialPathThinking"
-                points={thinkingPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
+                points={visibleThinkingPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
               />
             ) : null}
             {finalPoints.length > 1 ? (
@@ -2367,7 +2397,7 @@ function SpatialTrajectoryOverlay({
             {marks.map((mark) => (
               <g key={mark.id}>
                 <title>
-                  {mark.source === "thinking" ? "Thinking" : "Final"} #{mark.sequence}: {mark.label}
+                  {mark.source === "thinking" ? "Reasoning trace" : "Final answer"} #{mark.sequence}: {mark.label}
                   {mark.detail ? ` — ${mark.detail}` : ""}
                 </title>
                 <rect
@@ -2388,8 +2418,12 @@ function SpatialTrajectoryOverlay({
                     r={5}
                   />
                 ) : null}
-                <text className="spatialPointLabel" x={mark.x + 8} y={Math.max(18, mark.y - 8)}>
-                  {mark.source === "thinking" ? "T" : "F"}
+                <text
+                  className={`spatialPointLabel ${mark.source === "thinking" ? "spatialTraceLabel" : "spatialFinalLabel"}`}
+                  x={mark.x + 8}
+                  y={Math.max(18, mark.y - 8)}
+                >
+                  {spatialMarkSvgPrefix(mark)}
                   {mark.sequence}
                 </text>
               </g>
@@ -2398,27 +2432,52 @@ function SpatialTrajectoryOverlay({
         ) : null}
       </div>
       {marks.length > 0 ? (
-        <ol className="spatialSequence" aria-label="Generated coordinate sequence">
-          {marks.map((mark) => (
-            <li className="spatialSequenceItem" key={`sequence-${mark.id}`}>
-              <strong>
-                {mark.source === "thinking" ? "T" : "F"}#{mark.sequence}
-              </strong>
-              <span>{mark.label}</span>
-              {mark.detail ? <em>{mark.detail}</em> : null}
-              <code>
-                {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
-                {mark.kind === "bbox"
-                  ? `${Math.round(mark.x)}, ${Math.round(mark.y)}, ${Math.round(mark.width)}×${Math.round(mark.height)}`
-                  : `${Math.round(mark.centerX)}, ${Math.round(mark.centerY)}`}
-              </code>
-            </li>
-          ))}
-        </ol>
+        <div className="spatialSequenceGroups">
+          <SpatialMarkList label="Final answer" marks={visibleFinalMarks} />
+          {showReasoningTrace && visibleThinkingMarks.length > 0 ? (
+            <SpatialMarkList label="Reasoning trace" marks={visibleThinkingMarks} />
+          ) : null}
+        </div>
+      ) : thinkingMarks.length > 0 && !showReasoningTrace ? (
+        <p className="spatialLoading">Reasoning trace is hidden. Toggle it on to inspect trace coordinates.</p>
       ) : (
         <p className="spatialLoading">Loading image dimensions for overlay alignment...</p>
       )}
     </article>
+  );
+}
+
+function spatialMarkPrefix(mark: SpatialMark) {
+  return mark.source === "thinking" ? "Trace" : "Final";
+}
+
+function spatialMarkSvgPrefix(mark: SpatialMark) {
+  return mark.source === "thinking" ? "R" : "F";
+}
+
+function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[] }) {
+  if (marks.length === 0) return null;
+  return (
+    <section className={label === "Reasoning trace" ? "spatialSequenceGroup traceGroup" : "spatialSequenceGroup"}>
+      <p>{label}</p>
+      <ol className="spatialSequence" aria-label={`${label} coordinate sequence`}>
+        {marks.map((mark) => (
+          <li className="spatialSequenceItem" key={`sequence-${mark.id}`}>
+            <strong>
+              {spatialMarkPrefix(mark)} #{mark.sequence}
+            </strong>
+            <span>{mark.label}</span>
+            {mark.detail ? <em>{mark.detail}</em> : null}
+            <code>
+              {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
+              {mark.kind === "bbox"
+                ? `${Math.round(mark.x)}, ${Math.round(mark.y)}, ${Math.round(mark.width)}×${Math.round(mark.height)}`
+                : `${Math.round(mark.centerX)}, ${Math.round(mark.centerY)}`}
+            </code>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 

@@ -1202,7 +1202,16 @@ select {
   line-height: 1.25;
 }
 
-.spatialTopline > span {
+.spatialToolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spatialToolbar > span {
   flex: 0 0 auto;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
@@ -1210,6 +1219,95 @@ select {
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.spatialTraceToggle {
+  position: relative;
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: #101010;
+  color: var(--muted);
+  padding: 0 12px 0 7px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.spatialTraceToggle span {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border: 1px solid #4f4f4f;
+  border-radius: 999px;
+  background: #1f1f1f;
+}
+
+.spatialTraceToggle span::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #b8b8b8;
+  content: "";
+  transition: transform 150ms ease, background-color 150ms ease;
+}
+
+.spatialTraceToggle.checked {
+  border-color: var(--aqua);
+  color: var(--text);
+}
+
+.spatialTraceToggle.checked span {
+  border-color: var(--aqua);
+  background: #06272f;
+}
+
+.spatialTraceToggle.checked span::after {
+  background: var(--aqua);
+  transform: translateX(12px);
+}
+
+.spatialLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.spatialLegend span {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.spatialLegend span::before {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  content: "";
+}
+
+.finalLegend::before {
+  background: var(--green);
+}
+
+.traceLegend::before {
+  background: var(--aqua);
+}
+
+.mutedLegend {
+  opacity: 0.55;
 }
 
 .spatialCanvas {
@@ -1306,6 +1404,37 @@ select {
   stroke-width: 5;
 }
 
+.spatialTraceLabel {
+  fill: var(--aqua);
+}
+
+.spatialFinalLabel {
+  fill: #ffffff;
+}
+
+.spatialSequenceGroups {
+  display: grid;
+  gap: 12px;
+}
+
+.spatialSequenceGroup {
+  display: grid;
+  gap: 8px;
+}
+
+.spatialSequenceGroup > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.traceGroup {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
+}
+
 .spatialSequence {
   display: flex;
   flex-wrap: wrap;
@@ -1330,6 +1459,15 @@ select {
 
 .spatialSequenceItem strong {
   color: var(--green);
+}
+
+.traceGroup .spatialSequenceItem {
+  border-color: rgb(0 210 255 / 35%);
+  background: #071215;
+}
+
+.traceGroup .spatialSequenceItem strong {
+  color: var(--aqua);
 }
 
 .spatialSequenceItem code {
