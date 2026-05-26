@@ -1246,6 +1246,15 @@ select {
   vector-effect: non-scaling-stroke;
 }
 
+.spatialPathThinking {
+  opacity: 0.75;
+}
+
+.spatialPathFinal {
+  stroke: var(--green);
+  stroke-dasharray: none;
+}
+
 .spatialPointBox,
 .spatialBbox {
   fill: rgb(118 185 0 / 10%);
@@ -1259,11 +1268,32 @@ select {
   stroke: var(--blue);
 }
 
+.spatialPointBox.spatialThinkingMark,
+.spatialBbox.spatialThinkingMark {
+  fill: rgb(0 210 255 / 10%);
+  stroke: var(--aqua);
+  stroke-dasharray: 6 4;
+}
+
+.spatialPointBox.spatialFinalMark {
+  fill: rgb(118 185 0 / 12%);
+  stroke: var(--green);
+}
+
+.spatialBbox.spatialFinalMark {
+  fill: rgb(0 141 255 / 10%);
+  stroke: var(--blue);
+}
+
 .spatialPointDot {
   fill: var(--aqua);
   stroke: #000000;
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+}
+
+.spatialFinalDot {
+  fill: var(--green);
 }
 
 .spatialPointLabel {
@@ -1305,6 +1335,15 @@ select {
 .spatialSequenceItem code {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.spatialSequenceItem em {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--muted);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .spatialLoading {

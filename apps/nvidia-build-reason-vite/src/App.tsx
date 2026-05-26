@@ -169,11 +169,14 @@ type ImageSize = {
   height: number;
 };
 
+type SpatialSource = "thinking" | "final";
+
 type SpatialMark = {
   id: string;
   kind: "point" | "bbox";
   sourceKey: string;
   coordinateMode: "cosmos-1000" | "unit" | "pixel";
+  source: SpatialSource;
   x: number;
   y: number;
   width: number;
@@ -181,6 +184,7 @@ type SpatialMark = {
   centerX: number;
   centerY: number;
   label: string;
+  detail?: string;
   sequence: number;
 };
 
@@ -649,7 +653,86 @@ function parseJsonCandidate(candidate: string): unknown | null {
   }
 }
 
+function collectBalancedJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const openers: Record<string, string> = { "{": "}", "[": "]" };
+  const closers = new Set(Object.values(openers));
+
+  for (let start = 0; start < text.length; start += 1) {
+    const opener = text[start];
+    const firstCloser = openers[opener];
+    if (!firstCloser) continue;
+
+    const stack = [firstCloser];
+    let inString = false;
+    let escaping = false;
+
+    for (let index = start + 1; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (escaping) {
+          escaping = false;
+        } else if (char === "\\") {
+          escaping = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      const nextCloser = openers[char];
+      if (nextCloser) {
+        stack.push(nextCloser);
+        continue;
+      }
+
+      if (closers.has(char)) {
+        if (stack.pop() !== char) break;
+        if (stack.length === 0) {
+          candidates.push(text.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function parseJsonPayloads(text: string): unknown[] {
+  const payloads: unknown[] = [];
+  const seen = new Set<string>();
+
+  function addCandidate(candidate: string) {
+    const parsed = parseJsonCandidate(candidate);
+    if (parsed === null) return;
+    const key = JSON.stringify(parsed);
+    if (seen.has(key)) return;
+    seen.add(key);
+    payloads.push(parsed);
+  }
+
+  const trimmed = text.trim();
+  if (trimmed) addCandidate(trimmed);
+
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    addCandidate(match[1]);
+  }
+
+  collectBalancedJsonCandidates(text).forEach(addCandidate);
+  return payloads;
+}
+
 function parseResponseJsonPayload(text: string): unknown | null {
+  const firstPayload = parseJsonPayloads(text)[0];
+  if (firstPayload !== undefined) return firstPayload;
+
   const trimmed = text.trim();
   if (!trimmed) return null;
 
@@ -772,9 +855,35 @@ function normalizeBbox(
   return rect ? [...rect, mode] : null;
 }
 
+function stringField(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return "";
+}
+
 function spatialLabel(record: Record<string, unknown>, fallback: string) {
-  const value = record.label ?? record.category_name ?? record.name ?? record.class ?? record.description;
-  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  return (
+    stringField(record, [
+      "label",
+      "category_name",
+      "name",
+      "class",
+      "object",
+      "target",
+      "action",
+      "description",
+      "stage",
+      "step_label"
+    ]) || fallback
+  );
+}
+
+function spatialDetail(record: Record<string, unknown>, label: string) {
+  const detail = stringField(record, ["reason", "rationale", "thought", "observation", "note", "description", "action"]);
+  return detail && detail !== label ? detail : undefined;
 }
 
 function spatialSequence(record: Record<string, unknown>, fallback: number) {
@@ -783,17 +892,18 @@ function spatialSequence(record: Record<string, unknown>, fallback: number) {
 }
 
 function hasSpatialPayload(text: string) {
-  const payload = parseResponseJsonPayload(text);
-  return payload !== null && collectSpatialRecords(payload).length > 0;
+  return parseJsonPayloads(text).some((payload) => collectSpatialRecords(payload).length > 0);
 }
 
-function parseSpatialMarks(text: string, imageSize: ImageSize) {
-  const payload = parseResponseJsonPayload(text);
-  const records = payload === null ? [] : collectSpatialRecords(payload);
+function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSource) {
+  const records = parseJsonPayloads(text).flatMap((payload) => collectSpatialRecords(payload));
   const marks: SpatialMark[] = [];
+  let fallbackSequence = 1;
   records.forEach((record, index) => {
-    const sequence = spatialSequence(record, index + 1);
+    const sequence = spatialSequence(record, fallbackSequence);
+    fallbackSequence += 1;
     const label = spatialLabel(record, `point ${sequence}`);
+    const detail = spatialDetail(record, label);
 
     for (const key of POINT_KEYS) {
       const point = normalizePoint(key, record[key], imageSize);
@@ -801,10 +911,11 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
       const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
       const [centerX, centerY, coordinateMode] = point;
       marks.push({
-        id: `${key}-${index}-point`,
+        id: `${source}-${key}-${index}-point`,
         kind: "point",
         sourceKey: key,
         coordinateMode,
+        source,
         x: centerX - side / 2,
         y: centerY - side / 2,
         width: side,
@@ -812,6 +923,7 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
         centerX,
         centerY,
         label,
+        detail,
         sequence
       });
       break;
@@ -822,10 +934,11 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
       if (!bbox) continue;
       const [x, y, width, height, coordinateMode] = bbox;
       marks.push({
-        id: `${key}-${index}-bbox`,
+        id: `${source}-${key}-${index}-bbox`,
         kind: "bbox",
         sourceKey: key,
         coordinateMode,
+        source,
         x,
         y,
         width,
@@ -833,6 +946,7 @@ function parseSpatialMarks(text: string, imageSize: ImageSize) {
         centerX: x + width / 2,
         centerY: y + height / 2,
         label,
+        detail,
         sequence
       });
       break;
@@ -2177,12 +2291,33 @@ function ExampleModal({
   );
 }
 
-function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; text: string }) {
+function SpatialTrajectoryOverlay({
+  answerText,
+  media,
+  reasoningText
+}: {
+  answerText: string;
+  media: MediaState | null;
+  reasoningText: string;
+}) {
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
-  const canParseSpatial = useMemo(() => hasSpatialPayload(text), [text]);
-  const marks = useMemo(() => (imageSize ? parseSpatialMarks(text, imageSize) : []), [imageSize, text]);
+  const canParseSpatial = useMemo(
+    () => hasSpatialPayload(reasoningText) || hasSpatialPayload(answerText),
+    [answerText, reasoningText]
+  );
+  const marks = useMemo(() => {
+    if (!imageSize) return [];
+    return [
+      ...parseSpatialMarks(reasoningText, imageSize, "thinking"),
+      ...parseSpatialMarks(answerText, imageSize, "final")
+    ];
+  }, [answerText, imageSize, reasoningText]);
   const points = marks.filter((mark) => mark.kind === "point");
   const boxes = marks.filter((mark) => mark.kind === "bbox");
+  const thinkingMarks = marks.filter((mark) => mark.source === "thinking");
+  const finalMarks = marks.filter((mark) => mark.source === "final");
+  const thinkingPoints = thinkingMarks.filter((mark) => mark.kind === "point");
+  const finalPoints = finalMarks.filter((mark) => mark.kind === "point");
 
   if (!media || media.kind !== "image" || !canParseSpatial) return null;
 
@@ -2190,11 +2325,11 @@ function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; t
     <article className="spatialOverlayCard">
       <div className="spatialTopline">
         <div>
-          <p className="responseLabel">Response JSON boxes</p>
-          <h3>Point and bbox fields rendered from the final answer only</h3>
+          <p className="responseLabel">Robot reasoning trace</p>
+          <h3>Thinking and final JSON rendered in image coordinate space</h3>
         </div>
         <span>
-          {points.length} points · {boxes.length} boxes
+          {thinkingMarks.length} thinking · {finalMarks.length} final · {points.length} points · {boxes.length} boxes
         </span>
       </div>
       <div className="spatialCanvas">
@@ -2217,21 +2352,44 @@ function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; t
             preserveAspectRatio="xMidYMid meet"
             viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
           >
-            {points.length > 1 ? (
-              <polyline className="spatialPath" points={points.map((point) => `${point.centerX},${point.centerY}`).join(" ")} />
+            {thinkingPoints.length > 1 ? (
+              <polyline
+                className="spatialPath spatialPathThinking"
+                points={thinkingPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
+              />
+            ) : null}
+            {finalPoints.length > 1 ? (
+              <polyline
+                className="spatialPath spatialPathFinal"
+                points={finalPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
+              />
             ) : null}
             {marks.map((mark) => (
               <g key={mark.id}>
+                <title>
+                  {mark.source === "thinking" ? "Thinking" : "Final"} #{mark.sequence}: {mark.label}
+                  {mark.detail ? ` — ${mark.detail}` : ""}
+                </title>
                 <rect
-                  className={mark.kind === "point" ? "spatialPointBox" : "spatialBbox"}
+                  className={`${mark.kind === "point" ? "spatialPointBox" : "spatialBbox"} ${
+                    mark.source === "thinking" ? "spatialThinkingMark" : "spatialFinalMark"
+                  }`}
                   height={mark.height}
                   rx={Math.max(4, Math.min(mark.width, mark.height) * 0.08)}
                   width={mark.width}
                   x={mark.x}
                   y={mark.y}
                 />
-                {mark.kind === "point" ? <circle className="spatialPointDot" cx={mark.centerX} cy={mark.centerY} r={5} /> : null}
+                {mark.kind === "point" ? (
+                  <circle
+                    className={`spatialPointDot ${mark.source === "thinking" ? "spatialThinkingDot" : "spatialFinalDot"}`}
+                    cx={mark.centerX}
+                    cy={mark.centerY}
+                    r={5}
+                  />
+                ) : null}
                 <text className="spatialPointLabel" x={mark.x + 8} y={Math.max(18, mark.y - 8)}>
+                  {mark.source === "thinking" ? "T" : "F"}
                   {mark.sequence}
                 </text>
               </g>
@@ -2243,8 +2401,11 @@ function SpatialTrajectoryOverlay({ media, text }: { media: MediaState | null; t
         <ol className="spatialSequence" aria-label="Generated coordinate sequence">
           {marks.map((mark) => (
             <li className="spatialSequenceItem" key={`sequence-${mark.id}`}>
-              <strong>#{mark.sequence}</strong>
+              <strong>
+                {mark.source === "thinking" ? "T" : "F"}#{mark.sequence}
+              </strong>
               <span>{mark.label}</span>
+              {mark.detail ? <em>{mark.detail}</em> : null}
               <code>
                 {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
                 {mark.kind === "bbox"
@@ -2317,7 +2478,7 @@ function PreviewOutput({
     const answerText = parsedOutput.answer || result.content || "";
     return (
       <div className="responseStack">
-        <SpatialTrajectoryOverlay media={media} text={answerText} />
+        <SpatialTrajectoryOverlay answerText={answerText} media={media} reasoningText={parsedOutput.reasoning} />
         {hasAnswer ? (
           <article className={isRunning ? "answer streamingAnswer" : "answer"}>
             <p className="responseLabel">Response</p>
