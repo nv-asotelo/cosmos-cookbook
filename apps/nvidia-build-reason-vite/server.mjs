@@ -9,6 +9,7 @@ import {
   buildReasoningPayload,
   createReasoningStreamNormalizer,
   listReasonerModels,
+  normalizeReasonerMessage,
   submitReasoning
 } from "../_shared/reasonerClient.mjs";
 
@@ -31,10 +32,11 @@ const KNOWN_HF_MODEL_COMMITS = {
 };
 
 const app = express();
-app.use(express.json({ limit: "128mb" }));
+app.use(express.json({ limit: "512mb" }));
 
 const EXAMPLE_MEDIA_HOSTS = new Set(["assets.ngc.nvidia.com"]);
 const DEFAULT_NIM_FRAME_FALLBACK_IMAGES = 5;
+const LONG_VIDEO_MAX_IMAGES_PER_CHUNK = 5;
 const FRAME_EXTRACTOR_PY = String.raw`
 import json
 import os
@@ -75,6 +77,92 @@ for index, frame in enumerate(container.decode(stream)):
 container.close()
 print(json.dumps({"count": len(paths), "fps": fps, "frames": paths}))
 `;
+const LONG_FRAME_EXTRACTOR_PY = String.raw`
+import json
+import math
+import os
+import sys
+
+import av
+
+video_path, output_dir, fps_raw, max_raw, width_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+fps = max(0.1, float(fps_raw))
+max_frames = int(float(max_raw)) if max_raw else 0
+target_width = int(float(width_raw)) if width_raw else 768
+
+def fmt(seconds):
+    seconds = max(0.0, float(seconds or 0.0))
+    minutes = int(seconds // 60)
+    rem = seconds - minutes * 60
+    return f"{minutes:02d}:{rem:05.2f}"
+
+container = av.open(video_path)
+stream = container.streams.video[0]
+frame_rate = float(stream.average_rate) if stream.average_rate else 25.0
+duration_s = 0.0
+if container.duration:
+    duration_s = float(container.duration / av.time_base)
+elif stream.duration:
+    duration_s = float(stream.duration * stream.time_base)
+elif stream.frames and frame_rate:
+    duration_s = float(stream.frames) / frame_rate
+
+target_count = max(1, int(math.ceil(duration_s * fps))) if duration_s > 0 else 1
+target_times = [index / fps for index in range(target_count)]
+if duration_s > 0 and (not target_times or target_times[-1] < duration_s - (0.5 / fps)):
+    target_times.append(duration_s)
+target_times = [min(duration_s, value) if duration_s > 0 else value for value in target_times]
+if max_frames > 0 and len(target_times) > max_frames:
+    if max_frames == 1:
+        target_times = [target_times[0]]
+    else:
+        target_times = [
+            target_times[int(round(index * (len(target_times) - 1) / (max_frames - 1)))]
+            for index in range(max_frames)
+        ]
+
+frames = []
+next_target = 0
+source_width = 0
+source_height = 0
+last_ts = 0.0
+for index, frame in enumerate(container.decode(stream)):
+    if next_target >= len(target_times):
+        break
+    ts = float(frame.pts * frame.time_base) if frame.pts is not None else (float(index) / frame_rate if frame_rate else 0.0)
+    last_ts = ts
+    if ts + (0.5 / max(frame_rate, 1.0)) < target_times[next_target]:
+        continue
+    image = frame.to_image().convert("RGB")
+    source_width, source_height = image.size
+    if target_width > 0 and image.width > target_width:
+        ratio = target_width / float(image.width)
+        image = image.resize((target_width, max(1, int(round(image.height * ratio)))))
+    frame_path = os.path.join(output_dir, f"frame_{len(frames):05d}.jpg")
+    image.save(frame_path, format="JPEG", quality=78, optimize=True)
+    frames.append({
+        "path": frame_path,
+        "index": index,
+        "timestamp": ts,
+        "timestamp_text": fmt(ts),
+        "target_timestamp": target_times[next_target],
+        "target_timestamp_text": fmt(target_times[next_target])
+    })
+    next_target += 1
+
+container.close()
+if duration_s <= 0:
+    duration_s = last_ts
+print(json.dumps({
+    "duration_s": duration_s,
+    "source_fps": frame_rate,
+    "source_width": source_width,
+    "source_height": source_height,
+    "sample_fps": fps,
+    "count": len(frames),
+    "frames": frames
+}))
+`;
 
 function dataUrlToBuffer(dataUrl) {
   const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
@@ -84,6 +172,21 @@ function dataUrlToBuffer(dataUrl) {
     mime: match[1] || "application/octet-stream",
     buffer: isBase64 ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8")
   };
+}
+
+async function mediaSourceToBuffer(mediaSource) {
+  const source = String(mediaSource || "");
+  if (/^https?:\/\//i.test(source)) {
+    const upstream = await fetch(source);
+    if (!upstream.ok) {
+      throw new Error(`Video URL fetch failed with HTTP ${upstream.status}`);
+    }
+    return {
+      mime: upstream.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+      buffer: Buffer.from(await upstream.arrayBuffer())
+    };
+  }
+  return dataUrlToBuffer(source);
 }
 
 function pythonForFrames() {
@@ -152,7 +255,7 @@ function frameFallbackLimit() {
 function frameFallbackAllowed() {
   if (process.env.REASONER_ENABLE_FRAME_FALLBACK === "1") return true;
   if (process.env.REASONER_DISABLE_FRAME_FALLBACK === "1") return false;
-  return String(process.env.REASONER_MEDIA_MODE || "").toLowerCase() !== "video_url";
+  return false;
 }
 
 function nativeVideoFallbackMessage(message) {
@@ -208,7 +311,7 @@ function runFrameExtractor(videoPath, outputDir, framesPerSecond, maxFrames) {
 async function extractFrameDataUrls(mediaDataUrl, framesPerSecond, maxFrames) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "reason-vite-frames-"));
   try {
-    const { buffer } = dataUrlToBuffer(mediaDataUrl);
+    const { buffer } = await mediaSourceToBuffer(mediaDataUrl);
     const videoPath = path.join(tempDir, "input.mp4");
     const frameDir = path.join(tempDir, "frames");
     await fs.mkdir(frameDir);
@@ -225,6 +328,463 @@ async function extractFrameDataUrls(mediaDataUrl, framesPerSecond, maxFrames) {
     await fs.rm(tempDir, { recursive: true, force: true });
     throw error;
   }
+}
+
+function formatTimestamp(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const remainder = value - minutes * 60;
+  return `${String(minutes).padStart(2, "0")}:${remainder.toFixed(2).padStart(5, "0")}`;
+}
+
+function positiveNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function longVideoFrameLimit() {
+  const parsed = Number.parseInt(process.env.REASONER_LONG_MAX_FRAMES || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 720;
+}
+
+function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurrency, requestedFramesPerSecond) {
+  const preset = String(presetRaw || "balanced").toLowerCase();
+  const duration = Number(durationSeconds) || 0;
+  const requestedFps = positiveNumber(requestedFramesPerSecond);
+  const defaults =
+    preset === "fast"
+      ? {
+          preset: "fast",
+          sampleFps: duration > 180 ? 0.33 : 0.5,
+          maxFrames: duration > 0 ? Math.min(48, Math.max(12, Math.ceil(duration * 0.5))) : 48,
+          chunkSize: 5,
+          overlap: 0,
+          concurrency: 4,
+          chunkMaxTokens: 512,
+          finalMaxTokens: 1200,
+          chunkTimeoutMs: 45000,
+          targetWidth: 640
+        }
+      : preset === "detailed"
+        ? {
+            preset: "detailed",
+            sampleFps: duration > 120 ? 1.5 : 2,
+            maxFrames: duration > 0 ? Math.min(180, Math.max(24, Math.ceil(duration * 2))) : 180,
+            chunkSize: 5,
+            overlap: 1,
+            concurrency: 4,
+            chunkMaxTokens: 900,
+            finalMaxTokens: 2200,
+            chunkTimeoutMs: 90000,
+            targetWidth: 768
+          }
+        : {
+            preset: "balanced",
+            sampleFps: duration > 120 ? 0.75 : 1,
+            maxFrames: duration > 0 ? Math.min(96, Math.max(18, Math.ceil(duration))) : 96,
+            chunkSize: 5,
+            overlap: 1,
+            concurrency: 4,
+            chunkMaxTokens: 560,
+            finalMaxTokens: 900,
+            chunkTimeoutMs: 65000,
+          targetWidth: 704
+        };
+  const maxFrameLimit = longVideoFrameLimit();
+  const sampleFps = requestedFps ? Math.min(30, requestedFps) : defaults.sampleFps;
+  const requestedFrameBudget =
+    duration > 0
+      ? Math.ceil(duration * sampleFps)
+      : Math.ceil(sampleFps * 120);
+  const maxFrames = requestedFps
+    ? Math.min(maxFrameLimit, Math.max(defaults.maxFrames, requestedFrameBudget))
+    : defaults.maxFrames;
+  const concurrency = Number.parseInt(String(requestedConcurrency || ""), 10);
+  return {
+    ...defaults,
+    sampleFps,
+    maxFrames,
+    requestedFps,
+    frameLimit: maxFrameLimit,
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.min(8, concurrency) : defaults.concurrency,
+    maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK
+  };
+}
+
+function runLongFrameExtractor(videoPath, outputDir, config) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      pythonForFrames(),
+      [
+        "-",
+        videoPath,
+        outputDir,
+        String(config.sampleFps),
+        String(config.maxFrames || ""),
+        String(config.targetWidth || 704)
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Long video frame extractor exited with ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(LONG_FRAME_EXTRACTOR_PY);
+  });
+}
+
+async function extractLongVideoFrames(mediaSource, config) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "reason-vite-long-"));
+  try {
+    const { buffer } = await mediaSourceToBuffer(mediaSource);
+    const videoPath = path.join(tempDir, "input.mp4");
+    const frameDir = path.join(tempDir, "frames");
+    await fs.mkdir(frameDir);
+    await fs.writeFile(videoPath, buffer);
+    const info = await runLongFrameExtractor(videoPath, frameDir, config);
+    const frames = [];
+    for (const frame of info.frames || []) {
+      const bytes = await fs.readFile(frame.path);
+      frames.push({
+        ...frame,
+        dataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}`,
+        timestamp: Number(frame.timestamp) || 0,
+        timestamp_text: frame.timestamp_text || formatTimestamp(frame.timestamp)
+      });
+    }
+    if (frames.length === 0) throw new Error("Could not extract timestamped frames from video");
+    return {
+      tempDir,
+      durationSeconds: Number(info.duration_s) || frames.at(-1)?.timestamp || 0,
+      sourceFps: Number(info.source_fps) || null,
+      sourceWidth: Number(info.source_width) || null,
+      sourceHeight: Number(info.source_height) || null,
+      sampleFps: Number(info.sample_fps) || config.sampleFps,
+      frames
+    };
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function chunkLongFrames(frames, config) {
+  const size = Math.min(config.chunkSize || 5, LONG_VIDEO_MAX_IMAGES_PER_CHUNK);
+  const overlap = Math.max(0, Math.min(config.overlap || 0, size - 1));
+  const step = Math.max(1, size - overlap);
+  const chunks = [];
+  for (let start = 0; start < frames.length; start += step) {
+    const slice = frames.slice(start, start + size);
+    if (slice.length === 0) continue;
+    chunks.push({
+      index: chunks.length,
+      frames: slice,
+      startSeconds: slice[0].timestamp,
+      endSeconds: slice.at(-1).timestamp,
+      timeRange: `${slice[0].timestamp_text} - ${slice.at(-1).timestamp_text}`
+    });
+    if (start + size >= frames.length) break;
+  }
+  return chunks;
+}
+
+function stripReasoningFormatInstruction(prompt) {
+  return String(prompt || "")
+    .replace(/Answer the question using the following format:\s*<think>\s*Your reasoning\.\s*<\/think>\s*Write your final answer immediately after the <\/think> tag\./gi, "")
+    .replace(/<think>\s*Your reasoning\.\s*<\/think>/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function maybeJsonText(value) {
+  const text = String(value || "").trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : text;
+  const first = candidate.search(/[\[{]/);
+  if (first < 0) return null;
+  const trimmed = candidate.slice(first);
+  for (let end = trimmed.length; end > Math.max(1, trimmed.length - 400); end -= 1) {
+    try {
+      return JSON.parse(trimmed.slice(0, end));
+    } catch {
+      // Keep searching for a valid JSON tail.
+    }
+  }
+  return null;
+}
+
+function cleanModelText(value) {
+  return String(value || "")
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
+
+function compactChunkSummary(parsed, content) {
+  if (parsed?.summary) return String(parsed.summary);
+  const cleaned = cleanModelText(content);
+  const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+  if (summaryMatch) {
+    try {
+      return JSON.parse(`"${summaryMatch[1]}"`);
+    } catch {
+      return summaryMatch[1].replace(/\\"/g, '"');
+    }
+  }
+  const firstLine = cleaned
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find((line) => line && !/^[{}\[\],]+$/.test(line));
+  const fallback = firstLine || cleaned || "";
+  return fallback.length > 320 ? `${fallback.slice(0, 317)}...` : fallback;
+}
+
+function normalizeBaseUrl(url) {
+  const stripped = String(url || "").replace(/\/$/, "");
+  return stripped.endsWith("/v1") ? stripped : `${stripped}/v1`;
+}
+
+function reasonerEndpointPool(defaultBaseUrl) {
+  const raw = process.env.REASONER_ENDPOINTS || "";
+  const values = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return (values.length ? values : [defaultBaseUrl]).map(normalizeBaseUrl);
+}
+
+async function postOpenAiJson(baseUrl, payload, timeoutMs, parentSignal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parentSignal?.addEventListener?.("abort", abort, { once: true });
+  try {
+    const upstream = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    let data = null;
+    try {
+      data = await upstream.json();
+    } catch {
+      data = null;
+    }
+    if (!upstream.ok) {
+      throw new Error(data?.error?.message || data?.message || `Reasoner returned HTTP ${upstream.status}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener?.("abort", abort);
+  }
+}
+
+async function runConcurrent(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const count = Math.max(1, Math.min(Number(concurrency) || 1, items.length || 1));
+  async function loop() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: count }, loop));
+  return results;
+}
+
+function chunkPrompt({ chunk, durationSeconds, prompt, preset }) {
+  const task = stripReasoningFormatInstruction(prompt) || "Summarize what happens in this video segment.";
+  const frames = chunk.frames
+    .map((frame, index) => `Frame ${index + 1}: ${frame.timestamp_text} (${frame.timestamp.toFixed(2)}s)`)
+    .join("\n");
+  return `You are analyzing one timestamped window from a longer video.
+
+Full clip duration: ${formatTimestamp(durationSeconds)}.
+Window: ${chunk.timeRange}.
+Preset: ${preset}.
+
+Frame timestamp map:
+${frames}
+
+Original user task:
+${task}
+
+Return concise valid JSON only with this shape:
+{
+  "time_range": {"start": "${chunk.frames[0].timestamp_text}", "end": "${chunk.frames.at(-1).timestamp_text}"},
+  "summary": "one-sentence visible summary",
+  "events": [
+    {"start": "mm:ss.ff", "end": "mm:ss.ff", "event_type": "visible event type", "caption": "what is visibly happening", "confidence": 0.0}
+  ],
+  "uncertainty": "what might be missed because only these frames were sampled",
+  "evidence_frames": ["Frame 1", "Frame 2"]
+}
+
+Use only visible evidence from these frames. Do not invent events between frames. Keep output short.`;
+}
+
+function reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset, warnings }) {
+  const task = stripReasoningFormatInstruction(prompt) || "Summarize the full video.";
+  const chunkText = chunks
+    .map((chunk) => {
+      const parsed = chunk.parsed ? JSON.stringify(chunk.parsed) : chunk.content;
+      return `Chunk ${chunk.index + 1} (${chunk.timeRange}, ${chunk.status}): ${parsed || chunk.error || "No output"}`;
+    })
+    .join("\n\n");
+  const failures = failedChunks.length
+    ? `\nFailed chunks: ${failedChunks.map((chunk) => `${chunk.index + 1} ${chunk.timeRange}: ${chunk.error}`).join("; ")}`
+    : "";
+  return `Stitch these timestamped chunk analyses into one answer for the original user task.
+
+Original user task:
+${task}
+
+Clip duration: ${formatTimestamp(durationSeconds)}
+Analysis preset: ${preset}
+Warnings: ${warnings.join("; ") || "none"}${failures}
+
+Chunk analyses:
+${chunkText}
+
+Instructions:
+- Preserve timestamp evidence across the full clip.
+- Deduplicate overlapping events with the same event type and similar timestamp.
+- Mention failed or sparse sections as limitations instead of hiding them.
+- Follow the user's requested output format when possible. If no exact format is requested, return no more than 12 concise timeline bullets plus key limitations.
+- Do not include <think> tags.`;
+}
+
+function timestampSeconds(value) {
+  const text = String(value || "");
+  const match = text.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+  if (!match) return Number.NaN;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, preset, warnings }) {
+  const wantsJson = /\bjson\b/i.test(String(prompt || ""));
+  const events = [];
+  const chunkSummaries = [];
+  for (const chunk of chunks) {
+    const summary = chunk.summary || compactChunkSummary(chunk.parsed, chunk.content);
+    if (summary) {
+      chunkSummaries.push({
+        index: chunk.index + 1,
+        time_range: chunk.timeRange,
+        summary: String(summary).replace(/```(?:json)?|```/gi, "").trim()
+      });
+    }
+    const parsedEvents = Array.isArray(chunk.parsed?.events) ? chunk.parsed.events : [];
+    for (const event of parsedEvents) {
+      const start = String(event.start || chunk.timeRange?.split(" - ")[0] || "");
+      const type = String(event.event_type || event.type || "visible_event");
+      const seconds = timestampSeconds(start);
+      const duplicate = events.some((existing) => {
+        if (String(existing.event_type).toLowerCase() !== type.toLowerCase()) return false;
+        const existingSeconds = timestampSeconds(existing.start);
+        return Number.isFinite(seconds) && Number.isFinite(existingSeconds) && Math.abs(existingSeconds - seconds) < 1.5;
+      });
+      if (duplicate) continue;
+      events.push({
+        start,
+        end: String(event.end || start),
+        event_type: type,
+        caption: String(event.caption || summary || "Visible event"),
+        confidence: Number.isFinite(Number(event.confidence)) ? Number(event.confidence) : undefined,
+        source_chunk: chunk.index + 1
+      });
+    }
+  }
+  events.sort((left, right) => timestampSeconds(left.start) - timestampSeconds(right.start));
+  const failed = failedChunks.map((chunk) => ({
+    index: chunk.index + 1,
+    time_range: chunk.timeRange,
+    error: chunk.error
+  }));
+  const samplingLimits = {
+    clip_duration: formatTimestamp(durationSeconds),
+    preset,
+    frame_chunking: `Timestamped image chunks, max ${LONG_VIDEO_MAX_IMAGES_PER_CHUNK} images per NIM request`,
+    warnings,
+    failed_chunks: failed
+  };
+
+  if (wantsJson) {
+    return JSON.stringify(
+      {
+        events,
+        chunk_summaries: chunkSummaries,
+        sampling_limits: samplingLimits
+      },
+      null,
+      2
+    );
+  }
+
+  const timeline =
+    events.length > 0
+      ? events.slice(0, 24).map((event) => `- ${event.start}${event.end && event.end !== event.start ? `-${event.end}` : ""}: ${event.event_type} — ${event.caption}`)
+      : chunkSummaries.slice(0, 18).map((item) => `- ${item.time_range}: ${item.summary}`);
+  const limitLines = warnings.map((warning) => `- ${warning}`);
+  if (failed.length > 0) {
+    limitLines.push(`- Failed chunks: ${failed.map((chunk) => `${chunk.index} (${chunk.time_range})`).join(", ")}`);
+  }
+  return [
+    `Long video analysis (${preset})`,
+    "",
+    `Coverage: ${chunks.length - failed.length}/${chunks.length} chunks across ${formatTimestamp(durationSeconds)}.`,
+    "",
+    "Timeline",
+    ...timeline,
+    "",
+    "Sampling limits",
+    ...limitLines
+  ].join("\n");
+}
+
+function longVideoWarnings(durationSeconds, frameCount, preset, config = {}) {
+  const warnings = [];
+  const coverage = durationSeconds > 0 ? frameCount / durationSeconds : 0;
+  if (coverage > 0 && coverage < 2) {
+    warnings.push(`${coverage.toFixed(2)} fps equivalent coverage; fast contacts or brief state changes may be missed.`);
+  }
+  if (config.requestedFps) {
+    warnings.push(
+      `Long Video is using the FPS slider at ${config.requestedFps} fps. Higher FPS creates more chunks because each NIM request can include only ${LONG_VIDEO_MAX_IMAGES_PER_CHUNK} frames.`
+    );
+  }
+  if (config.requestedFps && coverage > 0 && coverage + 0.01 < config.requestedFps) {
+    warnings.push(
+      `Requested ${config.requestedFps} fps was capped to ${coverage.toFixed(2)} fps effective coverage by the ${config.frameLimit} frame budget.`
+    );
+  }
+  if (preset === "fast") warnings.push("Fast preset prioritizes runtime over dense visual coverage.");
+  if (preset === "detailed") warnings.push("Detailed preset may run longer than the clip duration.");
+  warnings.push("NIM native video decode is bypassed here; Vite sends timestamped image chunks with at most 5 frames per request.");
+  return warnings;
 }
 
 function mediaMime(name, fallback = "application/octet-stream") {
@@ -755,7 +1315,11 @@ async function prepareReasonRequest(body = {}, options = {}) {
     mediaKind = body.mediaKind || null;
   }
 
-  if (mediaKind === "video" && mediaDataUrl && (forceFrameFallback || !usesNativeVideoUrl(selectedModel))) {
+  if (
+    mediaKind === "video" &&
+    mediaDataUrl &&
+    (forceFrameFallback || (!usesNativeVideoUrl(selectedModel) && frameFallbackAllowed()))
+  ) {
     const maxFrames = backend === "nim_local" || forceFrameFallback ? frameFallbackLimit() : undefined;
     const extracted = await extractFrameDataUrls(mediaDataUrl, params.frames_per_second, maxFrames);
     mediaFrames = extracted.frames;
@@ -929,6 +1493,146 @@ function emitFallback(response, result) {
   sse(response, "state", { phase: "complete" });
 }
 
+async function submitLongChunk({ chunk, config, durationSeconds, endpoints, model, params, prompt, signal, systemPrompt }) {
+  const text = chunkPrompt({ chunk, durationSeconds, prompt, preset: config.preset });
+  const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
+    model,
+    prompt: text,
+    systemPrompt: systemPrompt
+      ? `${systemPrompt}\n\nFor this long-video chunk pass, return concise JSON only. Do not include hidden reasoning.`
+      : "Return concise JSON only for this long-video chunk pass. Do not include hidden reasoning.",
+    mediaFrames: chunk.frames.map((frame) => frame.dataUrl),
+    framesPerSecond: config.sampleFps,
+    params: {
+      ...params,
+      temperature: Math.min(Number(params.temperature) || 0.6, 0.6),
+      max_tokens: config.chunkMaxTokens
+    }
+  });
+  delete payload.mm_processor_kwargs;
+  payload.max_tokens = config.chunkMaxTokens;
+
+  const endpoint = endpoints[chunk.index % endpoints.length] || baseUrl;
+  const startedAt = Date.now();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const attemptPayload = attempt === 0 ? payload : { ...payload, max_tokens: Math.min(384, config.chunkMaxTokens) };
+      const data = await postOpenAiJson(endpoint, attemptPayload, config.chunkTimeoutMs, signal);
+      const normalized = normalizeReasonerMessage(data);
+      const content = normalized.answer || normalized.combined;
+      const parsed = maybeJsonText(content);
+      return {
+        index: chunk.index,
+        status: "done",
+        timeRange: chunk.timeRange,
+        startSeconds: chunk.startSeconds,
+        endSeconds: chunk.endSeconds,
+        content,
+        reasoning: normalized.reasoning,
+        parsed,
+        summary: compactChunkSummary(parsed, content),
+        elapsedSeconds: (Date.now() - startedAt) / 1000,
+        endpoint,
+        payload: redactedPayload
+      };
+    } catch (error) {
+      if (attempt === 1 || signal?.aborted) {
+        return {
+          index: chunk.index,
+          status: "error",
+          timeRange: chunk.timeRange,
+          startSeconds: chunk.startSeconds,
+          endSeconds: chunk.endSeconds,
+          error: error instanceof Error ? error.message : "Chunk inference failed",
+          elapsedSeconds: (Date.now() - startedAt) / 1000,
+          endpoint,
+          payload: redactedPayload
+        };
+      }
+    }
+  }
+  return {
+    index: chunk.index,
+    status: "error",
+    timeRange: chunk.timeRange,
+    error: "Chunk inference failed"
+  };
+}
+
+async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, failedChunks, model, params, prompt, signal, warnings }) {
+  if (config.preset !== "detailed" && process.env.REASONER_LONG_USE_MODEL_REDUCER !== "1") {
+    const content = localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, preset: config.preset, warnings });
+    return {
+      status: "success",
+      content,
+      reasoning: "",
+      combined_content: content,
+      schema: /\bjson\b/i.test(String(prompt || "")) ? "local_long_video_json" : "local_long_video_timeline",
+      openai: {
+        id: `chatcmpl-byo-long-local-${Date.now()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content },
+            finish_reason: "stop"
+          }
+        ],
+        usage: null
+      }
+    };
+  }
+
+  const text = reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset: config.preset, warnings });
+  const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
+    model,
+    prompt: text,
+    systemPrompt: "You are a timeline reducer for long video analysis. Return the final answer only.",
+    params: {
+      ...params,
+      temperature: Math.min(Number(params.temperature) || 0.6, 0.6),
+      max_tokens: config.finalMaxTokens
+    }
+  });
+  delete payload.mm_processor_kwargs;
+  payload.max_tokens = config.finalMaxTokens;
+  const endpoint = endpoints[0] || baseUrl;
+  try {
+    const data = await postOpenAiJson(endpoint, payload, Math.max(config.chunkTimeoutMs, 90000), signal);
+    const normalized = normalizeReasonerMessage(data);
+    return {
+      status: "success",
+      content: normalized.answer || normalized.combined,
+      reasoning: normalized.reasoning,
+      combined_content: normalized.combined,
+      schema: normalized.schema,
+      openai: normalized.normalized,
+      raw: data,
+      payload: redactedPayload
+    };
+  } catch (error) {
+    const fallback = [
+      "Long video analysis completed, but the final stitching pass failed.",
+      "",
+      ...chunks
+        .filter((chunk) => chunk.status === "done")
+        .map((chunk) => `- ${chunk.timeRange}: ${chunk.parsed?.summary || chunk.content || "No summary"}`),
+      ...failedChunks.map((chunk) => `- ${chunk.timeRange}: failed (${chunk.error})`)
+    ].join("\n");
+    return {
+      status: "success",
+      content: fallback,
+      reasoning: "",
+      combined_content: fallback,
+      schema: "local_chunk_fallback",
+      message: error instanceof Error ? `Reducer failed: ${error.message}` : "Reducer failed",
+      payload: redactedPayload
+    };
+  }
+}
+
 app.post("/api/reason", async (request, response) => {
   let prepared;
   let fallbackPrepared;
@@ -956,6 +1660,254 @@ app.post("/api/reason", async (request, response) => {
   } finally {
     if (prepared?.frameTempDir) await fs.rm(prepared.frameTempDir, { recursive: true, force: true });
     if (fallbackPrepared?.frameTempDir) await fs.rm(fallbackPrepared.frameTempDir, { recursive: true, force: true });
+  }
+});
+
+app.post("/api/reason/long/stream", async (request, response) => {
+  const upstreamAbort = new AbortController();
+  let clientClosed = false;
+  let extracted = null;
+  const startedAt = Date.now();
+
+  const abortForClosedClient = () => {
+    if (response.writableEnded) return;
+    clientClosed = true;
+    upstreamAbort.abort();
+  };
+  request.on("aborted", abortForClosedClient);
+  response.on("close", abortForClosedClient);
+
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  response.flushHeaders?.();
+
+  function elapsedSeconds() {
+    return (Date.now() - startedAt) / 1000;
+  }
+
+  try {
+    const body = request.body || {};
+    const params = body.params || {};
+    const selectedModel = body.model || defaultModel;
+    const mediaSource = body.video || (body.mediaKind === "video" ? body.mediaDataUrl : "");
+    if (!mediaSource) throw new Error("Long Video Analysis requires an MP4/video input.");
+
+    const requestedLongFps = params.frames_per_second ?? body.framesPerSecond ?? body.longVideoFps;
+    let config = longVideoPresetConfig(body.preset, 0, body.concurrency, requestedLongFps);
+    sse(response, "long_state", {
+      phase: "media_scan",
+      message: "Scanning video and extracting timestamped frames",
+      percent: 2,
+      elapsedSeconds: elapsedSeconds()
+    });
+    extracted = await extractLongVideoFrames(mediaSource, config);
+    config = longVideoPresetConfig(body.preset, extracted.durationSeconds, body.concurrency, requestedLongFps);
+
+    if (Math.abs((extracted.sampleFps || 0) - config.sampleFps) > 0.01 || extracted.frames.length > config.maxFrames) {
+      await fs.rm(extracted.tempDir, { recursive: true, force: true });
+      extracted = await extractLongVideoFrames(mediaSource, config);
+    }
+
+    const effectiveSampleFps =
+      extracted.durationSeconds > 0
+        ? Number((extracted.frames.length / extracted.durationSeconds).toFixed(2))
+        : extracted.sampleFps;
+    const chunks = chunkLongFrames(extracted.frames, config);
+    const warnings = longVideoWarnings(extracted.durationSeconds, extracted.frames.length, config.preset, config);
+    const { baseUrl } = buildReasoningPayload({ model: selectedModel, prompt: "probe", params: {} });
+    const endpoints = reasonerEndpointPool(baseUrl);
+    const progress = new Map();
+    let completed = 0;
+    let failed = 0;
+    let latencyTotal = 0;
+    let latencyCount = 0;
+
+    sse(response, "long_plan", {
+      phase: "extraction_plan",
+      preset: config.preset,
+      durationSeconds: extracted.durationSeconds,
+      durationText: formatTimestamp(extracted.durationSeconds),
+      sourceFps: extracted.sourceFps,
+      sourceWidth: extracted.sourceWidth,
+      sourceHeight: extracted.sourceHeight,
+      frameCount: extracted.frames.length,
+      requestedFps: config.requestedFps || null,
+      sampleFps: effectiveSampleFps,
+      extractionFps: extracted.sampleFps,
+      frameLimit: config.frameLimit,
+      chunkSize: config.chunkSize,
+      maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
+      totalChunks: chunks.length,
+      concurrency: config.concurrency,
+      endpoints,
+      warnings,
+      chunks: chunks.map((chunk) => ({
+        index: chunk.index,
+        status: "queued",
+        timeRange: chunk.timeRange,
+        frameCount: chunk.frames.length
+      })),
+      percent: 8,
+      elapsedSeconds: elapsedSeconds()
+    });
+
+    const emitProgress = (phase, message) => {
+      const total = Math.max(1, chunks.length);
+      const active = [...progress.values()].filter((item) => item.status === "running").length;
+      const doneRatio = (completed + failed) / total;
+      const averageLatency = latencyCount > 0 ? latencyTotal / latencyCount : null;
+      const remaining = Math.max(0, total - completed - failed);
+      const etaSeconds = averageLatency ? (remaining / Math.max(1, config.concurrency)) * averageLatency : null;
+      sse(response, "long_state", {
+        phase,
+        message,
+        completedChunks: completed,
+        failedChunks: failed,
+        runningChunks: active,
+        totalChunks: chunks.length,
+        percent: Math.min(95, Math.round(8 + doneRatio * 82)),
+        elapsedSeconds: elapsedSeconds(),
+        etaSeconds,
+        concurrency: config.concurrency
+      });
+    };
+
+    emitProgress("chunking", `Running chunks 0/${chunks.length}`);
+    const results = await runConcurrent(chunks, config.concurrency, async (chunk) => {
+      progress.set(chunk.index, { status: "running" });
+      sse(response, "long_chunk", {
+        index: chunk.index,
+        status: "running",
+        timeRange: chunk.timeRange,
+        frameCount: chunk.frames.length
+      });
+      emitProgress("chunking", `Running chunks ${completed + failed}/${chunks.length}`);
+
+      const result = await submitLongChunk({
+        chunk,
+        config,
+        durationSeconds: extracted.durationSeconds,
+        endpoints,
+        model: selectedModel,
+        params,
+        prompt: body.prompt || body.userPrompt || "",
+        signal: upstreamAbort.signal,
+        systemPrompt: body.systemPrompt || body.system_prompt || ""
+      });
+
+      progress.set(chunk.index, { status: result.status });
+      if (result.status === "done") {
+        completed += 1;
+        latencyTotal += result.elapsedSeconds || 0;
+        latencyCount += 1;
+      } else {
+        failed += 1;
+      }
+      sse(response, "long_chunk", {
+        index: result.index,
+        status: result.status,
+        timeRange: result.timeRange,
+        elapsedSeconds: result.elapsedSeconds,
+        summary: result.summary || result.parsed?.summary || result.content,
+        content: result.content || "",
+        parsed: result.parsed || null,
+        events: Array.isArray(result.parsed?.events) ? result.parsed.events : [],
+        eventsCount: Array.isArray(result.parsed?.events) ? result.parsed.events.length : undefined,
+        error: result.error
+      });
+      if (result.status === "done") {
+        sse(response, "long_partial", {
+          index: result.index,
+          timeRange: result.timeRange,
+          summary: result.summary || result.parsed?.summary || result.content || ""
+        });
+      }
+      emitProgress("chunking", `Running chunks ${completed + failed}/${chunks.length}`);
+      return result;
+    });
+
+    if (clientClosed || upstreamAbort.signal.aborted) return;
+    const doneChunks = results.filter((item) => item?.status === "done");
+    const failedChunks = results.filter((item) => item?.status === "error");
+    sse(response, "long_state", {
+      phase: "stitching",
+      message: "Stitching timeline",
+      completedChunks: completed,
+      failedChunks: failed,
+      totalChunks: chunks.length,
+      percent: 96,
+      elapsedSeconds: elapsedSeconds()
+    });
+
+    const stitched = await stitchLongVideo({
+      chunks: results,
+      config,
+      durationSeconds: extracted.durationSeconds,
+      endpoints,
+      failedChunks,
+      model: selectedModel,
+      params,
+      prompt: body.prompt || body.userPrompt || "",
+      signal: upstreamAbort.signal,
+      warnings
+    });
+
+    const result = {
+      ...stitched,
+      media: {
+        mode: "long-video-image-chunks",
+        duration_seconds: extracted.durationSeconds,
+        frame_count: extracted.frames.length,
+        requested_fps: config.requestedFps || null,
+        sample_fps: effectiveSampleFps,
+        extraction_fps: extracted.sampleFps,
+        frame_limit: config.frameLimit,
+        chunk_count: chunks.length,
+        max_images_per_chunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
+        completed_chunks: doneChunks.length,
+        failed_chunks: failedChunks.length,
+        warnings
+      },
+      long_video: {
+        preset: config.preset,
+        chunks: results.map((item) => ({
+          index: item.index,
+          status: item.status,
+          timeRange: item.timeRange,
+          summary: item.summary || item.parsed?.summary || item.content || "",
+          content: item.content || "",
+          parsed: item.parsed || null,
+          events: item.parsed?.events || [],
+          error: item.error,
+          elapsedSeconds: item.elapsedSeconds
+        }))
+      }
+    };
+
+    sse(response, "raw", result);
+    sse(response, "long_state", {
+      phase: "complete",
+      message: "Complete",
+      completedChunks: completed,
+      failedChunks: failed,
+      totalChunks: chunks.length,
+      percent: 100,
+      elapsedSeconds: elapsedSeconds(),
+      etaSeconds: 0
+    });
+    sse(response, "state", { phase: "complete" });
+  } catch (error) {
+    if (!clientClosed && !response.writableEnded) {
+      sse(response, "error", { message: error instanceof Error ? error.message : "Long video analysis failed" });
+      sse(response, "state", { phase: "error" });
+    }
+  } finally {
+    if (extracted?.tempDir) await fs.rm(extracted.tempDir, { recursive: true, force: true });
+    if (!response.writableEnded) response.end();
   }
 });
 

@@ -220,8 +220,12 @@ export function buildReasoningPayload({
   if (process.env.REASONER_SEND_SEED === "1" && Number.isFinite(Number(p.seed))) {
     payload.seed = Number(p.seed);
   }
-  if (process.env.REASONER_SEND_MM_PROCESSOR_KWARGS === "1" && Number.isFinite(Number(p.frames_per_second))) {
-    payload.mm_processor_kwargs = { fps: Number(p.frames_per_second) };
+  if (
+    Number.isFinite(Number(p.frames_per_second)) &&
+    (process.env.REASONER_SEND_MM_PROCESSOR_KWARGS === "1" ||
+      (inferenceBackend === "nim_local" && mediaKind === "video" && !mediaFrames?.length))
+  ) {
+    payload.mm_processor_kwargs = { fps: Number(p.frames_per_second), do_sample_frames: true };
   }
 
   Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);

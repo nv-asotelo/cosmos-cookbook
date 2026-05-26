@@ -793,6 +793,77 @@ select:focus,
   margin-top: 28px;
 }
 
+.longVideoControls {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  border: 1px solid #2c2c2c;
+  border-radius: 8px;
+  background: #111;
+  padding: 12px;
+}
+
+.longVideoControls p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.longVideoControls .longVideoWarning {
+  color: #cfd6c6;
+}
+
+.longPresetTabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.longPresetTabs button {
+  min-height: 34px;
+  border: 1px solid #383838;
+  border-radius: 6px;
+  background: #1d1d1d;
+  color: #d8d8d8;
+  font-weight: 800;
+}
+
+.longPresetTabs button.active {
+  border-color: var(--green);
+  background: #263b05;
+  color: var(--text);
+}
+
+.longFpsControl {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.longFpsInputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px;
+  gap: 10px;
+  align-items: center;
+}
+
+.longFpsInputs input[type="range"] {
+  width: 100%;
+}
+
+.longFpsInputs input[type="number"] {
+  min-height: 34px;
+  border: 1px solid #354864;
+  border-radius: 6px;
+  background: #10151c;
+  color: var(--text);
+  padding: 0 10px;
+  font: inherit;
+}
+
 .resetButton {
   min-width: 76px;
   border: 0;
@@ -808,6 +879,11 @@ select:focus,
   min-width: 76px;
   padding: 0 20px;
   font-size: 16px;
+}
+
+.longRunButton {
+  border-color: #4b6b13;
+  background: #1d2a08;
 }
 
 .runButton svg {
@@ -1746,6 +1822,388 @@ select {
 .responseStack {
   display: grid;
   gap: 22px;
+}
+
+.stitchedTimelineCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #091006;
+  padding: 18px;
+}
+
+.stitchedTimelineHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stitchedTimelineHeader h3 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 20px;
+}
+
+.stitchedTimelineHeader > span {
+  border: 1px solid #4b6b13;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.rawResponseDetails {
+  display: grid;
+  gap: 0;
+}
+
+.rawResponseDetails summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 900;
+}
+
+.rawResponseDetails summary:hover {
+  color: var(--green);
+}
+
+.rawResponseDetails pre {
+  max-height: 420px;
+  overflow: auto;
+  margin: 14px 0 0;
+  white-space: pre-wrap;
+}
+
+.longProgressCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #0d1507;
+  padding: 18px;
+}
+
+.longProgressCard.compact {
+  gap: 10px;
+}
+
+.longProgressHeader,
+.longProgressMeta,
+.longCoverageGrid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.longProgressHeader {
+  justify-content: space-between;
+}
+
+.longProgressHeader h3 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 20px;
+}
+
+.longProgressActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.longPresetBadge {
+  border: 1px solid #4b6b13;
+  border-radius: 999px;
+  background: #1d2a08;
+  padding: 6px 10px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.longProgressCollapse {
+  min-height: 31px;
+  border: 1px solid #4b6b13;
+  border-radius: 999px;
+  background: #111a0b;
+  color: #dcebc8;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.longProgressMeta,
+.longCoverageGrid {
+  color: #c9d8ba;
+  font-size: 12px;
+}
+
+.longProgressTrack {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #26301c;
+}
+
+.longProgressTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 180ms ease;
+}
+
+.longWarnings {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  border-left: 3px solid #8abf20;
+  padding: 0 0 0 12px;
+  color: #d6dfcd;
+  font-size: 12px;
+}
+
+.longChunkGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.longChunkPill,
+.longChunkMore {
+  display: grid;
+  gap: 3px;
+  min-height: 54px;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  background: #171717;
+  padding: 8px;
+  color: #d8d8d8;
+  font-size: 11px;
+  text-align: left;
+}
+
+.longChunkPill strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.longChunkPill small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.longChunkPill {
+  cursor: pointer;
+}
+
+.longChunkPill:hover {
+  border-color: #6b9400;
+  background: #20251a;
+}
+
+.longChunkPill.selected {
+  border-color: var(--green);
+  box-shadow: inset 0 0 0 1px var(--green);
+}
+
+.longChunkPill.running {
+  border-color: #7aa600;
+  background: #1c2709;
+}
+
+.longChunkPill.done {
+  border-color: #31530b;
+  color: #aee46f;
+}
+
+.longChunkPill.error {
+  border-color: #8a3333;
+  background: #210d0d;
+  color: #ffb6b6;
+}
+
+.longChunkInspector {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #36580f;
+  border-radius: 8px;
+  background: #11180c;
+  padding: 14px;
+}
+
+.longChunkInspectorHeader,
+.longChunkInspectorMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+
+.longChunkInspector h4 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.longChunkInspectorMeta {
+  justify-content: flex-start;
+  color: #c9d8ba;
+  font-size: 12px;
+}
+
+.longChunkStatus {
+  border: 1px solid #3c3c3c;
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #d8d8d8;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.longChunkStatus.done {
+  border-color: #31530b;
+  color: #aee46f;
+}
+
+.longChunkStatus.running {
+  border-color: #7aa600;
+  color: var(--green);
+}
+
+.longChunkStatus.error {
+  border-color: #8a3333;
+  color: #ffb6b6;
+}
+
+.longChunkSummary,
+.longChunkEvents,
+.longChunkRaw {
+  display: grid;
+  gap: 7px;
+}
+
+.longChunkSummary strong,
+.longChunkEvents strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.longChunkRaw {
+  border: 1px solid #26301c;
+  border-radius: 6px;
+  background: #0a0c08;
+}
+
+.longChunkRaw summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 900;
+  list-style-position: inside;
+  padding: 10px;
+}
+
+.longChunkRaw summary:hover {
+  color: var(--green);
+}
+
+.longChunkSummary p {
+  margin: 0;
+  color: #e6efd9;
+  line-height: 1.45;
+}
+
+.longChunkEvents pre,
+.longChunkRaw pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid #26301c;
+  background: transparent;
+  color: #e6efd9;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.longTimeline {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #26301c;
+  padding-top: 12px;
+}
+
+.longTimelineTitle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  text-align: left;
+}
+
+.longTimelineTitle span {
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.longTimelineTitle small {
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.longTimelineList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.longTimelineList li {
+  color: #d6dfcd;
+  line-height: 1.4;
+}
+
+.longTimelineList li strong {
+  display: inline-block;
+  min-width: 148px;
+  margin-right: 8px;
+  color: var(--green);
+}
+
+.longTimelineList li em {
+  margin-right: 8px;
+  color: var(--text);
+  font-style: normal;
+  font-weight: 900;
+}
+
+.longTimelineList li small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timelineEmpty {
+  margin: 0;
+  color: var(--muted);
 }
 
 .reasoningFrame {

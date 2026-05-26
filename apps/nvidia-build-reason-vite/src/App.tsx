@@ -97,6 +97,8 @@ const DEFAULT_PRESENCE_PENALTY = SAMPLING_DEFAULTS.reasoning.presencePenalty;
 const DEFAULT_SEED = 42;
 const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
+const TENNIS_TEMPORAL_EXAMPLE_ID = "tennis-temporal-events";
+const TENNIS_TEMPORAL_VIDEO = "/examples/tennis_nim_safe.mp4";
 const ACCEPTED_MEDIA_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "jpg", "jpeg", "png", "webp"];
 const ACCEPTED_MEDIA_ACCEPT = [
   "video/*",
@@ -156,12 +158,15 @@ const VLA_HERO_TAGS = [
 type SectionTab = "Experience" | "Model Card" | "System Card" | "Deploy";
 type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
+type LongPreset = "fast" | "balanced" | "detailed";
+type RunMode = "standard" | "long" | null;
 
 type MediaState = {
   name: string;
   kind: "video" | "image";
   previewUrl: string;
   dataUrl: string;
+  sourceUrl?: string;
 };
 
 type ImageSize = {
@@ -229,6 +234,11 @@ type ApiResult = {
   openai?: unknown;
   payload?: unknown;
   raw?: unknown;
+  media?: unknown;
+  long_video?: {
+    preset?: string;
+    chunks?: LongChunkProgress[];
+  };
 };
 
 type StreamPhase =
@@ -252,6 +262,66 @@ type StreamState = {
   message?: string;
   created: number;
   model: string;
+};
+
+type LongChunkProgress = {
+  index: number;
+  status: "queued" | "running" | "done" | "error";
+  timeRange?: string;
+  frameCount?: number;
+  summary?: string;
+  content?: string;
+  parsed?: unknown;
+  events?: unknown[];
+  error?: string;
+  elapsedSeconds?: number;
+  eventsCount?: number;
+};
+
+type TimelineEvent = {
+  start?: string;
+  end?: string;
+  event_type?: string;
+  type?: string;
+  caption?: string;
+  summary?: string;
+  confidence?: number | string;
+  player?: string;
+  source_chunk?: number;
+  [key: string]: unknown;
+};
+
+type TimelineItem = {
+  id: string;
+  range: string;
+  title: string;
+  caption: string;
+  meta?: string;
+};
+
+type LongProgressState = {
+  phase?: string;
+  message?: string;
+  preset: LongPreset;
+  durationSeconds?: number;
+  durationText?: string;
+  sourceFps?: number;
+  frameCount?: number;
+  sampleFps?: number;
+  requestedFps?: number | null;
+  extractionFps?: number;
+  frameLimit?: number;
+  totalChunks?: number;
+  completedChunks?: number;
+  failedChunks?: number;
+  runningChunks?: number;
+  percent?: number;
+  elapsedSeconds?: number;
+  etaSeconds?: number | null;
+  concurrency?: number;
+  warnings: string[];
+  chunks: LongChunkProgress[];
+  partialTimeline: Array<{ index: number; timeRange?: string; summary: string }>;
 };
 
 type ParsedSseEvent = {
@@ -459,6 +529,26 @@ const EXAMPLES: ExampleItem[] = [
       repetitionPenalty: 1.2,
       temperature: 0.3,
       topP: 0.8
+    }
+  },
+  {
+    id: TENNIS_TEMPORAL_EXAMPLE_ID,
+    title: "Tennis temporal events",
+    mediaUrl: TENNIS_TEMPORAL_VIDEO,
+    mediaName: "tennis_nim_safe.mp4",
+    mediaKind: "video",
+    userPrompt:
+      'Analyze this tennis clip for sports analytics. Identify every visible serve, racquet-ball hit/contact, and point-scoring or end-of-point moment. Use the video timeline, not frame numbers. Return only events that are visible in the clip; do not infer hidden, blurred, or between-sample events.\n\nUse timestamps in "mm:ss.ff" format. For each event, include "start", "end", "event_type" ("serve", "hit", "score", or "uncertain"), "player" ("near", "far", "left", "right", or "unknown"), "confidence" from 0 to 1, and "caption". A "score" event requires visible evidence that the point ended, such as a ball landing out, a winner, a net error, a double bounce, a clear player reaction, or a scoreboard change. If that evidence is not visible, put it in "uncertain_events" rather than "events".\n\nReturn the final answer as valid JSON with this shape: {"events": [], "uncertain_events": [], "sampling_limits": {"motion_blur": "", "occlusion": "", "camera_or_sampling_limits": "", "would_higher_fps_help": true}}.',
+    systemPrompt: "You are a sports video analyst. Use only visible evidence and preserve timestamps.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 6,
+      maxTokens: 4096,
+      presencePenalty: 0,
+      repetitionPenalty: 1.2,
+      temperature: 0.6,
+      topK: 20,
+      topP: 0.3
     }
   }
 ];
@@ -1047,6 +1137,129 @@ function statusForPhase(phase: StreamPhase) {
   return "Ready";
 }
 
+function formatDuration(seconds?: number | null) {
+  if (!Number.isFinite(Number(seconds))) return "unknown";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (minutes <= 0) return `${remainder}s`;
+  return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+}
+
+function mergeLongChunk(chunks: LongChunkProgress[], update: Partial<LongChunkProgress> & { index?: number }) {
+  if (typeof update.index !== "number") return chunks;
+  const next = chunks.slice();
+  const current = next[update.index] || { index: update.index, status: "queued" as const };
+  next[update.index] = { ...current, ...update, index: update.index } as LongChunkProgress;
+  return next;
+}
+
+function parseJsonFromText(text?: string): unknown | null {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : value;
+  const first = candidate.search(/[\[{]/);
+  if (first < 0) return null;
+  try {
+    return JSON.parse(candidate.slice(first));
+  } catch {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function asTimelineEvents(value: unknown): TimelineEvent[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is TimelineEvent => Boolean(asRecord(item)));
+}
+
+function eventsFromChunk(chunk: LongChunkProgress): TimelineEvent[] {
+  if (Array.isArray(chunk.events) && chunk.events.length > 0) return asTimelineEvents(chunk.events);
+  const parsed = asRecord(chunk.parsed) || asRecord(parseJsonFromText(chunk.content));
+  return asTimelineEvents(parsed?.events);
+}
+
+function captionFromEvent(event: TimelineEvent, fallback = "") {
+  return String(event.caption || event.summary || fallback || "").trim();
+}
+
+function typeFromEvent(event: TimelineEvent) {
+  return String(event.event_type || event.type || "event").replace(/[_-]+/g, " ");
+}
+
+function rangeFromEvent(event: TimelineEvent, fallback = "") {
+  const start = String(event.start || "").trim();
+  const end = String(event.end || "").trim();
+  if (start && end && end !== start) return `${start} - ${end}`;
+  if (start) return start;
+  return fallback || "timestamp unknown";
+}
+
+function timelineItemsFromEvents(events: TimelineEvent[], fallbackRange = "", fallbackCaption = ""): TimelineItem[] {
+  return events.map((event, index) => {
+    const confidence = event.confidence === undefined || event.confidence === "" ? "" : `confidence ${event.confidence}`;
+    const player = event.player ? `player ${event.player}` : "";
+    return {
+      id: `${fallbackRange}-${index}-${event.start || ""}-${event.end || ""}`,
+      range: rangeFromEvent(event, fallbackRange),
+      title: typeFromEvent(event),
+      caption: captionFromEvent(event, fallbackCaption),
+      meta: [player, confidence].filter(Boolean).join(" · ")
+    };
+  });
+}
+
+function timelineItemsFromChunks(chunks: LongChunkProgress[], mode: "events" | "summaries") {
+  if (mode === "events") {
+    return chunks.flatMap((chunk) => {
+      const events = eventsFromChunk(chunk);
+      if (events.length === 0 && chunk.summary) {
+        return [
+          {
+            id: `summary-${chunk.index}`,
+            range: chunk.timeRange || `Chunk ${chunk.index + 1}`,
+            title: "summary",
+            caption: chunk.summary,
+            meta: `chunk ${chunk.index + 1}`
+          }
+        ];
+      }
+      return timelineItemsFromEvents(events, chunk.timeRange, chunk.summary).map((item, index) => ({
+        ...item,
+        id: `chunk-${chunk.index}-${index}-${item.id}`,
+        meta: [item.meta, `chunk ${chunk.index + 1}`].filter(Boolean).join(" · ")
+      }));
+    });
+  }
+  return chunks
+    .filter((chunk) => chunk.summary)
+    .map((chunk) => ({
+      id: `summary-${chunk.index}`,
+      range: chunk.timeRange || `Chunk ${chunk.index + 1}`,
+      title: "summary",
+      caption: chunk.summary || "",
+      meta: `chunk ${chunk.index + 1}`
+    }));
+}
+
+function stitchedTimelineItems(result: ApiResult | null): TimelineItem[] {
+  if (!result) return [];
+  const parsed = asRecord(parseJsonFromText(result.content));
+  const finalEvents = timelineItemsFromEvents(asTimelineEvents(parsed?.events));
+  if (finalEvents.length > 0) return finalEvents;
+  const chunks = result.long_video?.chunks || [];
+  return timelineItemsFromChunks(chunks, "events");
+}
+
+function looksLikeJsonResponse(text: string) {
+  const trimmed = text.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[") || /^```json/i.test(trimmed);
+}
+
 function safeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -1201,6 +1414,9 @@ export default function App() {
   const [seed, setSeed] = useState(DEFAULT_SEED);
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>(null);
+  const [longPreset, setLongPreset] = useState<LongPreset>("balanced");
+  const [longProgress, setLongProgress] = useState<LongProgressState | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
   const [copied, setCopied] = useState(false);
@@ -1403,7 +1619,8 @@ export default function App() {
         name: example.mediaName,
         kind: mime.startsWith("image/") ? "image" : "video",
         previewUrl: example.mediaUrl,
-        dataUrl: await readBlobAsDataUrl(blob)
+        dataUrl: await readBlobAsDataUrl(blob),
+        sourceUrl: new URL(example.mediaUrl, window.location.origin).toString()
       };
     }
 
@@ -1418,7 +1635,8 @@ export default function App() {
       name: data.name,
       kind: data.mime.startsWith("image/") ? "image" : "video",
       previewUrl: example.mediaUrl,
-      dataUrl: data.dataUrl
+      dataUrl: data.dataUrl,
+      sourceUrl: example.mediaUrl
     };
   }
 
@@ -1493,6 +1711,8 @@ export default function App() {
     setResult(null);
     setStreamState(idleStreamState(model));
     setIsRunning(false);
+    setRunMode(null);
+    setLongProgress(null);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -1506,6 +1726,8 @@ export default function App() {
     const controller = new AbortController();
     abortRef.current = controller;
     setIsRunning(true);
+    setRunMode("standard");
+    setLongProgress(null);
     setResult(null);
     const initialStreamState = makeStreamState(model);
     setStreamState(initialStreamState);
@@ -1528,7 +1750,7 @@ export default function App() {
           prompt: effectivePrompt,
           systemPrompt,
           model,
-          video: media?.kind === "video" ? media.dataUrl : undefined,
+          video: media?.kind === "video" ? media.sourceUrl || media.dataUrl : undefined,
           image: media?.kind === "image" ? media.dataUrl : undefined,
             params: {
               temperature,
@@ -1625,6 +1847,187 @@ export default function App() {
       if (abortRef.current === controller) {
         abortRef.current = null;
         setIsRunning(false);
+        setRunMode(null);
+      }
+    }
+  }
+
+  async function runLongVideo() {
+    if (isRunning) {
+      abortRef.current?.abort();
+      setStatus("Stopping task");
+      return;
+    }
+    if (media?.kind !== "video") {
+      setStatus("Long Video requires a video input");
+      return;
+    }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsRunning(true);
+    setRunMode("long");
+    setResult(null);
+    setOutputTab("preview");
+    setReasoningExpanded(false);
+    setStreamState(makeStreamState(model));
+    setLongProgress({
+      preset: longPreset,
+      phase: "media_scan",
+      message: "Preparing long video analysis",
+      percent: 1,
+      warnings: [],
+      chunks: [],
+      partialTimeline: []
+    });
+    setStatus("Long Video: preparing");
+
+    try {
+      const response = await fetch("/api/reason/long/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          prompt: effectivePrompt,
+          systemPrompt,
+          model,
+          preset: longPreset,
+          video: media.sourceUrl || media.dataUrl,
+          params: {
+            temperature,
+            top_p: topP,
+            top_k: topK,
+            presence_penalty: presencePenalty,
+            max_tokens: maxTokens,
+            frames_per_second: framesPerSecond,
+            repetition_penalty: repetitionPenalty,
+            seed
+          }
+        })
+      });
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(error || `Long video stream returned HTTP ${response.status}`);
+      }
+      if (!response.body) throw new Error("Long video stream did not include a response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let rawResult: ApiResult | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const drained = drainSseEvents(buffer);
+        buffer = drained.rest;
+
+        for (const event of drained.events) {
+          if (event.event === "long_plan") {
+            const data = event.data as Partial<LongProgressState> & { chunks?: LongChunkProgress[] };
+            setLongProgress((current) => {
+              const base = current || { preset: longPreset, warnings: [], chunks: [], partialTimeline: [] };
+              return {
+                ...base,
+                ...data,
+                preset: longPreset,
+                chunks: data.chunks || base.chunks,
+                warnings: data.warnings || base.warnings,
+                partialTimeline: base.partialTimeline
+              };
+            });
+            setStatus(`Long Video: planned ${data.totalChunks || 0} chunks`);
+          } else if (event.event === "long_state") {
+            const data = event.data as Partial<LongProgressState>;
+            setLongProgress((current) => {
+              const base = current || { preset: longPreset, warnings: [], chunks: [], partialTimeline: [] };
+              return {
+                ...base,
+                ...data,
+                preset: longPreset,
+                warnings: base.warnings.length > 0 ? base.warnings : data.warnings || [],
+                chunks: base.chunks,
+                partialTimeline: base.partialTimeline
+              };
+            });
+            setStatus(data.message ? `Long Video: ${data.message}` : "Long Video running");
+          } else if (event.event === "long_chunk") {
+            const data = event.data as Partial<LongChunkProgress> & { index?: number };
+            setLongProgress((current) => {
+              const base = current || { preset: longPreset, warnings: [], chunks: [], partialTimeline: [] };
+              return {
+                ...base,
+                preset: longPreset,
+                chunks: mergeLongChunk(base.chunks, data)
+              };
+            });
+          } else if (event.event === "long_partial") {
+            const data = event.data as { index?: number; timeRange?: string; summary?: string };
+            if (data.summary) {
+              setLongProgress((current) => {
+                const base = current || { preset: longPreset, warnings: [], chunks: [], partialTimeline: [] };
+                return {
+                  ...base,
+                  preset: longPreset,
+                  partialTimeline: [
+                    ...base.partialTimeline.filter((item) => item.index !== data.index),
+                    { index: data.index ?? Date.now(), timeRange: data.timeRange, summary: data.summary }
+                  ].sort((left, right) => left.index - right.index)
+                };
+              });
+            }
+          } else if (event.event === "raw") {
+            rawResult = event.data as ApiResult;
+            setStreamState((current) => ({
+              ...current,
+              phase: "complete",
+              answer: rawResult?.content || "",
+              reasoning: rawResult?.reasoning || "",
+              schema: rawResult?.schema || "plain_content",
+              raw: rawResult
+            }));
+            setResult(rawResult);
+          } else if (event.event === "error") {
+            const data = event.data as { message?: string };
+            throw new Error(data.message || "Long video analysis failed");
+          }
+        }
+
+        if (done) break;
+      }
+
+      setLongProgress((current) =>
+        current
+          ? {
+              ...current,
+              phase: "complete",
+              message: "Complete",
+              percent: 100,
+              etaSeconds: 0
+            }
+          : current
+      );
+      if (!rawResult) {
+        setResult({ status: "error", message: "Long video analysis finished without a final result" });
+      }
+      setStatus("Complete");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setResult({ status: "skip", message: "Long video task stopped by user" });
+        setLongProgress((current) => (current ? { ...current, phase: "stopped", message: "Stopped" } : current));
+        setStatus("Stopped");
+      } else {
+        const message = error instanceof Error ? error.message : "Long video request failed";
+        setResult({ status: "error", message });
+        setStreamState((current) => ({ ...current, phase: "error", message }));
+        setLongProgress((current) => (current ? { ...current, phase: "error", message } : current));
+        setStatus("Request failed");
+      }
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setIsRunning(false);
+        setRunMode(null);
       }
     }
   }
@@ -1750,6 +2153,8 @@ export default function App() {
             inputRef={inputRef}
             isRunning={isRunning}
             jsonOutput={jsonOutput}
+            longPreset={longPreset}
+            longProgress={longProgress}
             maxTokens={maxTokens}
             media={media}
             model={model}
@@ -1765,10 +2170,13 @@ export default function App() {
             reset={reset}
             result={activeResult}
             run={run}
+            runLongVideo={runLongVideo}
+            runMode={runMode}
             seed={seed}
             selectedExampleId={selectedExampleId}
             setExamplesOpen={setExamplesOpen}
             setFramesPerSecond={setFramesPerSecond}
+            setLongPreset={setLongPreset}
             setMaxTokens={setMaxTokens}
             setModel={setModel}
             setOutputTab={setOutputTab}
@@ -1848,6 +2256,8 @@ function ExperiencePanel({
   inputRef,
   isRunning,
   jsonOutput,
+  longPreset,
+  longProgress,
   maxTokens,
   media,
   model,
@@ -1863,10 +2273,13 @@ function ExperiencePanel({
   reset,
   result,
   run,
+  runLongVideo,
+  runMode,
   seed,
   selectedExampleId,
   setExamplesOpen,
   setFramesPerSecond,
+  setLongPreset,
   setMaxTokens,
   setModel,
   setOutputTab,
@@ -1904,6 +2317,8 @@ function ExperiencePanel({
   inputRef: RefObject<HTMLInputElement | null>;
   isRunning: boolean;
   jsonOutput: unknown;
+  longPreset: LongPreset;
+  longProgress: LongProgressState | null;
   maxTokens: number;
   media: MediaState | null;
   model: string;
@@ -1919,10 +2334,13 @@ function ExperiencePanel({
   reset: () => void;
   result: ApiResult | null;
   run: () => Promise<void>;
+  runLongVideo: () => Promise<void>;
+  runMode: RunMode;
   seed: number;
   selectedExampleId: string;
   setExamplesOpen: (open: boolean) => void;
   setFramesPerSecond: (value: number) => void;
+  setLongPreset: (value: LongPreset) => void;
   setMaxTokens: (value: number) => void;
   setModel: (value: string) => void;
   setOutputTab: (tab: OutputTab) => void;
@@ -1948,10 +2366,21 @@ function ExperiencePanel({
 }) {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const vlaMode = isVlaMode(model, backendInfo);
+  const tennisExampleLoaded =
+    selectedExampleId === TENNIS_TEMPORAL_EXAMPLE_ID &&
+    media?.kind === "video" &&
+    media.name === "tennis_nim_safe.mp4" &&
+    (media.previewUrl === TENNIS_TEMPORAL_VIDEO || Boolean(media.sourceUrl?.endsWith(TENNIS_TEMPORAL_VIDEO)));
+  const showLongVideoUi = tennisExampleLoaded || runMode === "long";
 
   async function runWithOutputVisible() {
     setMobilePanel("output");
     await run();
+  }
+
+  async function runLongWithOutputVisible() {
+    setMobilePanel("output");
+    await runLongVideo();
   }
 
   function resetWithInputVisible() {
@@ -2099,6 +2528,57 @@ function ExperiencePanel({
             vlaSummary={vlaFrameSummary(backendInfo)}
           />
 
+          {showLongVideoUi ? (
+            <div className="longVideoControls" aria-label="Long video analysis controls">
+              <div className="longPresetTabs" role="radiogroup" aria-label="Long video preset">
+                {(["fast", "balanced", "detailed"] as LongPreset[]).map((preset) => (
+                  <button
+                    aria-checked={longPreset === preset}
+                    className={longPreset === preset ? "active" : ""}
+                    key={preset}
+                    onClick={() => setLongPreset(preset)}
+                    role="radio"
+                    type="button"
+                  >
+                    {preset[0].toUpperCase()}
+                    {preset.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <label className="longFpsControl" htmlFor="long-video-fps">
+                <span>Long video FPS</span>
+                <div className="longFpsInputs">
+                  <input
+                    id="long-video-fps"
+                    max={12}
+                    min={0.5}
+                    onChange={(event) => setFramesPerSecond(Number(event.target.value))}
+                    step={0.5}
+                    type="range"
+                    value={framesPerSecond}
+                  />
+                  <input
+                    aria-label="Long video frames per second"
+                    max={12}
+                    min={0.5}
+                    onChange={(event) => setFramesPerSecond(Number(event.target.value))}
+                    step={0.5}
+                    type="number"
+                    value={framesPerSecond}
+                  />
+                </div>
+              </label>
+              <p>
+                Long Video sends timestamped frame chunks to the current NIM, max 5 images per request, with live ETA and
+                a stitched timeline.
+              </p>
+              <p className="longVideoWarning">
+                Higher FPS increases chunk count and wait time. Vite will cap the run at the server frame budget if the
+                requested FPS would create too many frames.
+              </p>
+            </div>
+          ) : null}
+
           <div className="runBar">
             <button className="resetButton" onClick={resetWithInputVisible} type="button">
               <RotateCcw size={16} />
@@ -2108,6 +2588,17 @@ function ExperiencePanel({
               {isRunning ? null : <Play size={16} fill="currentColor" />}
               {isRunning ? "Quit Task" : "Run"}
             </button>
+            {showLongVideoUi ? (
+              <button
+                className={`runButton longRunButton${isRunning && runMode === "long" ? " running" : ""}`}
+                disabled={media?.kind !== "video" && !(isRunning && runMode === "long")}
+                onClick={runLongWithOutputVisible}
+                type="button"
+              >
+                {isRunning && runMode === "long" ? null : <FileVideo size={16} />}
+                {isRunning && runMode === "long" ? "Quit Task" : "Long Video"}
+              </button>
+            ) : null}
           </div>
           <div className="statusLine" role="status">
             {status}
@@ -2146,6 +2637,7 @@ function ExperiencePanel({
             ) : (
               <PreviewOutput
                 isRunning={isRunning}
+                longProgress={longProgress}
                 media={media}
                 parsedOutput={parsedOutput}
                 reasoningExpanded={reasoningExpanded}
@@ -2483,6 +2975,7 @@ function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[]
 
 function PreviewOutput({
   isRunning,
+  longProgress,
   media,
   parsedOutput,
   reasoningExpanded,
@@ -2491,6 +2984,7 @@ function PreviewOutput({
   streamPhase
 }: {
   isRunning: boolean;
+  longProgress: LongProgressState | null;
   media: MediaState | null;
   parsedOutput: { reasoning: string; answer: string; steps: string[] };
   reasoningExpanded: boolean;
@@ -2498,16 +2992,26 @@ function PreviewOutput({
   setReasoningExpanded: (expanded: boolean) => void;
   streamPhase: StreamPhase;
 }) {
+  const progressCard = longProgress ? <LongVideoProgress progress={longProgress} /> : null;
+
   if (result?.status === "error" || result?.error) {
-    return <pre className="errorBox">{result.message || result.error}</pre>;
+    return (
+      <div className="responseStack">
+        {progressCard}
+        <pre className="errorBox">{result.message || result.error}</pre>
+      </div>
+    );
   }
 
   if (result?.status === "skip") {
     return (
-      <article className="emptyOutput">
-        <h3>Task stopped</h3>
-        <p>{result.message || "The current inference task was stopped before completion."}</p>
-      </article>
+      <div className="responseStack">
+        {progressCard}
+        <article className="emptyOutput">
+          <h3>Task stopped</h3>
+          <p>{result.message || "The current inference task was stopped before completion."}</p>
+        </article>
+      </div>
     );
   }
 
@@ -2535,10 +3039,20 @@ function PreviewOutput({
   if (result?.content || result?.reasoning) {
     const hasAnswer = Boolean(parsedOutput.answer || result.content);
     const answerText = parsedOutput.answer || result.content || "";
+    const timelineItems = stitchedTimelineItems(result);
+    const isLongVideoResult = Boolean(result?.long_video || longProgress);
+    const collapseResponse = isLongVideoResult && hasAnswer;
     return (
       <div className="responseStack">
+        {progressCard}
+        {timelineItems.length > 0 ? <StitchedTimeline items={timelineItems} /> : null}
         <SpatialTrajectoryOverlay answerText={answerText} media={media} reasoningText={parsedOutput.reasoning} />
-        {hasAnswer ? (
+        {hasAnswer && collapseResponse ? (
+          <details className="answer rawResponseDetails">
+            <summary>{looksLikeJsonResponse(answerText) ? "Stitched JSON response" : "Raw stitched response"}</summary>
+            <pre>{answerText || "No final response returned."}</pre>
+          </details>
+        ) : hasAnswer ? (
           <article className={isRunning ? "answer streamingAnswer" : "answer"}>
             <p className="responseLabel">Response</p>
             <FormattedText text={answerText || "No final response returned."} />
@@ -2559,7 +3073,12 @@ function PreviewOutput({
   }
 
   if (isRunning) {
-    return <GeneratingOutput />;
+    return (
+      <div className="responseStack">
+        {progressCard}
+        {progressCard ? null : <GeneratingOutput />}
+      </div>
+    );
   }
 
   return (
@@ -2567,6 +3086,190 @@ function PreviewOutput({
       <h3>Ready for inference</h3>
       <p>Upload media or choose an example, then run the model to see the response and reasoning trace.</p>
     </article>
+  );
+}
+
+function TimelineList({ empty, items }: { empty: string; items: TimelineItem[] }) {
+  if (items.length === 0) return <p className="timelineEmpty">{empty}</p>;
+  return (
+    <ol className="longTimelineList">
+      {items.map((item, index) => (
+        <li key={item.id || index}>
+          <strong>{item.range}</strong>
+          <span>
+            {item.title ? <em>{item.title}</em> : null}
+            {item.caption}
+          </span>
+          {item.meta ? <small>{item.meta}</small> : null}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function StitchedTimeline({ items }: { items: TimelineItem[] }) {
+  return (
+    <article className="stitchedTimelineCard">
+      <div className="stitchedTimelineHeader">
+        <div>
+          <p className="responseLabel">Complete Stitched Response</p>
+          <h3>Sequential timeline</h3>
+        </div>
+        <span>{items.length} events</span>
+      </div>
+      <TimelineList empty="No stitched events were returned." items={items} />
+    </article>
+  );
+}
+
+function LongVideoProgress({ progress }: { progress: LongProgressState }) {
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [showTimelineEvents, setShowTimelineEvents] = useState(false);
+  const [compact, setCompact] = useState(false);
+  const percent = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+  const completed = progress.completedChunks || progress.chunks.filter((chunk) => chunk.status === "done").length;
+  const failed = progress.failedChunks || progress.chunks.filter((chunk) => chunk.status === "error").length;
+  const running = progress.runningChunks || progress.chunks.filter((chunk) => chunk.status === "running").length;
+  const total = progress.totalChunks || progress.chunks.length;
+  const phase = progress.phase || "preparing";
+  const timelineItems = showTimelineEvents
+    ? timelineItemsFromChunks(progress.chunks, "events").slice(-24)
+    : progress.partialTimeline.slice(-8).map((item) => ({
+        id: `partial-${item.index}-${item.timeRange}`,
+        range: item.timeRange || `Chunk ${item.index + 1}`,
+        title: "",
+        caption: item.summary,
+        meta: `chunk ${item.index + 1}`
+      }));
+  const selectedChunk =
+    progress.chunks.find((chunk) => chunk.index === selectedIndex) ||
+    (selectedIndex === null ? null : progress.chunks[selectedIndex]) ||
+    null;
+  useEffect(() => {
+    if (selectedIndex !== null && !progress.chunks.some((chunk) => chunk.index === selectedIndex)) {
+      setSelectedIndex(null);
+    }
+  }, [progress.chunks, selectedIndex]);
+  return (
+    <article className={`longProgressCard${compact ? " compact" : ""}`} aria-live="polite">
+      <div className="longProgressHeader">
+        <div>
+          <p className="responseLabel">Long Video Analysis</p>
+          <h3>{progress.message || "Preparing timeline analysis"}</h3>
+        </div>
+        <div className="longProgressActions">
+          <span className="longPresetBadge">{progress.preset}</span>
+          <button className="longProgressCollapse" onClick={() => setCompact((value) => !value)} type="button">
+            {compact ? "Show details" : "Collapse"}
+          </button>
+        </div>
+      </div>
+      <div className="longProgressMeta">
+        <span>Phase: {phase.replace(/_/g, " ")}</span>
+        <span>Chunks: {completed + failed}/{total || "?"}</span>
+        <span>Running: {running}</span>
+        <span>Elapsed: {formatDuration(progress.elapsedSeconds)}</span>
+        <span>ETA: {progress.etaSeconds === 0 ? "complete" : formatDuration(progress.etaSeconds)}</span>
+      </div>
+      <div className="longProgressTrack" aria-label={`Long video progress ${percent}%`}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="longCoverageGrid">
+        <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
+        <span>Frames: {progress.frameCount ?? "scanning"}</span>
+        <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
+        <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
+        {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
+        <span>Concurrency: {progress.concurrency || 4}</span>
+      </div>
+      {!compact ? (
+        <>
+          {progress.warnings.length > 0 ? (
+            <ul className="longWarnings">
+              {progress.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          ) : null}
+          {progress.chunks.length > 0 ? (
+            <div className="longChunkGrid" aria-label="Chunk progress">
+              {progress.chunks.map((chunk) => (
+                <button
+                  aria-pressed={selectedChunk?.index === chunk.index}
+                  className={`longChunkPill ${chunk.status}${selectedChunk?.index === chunk.index ? " selected" : ""}`}
+                  key={chunk.index}
+                  onClick={() => setSelectedIndex((current) => (current === chunk.index ? null : chunk.index))}
+                  title={chunk.error || chunk.summary || chunk.timeRange}
+                  type="button"
+                >
+                  <strong>{chunk.index + 1}</strong>
+                  <span>{chunk.status}</span>
+                  <small>{chunk.timeRange}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
+          {progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0) ? (
+            <div className="longTimeline">
+              <button
+                className="longTimelineTitle"
+                onClick={() => setShowTimelineEvents((value) => !value)}
+                type="button"
+              >
+                <span>{showTimelineEvents ? "Live parsed events" : "Live partial timeline"}</span>
+                <small>{showTimelineEvents ? "Show summaries" : "Show events"}</small>
+              </button>
+              <TimelineList
+                empty={showTimelineEvents ? "No parsed events have arrived yet." : "No chunk summaries have arrived yet."}
+                items={timelineItems}
+              />
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </article>
+  );
+}
+
+function LongChunkInspector({ chunk }: { chunk: LongChunkProgress }) {
+  const hasEvents = Array.isArray(chunk.events) && chunk.events.length > 0;
+  const eventItems = timelineItemsFromEvents(eventsFromChunk(chunk), chunk.timeRange, chunk.summary);
+  const rawText = chunk.content || chunk.summary || chunk.error || "No chunk response has arrived yet.";
+  return (
+    <section className="longChunkInspector" aria-label={`Chunk ${chunk.index + 1} details`}>
+      <div className="longChunkInspectorHeader">
+        <div>
+          <p className="responseLabel">Selected Chunk</p>
+          <h4>
+            Chunk {chunk.index + 1}
+            {chunk.timeRange ? ` · ${chunk.timeRange}` : ""}
+          </h4>
+        </div>
+        <span className={`longChunkStatus ${chunk.status}`}>{chunk.status}</span>
+      </div>
+      <div className="longChunkInspectorMeta">
+        <span>Frames: {chunk.frameCount ?? "done"}</span>
+        <span>Elapsed: {formatDuration(chunk.elapsedSeconds)}</span>
+        <span>Events: {chunk.eventsCount ?? chunk.events?.length ?? 0}</span>
+      </div>
+      {chunk.summary ? (
+        <div className="longChunkSummary">
+          <strong>Summary</strong>
+          <p>{chunk.summary}</p>
+        </div>
+      ) : null}
+      {hasEvents || eventItems.length > 0 ? (
+        <div className="longChunkEvents">
+          <strong>Parsed events</strong>
+          <TimelineList empty="No parsed events for this chunk." items={eventItems} />
+        </div>
+      ) : null}
+      <details className="longChunkRaw">
+        <summary>Raw chunk response</summary>
+        <pre>{rawText}</pre>
+      </details>
+    </section>
   );
 }
 
@@ -2824,9 +3527,9 @@ function ParameterAccordion({
           <SliderField
             help={frameHelp}
             label={vlaMode ? "Frame fallback FPS" : "Frames per Second"}
-            min={2}
-            max={8}
-            step={1}
+            min={0.5}
+            max={12}
+            step={0.5}
             value={framesPerSecond}
             onChange={setFramesPerSecond}
           />
