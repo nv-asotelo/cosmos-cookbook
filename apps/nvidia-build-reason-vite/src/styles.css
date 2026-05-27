@@ -1960,6 +1960,91 @@ select {
   transition: width 180ms ease;
 }
 
+.longStepList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 8px;
+}
+
+.longStepItem {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #26301c;
+  border-radius: 6px;
+  background: #0a0f07;
+  padding: 9px;
+}
+
+.longStepHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #dcebc8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.longStepHeader strong {
+  color: #8f9d83;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.longStepTrack {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #26301c;
+}
+
+.longStepTrack span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #526240;
+  transition: width 180ms ease;
+}
+
+.longStepItem small {
+  overflow: hidden;
+  color: #aebda1;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.longStepItem.running {
+  border-color: #5f7e12;
+  background: #121d08;
+}
+
+.longStepItem.running .longStepTrack span {
+  background: linear-gradient(90deg, #7ac900, #caff4a, #7ac900);
+  background-size: 220% 100%;
+  animation: chunkProgressPulse 1s linear infinite;
+}
+
+.longStepItem.done .longStepHeader strong {
+  color: var(--green);
+}
+
+.longStepItem.done .longStepTrack span {
+  background: var(--green);
+}
+
+.longStepItem.error {
+  border-color: #8a3333;
+}
+
+.longStepItem.error .longStepHeader strong {
+  color: #ffb6b6;
+}
+
+.longStepItem.error .longStepTrack span {
+  background: #d85c5c;
+}
+
 .longWarnings {
   display: grid;
   gap: 6px;
@@ -1972,27 +2057,22 @@ select {
 
 .longChunkGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
 }
 
 .longChunkPill,
 .longChunkMore {
   display: grid;
-  gap: 3px;
-  min-height: 54px;
+  gap: 6px;
+  min-height: 122px;
   border: 1px solid #303030;
   border-radius: 6px;
   background: #171717;
-  padding: 8px;
+  padding: 7px;
   color: #d8d8d8;
   font-size: 11px;
   text-align: left;
-}
-
-.longChunkPill strong {
-  color: var(--text);
-  font-size: 13px;
 }
 
 .longChunkPill small {
@@ -2000,6 +2080,70 @@ select {
   color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.longChunkThumb {
+  position: relative;
+  min-height: 78px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: #0d0d0d;
+}
+
+.longChunkThumb img {
+  display: block;
+  width: 100%;
+  height: 78px;
+  object-fit: cover;
+}
+
+.longChunkThumb > span {
+  display: block;
+  height: 78px;
+  background: linear-gradient(135deg, #151515, #242424);
+}
+
+.longChunkOverlay {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.82));
+  padding: 22px 7px 6px;
+}
+
+.longChunkOverlay strong {
+  color: #fff;
+  font-size: 14px;
+  text-shadow: 0 1px 2px #000;
+}
+
+.longChunkOverlay span {
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  padding: 2px 6px;
+  color: #c8f68a;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.longChunkProgress {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #2a2a2a;
+}
+
+.longChunkProgress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 160ms ease;
 }
 
 .longChunkPill {
@@ -2021,6 +2165,12 @@ select {
   background: #1c2709;
 }
 
+.longChunkPill.running .longChunkProgress span {
+  background: linear-gradient(90deg, #7ac900, #caff4a, #7ac900);
+  background-size: 220% 100%;
+  animation: chunkProgressPulse 1s linear infinite;
+}
+
 .longChunkPill.done {
   border-color: #31530b;
   color: #aee46f;
@@ -2030,6 +2180,22 @@ select {
   border-color: #8a3333;
   background: #210d0d;
   color: #ffb6b6;
+}
+
+.longChunkPill.error .longChunkOverlay span,
+.longChunkPill.error .longChunkProgress span {
+  background: #d85c5c;
+  color: #fff;
+}
+
+@keyframes chunkProgressPulse {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 220% 0;
+  }
 }
 
 .longChunkInspector {
@@ -2145,6 +2311,17 @@ select {
   padding-top: 12px;
 }
 
+.longTimeline.collapsed {
+  gap: 0;
+}
+
+.longTimelineHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .longTimelineTitle {
   display: flex;
   width: 100%;
@@ -2155,6 +2332,17 @@ select {
   color: var(--text);
   padding: 0;
   text-align: left;
+}
+
+.longTimelineMode {
+  flex: 0 0 auto;
+  border: 1px solid #31530b;
+  border-radius: 999px;
+  background: #10170b;
+  color: var(--green);
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .longTimelineTitle span {
@@ -2437,9 +2625,65 @@ select {
   color: var(--muted);
 }
 
+.exampleTabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.exampleTabs button {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #0d0d0d;
+  color: var(--text);
+  padding: 0 10px;
+  font-weight: 800;
+}
+
+.exampleTabs button.active {
+  border-color: var(--green);
+  background: #163000;
+}
+
+.exampleTabs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.exampleTabs small {
+  display: inline-grid;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  background: #202020;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.exampleTabs button.active small {
+  background: var(--green);
+  color: #0b0b0b;
+}
+
 .exampleList {
   display: grid;
   gap: 10px;
+}
+
+.exampleEmpty {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0b0b0b;
+  color: var(--muted);
+  padding: 24px;
 }
 
 .exampleItem {
@@ -2490,6 +2734,12 @@ select {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+@media (max-width: 820px) {
+  .exampleTabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .staticPanel {

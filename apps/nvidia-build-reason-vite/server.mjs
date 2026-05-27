@@ -90,6 +90,10 @@ fps = max(0.1, float(fps_raw))
 max_frames = int(float(max_raw)) if max_raw else 0
 target_width = int(float(width_raw)) if width_raw else 768
 
+def emit_progress(phase, **payload):
+    payload["phase"] = phase
+    print("PROGRESS " + json.dumps(payload), file=sys.stderr, flush=True)
+
 def fmt(seconds):
     seconds = max(0.0, float(seconds or 0.0))
     minutes = int(seconds // 60)
@@ -121,11 +125,21 @@ if max_frames > 0 and len(target_times) > max_frames:
             for index in range(max_frames)
         ]
 
+emit_progress(
+    "opened",
+    duration_s=duration_s,
+    source_fps=frame_rate,
+    source_width=getattr(stream, "width", 0) or 0,
+    source_height=getattr(stream, "height", 0) or 0,
+    target_frames=len(target_times),
+)
+
 frames = []
 next_target = 0
 source_width = 0
 source_height = 0
 last_ts = 0.0
+progress_stride = max(1, len(target_times) // 20)
 for index, frame in enumerate(container.decode(stream)):
     if next_target >= len(target_times):
         break
@@ -149,10 +163,20 @@ for index, frame in enumerate(container.decode(stream)):
         "target_timestamp_text": fmt(target_times[next_target])
     })
     next_target += 1
+    if len(frames) == 1 or len(frames) == len(target_times) or len(frames) % progress_stride == 0:
+        emit_progress(
+            "decoded",
+            extracted=len(frames),
+            target_frames=len(target_times),
+            timestamp=ts,
+            timestamp_text=fmt(ts),
+            percent=(len(frames) / max(1, len(target_times))) * 100.0,
+        )
 
 container.close()
 if duration_s <= 0:
     duration_s = last_ts
+emit_progress("complete", extracted=len(frames), target_frames=len(target_times), duration_s=duration_s)
 print(json.dumps({
     "duration_s": duration_s,
     "source_fps": frame_rate,
@@ -347,6 +371,11 @@ function longVideoFrameLimit() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 720;
 }
 
+function longVideoMaxConcurrency() {
+  const parsed = Number.parseInt(process.env.REASONER_LONG_MAX_CONCURRENCY || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(32, parsed) : 16;
+}
+
 function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurrency, requestedFramesPerSecond) {
   const preset = String(presetRaw || "balanced").toLowerCase();
   const duration = Number(durationSeconds) || 0;
@@ -406,12 +435,13 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
     maxFrames,
     requestedFps,
     frameLimit: maxFrameLimit,
-    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.min(8, concurrency) : defaults.concurrency,
+    maxConcurrency: longVideoMaxConcurrency(),
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.min(longVideoMaxConcurrency(), concurrency) : defaults.concurrency,
     maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK
   };
 }
 
-function runLongFrameExtractor(videoPath, outputDir, config) {
+function runLongFrameExtractor(videoPath, outputDir, config, onProgress) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       pythonForFrames(),
@@ -427,14 +457,37 @@ function runLongFrameExtractor(videoPath, outputDir, config) {
     );
     let stdout = "";
     let stderr = "";
+    let progressBuffer = "";
+    const drainProgress = (text, flush = false) => {
+      progressBuffer += text;
+      const lines = progressBuffer.split(/\r?\n/);
+      progressBuffer = flush ? "" : lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        if (line.startsWith("PROGRESS ")) {
+          try {
+            onProgress?.(JSON.parse(line.slice("PROGRESS ".length)));
+          } catch {
+            // Keep malformed progress out of the user-facing error.
+          }
+        } else {
+          stderr += `${line}\n`;
+        }
+      }
+      if (flush && progressBuffer.trim()) {
+        stderr += `${progressBuffer}\n`;
+        progressBuffer = "";
+      }
+    };
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      drainProgress(String(chunk));
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      drainProgress("\n", true);
       if (code !== 0) {
         reject(new Error(stderr || `Long video frame extractor exited with ${code}`));
         return;
@@ -449,15 +502,17 @@ function runLongFrameExtractor(videoPath, outputDir, config) {
   });
 }
 
-async function extractLongVideoFrames(mediaSource, config) {
+async function extractLongVideoFrames(mediaSource, config, onProgress) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "reason-vite-long-"));
   try {
+    onProgress?.({ phase: "loading", percent: 0 });
     const { buffer } = await mediaSourceToBuffer(mediaSource);
     const videoPath = path.join(tempDir, "input.mp4");
     const frameDir = path.join(tempDir, "frames");
     await fs.mkdir(frameDir);
     await fs.writeFile(videoPath, buffer);
-    const info = await runLongFrameExtractor(videoPath, frameDir, config);
+    onProgress?.({ phase: "decode_start", percent: 0 });
+    const info = await runLongFrameExtractor(videoPath, frameDir, config, onProgress);
     const frames = [];
     for (const frame of info.frames || []) {
       const bytes = await fs.readFile(frame.path);
@@ -779,6 +834,11 @@ function longVideoWarnings(durationSeconds, frameCount, preset, config = {}) {
   if (config.requestedFps && coverage > 0 && coverage + 0.01 < config.requestedFps) {
     warnings.push(
       `Requested ${config.requestedFps} fps was capped to ${coverage.toFixed(2)} fps effective coverage by the ${config.frameLimit} frame budget.`
+    );
+  }
+  if (config.concurrency > 8) {
+    warnings.push(
+      `Chunk concurrency is set to ${config.concurrency}. This horde RTX PRO 6000 handled 16 comfortably in probes; lower it if other users are sharing the NIM or TTFT spikes.`
     );
   }
   if (preset === "fast") warnings.push("Fast preset prioritizes runtime over dense visual coverage.");
@@ -1690,6 +1750,30 @@ app.post("/api/reason/long/stream", async (request, response) => {
   }
 
   try {
+    const stepState = {
+      read_video: { label: "Read video", status: "pending", progress: 0, detail: "" },
+      decode_frames: { label: "Decode frames", status: "pending", progress: 0, detail: "" },
+      plan_chunks: { label: "Plan chunks", status: "pending", progress: 0, detail: "" },
+      run_chunks: { label: "Run chunks", status: "pending", progress: 0, detail: "" },
+      stitch_timeline: { label: "Stitch timeline", status: "pending", progress: 0, detail: "" }
+    };
+    const stepPayload = () =>
+      Object.entries(stepState).map(([key, value]) => ({
+        key,
+        label: value.label,
+        status: value.status,
+        progress: Math.max(0, Math.min(100, Math.round(Number(value.progress) || 0))),
+        detail: value.detail || ""
+      }));
+    const updateStep = (key, patch) => {
+      stepState[key] = { ...stepState[key], ...patch };
+    };
+    const emitLongState = (payload) => {
+      sse(response, "long_state", {
+        ...payload,
+        steps: stepPayload()
+      });
+    };
     const body = request.body || {};
     const params = body.params || {};
     const selectedModel = body.model || defaultModel;
@@ -1698,25 +1782,85 @@ app.post("/api/reason/long/stream", async (request, response) => {
 
     const requestedLongFps = params.frames_per_second ?? body.framesPerSecond ?? body.longVideoFps;
     let config = longVideoPresetConfig(body.preset, 0, body.concurrency, requestedLongFps);
-    sse(response, "long_state", {
+    updateStep("read_video", { status: "running", progress: 10, detail: "Opening media" });
+    emitLongState({
       phase: "media_scan",
       message: "Scanning video and extracting timestamped frames",
       percent: 2,
       elapsedSeconds: elapsedSeconds()
     });
-    extracted = await extractLongVideoFrames(mediaSource, config);
+    const handleDecodeProgress = (event) => {
+      if (event.phase === "loading") {
+        updateStep("read_video", { status: "running", progress: 45, detail: "Loading video bytes" });
+        emitLongState({
+          phase: "media_scan",
+          message: "Loading video bytes",
+          percent: 2,
+          elapsedSeconds: elapsedSeconds()
+        });
+        return;
+      }
+      if (event.phase === "decode_start") {
+        updateStep("read_video", { status: "done", progress: 100, detail: "Video loaded" });
+        updateStep("decode_frames", { status: "running", progress: 2, detail: "Starting decoder" });
+      } else if (event.phase === "opened") {
+        const target = Number(event.target_frames) || config.maxFrames;
+        updateStep("read_video", { status: "done", progress: 100, detail: "Video metadata read" });
+        updateStep("decode_frames", {
+          status: "running",
+          progress: 3,
+          detail: `Target ${target} frames at ${config.sampleFps} fps`
+        });
+      } else if (event.phase === "decoded") {
+        const extractedFrames = Number(event.extracted) || 0;
+        const target = Number(event.target_frames) || config.maxFrames || extractedFrames || 1;
+        const decodePercent = Math.max(0, Math.min(100, Number(event.percent) || (extractedFrames / target) * 100));
+        updateStep("decode_frames", {
+          status: "running",
+          progress: decodePercent,
+          detail: `${extractedFrames}/${target} frames${event.timestamp_text ? ` through ${event.timestamp_text}` : ""}`
+        });
+        emitLongState({
+          phase: "media_decode",
+          message: `Decoding frames ${extractedFrames}/${target}`,
+          percent: Math.min(7, Math.round(2 + decodePercent * 0.05)),
+          frameCount: extractedFrames,
+          elapsedSeconds: elapsedSeconds()
+        });
+      } else if (event.phase === "complete") {
+        updateStep("decode_frames", {
+          status: "done",
+          progress: 100,
+          detail: `${Number(event.extracted) || 0} frames extracted`
+        });
+      }
+    };
+    extracted = await extractLongVideoFrames(mediaSource, config, handleDecodeProgress);
     config = longVideoPresetConfig(body.preset, extracted.durationSeconds, body.concurrency, requestedLongFps);
 
     if (Math.abs((extracted.sampleFps || 0) - config.sampleFps) > 0.01 || extracted.frames.length > config.maxFrames) {
       await fs.rm(extracted.tempDir, { recursive: true, force: true });
-      extracted = await extractLongVideoFrames(mediaSource, config);
+      updateStep("decode_frames", {
+        status: "running",
+        progress: 0,
+        detail: `Re-decoding at ${config.sampleFps} fps after reading duration`
+      });
+      extracted = await extractLongVideoFrames(mediaSource, config, handleDecodeProgress);
     }
 
+    updateStep("decode_frames", {
+      status: "done",
+      progress: 100,
+      detail: `${extracted.frames.length} frames extracted`
+    });
+    updateStep("plan_chunks", { status: "running", progress: 35, detail: "Building timestamp windows" });
     const effectiveSampleFps =
       extracted.durationSeconds > 0
         ? Number((extracted.frames.length / extracted.durationSeconds).toFixed(2))
         : extracted.sampleFps;
     const chunks = chunkLongFrames(extracted.frames, config);
+    updateStep("plan_chunks", { status: "done", progress: 100, detail: `${chunks.length} chunks planned` });
+    updateStep("run_chunks", { status: "pending", progress: 0, detail: `${config.concurrency} concurrent requests` });
     const warnings = longVideoWarnings(extracted.durationSeconds, extracted.frames.length, config.preset, config);
     const { baseUrl } = buildReasoningPayload({ model: selectedModel, prompt: "probe", params: {} });
     const endpoints = reasonerEndpointPool(baseUrl);
@@ -1743,13 +1887,16 @@ app.post("/api/reason/long/stream", async (request, response) => {
       maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
       totalChunks: chunks.length,
       concurrency: config.concurrency,
+      maxConcurrency: config.maxConcurrency,
       endpoints,
       warnings,
+      steps: stepPayload(),
       chunks: chunks.map((chunk) => ({
         index: chunk.index,
         status: "queued",
         timeRange: chunk.timeRange,
-        frameCount: chunk.frames.length
+        frameCount: chunk.frames.length,
+        thumbnailUrl: chunk.frames[0]?.dataUrl || null
       })),
       percent: 8,
       elapsedSeconds: elapsedSeconds()
@@ -1762,7 +1909,12 @@ app.post("/api/reason/long/stream", async (request, response) => {
       const averageLatency = latencyCount > 0 ? latencyTotal / latencyCount : null;
       const remaining = Math.max(0, total - completed - failed);
       const etaSeconds = averageLatency ? (remaining / Math.max(1, config.concurrency)) * averageLatency : null;
-      sse(response, "long_state", {
+      updateStep("run_chunks", {
+        status: remaining > 0 ? "running" : failed > 0 ? "error" : "done",
+        progress: doneRatio * 100,
+        detail: `${completed + failed}/${chunks.length} chunks complete; ${active} running`
+      });
+      emitLongState({
         phase,
         message,
         completedChunks: completed,
@@ -1772,7 +1924,8 @@ app.post("/api/reason/long/stream", async (request, response) => {
         percent: Math.min(95, Math.round(8 + doneRatio * 82)),
         elapsedSeconds: elapsedSeconds(),
         etaSeconds,
-        concurrency: config.concurrency
+        concurrency: config.concurrency,
+        maxConcurrency: config.maxConcurrency
       });
     };
 
@@ -1833,7 +1986,13 @@ app.post("/api/reason/long/stream", async (request, response) => {
     if (clientClosed || upstreamAbort.signal.aborted) return;
     const doneChunks = results.filter((item) => item?.status === "done");
     const failedChunks = results.filter((item) => item?.status === "error");
-    sse(response, "long_state", {
+    updateStep("run_chunks", {
+      status: failedChunks.length > 0 ? "error" : "done",
+      progress: 100,
+      detail: `${doneChunks.length}/${chunks.length} chunks succeeded`
+    });
+    updateStep("stitch_timeline", { status: "running", progress: 20, detail: "Combining chunk results" });
+    emitLongState({
       phase: "stitching",
       message: "Stitching timeline",
       completedChunks: completed,
@@ -1867,6 +2026,8 @@ app.post("/api/reason/long/stream", async (request, response) => {
         extraction_fps: extracted.sampleFps,
         frame_limit: config.frameLimit,
         chunk_count: chunks.length,
+        concurrency: config.concurrency,
+        max_concurrency: config.maxConcurrency,
         max_images_per_chunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
         completed_chunks: doneChunks.length,
         failed_chunks: failedChunks.length,
@@ -1889,7 +2050,8 @@ app.post("/api/reason/long/stream", async (request, response) => {
     };
 
     sse(response, "raw", result);
-    sse(response, "long_state", {
+    updateStep("stitch_timeline", { status: "done", progress: 100, detail: "Final response ready" });
+    emitLongState({
       phase: "complete",
       message: "Complete",
       completedChunks: completed,

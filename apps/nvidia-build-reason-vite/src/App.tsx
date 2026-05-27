@@ -99,6 +99,7 @@ const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
 const TENNIS_TEMPORAL_EXAMPLE_ID = "tennis-temporal-events";
 const TENNIS_TEMPORAL_VIDEO = "/examples/tennis_nim_safe.mp4";
+const WAREHOUSE_ROW_D_VIDEO = "/examples/warehouse_7min.mp4";
 const ACCEPTED_MEDIA_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "jpg", "jpeg", "png", "webp"];
 const ACCEPTED_MEDIA_ACCEPT = [
   "video/*",
@@ -160,6 +161,7 @@ type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
 type LongPreset = "fast" | "balanced" | "detailed";
 type RunMode = "standard" | "long" | null;
+type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "anomaly-id" | "embodied-reasoning";
 
 type MediaState = {
   name: string;
@@ -202,7 +204,9 @@ type ExampleItem = {
   userPrompt: string;
   systemPrompt: string;
   reasoning: boolean;
+  group?: ExampleGroupId;
   judgeNote?: string;
+  longVideoEnabled?: boolean;
   parameters?: Partial<{
     framesPerSecond: number;
     maxTokens: number;
@@ -269,6 +273,7 @@ type LongChunkProgress = {
   status: "queued" | "running" | "done" | "error";
   timeRange?: string;
   frameCount?: number;
+  thumbnailUrl?: string | null;
   summary?: string;
   content?: string;
   parsed?: unknown;
@@ -299,6 +304,14 @@ type TimelineItem = {
   meta?: string;
 };
 
+type LongStepProgress = {
+  key: string;
+  label: string;
+  status: "pending" | "running" | "done" | "error";
+  detail?: string;
+  progress?: number;
+};
+
 type LongProgressState = {
   phase?: string;
   message?: string;
@@ -319,6 +332,8 @@ type LongProgressState = {
   elapsedSeconds?: number;
   etaSeconds?: number | null;
   concurrency?: number;
+  maxConcurrency?: number;
+  steps?: LongStepProgress[];
   warnings: string[];
   chunks: LongChunkProgress[];
   partialTimeline: Array<{ index: number; timeRange?: string; summary: string }>;
@@ -402,6 +417,14 @@ type BackendInfo = {
     } | null;
   };
 };
+
+const EXAMPLE_GROUPS: Array<{ id: ExampleGroupId; label: string }> = [
+  { id: "build", label: "build.nvidia.com" },
+  { id: "vss", label: "VSS" },
+  { id: "av-dense-captioning", label: "AV Dense Captioning" },
+  { id: "anomaly-id", label: "Anomaly ID" },
+  { id: "embodied-reasoning", label: "Embodied Reasoning" }
+];
 
 function initialBackendInfo(modelName = DEFAULT_MODEL, backend = DEFAULT_BACKEND): BackendInfo | null {
   const lower = `${modelName} ${backend}`.toLowerCase();
@@ -532,8 +555,32 @@ const EXAMPLES: ExampleItem[] = [
     }
   },
   {
+    id: "warehouse-row-d-box",
+    title: "Warehouse row D shelf placement",
+    group: "vss",
+    mediaUrl: WAREHOUSE_ROW_D_VIDEO,
+    mediaName: "warehouse_7min.mp4",
+    mediaKind: "video",
+    userPrompt:
+      'In the first two minutes of the video, who put the box on the shelves on row D?\n\nUse only visible evidence from the video. Identify the person by stable visual details such as clothing color, position, or direction of travel, and cite the timestamp range where the box is placed on row D. If the person cannot be determined from visible evidence, say so and explain what is ambiguous.',
+    systemPrompt:
+      "You are a helpful video security analyst. Use only visible evidence, preserve timestamps, and do not infer actions that are not visible.",
+    reasoning: true,
+    longVideoEnabled: true,
+    parameters: {
+      framesPerSecond: 6,
+      maxTokens: 4096,
+      presencePenalty: 0,
+      repetitionPenalty: 1.0,
+      temperature: 0.6,
+      topK: 20,
+      topP: 0.95
+    }
+  },
+  {
     id: TENNIS_TEMPORAL_EXAMPLE_ID,
     title: "Tennis temporal events",
+    group: "vss",
     mediaUrl: TENNIS_TEMPORAL_VIDEO,
     mediaName: "tennis_nim_safe.mp4",
     mediaKind: "video",
@@ -541,6 +588,7 @@ const EXAMPLES: ExampleItem[] = [
       'Analyze this tennis clip for sports analytics. Identify every visible serve, racquet-ball hit/contact, and point-scoring or end-of-point moment. Use the video timeline, not frame numbers. Return only events that are visible in the clip; do not infer hidden, blurred, or between-sample events.\n\nUse timestamps in "mm:ss.ff" format. For each event, include "start", "end", "event_type" ("serve", "hit", "score", or "uncertain"), "player" ("near", "far", "left", "right", or "unknown"), "confidence" from 0 to 1, and "caption". A "score" event requires visible evidence that the point ended, such as a ball landing out, a winner, a net error, a double bounce, a clear player reaction, or a scoreboard change. If that evidence is not visible, put it in "uncertain_events" rather than "events".\n\nReturn the final answer as valid JSON with this shape: {"events": [], "uncertain_events": [], "sampling_limits": {"motion_blur": "", "occlusion": "", "camera_or_sampling_limits": "", "would_higher_fps_help": true}}.',
     systemPrompt: "You are a sports video analyst. Use only visible evidence and preserve timestamps.",
     reasoning: true,
+    longVideoEnabled: true,
     parameters: {
       framesPerSecond: 6,
       maxTokens: 4096,
@@ -1260,6 +1308,13 @@ function looksLikeJsonResponse(text: string) {
   return trimmed.startsWith("{") || trimmed.startsWith("[") || /^```json/i.test(trimmed);
 }
 
+function chunkProgressPercent(status: LongChunkProgress["status"]) {
+  if (status === "done") return 100;
+  if (status === "running") return 52;
+  if (status === "error") return 100;
+  return 0;
+}
+
 function safeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -1416,6 +1471,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [runMode, setRunMode] = useState<RunMode>(null);
   const [longPreset, setLongPreset] = useState<LongPreset>("balanced");
+  const [longConcurrency, setLongConcurrency] = useState(8);
   const [longProgress, setLongProgress] = useState<LongProgressState | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
@@ -1701,6 +1757,7 @@ export default function App() {
     setTopK(DEFAULT_TOP_K);
     setMaxTokens(DEFAULT_MAX_TOKENS);
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
+    setLongConcurrency(8);
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
     setPresencePenalty(DEFAULT_PRESENCE_PENALTY);
     setSeed(DEFAULT_SEED);
@@ -1892,6 +1949,7 @@ export default function App() {
           systemPrompt,
           model,
           preset: longPreset,
+          concurrency: longConcurrency,
           video: media.sourceUrl || media.dataUrl,
           params: {
             temperature,
@@ -2153,6 +2211,7 @@ export default function App() {
             inputRef={inputRef}
             isRunning={isRunning}
             jsonOutput={jsonOutput}
+            longConcurrency={longConcurrency}
             longPreset={longPreset}
             longProgress={longProgress}
             maxTokens={maxTokens}
@@ -2176,6 +2235,7 @@ export default function App() {
             selectedExampleId={selectedExampleId}
             setExamplesOpen={setExamplesOpen}
             setFramesPerSecond={setFramesPerSecond}
+            setLongConcurrency={setLongConcurrency}
             setLongPreset={setLongPreset}
             setMaxTokens={setMaxTokens}
             setModel={setModel}
@@ -2256,6 +2316,7 @@ function ExperiencePanel({
   inputRef,
   isRunning,
   jsonOutput,
+  longConcurrency,
   longPreset,
   longProgress,
   maxTokens,
@@ -2279,6 +2340,7 @@ function ExperiencePanel({
   selectedExampleId,
   setExamplesOpen,
   setFramesPerSecond,
+  setLongConcurrency,
   setLongPreset,
   setMaxTokens,
   setModel,
@@ -2317,6 +2379,7 @@ function ExperiencePanel({
   inputRef: RefObject<HTMLInputElement | null>;
   isRunning: boolean;
   jsonOutput: unknown;
+  longConcurrency: number;
   longPreset: LongPreset;
   longProgress: LongProgressState | null;
   maxTokens: number;
@@ -2340,6 +2403,7 @@ function ExperiencePanel({
   selectedExampleId: string;
   setExamplesOpen: (open: boolean) => void;
   setFramesPerSecond: (value: number) => void;
+  setLongConcurrency: (value: number) => void;
   setLongPreset: (value: LongPreset) => void;
   setMaxTokens: (value: number) => void;
   setModel: (value: string) => void;
@@ -2366,12 +2430,13 @@ function ExperiencePanel({
 }) {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const vlaMode = isVlaMode(model, backendInfo);
-  const tennisExampleLoaded =
-    selectedExampleId === TENNIS_TEMPORAL_EXAMPLE_ID &&
-    media?.kind === "video" &&
-    media.name === "tennis_nim_safe.mp4" &&
-    (media.previewUrl === TENNIS_TEMPORAL_VIDEO || Boolean(media.sourceUrl?.endsWith(TENNIS_TEMPORAL_VIDEO)));
-  const showLongVideoUi = tennisExampleLoaded || runMode === "long";
+  const selectedExample = examples.find((example) => example.id === selectedExampleId);
+  const selectedExampleLoaded =
+    Boolean(selectedExample) &&
+    media?.kind === selectedExample?.mediaKind &&
+    media.name === selectedExample.mediaName &&
+    (media.previewUrl === selectedExample.mediaUrl || Boolean(media.sourceUrl?.endsWith(selectedExample.mediaUrl)));
+  const showLongVideoUi = Boolean(selectedExample?.longVideoEnabled && selectedExampleLoaded) || runMode === "long";
 
   async function runWithOutputVisible() {
     setMobilePanel("output");
@@ -2568,13 +2633,36 @@ function ExperiencePanel({
                   />
                 </div>
               </label>
+              <label className="longFpsControl" htmlFor="long-video-concurrency">
+                <span>Chunk concurrency</span>
+                <div className="longFpsInputs">
+                  <input
+                    id="long-video-concurrency"
+                    max={16}
+                    min={1}
+                    onChange={(event) => setLongConcurrency(Math.max(1, Math.min(16, Number(event.target.value) || 1)))}
+                    step={1}
+                    type="range"
+                    value={longConcurrency}
+                  />
+                  <input
+                    aria-label="Long video chunk concurrency"
+                    max={16}
+                    min={1}
+                    onChange={(event) => setLongConcurrency(Math.max(1, Math.min(16, Number(event.target.value) || 1)))}
+                    step={1}
+                    type="number"
+                    value={longConcurrency}
+                  />
+                </div>
+              </label>
               <p>
                 Long Video sends timestamped frame chunks to the current NIM, max 5 images per request, with live ETA and
                 a stitched timeline.
               </p>
               <p className="longVideoWarning">
-                Higher FPS increases chunk count and wait time. Vite will cap the run at the server frame budget if the
-                requested FPS would create too many frames.
+                Higher FPS increases chunk count and wait time. Concurrency defaults to 8 and can go to 16 on this
+                RTX PRO 6000 based on the live NIM probes; lower it if other users share the endpoint.
               </p>
             </div>
           ) : null}
@@ -2700,20 +2788,54 @@ function ExampleModal({
   setSelectedExampleId: (id: string) => void;
 }) {
   const [draftExampleId, setDraftExampleId] = useState(selectedExampleId);
+  const [activeGroup, setActiveGroup] = useState<ExampleGroupId>(() =>
+    exampleGroupId(examples.find((example) => example.id === selectedExampleId) || examples[0])
+  );
   const [isApplying, setIsApplying] = useState(false);
+  const visibleExamples = useMemo(
+    () => examples.filter((example) => exampleGroupId(example) === activeGroup),
+    [activeGroup, examples]
+  );
+  const groupCounts = useMemo(
+    () =>
+      EXAMPLE_GROUPS.reduce<Record<ExampleGroupId, number>>(
+        (counts, group) => {
+          counts[group.id] = examples.filter((example) => exampleGroupId(example) === group.id).length;
+          return counts;
+        },
+        {
+          build: 0,
+          vss: 0,
+          "av-dense-captioning": 0,
+          "anomaly-id": 0,
+          "embodied-reasoning": 0
+        }
+      ),
+    [examples]
+  );
 
   useEffect(() => {
-    if (examples.some((example) => example.id === selectedExampleId)) {
+    const selectedExample = examples.find((example) => example.id === selectedExampleId);
+    if (selectedExample) {
       setDraftExampleId(selectedExampleId);
+      setActiveGroup(exampleGroupId(selectedExample));
       return;
     }
     if (examples[0]) {
       setDraftExampleId(examples[0].id);
+      setActiveGroup(exampleGroupId(examples[0]));
       setSelectedExampleId(examples[0].id);
     }
   }, [examples, selectedExampleId, setSelectedExampleId]);
 
+  useEffect(() => {
+    if (visibleExamples.length === 0 || visibleExamples.some((example) => example.id === draftExampleId)) return;
+    setDraftExampleId(visibleExamples[0].id);
+    setSelectedExampleId(visibleExamples[0].id);
+  }, [draftExampleId, setSelectedExampleId, visibleExamples]);
+
   function handleDone() {
+    if (!draftExampleId || !visibleExamples.some((example) => example.id === draftExampleId)) return;
     setIsApplying(true);
     void applyExample(draftExampleId);
   }
@@ -2729,53 +2851,88 @@ function ExampleModal({
           </button>
         </div>
         <div className="modalMain">
-          <p>Select the input from the examples below:</p>
-          <div className="exampleList" role="radiogroup" aria-label="Examples">
-            {examples.map((example) => {
-              const checked = draftExampleId === example.id;
+          <div className="exampleTabs" role="tablist" aria-label="Example categories">
+            {EXAMPLE_GROUPS.map((group) => {
+              const active = activeGroup === group.id;
               return (
                 <button
-                  className={checked ? "exampleItem checked" : "exampleItem"}
-                  key={example.id}
-                  role="radio"
-                  aria-checked={checked}
+                  aria-selected={active}
+                  className={active ? "active" : ""}
+                  key={group.id}
                   onClick={() => {
-                    setDraftExampleId(example.id);
-                    setSelectedExampleId(example.id);
+                    setActiveGroup(group.id);
+                    const first = examples.find((example) => exampleGroupId(example) === group.id);
+                    if (first) {
+                      setDraftExampleId(first.id);
+                      setSelectedExampleId(first.id);
+                    }
                   }}
+                  role="tab"
                   type="button"
                 >
-                  <div className="exampleThumb">
-                    {example.mediaKind === "image" ? (
-                      <img src={example.mediaUrl} alt="" />
-                    ) : (
-                      <video src={example.mediaUrl} muted preload="metadata" />
-                    )}
-                  </div>
-                  <div className="exampleText">
-                    <strong>{example.title}</strong>
-                    <span>
-                      <b>User Prompt:</b> {promptForReasoning(example.userPrompt, example.reasoning)}
-                    </span>
-                    <span>
-                      <b>Reasoning:</b> {example.reasoning ? "On" : "Off"}
-                    </span>
-                    <span>
-                      <b>System Prompt:</b> {example.systemPrompt}
-                    </span>
-                    {example.judgeNote ? (
-                      <span>
-                        <b>LingoQA:</b> {example.judgeNote}
-                      </span>
-                    ) : null}
-                  </div>
+                  <span>{group.label}</span>
+                  <small>{groupCounts[group.id]}</small>
                 </button>
               );
             })}
           </div>
+          <p>Select the input from the {EXAMPLE_GROUPS.find((group) => group.id === activeGroup)?.label} examples below:</p>
+          {visibleExamples.length > 0 ? (
+            <div className="exampleList" role="radiogroup" aria-label="Examples">
+              {visibleExamples.map((example) => {
+                const checked = draftExampleId === example.id;
+                return (
+                  <button
+                    className={checked ? "exampleItem checked" : "exampleItem"}
+                    key={example.id}
+                    role="radio"
+                    aria-checked={checked}
+                    onClick={() => {
+                      setDraftExampleId(example.id);
+                      setSelectedExampleId(example.id);
+                    }}
+                    type="button"
+                  >
+                    <div className="exampleThumb">
+                      {example.mediaKind === "image" ? (
+                        <img src={example.mediaUrl} alt="" />
+                      ) : (
+                        <video src={example.mediaUrl} muted preload="metadata" />
+                      )}
+                    </div>
+                    <div className="exampleText">
+                      <strong>{example.title}</strong>
+                      <span>
+                        <b>User Prompt:</b> {promptForReasoning(example.userPrompt, example.reasoning)}
+                      </span>
+                      <span>
+                        <b>Reasoning:</b> {example.reasoning ? "On" : "Off"}
+                      </span>
+                      <span>
+                        <b>System Prompt:</b> {example.systemPrompt}
+                      </span>
+                      {example.judgeNote ? (
+                        <span>
+                          <b>LingoQA:</b> {example.judgeNote}
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="exampleEmpty">No examples have been added to this category yet.</div>
+          )}
         </div>
         <div className="modalFooter">
-          <button className="runButton" disabled={isApplying} onClick={handleDone} type="button" aria-busy={isApplying}>
+          <button
+            className="runButton"
+            disabled={isApplying || visibleExamples.length === 0}
+            onClick={handleDone}
+            type="button"
+            aria-busy={isApplying}
+          >
             {isApplying ? "Loading" : "Done"}
           </button>
         </div>
@@ -3125,6 +3282,7 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
 function LongVideoProgress({ progress }: { progress: LongProgressState }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showTimelineEvents, setShowTimelineEvents] = useState(false);
+  const [timelineCollapsed, setTimelineCollapsed] = useState(true);
   const [compact, setCompact] = useState(false);
   const percent = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
   const completed = progress.completedChunks || progress.chunks.filter((chunk) => chunk.status === "done").length;
@@ -3174,6 +3332,7 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
       <div className="longProgressTrack" aria-label={`Long video progress ${percent}%`}>
         <span style={{ width: `${percent}%` }} />
       </div>
+      {progress.steps?.length ? <LongStepList steps={progress.steps} /> : null}
       <div className="longCoverageGrid">
         <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
         <span>Frames: {progress.frameCount ?? "scanning"}</span>
@@ -3202,34 +3361,82 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
                   title={chunk.error || chunk.summary || chunk.timeRange}
                   type="button"
                 >
-                  <strong>{chunk.index + 1}</strong>
-                  <span>{chunk.status}</span>
+                  <div className="longChunkThumb" aria-hidden="true">
+                    {chunk.thumbnailUrl ? <img src={chunk.thumbnailUrl} alt="" loading="lazy" /> : <span />}
+                    <div className="longChunkOverlay">
+                      <strong>{chunk.index + 1}</strong>
+                      <span>{chunk.status}</span>
+                    </div>
+                  </div>
                   <small>{chunk.timeRange}</small>
+                  <span className="longChunkProgress" aria-label={`Chunk ${chunk.index + 1} ${chunk.status}`}>
+                    <span style={{ width: `${chunkProgressPercent(chunk.status)}%` }} />
+                  </span>
                 </button>
               ))}
             </div>
           ) : null}
           {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
           {progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0) ? (
-            <div className="longTimeline">
-              <button
-                className="longTimelineTitle"
-                onClick={() => setShowTimelineEvents((value) => !value)}
-                type="button"
-              >
-                <span>{showTimelineEvents ? "Live parsed events" : "Live partial timeline"}</span>
-                <small>{showTimelineEvents ? "Show summaries" : "Show events"}</small>
-              </button>
-              <TimelineList
-                empty={showTimelineEvents ? "No parsed events have arrived yet." : "No chunk summaries have arrived yet."}
-                items={timelineItems}
-              />
+            <div className={`longTimeline${timelineCollapsed ? " collapsed" : ""}`}>
+              <div className="longTimelineHeader">
+                <button
+                  aria-expanded={!timelineCollapsed}
+                  className="longTimelineTitle"
+                  onClick={() => setTimelineCollapsed((value) => !value)}
+                  type="button"
+                >
+                  <span>{showTimelineEvents ? "Live parsed events" : "Live partial timeline"}</span>
+                  <small>{timelineCollapsed ? "Show timeline" : "Hide timeline"}</small>
+                </button>
+                {!timelineCollapsed ? (
+                  <button
+                    className="longTimelineMode"
+                    onClick={() => setShowTimelineEvents((value) => !value)}
+                    type="button"
+                  >
+                    {showTimelineEvents ? "Show partial timeline" : "Show events"}
+                  </button>
+                ) : null}
+              </div>
+              {!timelineCollapsed ? (
+                <TimelineList
+                  empty={showTimelineEvents ? "No parsed events have arrived yet." : "No chunk summaries have arrived yet."}
+                  items={timelineItems}
+                />
+              ) : null}
             </div>
           ) : null}
         </>
       ) : null}
     </article>
   );
+}
+
+function LongStepList({ steps }: { steps: LongStepProgress[] }) {
+  return (
+    <div className="longStepList" aria-label="Long video analysis steps">
+      {steps.map((step) => {
+        const progress = Math.max(0, Math.min(100, Math.round(Number(step.progress) || 0)));
+        return (
+          <div className={`longStepItem ${step.status}`} key={step.key}>
+            <div className="longStepHeader">
+              <span>{step.label}</span>
+              <strong>{step.status}</strong>
+            </div>
+            <div className="longStepTrack" aria-label={`${step.label} ${progress}%`}>
+              <span style={{ width: `${progress}%` }} />
+            </div>
+            {step.detail ? <small>{step.detail}</small> : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function exampleGroupId(example?: ExampleItem): ExampleGroupId {
+  return example?.group || "build";
 }
 
 function LongChunkInspector({ chunk }: { chunk: LongChunkProgress }) {
