@@ -1804,6 +1804,71 @@ select {
   text-align: right;
 }
 
+.exampleLoadStatus {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid rgba(118, 185, 0, 0.45);
+  border-radius: 8px;
+  background: rgba(118, 185, 0, 0.08);
+  text-align: left;
+}
+
+.exampleLoadHeader,
+.exampleLoadMeta,
+.exampleLoadSteps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.exampleLoadHeader strong {
+  color: var(--green);
+}
+
+.exampleLoadHeader span,
+.exampleLoadMeta span {
+  color: var(--muted);
+}
+
+.exampleLoadBar {
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.exampleLoadBar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 180ms ease;
+}
+
+.exampleLoadStep {
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.exampleLoadStep.running {
+  border-color: rgba(118, 185, 0, 0.75);
+  color: var(--text);
+}
+
+.exampleLoadStep.done {
+  border-color: rgba(118, 185, 0, 0.65);
+  color: var(--green);
+}
+
+.exampleLoadStep.error {
+  border-color: rgba(255, 91, 91, 0.7);
+  color: #ff9b9b;
+}
+
 .runButton.running {
   min-width: 96px;
 }

@@ -319,6 +319,18 @@ type LongStepProgress = {
   progress?: number;
 };
 
+type ExampleLoadState = {
+  title: string;
+  phase: string;
+  detail?: string;
+  percent: number;
+  elapsedSeconds: number;
+  etaSeconds?: number | null;
+  bytesLoaded?: number;
+  bytesTotal?: number;
+  steps: LongStepProgress[];
+};
+
 type LongProgressState = {
   phase?: string;
   message?: string;
@@ -727,6 +739,47 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return readBlobAsDataUrl(file);
+}
+
+async function fetchBlobWithProgress(
+  url: string,
+  onProgress?: (payload: { loaded: number; total?: number; percent?: number; etaSeconds?: number | null }) => void
+) {
+  const startedAt = performance.now();
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Could not load example media (${response.status})`);
+  }
+  const total = Number(response.headers.get("content-length")) || undefined;
+  if (!response.body) {
+    const blob = await response.blob();
+    onProgress?.({ loaded: blob.size, total: total || blob.size, percent: 100, etaSeconds: 0 });
+    return { blob, mime: response.headers.get("content-type") || blob.type };
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      loaded += value.byteLength;
+      const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+      const rate = loaded / elapsed;
+      const etaSeconds = total && rate > 0 ? Math.max(0, (total - loaded) / rate) : null;
+      onProgress?.({
+        loaded,
+        total,
+        percent: total ? Math.min(100, (loaded / total) * 100) : undefined,
+        etaSeconds
+      });
+    }
+  }
+  const blob = new Blob(chunks, { type: response.headers.get("content-type") || undefined });
+  onProgress?.({ loaded, total: total || loaded, percent: 100, etaSeconds: 0 });
+  return { blob, mime: response.headers.get("content-type") || blob.type };
 }
 
 function withReasoningInstruction(prompt: string): string {
@@ -1218,6 +1271,19 @@ function formatDuration(seconds?: number | null) {
   return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
 }
 
+function formatBytes(bytes?: number | null) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
 function mergeLongChunk(chunks: LongChunkProgress[], update: Partial<LongChunkProgress> & { index?: number }) {
   if (typeof update.index !== "number") return chunks;
   const next = chunks.slice();
@@ -1496,6 +1562,7 @@ export default function App() {
   const [runMode, setRunMode] = useState<RunMode>(null);
   const [longPreset, setLongPreset] = useState<LongPreset>("balanced");
   const [longConcurrency, setLongConcurrency] = useState(LONG_VIDEO_DEFAULT_CONCURRENCY);
+  const [exampleLoad, setExampleLoad] = useState<ExampleLoadState | null>(null);
   const [longProgress, setLongProgress] = useState<LongProgressState | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
@@ -1658,6 +1725,7 @@ export default function App() {
       return;
     }
     const kind = inferKind(file);
+    setExampleLoad(null);
     setMedia({
       name: file.name,
       kind,
@@ -1687,29 +1755,112 @@ export default function App() {
     setDragActive(active);
   }
 
-  async function mediaFromExample(example: ExampleItem): Promise<MediaState> {
+  async function mediaFromExample(
+    example: ExampleItem,
+    onProgress?: (state: Omit<ExampleLoadState, "title" | "elapsedSeconds">) => void
+  ): Promise<MediaState> {
     if (example.mediaUrl.startsWith("/")) {
-      const response = await fetch(example.mediaUrl);
-      if (!response.ok) {
-        throw new Error(`Could not load example media (${response.status})`);
+      const sourceUrl = new URL(example.mediaUrl, window.location.origin).toString();
+      if (example.mediaKind === "video") {
+        let bytesTotal: number | undefined;
+        try {
+          const head = await fetch(example.mediaUrl, { method: "HEAD" });
+          bytesTotal = Number(head.headers.get("content-length")) || undefined;
+        } catch {
+          bytesTotal = undefined;
+        }
+        onProgress?.({
+          phase: "Ready",
+          detail: `Using URL stream${bytesTotal ? ` (${formatBytes(bytesTotal)})` : ""}; skipped browser base64 encoding`,
+          percent: 100,
+          etaSeconds: 0,
+          bytesLoaded: bytesTotal,
+          bytesTotal,
+          steps: [
+            { key: "locate", label: "Locate media", status: "done", progress: 100, detail: "Found server-hosted file" },
+            { key: "stream", label: "Prepare stream URL", status: "done", progress: 100, detail: "Preview and backend will stream by URL" },
+            { key: "ready", label: "Ready", status: "done", progress: 100, detail: "No browser copy required" }
+          ]
+        });
+        return {
+          name: example.mediaName,
+          kind: "video",
+          previewUrl: example.mediaUrl,
+          dataUrl: "",
+          sourceUrl
+        };
       }
-      const blob = await response.blob();
-      const mime = blob.type || (example.mediaKind === "image" ? "image/png" : "video/mp4");
+
+      const { blob, mime: responseMime } = await fetchBlobWithProgress(example.mediaUrl, (progress) => {
+        onProgress?.({
+          phase: "Downloading",
+          detail: progress.total
+            ? `${formatBytes(progress.loaded)} of ${formatBytes(progress.total)}`
+            : `${formatBytes(progress.loaded)} downloaded`,
+          percent: progress.percent ?? 45,
+          etaSeconds: progress.etaSeconds,
+          bytesLoaded: progress.loaded,
+          bytesTotal: progress.total,
+          steps: [
+            { key: "locate", label: "Locate media", status: "done", progress: 100, detail: "Found server-hosted file" },
+            { key: "download", label: "Download for request", status: "running", progress: progress.percent ?? 45, detail: "Reading browser payload" },
+            { key: "encode", label: "Encode request payload", status: "pending", progress: 0 },
+            { key: "ready", label: "Ready", status: "pending", progress: 0 }
+          ]
+        });
+      });
+      onProgress?.({
+        phase: "Encoding",
+        detail: "Preparing request payload",
+        percent: 92,
+        etaSeconds: null,
+        bytesLoaded: blob.size,
+        bytesTotal: blob.size,
+        steps: [
+          { key: "locate", label: "Locate media", status: "done", progress: 100 },
+          { key: "download", label: "Download for request", status: "done", progress: 100, detail: formatBytes(blob.size) },
+          { key: "encode", label: "Encode request payload", status: "running", progress: 70 },
+          { key: "ready", label: "Ready", status: "pending", progress: 0 }
+        ]
+      });
+      const mime = blob.type || responseMime || (example.mediaKind === "image" ? "image/png" : "video/mp4");
       return {
         name: example.mediaName,
         kind: mime.startsWith("image/") ? "image" : "video",
         previewUrl: example.mediaUrl,
         dataUrl: await readBlobAsDataUrl(blob),
-        sourceUrl: new URL(example.mediaUrl, window.location.origin).toString()
+        sourceUrl
       };
     }
 
     const params = new URLSearchParams({ url: example.mediaUrl, name: example.mediaName });
+    onProgress?.({
+      phase: "Fetching",
+      detail: "Proxying remote example media",
+      percent: 25,
+      etaSeconds: null,
+      steps: [
+        { key: "proxy", label: "Fetch remote media", status: "running", progress: 25 },
+        { key: "encode", label: "Encode request payload", status: "pending", progress: 0 },
+        { key: "ready", label: "Ready", status: "pending", progress: 0 }
+      ]
+    });
     const response = await fetch(`/api/example-media?${params.toString()}`);
     if (!response.ok) {
       const error = await response.json().catch(() => null);
       throw new Error(error?.message || "Could not load example media");
     }
+    onProgress?.({
+      phase: "Encoding",
+      detail: "Preparing proxied media",
+      percent: 90,
+      etaSeconds: null,
+      steps: [
+        { key: "proxy", label: "Fetch remote media", status: "done", progress: 100 },
+        { key: "encode", label: "Encode request payload", status: "running", progress: 80 },
+        { key: "ready", label: "Ready", status: "pending", progress: 0 }
+      ]
+    });
     const data = (await response.json()) as { dataUrl: string; mime: string; name: string };
     return {
       name: data.name,
@@ -1723,20 +1874,49 @@ export default function App() {
   async function applyExample(exampleId = selectedExampleId, options: { closeModal?: boolean } = {}) {
     const closeModal = options.closeModal ?? true;
     const example = activeExamples.find((item) => item.id === exampleId) || activeExamples[0] || EXAMPLES[0];
+    const startedAt = performance.now();
+    const setLoadProgress = (state: Omit<ExampleLoadState, "title" | "elapsedSeconds">) => {
+      setExampleLoad({
+        ...state,
+        title: example.title,
+        percent: Math.max(0, Math.min(100, Math.round(Number(state.percent) || 0))),
+        elapsedSeconds: (performance.now() - startedAt) / 1000
+      });
+    };
     setSelectedExampleId(example.id);
     if (closeModal) setExamplesOpen(false);
     setStatus("Loading example");
+    setLoadProgress({
+      phase: "Starting",
+      detail: example.mediaKind === "video" && example.mediaUrl.startsWith("/")
+        ? "Checking server-hosted video"
+        : "Preparing example media",
+      percent: 5,
+      etaSeconds: null,
+      steps: [
+        { key: "locate", label: "Locate media", status: "running", progress: 20 },
+        { key: "download", label: "Download or stream", status: "pending", progress: 0 },
+        { key: "ready", label: "Ready", status: "pending", progress: 0 }
+      ]
+    });
     try {
       setReasoningEnabled(example.reasoning);
       setUserPrompt(promptForReasoning(example.userPrompt, example.reasoning));
       setSystemPrompt(example.systemPrompt);
       applyExampleParameters(example);
-      setMedia(await mediaFromExample(example));
+      const nextMedia = await mediaFromExample(example, setLoadProgress);
+      setMedia(nextMedia);
       setResult(null);
       setStreamState(idleStreamState(model));
       setOutputTab("preview");
-      setStatus("Example loaded");
+      setStatus(
+        nextMedia.kind === "video" && nextMedia.sourceUrl
+          ? "Example loaded: video will stream by URL"
+          : "Example loaded"
+      );
+      window.setTimeout(() => setExampleLoad(null), 1200);
     } catch (error) {
+      setExampleLoad(null);
       setStatus(error instanceof Error ? error.message : "Example failed to load");
     }
   }
@@ -1795,6 +1975,7 @@ export default function App() {
     setStreamState(idleStreamState(model));
     setIsRunning(false);
     setRunMode(null);
+    setExampleLoad(null);
     setLongProgress(null);
     if (inputRef.current) inputRef.current.value = "";
   }
@@ -2229,6 +2410,7 @@ export default function App() {
             copied={copied}
             copyRequest={copyRequest}
             dragActive={dragActive}
+            exampleLoad={exampleLoad}
             examples={activeExamples}
             examplesOpen={examplesOpen}
             handleDrag={handleDrag}
@@ -2327,12 +2509,46 @@ function VlaModeBanner({ backendInfo }: { backendInfo: BackendInfo | null }) {
   );
 }
 
+function ExampleLoadStatus({ load }: { load: ExampleLoadState }) {
+  const etaText = load.etaSeconds === 0 ? "ETA complete" : `ETA ${formatDuration(load.etaSeconds)}`;
+  const bytesText = load.bytesTotal
+    ? `${formatBytes(load.bytesLoaded)} / ${formatBytes(load.bytesTotal)}`
+    : load.bytesLoaded
+      ? formatBytes(load.bytesLoaded)
+      : "";
+  return (
+    <div className="exampleLoadStatus">
+      <div className="exampleLoadHeader">
+        <strong>{load.phase}</strong>
+        <span>{load.title}</span>
+      </div>
+      <div className="exampleLoadBar" aria-label={`Example load progress ${load.percent}%`}>
+        <span style={{ width: `${Math.max(0, Math.min(100, load.percent))}%` }} />
+      </div>
+      <div className="exampleLoadMeta">
+        <span>{load.detail || "Preparing media"}</span>
+        {bytesText ? <span>{bytesText}</span> : null}
+        <span>Elapsed {formatDuration(load.elapsedSeconds)}</span>
+        <span>{etaText}</span>
+      </div>
+      <div className="exampleLoadSteps">
+        {load.steps.map((step) => (
+          <span className={`exampleLoadStep ${step.status}`} key={step.key}>
+            {step.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ExperiencePanel({
   applyExample,
   backendInfo,
   copied,
   copyRequest,
   dragActive,
+  exampleLoad,
   examples,
   examplesOpen,
   framesPerSecond,
@@ -2396,6 +2612,7 @@ function ExperiencePanel({
   copied: boolean;
   copyRequest: () => Promise<void>;
   dragActive: boolean;
+  exampleLoad: ExampleLoadState | null;
   examples: ExampleItem[];
   examplesOpen: boolean;
   framesPerSecond: number;
@@ -2722,7 +2939,7 @@ function ExperiencePanel({
             ) : null}
           </div>
           <div className="statusLine" role="status">
-            {status}
+            {exampleLoad ? <ExampleLoadStatus load={exampleLoad} /> : status}
           </div>
         </section>
 
