@@ -100,6 +100,7 @@ const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
 const TENNIS_TEMPORAL_EXAMPLE_ID = "tennis-temporal-events";
 const TENNIS_TEMPORAL_VIDEO = "/examples/tennis_nim_safe.mp4";
 const WAREHOUSE_ROW_D_VIDEO = "/examples/warehouse_7min.mp4";
+const AV_EGO_RAPID_SCENE_VIDEO = "/examples/av-ego-rapid-scene.mp4";
 const ACCEPTED_MEDIA_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "jpg", "jpeg", "png", "webp"];
 const ACCEPTED_MEDIA_ACCEPT = [
   "video/*",
@@ -642,6 +643,30 @@ const EXAMPLES: ExampleItem[] = [
 const ALPAMAYO_LINGOQA_SYSTEM_PROMPT =
   "Answer the user's driving-scene question from visible evidence in the sampled frames.";
 
+const AV_EGO_ACTION_EXAMPLE: ExampleItem = {
+  id: "av-ego-rapid-action-plan",
+  title: "AV: rapid ego-car action plan",
+  group: "av-dense-captioning",
+  mediaUrl: AV_EGO_RAPID_SCENE_VIDEO,
+  mediaName: "av-ego-rapid-scene.mp4",
+  mediaKind: "video",
+  userPrompt:
+    'Analyze this rapid ego-vehicle driving scene at high temporal resolution. Focus on what the ego car should do, not generic scene captioning.\n\nUse only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. For every road-relevant moment, identify: road actors (vehicles, pedestrians, cyclists, traffic control, lane markings, signs, obstacles), static context, dynamic motion, applicable right-of-way or road-rule cue, risk or uncertainty, and the concrete reaction the ego car should take.\n\nUse concrete ego actions such as maintain lane, maintain speed, slow, brake, yield, stop, wait, creep forward, steer left/right within lane, proceed, or accelerate. Do not infer hidden actors or between-sample events. If the scene is static and does not change the ego action, omit it from the event list.\n\nReturn the final answer as valid JSON with this shape: {"events":[{"start":"mm:ss.ff","end":"mm:ss.ff","scene_type":"static|dynamic|mixed","road_actors":[],"static_context":[],"road_rule_or_cue":"","risk":"","ego_action":"","confidence":0.0,"caption":""}],"timeline_summary":[{"start":"mm:ss.ff","end":"mm:ss.ff","ego_policy":"","key_reason":""}],"uncertain_events":[],"sampling_limits":{"rapid_motion":"","occlusion":"","would_higher_fps_help":true}}.',
+  systemPrompt:
+    "You are an autonomous-driving video analyst. Use only visible evidence, preserve exact timestamps, separate static context from dynamic actors, and give conservative concrete ego-car actions.",
+  reasoning: true,
+  longVideoEnabled: true,
+  parameters: {
+    framesPerSecond: 12,
+    maxTokens: 4096,
+    presencePenalty: 0,
+    repetitionPenalty: 1.0,
+    temperature: 0.6,
+    topK: 20,
+    topP: 0.95
+  }
+};
+
 const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   {
     id: "lingoqa-red-light-slowdown",
@@ -730,20 +755,23 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   }
 ];
 
-const AV_DENSE_CAPTIONING_EXAMPLES: ExampleItem[] = ALPAMAYO_LINGOQA_EXAMPLES.map((example) => ({
-  ...example,
-  group: "av-dense-captioning",
-  reasoning: true,
-  parameters: {
-    ...example.parameters,
-    maxTokens: 4096,
-    presencePenalty: 0,
-    repetitionPenalty: 1.0,
-    temperature: 0.6,
-    topK: 20,
-    topP: 0.95
-  }
-}));
+const AV_DENSE_CAPTIONING_EXAMPLES: ExampleItem[] = [
+  AV_EGO_ACTION_EXAMPLE,
+  ...ALPAMAYO_LINGOQA_EXAMPLES.map((example) => ({
+    ...example,
+    group: "av-dense-captioning" as ExampleGroupId,
+    reasoning: true,
+    parameters: {
+      ...example.parameters,
+      maxTokens: 4096,
+      presencePenalty: 0,
+      repetitionPenalty: 1.0,
+      temperature: 0.6,
+      topK: 20,
+      topP: 0.95
+    }
+  }))
+];
 
 const DEFAULT_REASON_EXAMPLES: ExampleItem[] = [...EXAMPLES, ...AV_DENSE_CAPTIONING_EXAMPLES];
 
@@ -1998,7 +2026,7 @@ export default function App() {
     setTopK(params.topK ?? samplingDefaults.topK);
     setRepetitionPenalty(params.repetitionPenalty ?? samplingDefaults.repetitionPenalty);
     setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
-    setFramesPerSecond(example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : (params.framesPerSecond ?? mediaDefaults.fps));
+    setFramesPerSecond(params.framesPerSecond ?? (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : mediaDefaults.fps));
     if (example.longVideoEnabled) setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
     setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
   }
