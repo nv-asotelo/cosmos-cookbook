@@ -2372,6 +2372,59 @@ select {
   padding: 0 10px 10px;
 }
 
+.liveTimelineCard {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #071006;
+  padding: 16px;
+}
+
+.liveTimelineCard.collapsed {
+  gap: 0;
+}
+
+.liveTimelineHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.liveTimelineHeader h3 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.liveTimelineActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.liveTimelineToggle,
+.liveTimelineMode {
+  min-height: 31px;
+  border: 1px solid #31530b;
+  border-radius: 999px;
+  background: #10170b;
+  color: var(--green);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.liveTimelineToggle:hover,
+.liveTimelineMode:hover,
+.liveTimelineToggle[aria-expanded="true"] {
+  border-color: var(--green);
+  background: #1d2a08;
+}
+
 .longChunkGrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

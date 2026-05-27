@@ -3709,6 +3709,52 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
   );
 }
 
+function LiveLongTimeline({
+  collapsed,
+  items,
+  setCollapsed,
+  setShowEvents,
+  showEvents
+}: {
+  collapsed: boolean;
+  items: TimelineItem[];
+  setCollapsed: (value: boolean | ((current: boolean) => boolean)) => void;
+  setShowEvents: (value: boolean | ((current: boolean) => boolean)) => void;
+  showEvents: boolean;
+}) {
+  return (
+    <article className={`liveTimelineCard${collapsed ? " collapsed" : ""}`}>
+      <div className="liveTimelineHeader">
+        <div>
+          <p className="responseLabel">Live Timeline</p>
+          <h3>{showEvents ? "Parsed events" : "Partial timeline"}</h3>
+        </div>
+        <div className="liveTimelineActions">
+          <button
+            aria-expanded={!collapsed}
+            className="liveTimelineToggle"
+            onClick={() => setCollapsed((value) => !value)}
+            type="button"
+          >
+            {collapsed ? "Show timeline" : "Hide timeline"}
+          </button>
+          {!collapsed ? (
+            <button className="liveTimelineMode" onClick={() => setShowEvents((value) => !value)} type="button">
+              {showEvents ? "Show partial timeline" : "Show events"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {!collapsed ? (
+        <TimelineList
+          empty={showEvents ? "No parsed events have arrived yet." : "No chunk summaries have arrived yet."}
+          items={items}
+        />
+      ) : null}
+    </article>
+  );
+}
+
 function LongVideoProgress({ progress }: { progress: LongProgressState }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showTimelineEvents, setShowTimelineEvents] = useState(false);
@@ -3778,98 +3824,80 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
       setSelectedIndex(null);
     }
   }, [progress.chunks, selectedIndex]);
+  const hasTimeline = progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0);
   return (
-    <article className={`longProgressCard${compact ? " compact" : ""}`} aria-live="polite">
-      <div className="longProgressHeader">
-        <div>
-          <p className="responseLabel">Long Video Analysis</p>
-          <h3>{progress.message || "Preparing timeline analysis"}</h3>
+    <>
+      <article className={`longProgressCard${compact ? " compact" : ""}`} aria-live="polite">
+        <div className="longProgressHeader">
+          <div>
+            <p className="responseLabel">Long Video Analysis</p>
+            <h3>{progress.message || "Preparing timeline analysis"}</h3>
+          </div>
+          <div className="longProgressActions">
+            <span className="longPresetBadge">{progress.preset}</span>
+            <button className="longProgressCollapse" onClick={() => setCompact((value) => !value)} type="button">
+              {compact ? "Show details" : "Collapse"}
+            </button>
+          </div>
         </div>
-        <div className="longProgressActions">
-          <span className="longPresetBadge">{progress.preset}</span>
-          <button className="longProgressCollapse" onClick={() => setCompact((value) => !value)} type="button">
-            {compact ? "Show details" : "Collapse"}
-          </button>
+        <div className="longProgressMeta">
+          <span>Phase: {phase.replace(/_/g, " ")}</span>
+          <span>Chunks: {completed + failed}/{total || "?"}</span>
+          <span>Running: {running}</span>
+          <span>Elapsed: {formatDuration(progress.elapsedSeconds)}</span>
+          <span>ETA: {progress.etaSeconds === 0 ? "complete" : formatDuration(progress.etaSeconds)}</span>
         </div>
-      </div>
-      <div className="longProgressMeta">
-        <span>Phase: {phase.replace(/_/g, " ")}</span>
-        <span>Chunks: {completed + failed}/{total || "?"}</span>
-        <span>Running: {running}</span>
-        <span>Elapsed: {formatDuration(progress.elapsedSeconds)}</span>
-        <span>ETA: {progress.etaSeconds === 0 ? "complete" : formatDuration(progress.etaSeconds)}</span>
-      </div>
-      <div className="longProgressTrack" aria-label={`Long video progress ${percent}%`}>
-        <span style={{ width: `${percent}%` }} />
-      </div>
-      {progress.steps?.length ? <LongStepList steps={progress.steps} /> : null}
-      <div className="longCoverageGrid">
-        <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
-        <span>Frames: {progress.frameCount ?? "scanning"}</span>
-        <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
-        <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
-        {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
-        <span>Concurrency: {progress.concurrency || 4}</span>
-      </div>
-      {!compact ? (
-        <>
-          {progress.warnings.length > 0 ? (
-            <ul className="longWarnings">
-              {progress.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          ) : null}
-          {activeChunks.length > 0 ? (
-            <div className="longChunkGrid" aria-label="Active chunk progress">
-              {activeChunks.map((chunk) => renderChunkButton(chunk))}
-            </div>
-          ) : null}
-          {completedChunks.length > 0 ? (
-            <details className="completedChunksDisclosure">
-              <summary>
-                <span>Completed chunks</span>
-                <small>{completedChunks.length}/{total || completedChunks.length}</small>
-              </summary>
-              <div className="longChunkGrid completedChunkGrid" aria-label="Completed chunks">
-                {completedChunks.map((chunk) => renderChunkButton(chunk, true))}
+        <div className="longProgressTrack" aria-label={`Long video progress ${percent}%`}>
+          <span style={{ width: `${percent}%` }} />
+        </div>
+        {progress.steps?.length ? <LongStepList steps={progress.steps} /> : null}
+        <div className="longCoverageGrid">
+          <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
+          <span>Frames: {progress.frameCount ?? "scanning"}</span>
+          <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
+          <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
+          {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
+          <span>Concurrency: {progress.concurrency || 4}</span>
+        </div>
+        {!compact ? (
+          <>
+            {progress.warnings.length > 0 ? (
+              <ul className="longWarnings">
+                {progress.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+            {activeChunks.length > 0 ? (
+              <div className="longChunkGrid" aria-label="Active chunk progress">
+                {activeChunks.map((chunk) => renderChunkButton(chunk))}
               </div>
-            </details>
-          ) : null}
-          {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
-          {progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0) ? (
-            <div className={`longTimeline${timelineCollapsed ? " collapsed" : ""}`}>
-              <div className="longTimelineHeader">
-                <button
-                  aria-expanded={!timelineCollapsed}
-                  className="longTimelineTitle"
-                  onClick={() => setTimelineCollapsed((value) => !value)}
-                  type="button"
-                >
-                  <span>{showTimelineEvents ? "Live parsed events" : "Live partial timeline"}</span>
-                  <small>{timelineCollapsed ? "Show timeline" : "Hide timeline"}</small>
-                </button>
-                {!timelineCollapsed ? (
-                  <button
-                    className="longTimelineMode"
-                    onClick={() => setShowTimelineEvents((value) => !value)}
-                    type="button"
-                  >
-                    {showTimelineEvents ? "Show partial timeline" : "Show events"}
-                  </button>
-                ) : null}
-              </div>
-              {!timelineCollapsed ? (
-                <TimelineList
-                  empty={showTimelineEvents ? "No parsed events have arrived yet." : "No chunk summaries have arrived yet."}
-                  items={timelineItems}
-                />
-              ) : null}
-            </div>
-          ) : null}
-        </>
+            ) : null}
+            {completedChunks.length > 0 ? (
+              <details className="completedChunksDisclosure">
+                <summary>
+                  <span>Completed chunks</span>
+                  <small>{completedChunks.length}/{total || completedChunks.length}</small>
+                </summary>
+                <div className="longChunkGrid completedChunkGrid" aria-label="Completed chunks">
+                  {completedChunks.map((chunk) => renderChunkButton(chunk, true))}
+                </div>
+              </details>
+            ) : null}
+            {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
+          </>
+        ) : null}
+      </article>
+      {!compact && hasTimeline ? (
+        <LiveLongTimeline
+          collapsed={timelineCollapsed}
+          items={timelineItems}
+          setCollapsed={setTimelineCollapsed}
+          setShowEvents={setShowTimelineEvents}
+          showEvents={showTimelineEvents}
+        />
       ) : null}
-    </article>
+    </>
   );
 }
 
