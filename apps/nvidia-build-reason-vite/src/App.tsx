@@ -692,6 +692,23 @@ const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   }
 ];
 
+const AV_DENSE_CAPTIONING_EXAMPLES: ExampleItem[] = ALPAMAYO_LINGOQA_EXAMPLES.map((example) => ({
+  ...example,
+  group: "av-dense-captioning",
+  reasoning: true,
+  parameters: {
+    ...example.parameters,
+    maxTokens: 4096,
+    presencePenalty: 0,
+    repetitionPenalty: 1.0,
+    temperature: 0.6,
+    topK: 20,
+    topP: 0.95
+  }
+}));
+
+const DEFAULT_REASON_EXAMPLES: ExampleItem[] = [...EXAMPLES, ...AV_DENSE_CAPTIONING_EXAMPLES];
+
 function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1477,7 +1494,7 @@ export default function App() {
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
   const [copied, setCopied] = useState(false);
   const vlaMode = isVlaMode(model, backendInfo);
-  const activeExamples = useMemo(() => (vlaMode ? ALPAMAYO_LINGOQA_EXAMPLES : EXAMPLES), [vlaMode]);
+  const activeExamples = useMemo(() => (vlaMode ? ALPAMAYO_LINGOQA_EXAMPLES : DEFAULT_REASON_EXAMPLES), [vlaMode]);
 
   useEffect(() => {
     let cancelled = false;
