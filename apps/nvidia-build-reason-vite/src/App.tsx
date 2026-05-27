@@ -161,7 +161,7 @@ type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
 type LongPreset = "fast" | "balanced" | "detailed";
 type RunMode = "standard" | "long" | null;
-type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "anomaly-id" | "embodied-reasoning";
+type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "embodied-reasoning";
 
 const LONG_VIDEO_PRESET_FPS: Record<LongPreset, number> = {
   fast: 2,
@@ -441,8 +441,7 @@ const EXAMPLE_GROUPS: Array<{ id: ExampleGroupId; label: string }> = [
   { id: "build", label: "build.nvidia.com" },
   { id: "vss", label: "VSS" },
   { id: "av-dense-captioning", label: "AV" },
-  { id: "anomaly-id", label: "Anomaly ID" },
-  { id: "embodied-reasoning", label: "Embodied Reasoning" }
+  { id: "embodied-reasoning", label: "Embodied" }
 ];
 
 function initialBackendInfo(modelName = DEFAULT_MODEL, backend = DEFAULT_BACKEND): BackendInfo | null {
@@ -470,6 +469,9 @@ function initialBackendInfo(modelName = DEFAULT_MODEL, backend = DEFAULT_BACKEND
   };
 }
 
+const ROBOT_ARM_TRAJECTORY_PROMPT =
+  'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.\n\nPrompt format:\nAnswer the question using the following format:\n<think>\nYour reasoning.\n</think>\nWrite your final answer immediately after the </think> tag.';
+
 const EXAMPLES: ExampleItem[] = [
   {
     id: "robotics-next-action",
@@ -491,8 +493,25 @@ const EXAMPLES: ExampleItem[] = [
     mediaUrl: ROBOT_TAPE_IMAGE,
     mediaName: "robot_tape.png",
     mediaKind: "image",
-    userPrompt:
-      'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.\n\nPrompt format:\nAnswer the question using the following format:\n<think>\nYour reasoning.\n</think>\nWrite your final answer immediately after the </think> tag.',
+    userPrompt: ROBOT_ARM_TRAJECTORY_PROMPT,
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true,
+    parameters: {
+      framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
+    id: "robot-arm-embodied",
+    title: "robot arm pick up stuff",
+    group: "embodied-reasoning",
+    mediaUrl: ROBOT_TAPE_IMAGE,
+    mediaName: "robot_tape.png",
+    mediaKind: "image",
+    userPrompt: ROBOT_ARM_TRAJECTORY_PROMPT,
     systemPrompt: "You are a helpful assistant.",
     reasoning: true,
     parameters: {
@@ -3057,7 +3076,6 @@ function ExampleModal({
           build: 0,
           vss: 0,
           "av-dense-captioning": 0,
-          "anomaly-id": 0,
           "embodied-reasoning": 0
         }
       ),
