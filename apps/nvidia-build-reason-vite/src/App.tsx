@@ -163,6 +163,13 @@ type LongPreset = "fast" | "balanced" | "detailed";
 type RunMode = "standard" | "long" | null;
 type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "anomaly-id" | "embodied-reasoning";
 
+const LONG_VIDEO_PRESET_FPS: Record<LongPreset, number> = {
+  fast: 2,
+  balanced: 4,
+  detailed: 6
+};
+const LONG_VIDEO_DEFAULT_CONCURRENCY = 16;
+
 type MediaState = {
   name: string;
   kind: "video" | "image";
@@ -1488,7 +1495,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [runMode, setRunMode] = useState<RunMode>(null);
   const [longPreset, setLongPreset] = useState<LongPreset>("balanced");
-  const [longConcurrency, setLongConcurrency] = useState(8);
+  const [longConcurrency, setLongConcurrency] = useState(LONG_VIDEO_DEFAULT_CONCURRENCY);
   const [longProgress, setLongProgress] = useState<LongProgressState | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [streamState, setStreamState] = useState<StreamState>(() => idleStreamState());
@@ -1758,7 +1765,8 @@ export default function App() {
     setTopK(params.topK ?? samplingDefaults.topK);
     setRepetitionPenalty(params.repetitionPenalty ?? samplingDefaults.repetitionPenalty);
     setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
-    setFramesPerSecond(params.framesPerSecond ?? mediaDefaults.fps);
+    setFramesPerSecond(example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : (params.framesPerSecond ?? mediaDefaults.fps));
+    if (example.longVideoEnabled) setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
     setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
   }
 
@@ -1774,7 +1782,8 @@ export default function App() {
     setTopK(DEFAULT_TOP_K);
     setMaxTokens(DEFAULT_MAX_TOKENS);
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
-    setLongConcurrency(8);
+    setLongPreset("balanced");
+    setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
     setPresencePenalty(DEFAULT_PRESENCE_PENALTY);
     setSeed(DEFAULT_SEED);
@@ -2455,6 +2464,12 @@ function ExperiencePanel({
     (media.previewUrl === selectedExample.mediaUrl || Boolean(media.sourceUrl?.endsWith(selectedExample.mediaUrl)));
   const showLongVideoUi = Boolean(selectedExample?.longVideoEnabled && selectedExampleLoaded) || runMode === "long";
 
+  function chooseLongPreset(preset: LongPreset) {
+    setLongPreset(preset);
+    setFramesPerSecond(LONG_VIDEO_PRESET_FPS[preset]);
+    setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+  }
+
   async function runWithOutputVisible() {
     setMobilePanel("output");
     await run();
@@ -2618,7 +2633,7 @@ function ExperiencePanel({
                     aria-checked={longPreset === preset}
                     className={longPreset === preset ? "active" : ""}
                     key={preset}
-                    onClick={() => setLongPreset(preset)}
+                    onClick={() => chooseLongPreset(preset)}
                     role="radio"
                     type="button"
                   >
@@ -2678,8 +2693,9 @@ function ExperiencePanel({
                 a stitched timeline.
               </p>
               <p className="longVideoWarning">
-                Higher FPS increases chunk count and wait time. Concurrency defaults to 8 and can go to 16 on this
-                RTX PRO 6000 based on the live NIM probes; lower it if other users share the endpoint.
+                Higher FPS increases chunk count and wait time. Presets use 2, 4, and 6 FPS for Fast, Balanced,
+                and Detailed. Chunk concurrency defaults to 16 on this RTX PRO 6000 based on the live NIM probes;
+                lower it if other users share the endpoint.
               </p>
             </div>
           ) : null}

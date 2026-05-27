@@ -384,11 +384,11 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
     preset === "fast"
       ? {
           preset: "fast",
-          sampleFps: duration > 180 ? 0.33 : 0.5,
-          maxFrames: duration > 0 ? Math.min(48, Math.max(12, Math.ceil(duration * 0.5))) : 48,
+          sampleFps: 2,
+          maxFrames: duration > 0 ? Math.ceil(duration * 2) : 240,
           chunkSize: 5,
           overlap: 0,
-          concurrency: 4,
+          concurrency: 16,
           chunkMaxTokens: 512,
           finalMaxTokens: 1200,
           chunkTimeoutMs: 45000,
@@ -397,11 +397,11 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
       : preset === "detailed"
         ? {
             preset: "detailed",
-            sampleFps: duration > 120 ? 1.5 : 2,
-            maxFrames: duration > 0 ? Math.min(180, Math.max(24, Math.ceil(duration * 2))) : 180,
+            sampleFps: 6,
+            maxFrames: duration > 0 ? Math.ceil(duration * 6) : 720,
             chunkSize: 5,
             overlap: 1,
-            concurrency: 4,
+            concurrency: 16,
             chunkMaxTokens: 900,
             finalMaxTokens: 2200,
             chunkTimeoutMs: 90000,
@@ -409,15 +409,15 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
           }
         : {
             preset: "balanced",
-            sampleFps: duration > 120 ? 0.75 : 1,
-            maxFrames: duration > 0 ? Math.min(96, Math.max(18, Math.ceil(duration))) : 96,
+            sampleFps: 4,
+            maxFrames: duration > 0 ? Math.ceil(duration * 4) : 480,
             chunkSize: 5,
             overlap: 1,
-            concurrency: 4,
+            concurrency: 16,
             chunkMaxTokens: 560,
             finalMaxTokens: 900,
             chunkTimeoutMs: 65000,
-          targetWidth: 704
+            targetWidth: 704
         };
   const maxFrameLimit = longVideoFrameLimit();
   const sampleFps = requestedFps ? Math.min(30, requestedFps) : defaults.sampleFps;
@@ -425,9 +425,7 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
     duration > 0
       ? Math.ceil(duration * sampleFps)
       : Math.ceil(sampleFps * 120);
-  const maxFrames = requestedFps
-    ? Math.min(maxFrameLimit, Math.max(defaults.maxFrames, requestedFrameBudget))
-    : defaults.maxFrames;
+  const maxFrames = Math.min(maxFrameLimit, Math.max(defaults.maxFrames, requestedFrameBudget));
   const concurrency = Number.parseInt(String(requestedConcurrency || ""), 10);
   return {
     ...defaults,
