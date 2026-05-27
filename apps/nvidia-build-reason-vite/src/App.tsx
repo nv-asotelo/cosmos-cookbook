@@ -440,7 +440,7 @@ type BackendInfo = {
 const EXAMPLE_GROUPS: Array<{ id: ExampleGroupId; label: string }> = [
   { id: "build", label: "build.nvidia.com" },
   { id: "vss", label: "VSS" },
-  { id: "av-dense-captioning", label: "AV Dense Captioning" },
+  { id: "av-dense-captioning", label: "AV" },
   { id: "anomaly-id", label: "Anomaly ID" },
   { id: "embodied-reasoning", label: "Embodied Reasoning" }
 ];
