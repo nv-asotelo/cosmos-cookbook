@@ -1412,6 +1412,30 @@ function stitchedTimelineItems(result: ApiResult | null): TimelineItem[] {
   return timelineItemsFromChunks(chunks, "events");
 }
 
+function isStaticTimelineItem(item: TimelineItem) {
+  const title = item.title.trim().toLowerCase();
+  const caption = item.caption.trim().toLowerCase();
+  return (
+    title === "static scene" ||
+    title === "none" ||
+    title === "no change" ||
+    caption.startsWith("the scene remains static") ||
+    caption.includes("no visible movement")
+  );
+}
+
+function isSummaryTimelineItem(item: TimelineItem) {
+  return item.title.trim().toLowerCase() === "summary";
+}
+
+function rangeParts(range: string) {
+  const [start, end] = range.split(/\s+-\s+/);
+  return {
+    start: start || range || "unknown",
+    end: end || start || range || "unknown"
+  };
+}
+
 function looksLikeJsonResponse(text: string) {
   const trimmed = text.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[") || /^```json/i.test(trimmed);
@@ -1529,7 +1553,17 @@ function nimImageForModel(modelName: string, backendInfo: BackendInfo | null) {
   const liveImage = backendInfo?.nim?.image;
   if (liveImage) return liveImage;
   const slug = modelSlug(modelName);
-  return slug ? `nvcr.io/nim/nvidia/${slug}:latest` : "<NIM_IMAGE>";
+  const lower = modelName.toLowerCase();
+  const vendor = lower.includes("qwen")
+    ? "qwen"
+    : lower.includes("gemma")
+      ? "google"
+      : lower.includes("mistral") || lower.includes("ministral")
+        ? "mistralai"
+        : lower.includes("kimi")
+          ? "moonshotai"
+          : "nvidia";
+  return slug ? `nvcr.io/nim/${vendor}/${slug}:latest` : "<NIM_IMAGE>";
 }
 
 function usesFrameFallback(modelName: string, backend?: string) {
@@ -3532,17 +3566,117 @@ function TimelineList({ empty, items }: { empty: string; items: TimelineItem[] }
   );
 }
 
+function DynamicTimelineList({ empty, items }: { empty: string; items: TimelineItem[] }) {
+  if (items.length === 0) return <p className="timelineEmpty">{empty}</p>;
+  return (
+    <ol className="dynamicTimelineList">
+      {items.map((item, index) => {
+        const isEndpoint = index === 0 || index === items.length - 1;
+        return (
+          <li className={isEndpoint ? "endpoint" : "middle"} key={item.id || index}>
+            <span className="dynamicTimelineRail" aria-hidden="true">
+              <span className={isEndpoint ? "dynamicTimelineDot" : "dynamicTimelineTick"} />
+            </span>
+            <div>
+              <strong>{item.range}</strong>
+              <span>
+                {item.title ? <em>{item.title}</em> : null}
+                {item.caption}
+              </span>
+              {item.meta ? <small>{item.meta}</small> : null}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function SummaryTimelineList({ empty, items }: { empty: string; items: TimelineItem[] }) {
+  if (items.length === 0) return <p className="timelineEmpty">{empty}</p>;
+  return (
+    <div className="summaryTimelineList">
+      {items.map((item, index) => {
+        const range = rangeParts(item.range);
+        return (
+          <article className="summaryTimelineItem" key={item.id || index}>
+            <div className="summaryTimelineRange">
+              <span>
+                <small>Start</small>
+                {range.start}
+              </span>
+              <span>
+                <small>End</small>
+                {range.end}
+              </span>
+            </div>
+            <div className="summaryTimelineBody">
+              <strong>Summary</strong>
+              <p>{item.caption}</p>
+              {item.meta ? <small>{item.meta}</small> : null}
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function StitchedTimeline({ items }: { items: TimelineItem[] }) {
+  const dynamicItems = items.filter((item) => !isStaticTimelineItem(item));
+  const summaryItems = dynamicItems.filter(isSummaryTimelineItem);
+  const dynamicEventItems = dynamicItems.filter((item) => !isSummaryTimelineItem(item));
+  const [compressed, setCompressed] = useState(() => dynamicItems.length > 0);
+  const [showDynamicDetails, setShowDynamicDetails] = useState(false);
+  const visibleItems = compressed ? dynamicItems : items;
+  const summaryFirst = compressed && summaryItems.length > 0;
   return (
     <article className="stitchedTimelineCard">
       <div className="stitchedTimelineHeader">
         <div>
           <p className="responseLabel">Complete Stitched Response</p>
-          <h3>Sequential timeline</h3>
+          <h3>{summaryFirst ? "Summary timeline" : compressed ? "Dynamic timeline" : "Sequential timeline"}</h3>
         </div>
-        <span>{items.length} events</span>
+        <div className="stitchedTimelineActions">
+          <span>
+            {summaryFirst ? `${summaryItems.length} summaries` : compressed ? `${dynamicItems.length} dynamic` : `${items.length} events`}
+          </span>
+          <button
+            aria-pressed={compressed}
+            className="stitchedTimelineToggle"
+            disabled={dynamicItems.length === 0}
+            onClick={() => {
+              setCompressed((value) => !value);
+              setShowDynamicDetails(false);
+            }}
+            type="button"
+          >
+            {compressed ? "Show all" : "Compressed"}
+          </button>
+        </div>
       </div>
-      <TimelineList empty="No stitched events were returned." items={items} />
+      {summaryFirst ? (
+        <>
+          <SummaryTimelineList empty="No summary events were returned." items={summaryItems} />
+          {dynamicEventItems.length > 0 ? (
+            <button
+              aria-expanded={showDynamicDetails}
+              className="summaryDetailsToggle"
+              onClick={() => setShowDynamicDetails((value) => !value)}
+              type="button"
+            >
+              {showDynamicDetails ? "Hide dynamic events" : `Show ${dynamicEventItems.length} dynamic events`}
+            </button>
+          ) : null}
+          {showDynamicDetails ? (
+            <DynamicTimelineList empty="No dynamic events were returned." items={dynamicEventItems} />
+          ) : null}
+        </>
+      ) : compressed ? (
+        <DynamicTimelineList empty="No dynamic events were returned." items={visibleItems} />
+      ) : (
+        <TimelineList empty="No stitched events were returned." items={visibleItems} />
+      )}
     </article>
   );
 }
@@ -3571,6 +3705,46 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
     progress.chunks.find((chunk) => chunk.index === selectedIndex) ||
     (selectedIndex === null ? null : progress.chunks[selectedIndex]) ||
     null;
+  const completedChunks = progress.chunks.filter((chunk) => chunk.status === "done");
+  const activeChunks = progress.chunks.filter((chunk) => chunk.status !== "done");
+  const renderChunkButton = (chunk: LongChunkProgress, collapseDone = false) => {
+    const selected = selectedChunk?.index === chunk.index;
+    const collapsedDone = collapseDone && chunk.status === "done" && !selected;
+    return (
+      <button
+        aria-pressed={selected}
+        className={`longChunkPill ${chunk.status}${selected ? " selected" : ""}${
+          collapsedDone ? " collapsedDone" : ""
+        }`}
+        key={chunk.index}
+        onClick={() => setSelectedIndex((current) => (current === chunk.index ? null : chunk.index))}
+        title={chunk.error || chunk.summary || chunk.timeRange}
+        type="button"
+      >
+        {collapsedDone ? (
+          <div className="longChunkCompact">
+            <strong>{chunk.index + 1}</strong>
+            <span>{chunk.status}</span>
+            <small>{chunk.timeRange}</small>
+          </div>
+        ) : (
+          <>
+            <div className="longChunkThumb" aria-hidden="true">
+              {chunk.thumbnailUrl ? <img src={chunk.thumbnailUrl} alt="" loading="lazy" /> : <span />}
+              <div className="longChunkOverlay">
+                <strong>{chunk.index + 1}</strong>
+                <span>{chunk.status}</span>
+              </div>
+            </div>
+            <small>{chunk.timeRange}</small>
+          </>
+        )}
+        <span className="longChunkProgress" aria-label={`Chunk ${chunk.index + 1} ${chunk.status}`}>
+          <span style={{ width: `${chunkProgressPercent(chunk.status)}%` }} />
+        </span>
+      </button>
+    );
+  };
   useEffect(() => {
     if (selectedIndex !== null && !progress.chunks.some((chunk) => chunk.index === selectedIndex)) {
       setSelectedIndex(null);
@@ -3618,31 +3792,21 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
               ))}
             </ul>
           ) : null}
-          {progress.chunks.length > 0 ? (
-            <div className="longChunkGrid" aria-label="Chunk progress">
-              {progress.chunks.map((chunk) => (
-                <button
-                  aria-pressed={selectedChunk?.index === chunk.index}
-                  className={`longChunkPill ${chunk.status}${selectedChunk?.index === chunk.index ? " selected" : ""}`}
-                  key={chunk.index}
-                  onClick={() => setSelectedIndex((current) => (current === chunk.index ? null : chunk.index))}
-                  title={chunk.error || chunk.summary || chunk.timeRange}
-                  type="button"
-                >
-                  <div className="longChunkThumb" aria-hidden="true">
-                    {chunk.thumbnailUrl ? <img src={chunk.thumbnailUrl} alt="" loading="lazy" /> : <span />}
-                    <div className="longChunkOverlay">
-                      <strong>{chunk.index + 1}</strong>
-                      <span>{chunk.status}</span>
-                    </div>
-                  </div>
-                  <small>{chunk.timeRange}</small>
-                  <span className="longChunkProgress" aria-label={`Chunk ${chunk.index + 1} ${chunk.status}`}>
-                    <span style={{ width: `${chunkProgressPercent(chunk.status)}%` }} />
-                  </span>
-                </button>
-              ))}
+          {activeChunks.length > 0 ? (
+            <div className="longChunkGrid" aria-label="Active chunk progress">
+              {activeChunks.map((chunk) => renderChunkButton(chunk))}
             </div>
+          ) : null}
+          {completedChunks.length > 0 ? (
+            <details className="completedChunksDisclosure">
+              <summary>
+                <span>Completed chunks</span>
+                <small>{completedChunks.length}/{total || completedChunks.length}</small>
+              </summary>
+              <div className="longChunkGrid completedChunkGrid" aria-label="Completed chunks">
+                {completedChunks.map((chunk) => renderChunkButton(chunk, true))}
+              </div>
+            </details>
           ) : null}
           {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
           {progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0) ? (

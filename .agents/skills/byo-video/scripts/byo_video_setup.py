@@ -13,7 +13,7 @@ selected companion frontend URL. Gradio is always written to
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
-  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B  (default: C3-2B)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B | QWEN35-35B-A3B  (default: C3-2B)
                       C3-NANO-GEN / C3-SUPER-GEN are Cosmos3 OSS *Generators* (diffusion video gen via the
                       upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
                       C3-super are the OSS *Reasoners* (chat VLM via vLLM).
@@ -242,6 +242,14 @@ _MODEL_CONFIGS = {
         "vllm_extra_flags": ["--gpu-memory-utilization", "0.93", "--allowed-local-media-path", "/tmp"],
         "vllm_max_model_len": 16384,
     },
+    # ── Qwen3.5 NIM-only sprint targets ───────────────────────────────────────
+    "QWEN35-35B-A3B": {
+        "variants": [
+            ("Qwen3.5 35B A3B NIM", "qwen3.5-35b-a3b", "qwen/qwen3.5-35b-a3b", "~40 GB"),
+        ],
+        "nim": "qwen/qwen3.5-35b-a3b",
+        "nim_max_wait": 2400,
+    },
     # ── Nemotron-3 Nano Omni and Gemma NIM-only sprint targets ─────────────────
     "OMNI-30B": {
         "variants": [
@@ -368,7 +376,7 @@ def credits_spent():
     return f" | Credits: ${cost:.3f}"
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
-    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use ALPAMAYO, CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")
+    print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use ALPAMAYO, CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, QW3-32B, or QWEN35-35B-A3B.")
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
@@ -512,7 +520,7 @@ _REASONING_MODEL_SIZES = {
     "CR1-7B", "2B", "8B", "32B",
     "C3-2B", "C3-8B", "C3-32B", "C3-super",
     "NEM-12B", "OMNI-30B", "GM-4-31B",
-    "QW3-2B", "QW3-8B", "QW3-32B",
+    "QW3-2B", "QW3-8B", "QW3-32B", "QWEN35-35B-A3B",
 }
 _GENERATION_MODEL_SIZES = {
     "PREDICT1-5B", "PREDICT1-7B", "PREDICT25-2B", "PREDICT25-14B",
@@ -650,7 +658,6 @@ USE_REASON_VITE = (
     FRONTEND == "nvidia_build"
     and "reasoning" in FRONTEND_TOWERS
     and INFERENCE_BACKEND in {"vllm", "nim_local", "alpamayo"}
-    and (MODEL_SIZE in {"C3-8B", "C3-super", "ALPAMAYO"} or "alpamayo" in (MODEL_ID + MODEL_NAME).lower())
 )
 USE_PREDICT_VITE = (
     FRONTEND == "nvidia_build"

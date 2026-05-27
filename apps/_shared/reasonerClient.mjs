@@ -222,8 +222,7 @@ export function buildReasoningPayload({
   }
   if (
     Number.isFinite(Number(p.frames_per_second)) &&
-    (process.env.REASONER_SEND_MM_PROCESSOR_KWARGS === "1" ||
-      (inferenceBackend === "nim_local" && mediaKind === "video" && !mediaFrames?.length))
+    process.env.REASONER_SEND_MM_PROCESSOR_KWARGS === "1"
   ) {
     payload.mm_processor_kwargs = { fps: Number(p.frames_per_second), do_sample_frames: true };
   }
