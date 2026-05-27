@@ -621,7 +621,7 @@ const EXAMPLES: ExampleItem[] = [
 ];
 
 const ALPAMAYO_LINGOQA_SYSTEM_PROMPT =
-  "You are Alpamayo 1.5 analyzing a LingoQA ego-camera driving clip. Answer the user's driving-scene question from visible evidence in the sampled frames.";
+  "Answer the user's driving-scene question from visible evidence in the sampled frames.";
 
 const ALPAMAYO_LINGOQA_EXAMPLES: ExampleItem[] = [
   {
