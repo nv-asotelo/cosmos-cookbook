@@ -2391,6 +2391,20 @@ select {
   padding: 0 10px 10px;
 }
 
+.liveTimelineDisclosure {
+  border-color: #31530b;
+}
+
+.liveTimelineInline {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.liveTimelineInline .liveTimelineMode {
+  justify-self: start;
+}
+
 .liveTimelineCard {
   display: grid;
   gap: 12px;

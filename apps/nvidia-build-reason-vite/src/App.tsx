@@ -165,9 +165,9 @@ type RunMode = "standard" | "long" | null;
 type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "embodied-reasoning";
 
 const LONG_VIDEO_PRESET_FPS: Record<LongPreset, number> = {
-  fast: 2,
-  balanced: 4,
-  detailed: 6
+  fast: 6,
+  balanced: 8,
+  detailed: 10
 };
 const LONG_VIDEO_DEFAULT_CONCURRENCY = 16;
 
@@ -651,13 +651,13 @@ const AV_EGO_ACTION_EXAMPLE: ExampleItem = {
   mediaName: "av-ego-rapid-scene.mp4",
   mediaKind: "video",
   userPrompt:
-    'Analyze this rapid ego-vehicle driving scene using timestamped 6 FPS long-video chunks. Focus on what the ego car should do, not generic scene captioning.\n\nUse only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. Mention road actors, traffic controls, lane markings, obstacles, and right-of-way cues only when they affect risk or ego action.\n\nUse concrete ego actions such as maintain lane, maintain speed, slow, brake, yield, stop, wait, creep forward, steer left/right within lane, proceed, or accelerate. Do not infer hidden actors or between-sample events. If the scene is static and does not change the ego action, omit it from the event list.\n\nReturn the final answer as valid JSON with this shape: {"events":[{"start":"mm:ss.ff","end":"mm:ss.ff","risk":"","ego_action":"","confidence":0.0,"caption":""}],"timeline_summary":[{"start":"mm:ss.ff","end":"mm:ss.ff","ego_policy":"","key_reason":""}],"uncertain_events":[],"sampling_limits":{"rapid_motion":"","occlusion":"","would_higher_fps_help":true}}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.',
+    'Analyze this rapid ego-vehicle driving scene at high temporal resolution. Focus on what the ego car should do, not generic scene captioning.\n\nUse only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. Mention road actors, traffic controls, lane markings, obstacles, and right-of-way cues only when they affect risk or ego action.\n\nUse concrete ego actions such as maintain lane, maintain speed, slow, brake, yield, stop, wait, creep forward, steer left/right within lane, proceed, or accelerate. Do not infer hidden actors or between-sample events. If the scene is static and does not change the ego action, omit it from the event list.\n\nReturn the final answer as valid JSON with this shape: {"events":[{"start":"mm:ss.ff","end":"mm:ss.ff","risk":"","ego_action":"","confidence":0.0,"caption":""}],"timeline_summary":[{"start":"mm:ss.ff","end":"mm:ss.ff","ego_policy":"","key_reason":""}],"uncertain_events":[],"sampling_limits":{"rapid_motion":"","occlusion":"","would_higher_fps_help":true}}.\n\nAnswer the question using the following format:\n\n<think>\nYour reasoning.\n</think>\n\nWrite your final answer immediately after the </think> tag.',
   systemPrompt:
     "You are an autonomous-driving video analyst. Use only visible evidence, preserve exact timestamps, separate static context from dynamic actors, and give conservative concrete ego-car actions.",
   reasoning: true,
   longVideoEnabled: true,
   parameters: {
-    framesPerSecond: 6,
+    framesPerSecond: 8,
     maxTokens: 4096,
     presencePenalty: 0,
     repetitionPenalty: 1.0,
@@ -805,13 +805,13 @@ async function fetchBlobWithProgress(
   }
 
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: BlobPart[] = [];
   let loaded = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     if (value) {
-      chunks.push(value);
+      chunks.push(new Uint8Array(value));
       loaded += value.byteLength;
       const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
       const rate = loaded / elapsed;
@@ -2316,15 +2316,17 @@ export default function App() {
             });
           } else if (event.event === "long_partial") {
             const data = event.data as { index?: number; timeRange?: string; summary?: string };
-            if (data.summary) {
+            const summary = data.summary;
+            if (summary) {
+              const index = data.index ?? Date.now();
               setLongProgress((current) => {
                 const base = current || { preset: longPreset, warnings: [], chunks: [], partialTimeline: [] };
                 return {
                   ...base,
                   preset: longPreset,
                   partialTimeline: [
-                    ...base.partialTimeline.filter((item) => item.index !== data.index),
-                    { index: data.index ?? Date.now(), timeRange: data.timeRange, summary: data.summary }
+                    ...base.partialTimeline.filter((item) => item.index !== index),
+                    { index, timeRange: data.timeRange, summary }
                   ].sort((left, right) => left.index - right.index)
                 };
               });
@@ -2762,11 +2764,13 @@ function ExperiencePanel({
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const vlaMode = isVlaMode(model, backendInfo);
   const selectedExample = examples.find((example) => example.id === selectedExampleId);
-  const selectedExampleLoaded =
-    Boolean(selectedExample) &&
+  const selectedExampleLoaded = Boolean(
+    selectedExample &&
+    media &&
     media?.kind === selectedExample?.mediaKind &&
     media.name === selectedExample.mediaName &&
-    (media.previewUrl === selectedExample.mediaUrl || Boolean(media.sourceUrl?.endsWith(selectedExample.mediaUrl)));
+    (media.previewUrl === selectedExample.mediaUrl || Boolean(media.sourceUrl?.endsWith(selectedExample.mediaUrl)))
+  );
   const showLongVideoUi = Boolean(selectedExample?.longVideoEnabled && selectedExampleLoaded) || runMode === "long";
 
   function chooseLongPreset(preset: LongPreset) {
@@ -2998,9 +3002,10 @@ function ExperiencePanel({
                 a stitched timeline.
               </p>
               <p className="longVideoWarning">
-                Higher FPS increases chunk count and wait time. Presets use 2, 4, and 6 FPS for Fast, Balanced,
-                and Detailed. Chunk concurrency defaults to 16 on this RTX PRO 6000 based on the live NIM probes;
-                lower it if other users share the endpoint.
+                Higher FPS increases chunk count and wait time. Presets use 6, 8, and 10 FPS for Fast, Balanced,
+                and Detailed. Fast is tuned for dense captioning speed, but very brief actions may still be missed.
+                Chunk concurrency defaults to 16 on this RTX PRO 6000 based on the live NIM probes; lower it if other
+                users share the endpoint.
               </p>
             </div>
           ) : null}
@@ -3787,6 +3792,34 @@ function LiveLongTimeline({
   );
 }
 
+function LiveTimelineDisclosure({
+  items,
+  setShowEvents,
+  showEvents
+}: {
+  items: TimelineItem[];
+  setShowEvents: (value: boolean | ((current: boolean) => boolean)) => void;
+  showEvents: boolean;
+}) {
+  return (
+    <details className="completedChunksDisclosure liveTimelineDisclosure">
+      <summary>
+        <span>{showEvents ? "Live parsed events" : "Partial timeline"}</span>
+        <small>{items.length}</small>
+      </summary>
+      <div className="liveTimelineInline">
+        <button className="liveTimelineMode" onClick={() => setShowEvents((value) => !value)} type="button">
+          {showEvents ? "Show partial timeline" : "Show events"}
+        </button>
+        <TimelineList
+          empty={showEvents ? "No parsed events were returned." : "No chunk summaries were returned."}
+          items={items}
+        />
+      </div>
+    </details>
+  );
+}
+
 function LongVideoProgress({ progress }: { progress: LongProgressState }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showTimelineEvents, setShowTimelineEvents] = useState(false);
@@ -3857,6 +3890,7 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
     }
   }, [progress.chunks, selectedIndex]);
   const hasTimeline = progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0);
+  const chunksFinished = total > 0 && completed + failed >= total && running === 0;
   return (
     <>
       <article className={`longProgressCard${compact ? " compact" : ""}`} aria-live="polite">
@@ -3916,11 +3950,18 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
                 </div>
               </details>
             ) : null}
+            {chunksFinished && hasTimeline ? (
+              <LiveTimelineDisclosure
+                items={timelineItems}
+                setShowEvents={setShowTimelineEvents}
+                showEvents={showTimelineEvents}
+              />
+            ) : null}
             {selectedChunk ? <LongChunkInspector chunk={selectedChunk} /> : null}
           </>
         ) : null}
       </article>
-      {!compact && hasTimeline ? (
+      {!compact && hasTimeline && !chunksFinished ? (
         <LiveLongTimeline
           collapsed={timelineCollapsed}
           items={timelineItems}

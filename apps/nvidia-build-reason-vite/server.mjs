@@ -384,8 +384,8 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
     preset === "fast"
       ? {
           preset: "fast",
-          sampleFps: 2,
-          maxFrames: duration > 0 ? Math.ceil(duration * 2) : 240,
+          sampleFps: 6,
+          maxFrames: duration > 0 ? Math.ceil(duration * 6) : 720,
           chunkSize: 5,
           overlap: 0,
           concurrency: 16,
@@ -397,8 +397,8 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
       : preset === "detailed"
         ? {
             preset: "detailed",
-            sampleFps: 6,
-            maxFrames: duration > 0 ? Math.ceil(duration * 6) : 720,
+            sampleFps: 10,
+            maxFrames: duration > 0 ? Math.ceil(duration * 10) : 1200,
             chunkSize: 5,
             overlap: 1,
             concurrency: 16,
@@ -409,8 +409,8 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
           }
         : {
             preset: "balanced",
-            sampleFps: 4,
-            maxFrames: duration > 0 ? Math.ceil(duration * 4) : 480,
+            sampleFps: 8,
+            maxFrames: duration > 0 ? Math.ceil(duration * 8) : 960,
             chunkSize: 5,
             overlap: 1,
             concurrency: 16,
@@ -839,7 +839,7 @@ function longVideoWarnings(durationSeconds, frameCount, preset, config = {}) {
       `Chunk concurrency is set to ${config.concurrency}. This horde RTX PRO 6000 handled 16 comfortably in probes; lower it if other users are sharing the NIM or TTFT spikes.`
     );
   }
-  if (preset === "fast") warnings.push("Fast preset prioritizes runtime over dense visual coverage.");
+  if (preset === "fast") warnings.push("Fast preset uses 6 fps for dense captioning, but very brief actions or contacts may still be missed.");
   if (preset === "detailed") warnings.push("Detailed preset may run longer than the clip duration.");
   warnings.push("NIM native video decode is bypassed here; Vite sends timestamped image chunks with at most 5 frames per request.");
   return warnings;
