@@ -45,7 +45,7 @@ const PROGRESS_FRAME_COUNT = 6;
 const COMMUNITY_VIDEOS = [
   "/examples/canonical/007.mp4",
   "/examples/canonical/009.mp4",
-  "/examples/canonical/010.mp4"
+  "/examples/canonical/011.mp4"
 ];
 
 const ETA_PIXELS_BY_RESOLUTION: Record<string, number> = {
@@ -223,7 +223,6 @@ const CANONICAL_PROMPTS = {
   "009": `The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.`,
   "021": `The video begins with a forward-facing dash camera view from a vehicle traveling along a multi-lane urban street under clear daylight. A white minivan remains ahead as traffic approaches a signalized intersection, with dashed white lane markings, sidewalks, storefronts, parked cars, mature trees, and bright sunlight from the upper-right casting long shadows across the asphalt. As the video progresses, the ego vehicle continues forward at a controlled speed while staying aligned with the lane. A white vehicle in the left lane briefly moves into the foreground alongside the ego vehicle, then continues ahead as the intersection remains visible in the distance. The traffic lights, lane markings, sidewalks, trees, commercial buildings, parked cars, and sunlit shadows remain consistent, and the motion stays calm and realistic for everyday city driving.`,
   "022": `The video begins with a view from inside a vehicle positioned in a dedicated left-turn lane at a wide signalized intersection under clear daylight. A large left-turn arrow is painted on the pavement in front of the ego vehicle, with crosswalk lines and lane boundaries clearly visible across the intersection. Overhead traffic lights, street-name signs, utility wires, and roadside buildings frame the scene, while several cars travel through the intersection and along the cross street. A small median island and roadside signs sit to the left, and trees and low commercial buildings line the far side of the road. As the video progresses, the ego vehicle moves forward from the turn lane and completes a smooth left turn through the intersection, following the curved path of the lane around the median. The vehicle enters the target roadway, straightens out into the appropriate lane, and continues forward at a controlled speed. Nearby vehicles maintain plausible motion and spacing, while the traffic lights, road markings, sidewalks, trees, and buildings remain consistent with the original daytime driving scene.`,
-  "010": `A close-up view captures a melting popsicle on a white plate. The popsicle features a vibrant red top, likely strawberry-flavored, transitioning into a creamy white base, possibly vanilla or yogurt-based. The popsicle stick is visible on the right side, and the surface of the popsicle shows signs of melting, with the red portion becoming more fluid and spreading outward. The creamy white base remains relatively intact initially but eventually starts to soften and blend with the red, creating a smooth transition between the two flavors. The camera remains steady, focusing on the popsicle as it transforms from a solid form into a liquid, with the background remaining plain and white to ensure all attention is on the melting process. The lighting is consistent throughout, highlighting the colors and textures of the ice cream.`,
   "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`
 };
 
@@ -364,17 +363,6 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
     title: "Smart Spaces",
     summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
     items: [
-      {
-        id: "melting-popsicle-physics",
-        title: "Melting Popsicle Physics",
-        domain: "Smart Spaces",
-        description: "A close-up physical-process scene focused on melting and material change.",
-        prompt: CANONICAL_PROMPTS["010"],
-        mediaUrl: "/examples/canonical/010.png",
-        mediaName: "Melting Popsicle Physics.png",
-        previewVideoUrl: "/examples/canonical/010.mp4",
-        previewVideoName: "Melting Popsicle Physics.mp4"
-      },
       {
         id: "industrial-metal-lathe",
         title: "Industrial Metal Lathe",
@@ -1283,7 +1271,7 @@ function StaticTab({
             <dt>Autonomous Vehicles</dt>
             <dd>Suburban Intersection Yield, Urban Signal Approach, Signalized Left Turn Completion</dd>
             <dt>Smart Spaces</dt>
-            <dd>Melting Popsicle Physics, Industrial Metal Lathe</dd>
+            <dd>Industrial Metal Lathe</dd>
           </dl>
         </StaticSection>
 
