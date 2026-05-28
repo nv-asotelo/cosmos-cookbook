@@ -214,12 +214,10 @@ const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" 
   "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
   "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 105 },
   "009": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
-  "021": { ...CANONICAL_SAMPLE_PARAMS, resolution: "480", numFrames: 121, seed: 111 },
+  "021": { ...CANONICAL_SAMPLE_PARAMS, seed: 111 },
   "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 },
   "012": {
     ...CANONICAL_SAMPLE_PARAMS,
-    resolution: "480",
-    numFrames: 121,
     seed: 109,
     negativePrompt: ASSEMBLY_LINE_NEGATIVE_PROMPT
   },
