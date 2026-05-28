@@ -185,6 +185,8 @@ type BackendInfo = {
 
 const CANONICAL_SAMPLE_NEGATIVE_PROMPT =
   "The video captures a series of frames showing macroblocking artifacts, chromatic aberration, high-frequency noise, and rolling shutter distortion. It includes static with no motion, motion blur, over-saturation, shaky footage, low resolution, grainy texture, pixelated images, poorly lit areas, underexposed and overexposed scenes, poor color balance, washed out colors, choppy sequences, jerky movements, low frame rate, bit-depth compression artifacts, color banding, unnatural transitions, outdated special effects, fake elements, unconvincing visuals, poorly edited content, jump cuts, visual noise, and flickering. Avoid moire patterns, edge halos, and temporal aliasing. Furthermore, the content defies common sense, generating illogical scenarios, nonsensical entities, absurd character behaviors, and conceptual paradoxes that violate basic human reasoning and everyday reality. The video looks like a surreal or glitchy hallucination. Overall, the video is of poor quality.";
+const ASSEMBLY_LINE_NEGATIVE_PROMPT =
+  "The video captures a series of frames showing macroblocking artifacts, chromatic aberration, high-frequency noise, and rolling shutter distortion. It includes static with no motion, motion blur, over-saturation, shaky footage, low resolution, grainy texture, pixelated images, poorly lit areas, underexposed and overexposed scenes, poor color balance, washed out colors, choppy sequences, jerky movements, low frame rate, bit-depth compression artifacts, color banding, unnatural transitions, outdated special effects, fake elements, unconvincing visuals, poorly edited content, jump cuts, visual noise, and flickering. Avoid moire patterns, edge halos, temporal aliasing, floating parts, newly appearing objects, detached car panels, deformed robot arms, extra grippers, warped geometry, melting metal, and hallucinated tools. Overall, the video is of poor quality.";
 const CANONICAL_SAMPLE_PARAMS: GenerationParams = {
   resolution: "720",
   numFrames: 189,
@@ -207,13 +209,20 @@ const CANONICAL_SAMPLE_PARAMS: GenerationParams = {
   numOutputs: 1,
   negativePrompt: CANONICAL_SAMPLE_NEGATIVE_PROMPT
 };
-const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022", GenerationParams> = {
+const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" | "012", GenerationParams> = {
   "001": { ...CANONICAL_SAMPLE_PARAMS, seed: 100 },
   "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
   "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 105 },
   "009": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
   "021": { ...CANONICAL_SAMPLE_PARAMS, resolution: "480", numFrames: 121, seed: 111 },
-  "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 }
+  "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 },
+  "012": {
+    ...CANONICAL_SAMPLE_PARAMS,
+    resolution: "480",
+    numFrames: 121,
+    seed: 109,
+    negativePrompt: ASSEMBLY_LINE_NEGATIVE_PROMPT
+  }
 };
 
 const CANONICAL_PROMPTS = {
@@ -223,7 +232,8 @@ const CANONICAL_PROMPTS = {
   "009": `The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.`,
   "021": `The video begins with a forward-facing dash camera view from a vehicle traveling along a multi-lane urban street under clear daylight. A white minivan remains ahead as traffic approaches a signalized intersection, with dashed white lane markings, sidewalks, storefronts, parked cars, mature trees, and bright sunlight from the upper-right casting long shadows across the asphalt. As the video progresses, the ego vehicle continues forward at a controlled speed while staying aligned with the lane. A white vehicle in the left lane briefly moves into the foreground alongside the ego vehicle, then continues ahead as the intersection remains visible in the distance. The traffic lights, lane markings, sidewalks, trees, commercial buildings, parked cars, and sunlit shadows remain consistent, and the motion stays calm and realistic for everyday city driving.`,
   "022": `The video begins with a view from inside a vehicle positioned in a dedicated left-turn lane at a wide signalized intersection under clear daylight. A large left-turn arrow is painted on the pavement in front of the ego vehicle, with crosswalk lines and lane boundaries clearly visible across the intersection. Overhead traffic lights, street-name signs, utility wires, and roadside buildings frame the scene, while several cars travel through the intersection and along the cross street. A small median island and roadside signs sit to the left, and trees and low commercial buildings line the far side of the road. As the video progresses, the ego vehicle moves forward from the turn lane and completes a smooth left turn through the intersection, following the curved path of the lane around the median. The vehicle enters the target roadway, straightens out into the appropriate lane, and continues forward at a controlled speed. Nearby vehicles maintain plausible motion and spacing, while the traffic lights, road markings, sidewalks, trees, and buildings remain consistent with the original daytime driving scene.`,
-  "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`
+  "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`,
+  "012": `A medium, locked-off shot of an automotive assembly display inside a clean exhibition area. A partially assembled car body remains stationary on its supports with the doors open and the interior framework visible. Two yellow industrial robot arms stand beside the car. During the video, the left robot arm makes a small, smooth adjustment near the side opening, and the right robot arm makes a short, controlled movement above the front cowl area, then both arms settle back into position. The car body, open doors, floor reflections, signs, background, and lighting remain stable. No new parts appear, no objects float in the air, and the camera does not move. The motion is subtle, realistic, and mechanically precise.`
 };
 
 const EXAMPLES: ExampleItem[] = [
@@ -363,6 +373,18 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
     title: "Smart Spaces",
     summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
     items: [
+      {
+        id: "automotive-assembly-line",
+        title: "Automotive Assembly Line",
+        domain: "Smart Spaces",
+        description: "An exhibition-area assembly scene with yellow robot arms working on a car body.",
+        prompt: CANONICAL_PROMPTS["012"],
+        mediaUrl: "/examples/canonical/012.jpg",
+        mediaName: "Automotive Assembly Line.jpg",
+        previewVideoUrl: "/examples/canonical/012.mp4",
+        previewVideoName: "Automotive Assembly Line.mp4",
+        params: SAMPLE_PARAMS_BY_ID["012"]
+      },
       {
         id: "industrial-metal-lathe",
         title: "Industrial Metal Lathe",
@@ -1271,7 +1293,7 @@ function StaticTab({
             <dt>Autonomous Vehicles</dt>
             <dd>Suburban Intersection Yield, Urban Signal Approach, Signalized Left Turn Completion</dd>
             <dt>Smart Spaces</dt>
-            <dd>Industrial Metal Lathe</dd>
+            <dd>Automotive Assembly Line, Industrial Metal Lathe</dd>
           </dl>
         </StaticSection>
 
