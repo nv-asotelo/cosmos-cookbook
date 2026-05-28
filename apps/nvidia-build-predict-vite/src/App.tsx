@@ -209,7 +209,7 @@ const CANONICAL_SAMPLE_PARAMS: GenerationParams = {
   numOutputs: 1,
   negativePrompt: CANONICAL_SAMPLE_NEGATIVE_PROMPT
 };
-const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" | "012", GenerationParams> = {
+const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" | "012" | "085", GenerationParams> = {
   "001": { ...CANONICAL_SAMPLE_PARAMS, seed: 100 },
   "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
   "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 105 },
@@ -222,7 +222,8 @@ const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" 
     numFrames: 121,
     seed: 109,
     negativePrompt: ASSEMBLY_LINE_NEGATIVE_PROMPT
-  }
+  },
+  "085": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 }
 };
 
 const CANONICAL_PROMPTS = {
@@ -233,7 +234,8 @@ const CANONICAL_PROMPTS = {
   "021": `The video begins with a forward-facing dash camera view from a vehicle traveling along a multi-lane urban street under clear daylight. A white minivan remains ahead as traffic approaches a signalized intersection, with dashed white lane markings, sidewalks, storefronts, parked cars, mature trees, and bright sunlight from the upper-right casting long shadows across the asphalt. As the video progresses, the ego vehicle continues forward at a controlled speed while staying aligned with the lane. A white vehicle in the left lane briefly moves into the foreground alongside the ego vehicle, then continues ahead as the intersection remains visible in the distance. The traffic lights, lane markings, sidewalks, trees, commercial buildings, parked cars, and sunlit shadows remain consistent, and the motion stays calm and realistic for everyday city driving.`,
   "022": `The video begins with a view from inside a vehicle positioned in a dedicated left-turn lane at a wide signalized intersection under clear daylight. A large left-turn arrow is painted on the pavement in front of the ego vehicle, with crosswalk lines and lane boundaries clearly visible across the intersection. Overhead traffic lights, street-name signs, utility wires, and roadside buildings frame the scene, while several cars travel through the intersection and along the cross street. A small median island and roadside signs sit to the left, and trees and low commercial buildings line the far side of the road. As the video progresses, the ego vehicle moves forward from the turn lane and completes a smooth left turn through the intersection, following the curved path of the lane around the median. The vehicle enters the target roadway, straightens out into the appropriate lane, and continues forward at a controlled speed. Nearby vehicles maintain plausible motion and spacing, while the traffic lights, road markings, sidewalks, trees, and buildings remain consistent with the original daytime driving scene.`,
   "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`,
-  "012": `A medium, locked-off shot of an automotive assembly display inside a clean exhibition area. A partially assembled car body remains stationary on its supports with the doors open and the interior framework visible. Two yellow industrial robot arms stand beside the car. During the video, the left robot arm makes a small, smooth adjustment near the side opening, and the right robot arm makes a short, controlled movement above the front cowl area, then both arms settle back into position. The car body, open doors, floor reflections, signs, background, and lighting remain stable. No new parts appear, no objects float in the air, and the camera does not move. The motion is subtle, realistic, and mechanically precise.`
+  "012": `A medium, locked-off shot of an automotive assembly display inside a clean exhibition area. A partially assembled car body remains stationary on its supports with the doors open and the interior framework visible. Two yellow industrial robot arms stand beside the car. During the video, the left robot arm makes a small, smooth adjustment near the side opening, and the right robot arm makes a short, controlled movement above the front cowl area, then both arms settle back into position. The car body, open doors, floor reflections, signs, background, and lighting remain stable. No new parts appear, no objects float in the air, and the camera does not move. The motion is subtle, realistic, and mechanically precise.`,
+  "085": `The video opens with an aerial view of a vast industrial site, likely a quarry or gravel pit, dominated by expansive piles of gravel or crushed stone. A long, elevated industrial sand mining conveyor belt system, supported by a metal framework, stretches horizontally across the frame, casting distinct shadows on the uneven terrain below. The conveyor belt moves steadily, continuously dumping materials onto a massive pile. The scene is set under a bright, sunny sky, with the shadows indicating the time of day. Throughout the video, the camera maintains a steady focus on the conveyor belt, capturing the continuous flow of materials. The industrial setting remains static, emphasizing the mechanical nature of the operation. By the final frame, the conveyor belt continues its steady operation, with no new elements entering the scene, highlighting the relentless and unchanging nature of the industrial process.`
 };
 
 const EXAMPLES: ExampleItem[] = [
@@ -384,6 +386,18 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         previewVideoUrl: "/examples/canonical/012.mp4",
         previewVideoName: "Automotive Assembly Line.mp4",
         params: SAMPLE_PARAMS_BY_ID["012"]
+      },
+      {
+        id: "industrial-conveyor-material-flow",
+        title: "Industrial Conveyor Material Flow",
+        domain: "Smart Spaces",
+        description: "An aerial quarry scene with a conveyor steadily dumping gravel onto a large pile.",
+        prompt: CANONICAL_PROMPTS["085"],
+        mediaUrl: "/examples/canonical/085.jpg",
+        mediaName: "Industrial Conveyor Material Flow.jpg",
+        previewVideoUrl: "/examples/canonical/085.mp4",
+        previewVideoName: "Industrial Conveyor Material Flow.mp4",
+        params: SAMPLE_PARAMS_BY_ID["085"]
       },
       {
         id: "industrial-metal-lathe",
@@ -1293,7 +1307,7 @@ function StaticTab({
             <dt>Autonomous Vehicles</dt>
             <dd>Suburban Intersection Yield, Urban Signal Approach, Signalized Left Turn Completion</dd>
             <dt>Smart Spaces</dt>
-            <dd>Automotive Assembly Line, Industrial Metal Lathe</dd>
+            <dd>Automotive Assembly Line, Industrial Conveyor Material Flow, Industrial Metal Lathe</dd>
           </dl>
         </StaticSection>
 
