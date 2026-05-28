@@ -1444,11 +1444,18 @@ function isStaticTimelineItem(item: TimelineItem) {
   const title = item.title.trim().toLowerCase();
   const caption = item.caption.trim().toLowerCase();
   return (
+    title === "static" ||
     title === "static scene" ||
+    title === "stationary" ||
     title === "none" ||
     title === "no change" ||
+    title.includes("stationary") ||
     caption.startsWith("the scene remains static") ||
-    caption.includes("no visible movement")
+    caption.includes("no visible movement") ||
+    caption.includes("remains stationary") ||
+    caption.includes("remain stationary") ||
+    caption.includes("is stationary") ||
+    caption.includes("are stationary")
   );
 }
 
@@ -3651,35 +3658,60 @@ function SummaryTimelineList({ empty, items }: { empty: string; items: TimelineI
 }
 
 function StitchedTimeline({ items }: { items: TimelineItem[] }) {
+  const timelineSignature = useMemo(
+    () => items.map((item) => `${item.range}:${item.title}:${item.caption}`).join("|"),
+    [items]
+  );
   const dynamicItems = items.filter((item) => !isStaticTimelineItem(item));
+  const staticItems = items.filter(isStaticTimelineItem);
+  const [showDynamic, setShowDynamic] = useState(true);
+  const [showStatic, setShowStatic] = useState(false);
+  const [showDynamicDetails, setShowDynamicDetails] = useState(false);
+  useEffect(() => {
+    setShowDynamic(true);
+    setShowStatic(false);
+    setShowDynamicDetails(false);
+  }, [timelineSignature]);
+  const visibleItems = items.filter((item) => (isStaticTimelineItem(item) ? showStatic : showDynamic));
   const summaryItems = dynamicItems.filter(isSummaryTimelineItem);
   const dynamicEventItems = dynamicItems.filter((item) => !isSummaryTimelineItem(item));
-  const [compressed, setCompressed] = useState(() => dynamicItems.length > 0);
-  const [showDynamicDetails, setShowDynamicDetails] = useState(false);
-  const visibleItems = compressed ? dynamicItems : items;
-  const summaryFirst = compressed && summaryItems.length > 0;
+  const summaryFirst = showDynamic && !showStatic && summaryItems.length > 0;
+  const title =
+    summaryFirst
+      ? "Summary timeline"
+      : showDynamic && showStatic
+        ? "Filtered timeline"
+        : showStatic
+          ? "Static timeline"
+          : showDynamic
+            ? "Dynamic timeline"
+            : "Timeline filters";
   return (
     <article className="stitchedTimelineCard">
       <div className="stitchedTimelineHeader">
         <div>
           <p className="responseLabel">Complete Stitched Response</p>
-          <h3>{summaryFirst ? "Summary timeline" : compressed ? "Dynamic timeline" : "Sequential timeline"}</h3>
+          <h3>{title}</h3>
         </div>
         <div className="stitchedTimelineActions">
-          <span>
-            {summaryFirst ? `${summaryItems.length} summaries` : compressed ? `${dynamicItems.length} dynamic` : `${items.length} events`}
-          </span>
+          <span>{visibleItems.length}/{items.length} shown</span>
           <button
-            aria-pressed={compressed}
+            aria-pressed={showDynamic}
             className="stitchedTimelineToggle"
             disabled={dynamicItems.length === 0}
-            onClick={() => {
-              setCompressed((value) => !value);
-              setShowDynamicDetails(false);
-            }}
+            onClick={() => setShowDynamic((value) => !value)}
             type="button"
           >
-            {compressed ? "Show all" : "Compressed"}
+            Dynamic <small>{dynamicItems.length}</small>
+          </button>
+          <button
+            aria-pressed={showStatic}
+            className="stitchedTimelineToggle"
+            disabled={staticItems.length === 0}
+            onClick={() => setShowStatic((value) => !value)}
+            type="button"
+          >
+            Static <small>{staticItems.length}</small>
           </button>
         </div>
       </div>
@@ -3700,10 +3732,10 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
             <DynamicTimelineList empty="No dynamic events were returned." items={dynamicEventItems} />
           ) : null}
         </>
-      ) : compressed ? (
-        <DynamicTimelineList empty="No dynamic events were returned." items={visibleItems} />
+      ) : visibleItems.length > 0 ? (
+        <DynamicTimelineList empty="No events match the current timeline filters." items={visibleItems} />
       ) : (
-        <TimelineList empty="No stitched events were returned." items={visibleItems} />
+        <TimelineList empty="Turn on Dynamic or Static to show stitched events." items={visibleItems} />
       )}
     </article>
   );

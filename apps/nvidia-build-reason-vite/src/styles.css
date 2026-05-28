@@ -1934,6 +1934,9 @@ select {
 }
 
 .stitchedTimelineToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   min-height: 29px;
   border: 1px solid #4b6b13;
   border-radius: 999px;
@@ -1944,11 +1947,27 @@ select {
   font-weight: 900;
 }
 
+.stitchedTimelineToggle small {
+  display: inline-grid;
+  min-width: 22px;
+  min-height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  background: #292929;
+  color: #dcebc8;
+  font-size: 11px;
+}
+
 .stitchedTimelineToggle:hover:not(:disabled),
 .stitchedTimelineToggle[aria-pressed="true"] {
   border-color: var(--green);
   background: #1d2a08;
   color: var(--green);
+}
+
+.stitchedTimelineToggle[aria-pressed="true"] small {
+  background: var(--green);
+  color: #081103;
 }
 
 .stitchedTimelineToggle:disabled {
