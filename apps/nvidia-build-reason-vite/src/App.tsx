@@ -97,6 +97,8 @@ const DEFAULT_PRESENCE_PENALTY = SAMPLING_DEFAULTS.reasoning.presencePenalty;
 const DEFAULT_SEED = 42;
 const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
+const EMBODIED_EGO_DRILL_VIDEO = "/examples/embodied-ego-drill.mp4";
+const EMBODIED_EGO_DRILL_POSTER = "/examples/embodied-ego-drill-poster.jpg";
 const TENNIS_TEMPORAL_EXAMPLE_ID = "tennis-temporal-events";
 const TENNIS_TEMPORAL_VIDEO = "/examples/tennis_nim_safe.mp4";
 const WAREHOUSE_ROW_D_VIDEO = "/examples/warehouse_7min.mp4";
@@ -177,6 +179,8 @@ type MediaState = {
   previewUrl: string;
   dataUrl: string;
   sourceUrl?: string;
+  posterUrl?: string;
+  planningTrace?: PlanningTrace;
 };
 
 type ImageSize = {
@@ -185,10 +189,29 @@ type ImageSize = {
 };
 
 type SpatialSource = "thinking" | "final";
+type SpatialRole = "perception" | "trajectory";
+
+type PlanningTraceFrame = {
+  time: string;
+  phase: string;
+  imageUrl: string;
+  caption?: string;
+  coordinateFrameIndex?: number;
+  renderMode?: "perception" | "trajectory" | "raw";
+};
+
+type PlanningTrace = {
+  title: string;
+  subtitle?: string;
+  frames: PlanningTraceFrame[];
+  coordinateFrameIndex?: number;
+  defaultFrameIndex?: number;
+};
 
 type SpatialMark = {
   id: string;
   kind: "point" | "bbox";
+  role: SpatialRole;
   sourceKey: string;
   coordinateMode: "cosmos-1000" | "unit" | "pixel";
   source: SpatialSource;
@@ -200,6 +223,7 @@ type SpatialMark = {
   centerY: number;
   label: string;
   detail?: string;
+  time?: string;
   sequence: number;
 };
 
@@ -215,6 +239,8 @@ type ExampleItem = {
   group?: ExampleGroupId;
   judgeNote?: string;
   longVideoEnabled?: boolean;
+  posterUrl?: string;
+  planningTrace?: PlanningTrace;
   parameters?: Partial<{
     framesPerSecond: number;
     maxTokens: number;
@@ -233,6 +259,15 @@ type ApiFile = {
   error?: string;
 };
 
+type PlanningStageApiResult = {
+  phase?: string;
+  mode?: string;
+  time?: string;
+  actual_time?: string;
+  elapsed_seconds?: number;
+  payload?: unknown;
+};
+
 type ApiResult = {
   status?: "success" | "error" | "skip";
   message?: string;
@@ -245,6 +280,7 @@ type ApiResult = {
   error?: string;
   openai?: unknown;
   payload?: unknown;
+  planning_stages?: PlanningStageApiResult[];
   raw?: unknown;
   media?: unknown;
   long_video?: {
@@ -274,6 +310,14 @@ type StreamState = {
   message?: string;
   created: number;
   model: string;
+  logs: StreamLogEntry[];
+};
+
+type StreamLogEntry = {
+  label: string;
+  detail?: string;
+  elapsedSeconds?: number;
+  level?: "info" | "warn" | "error";
 };
 
 type LongChunkProgress = {
@@ -473,6 +517,54 @@ function initialBackendInfo(modelName = DEFAULT_MODEL, backend = DEFAULT_BACKEND
 const ROBOT_ARM_TRAJECTORY_PROMPT =
   'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.\n\nPrompt format:\nAnswer the question using the following format:\n<think>\nYour reasoning.\n</think>\nWrite your final answer immediately after the </think> tag.';
 
+const ROBOT_EGO_DRILL_PROMPT =
+  'You are given the task "Pick up the Black+Decker drill and place it into the yellow box". Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.';
+
+const ROBOT_EGO_DRILL_TRACE: PlanningTrace = {
+  title: "Robot planning trace",
+  subtitle: "Perceive boxes use the 00:00 frame; Grasp trajectory uses the Grasp-frame coordinate space",
+  defaultFrameIndex: 0,
+  frames: [
+    {
+      time: "00:00.00",
+      phase: "Perceive",
+      imageUrl: "/examples/embodied-ego-drill-frame-01.jpg",
+      coordinateFrameIndex: 0,
+      renderMode: "perception",
+      caption: "Establish drill, yellow box, gripper, and support surface."
+    },
+    {
+      time: "00:01.00",
+      phase: "Approach",
+      imageUrl: "/examples/embodied-ego-drill-frame-02.jpg",
+      renderMode: "raw",
+      caption: "Move the end effector toward the drill handle."
+    },
+    {
+      time: "00:02.00",
+      phase: "Grasp",
+      imageUrl: "/examples/embodied-ego-drill-frame-03.jpg",
+      coordinateFrameIndex: 2,
+      renderMode: "trajectory",
+      caption: "Close around the drill and confirm the pickup path."
+    },
+    {
+      time: "00:03.00",
+      phase: "Transfer",
+      imageUrl: "/examples/embodied-ego-drill-frame-04.jpg",
+      renderMode: "raw",
+      caption: "Lift and carry the drill toward the yellow box."
+    },
+    {
+      time: "00:04.00",
+      phase: "Place",
+      imageUrl: "/examples/embodied-ego-drill-frame-05.jpg",
+      renderMode: "raw",
+      caption: "Align over the yellow box and release."
+    }
+  ]
+};
+
 const EXAMPLES: ExampleItem[] = [
   {
     id: "robotics-next-action",
@@ -499,6 +591,26 @@ const EXAMPLES: ExampleItem[] = [
     reasoning: true,
     parameters: {
       framesPerSecond: 2,
+      maxTokens: 4096,
+      repetitionPenalty: 1.2,
+      temperature: 0.3,
+      topP: 0.3
+    }
+  },
+  {
+    id: "robot-ego-drill-planning",
+    title: "Robot ego planning: drill to yellow box",
+    group: "embodied-reasoning",
+    mediaUrl: EMBODIED_EGO_DRILL_VIDEO,
+    mediaName: "embodied-ego-drill.mp4",
+    mediaKind: "video",
+    userPrompt: ROBOT_EGO_DRILL_PROMPT,
+    systemPrompt: "You are a helpful assistant.",
+    reasoning: true,
+    posterUrl: EMBODIED_EGO_DRILL_POSTER,
+    planningTrace: ROBOT_EGO_DRILL_TRACE,
+    parameters: {
+      framesPerSecond: 6,
       maxTokens: 4096,
       repetitionPenalty: 1.2,
       temperature: 0.3,
@@ -874,29 +986,117 @@ function parseReasoning(content?: string, explicitReasoning?: string) {
   return { reasoning, answer, steps };
 }
 
-const POINT_KEYS = ["point_2d", "point", "position", "coordinate", "coordinates"];
-const BBOX_KEYS = ["bbox_2d", "box_2d", "bounding_box", "bbox", "box"];
-const TRAJECTORY_KEYS = ["annotations", "detections", "objects", "points", "steps", "trajectory"];
+function assistantContentFromOpenAi(value: unknown): string {
+  if (!isObjectRecord(value) || !Array.isArray(value.choices)) return "";
+  for (const choice of value.choices) {
+    if (!isObjectRecord(choice)) continue;
+    const message = isObjectRecord(choice.message) ? choice.message : isObjectRecord(choice.delta) ? choice.delta : null;
+    const content = message?.content ?? choice.content;
+    const text = openAiContentText(content);
+    if (text) return text;
+  }
+  return "";
+}
+
+function resultContentText(result: ApiResult | null): string | undefined {
+  if (!result) return undefined;
+  return (
+    result.content ||
+    result.combined_content ||
+    assistantContentFromOpenAi(result) ||
+    assistantContentFromOpenAi(result.openai) ||
+    assistantContentFromOpenAi(result.raw) ||
+    undefined
+  );
+}
+
+const POINT_KEYS = [
+  "point_2d",
+  "point",
+  "position",
+  "coordinate",
+  "coordinates",
+  "center",
+  "center_point",
+  "target_point",
+  "waypoint",
+  "end_effector_point"
+];
+const BBOX_KEYS = [
+  "bbox_2d",
+  "box_2d",
+  "bounding_box",
+  "bounding_box_2d",
+  "bbox",
+  "bbox2d",
+  "box",
+  "box2d",
+  "bounds",
+  "bounds_2d",
+  "rect",
+  "rectangle",
+  "rectangle_2d"
+];
+const TRAJECTORY_KEYS = [
+  "annotations",
+  "detections",
+  "end_effector_path",
+  "grasp_plan",
+  "grasp_trajectory",
+  "objects",
+  "perception",
+  "plan",
+  "planned_path",
+  "planned_trajectory",
+  "points",
+  "route",
+  "spatial",
+  "spatial_annotations",
+  "steps",
+  "trajectory",
+  "waypoints"
+];
 const COSMOS_COORD_MAX = 1000;
+const INTERNAL_SPATIAL_ROLE_KEY = "__spatialRole";
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function finiteNumber(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function numberField(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = finiteNumber(record[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
 function numberArray(value: unknown): number[] | null {
   if (Array.isArray(value)) {
-    const numbers = value.map((item) => Number(item));
+    const flattened = value.flatMap((item) => (Array.isArray(item) ? item : [item]));
+    const numbers = flattened.map((item) => Number(item));
     return numbers.every((item) => Number.isFinite(item)) ? numbers : null;
   }
   if (isObjectRecord(value)) {
-    const x = Number(value.x ?? value.left ?? value.cx);
-    const y = Number(value.y ?? value.top ?? value.cy);
-    const width = Number(value.width ?? value.w);
-    const height = Number(value.height ?? value.h);
-    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(width) && Number.isFinite(height)) {
+    const x1 = numberField(value, ["x1", "x_min", "xmin", "left"]);
+    const y1 = numberField(value, ["y1", "y_min", "ymin", "top"]);
+    const x2 = numberField(value, ["x2", "x_max", "xmax", "right"]);
+    const y2 = numberField(value, ["y2", "y_max", "ymax", "bottom"]);
+    if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) return [x1, y1, x2, y2];
+
+    const x = numberField(value, ["x", "left", "cx", "center_x"]);
+    const y = numberField(value, ["y", "top", "cy", "center_y"]);
+    const width = numberField(value, ["width", "w"]);
+    const height = numberField(value, ["height", "h"]);
+    if (x !== null && y !== null && width !== null && height !== null) {
       return [x, y, width, height];
     }
-    if (Number.isFinite(x) && Number.isFinite(y)) return [x, y];
+    if (x !== null && y !== null) return [x, y];
   }
   return null;
 }
@@ -1022,20 +1222,54 @@ function parseResponseJsonPayload(text: string): unknown | null {
   return null;
 }
 
-function collectSpatialRecords(value: unknown, records: Record<string, unknown>[] = [], depth = 0) {
+function spatialRoleForContainer(key: string, currentRole?: SpatialRole): SpatialRole | undefined {
+  const lowerKey = key.toLowerCase();
+  if (
+    lowerKey.includes("trajectory") ||
+    lowerKey.includes("waypoint") ||
+    lowerKey.includes("path") ||
+    lowerKey.includes("route") ||
+    lowerKey.includes("grasp") ||
+    lowerKey === "plan" ||
+    lowerKey === "points"
+  ) {
+    return "trajectory";
+  }
+  if (
+    lowerKey.includes("perception") ||
+    lowerKey.includes("object") ||
+    lowerKey.includes("detection") ||
+    lowerKey.includes("annotation")
+  ) {
+    return "perception";
+  }
+  return currentRole;
+}
+
+function spatialRoleForRecord(record: Record<string, unknown>): SpatialRole | undefined {
+  const role = record[INTERNAL_SPATIAL_ROLE_KEY];
+  return role === "perception" || role === "trajectory" ? role : undefined;
+}
+
+function collectSpatialRecords(value: unknown, records: Record<string, unknown>[] = [], depth = 0, role?: SpatialRole) {
   if (depth > 8) return records;
   if (Array.isArray(value)) {
-    value.forEach((item) => collectSpatialRecords(item, records, depth + 1));
+    value.forEach((item) => collectSpatialRecords(item, records, depth + 1, role));
     return records;
   }
   if (!isObjectRecord(value)) return records;
 
   const hasSpatialField = [...POINT_KEYS, ...BBOX_KEYS].some((key) => value[key] !== undefined);
-  if (hasSpatialField) records.push(value);
+  if (hasSpatialField) {
+    if (role) value[INTERNAL_SPATIAL_ROLE_KEY] = role;
+    records.push(value);
+  }
 
-  for (const key of TRAJECTORY_KEYS) {
-    const nested = value[key];
-    if (nested !== undefined) collectSpatialRecords(nested, records, depth + 1);
+  for (const [key, nested] of Object.entries(value)) {
+    if ([...POINT_KEYS, ...BBOX_KEYS, INTERNAL_SPATIAL_ROLE_KEY].includes(key)) continue;
+    if (TRAJECTORY_KEYS.includes(key) || Array.isArray(nested) || isObjectRecord(nested)) {
+      collectSpatialRecords(nested, records, depth + 1, spatialRoleForContainer(key, role));
+    }
   }
   return records;
 }
@@ -1049,7 +1283,12 @@ function scaleCoordinate(value: number, axisSize: number, mode: "cosmos-1000" | 
 function inferPointCoordinateMode(numbers: number[], key: string): "cosmos-1000" | "unit" | "pixel" {
   if (numbers.every((item) => Math.abs(item) <= 1)) return "unit";
   const lowerKey = key.toLowerCase();
-  const looksLikeCosmosKey = lowerKey.includes("2d") || lowerKey.includes("coordinate") || lowerKey.includes("position");
+  const looksLikeCosmosKey =
+    lowerKey.includes("2d") ||
+    lowerKey.includes("coordinate") ||
+    lowerKey.includes("position") ||
+    lowerKey.includes("point") ||
+    lowerKey.includes("waypoint");
   const allInCosmosPlane = numbers.every((item) => item >= 0 && item <= COSMOS_COORD_MAX);
   return looksLikeCosmosKey && allInCosmosPlane ? "cosmos-1000" : "pixel";
 }
@@ -1118,6 +1357,16 @@ function normalizeBbox(
   return rect ? [...rect, mode] : null;
 }
 
+function normalizeBboxPointFallback(
+  key: string,
+  value: unknown,
+  imageSize: ImageSize
+): [number, number, "cosmos-1000" | "unit" | "pixel"] | null {
+  const numbers = numberArray(value);
+  if (!numbers || numbers.length !== 2) return null;
+  return normalizePoint(key, value, imageSize);
+}
+
 function stringField(record: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = record[key];
@@ -1131,22 +1380,41 @@ function spatialLabel(record: Record<string, unknown>, fallback: string) {
   return (
     stringField(record, [
       "label",
+      "object_label",
+      "object_name",
       "category_name",
       "name",
       "class",
       "object",
       "target",
       "action",
+      "action_label",
       "description",
+      "phase",
+      "phase_label",
       "stage",
+      "step_name",
       "step_label"
     ]) || fallback
   );
 }
 
 function spatialDetail(record: Record<string, unknown>, label: string) {
-  const detail = stringField(record, ["reason", "rationale", "thought", "observation", "note", "description", "action"]);
+  const detail = stringField(record, [
+    "caption",
+    "reason",
+    "rationale",
+    "thought",
+    "observation",
+    "note",
+    "description",
+    "action"
+  ]);
   return detail && detail !== label ? detail : undefined;
+}
+
+function spatialTime(record: Record<string, unknown>) {
+  return stringField(record, ["time", "timestamp", "start"]);
 }
 
 function spatialSequence(record: Record<string, unknown>, fallback: number) {
@@ -1154,8 +1422,202 @@ function spatialSequence(record: Record<string, unknown>, fallback: number) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function coordinateTracePairs(text: string) {
+  const pairs: Array<{ x: number; y: number; index: number; endIndex: number; raw: string }> = [];
+  const coordinatePattern = /\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/g;
+  for (const match of text.matchAll(coordinatePattern)) {
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const index = match.index || 0;
+    pairs.push({ x, y, index, endIndex: index + match[0].length, raw: match[0] });
+  }
+  return pairs;
+}
+
+function coordinateListItems(text: string) {
+  const items = new Map<number, { label: string; phrase: string }>();
+  const listPattern = /([A-Za-z][A-Za-z0-9 +&/.'’+-]{1,120}?)\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/g;
+  for (const match of text.matchAll(listPattern)) {
+    const matchIndex = match.index || 0;
+    const coordinateOffset = match[0].lastIndexOf("[");
+    const coordinateIndex = matchIndex + Math.max(0, coordinateOffset);
+    const sentenceStart = Math.max(
+      text.lastIndexOf(".", matchIndex),
+      text.lastIndexOf(";", matchIndex),
+      text.lastIndexOf("\n", matchIndex),
+      text.lastIndexOf("<think>", matchIndex)
+    );
+    const sentencePrefix = text.slice(Math.max(0, sentenceStart + 1), matchIndex);
+    const appearsInObjectList = /(?:locate|position|positions|item|items|object|objects|visible|coordinates?)\b/i.test(sentencePrefix);
+    if (!appearsInObjectList) continue;
+
+    const rawLabel = match[1].split(/[:\n]/).pop() || "";
+    const label = trimTraceLabel(rawLabel.replace(/^(?:and|then|so|also|next)\s+/i, ""));
+    if (!label || /^(?:based|this|that|i|after|before|then|so|current|next|position)$/i.test(label)) continue;
+    if (label.split(/\s+/).length > 8) continue;
+
+    const phrase = `${label} [${match[2]}, ${match[3]}]`;
+    items.set(coordinateIndex, { label, phrase });
+  }
+  return items;
+}
+
+function hasCoordinateTracePayload(text: string) {
+  const pairs = coordinateTracePairs(text);
+  return (
+    pairs.length > 0 &&
+    /point_2d|trajectory|waypoint|gripper|end.?effector|coordinate|located at|positioned at|basket|tape|drill|box/i.test(text)
+  );
+}
+
 function hasSpatialPayload(text: string) {
-  return parseJsonPayloads(text).some((payload) => collectSpatialRecords(payload).length > 0);
+  return parseJsonPayloads(text).some((payload) => collectSpatialRecords(payload).length > 0) || hasCoordinateTracePayload(text);
+}
+
+function trimTraceLabel(label: string) {
+  return label
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^(?:the|a|an|my|its|this|that)\s+/i, "")
+    .replace(/\s+(?:located|positioned|sitting|placed|shown|visible)$/i, "")
+    .trim();
+}
+
+function tailTraceLabel(rawLabel: string) {
+  const clause = rawLabel.split(/[.;:\n]/).pop() || rawLabel;
+  const pieces = clause
+    .split(/\b(?:over to|towards?|to|inside|within|near|around|at)\s+/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const label = trimTraceLabel(pieces.at(-1) || clause);
+  if (!label) return "";
+  const words = label.split(" ");
+  return words.slice(Math.max(0, words.length - 6)).join(" ");
+}
+
+function localCoordinateContext(before: string) {
+  const previousCoordinate = before.lastIndexOf("]");
+  const previousSentence = Math.max(before.lastIndexOf("."), before.lastIndexOf(";"), before.lastIndexOf("\n"));
+  const start = Math.max(previousCoordinate, previousSentence);
+  return before.slice(Math.max(0, start + 1));
+}
+
+function coordinateTracePhrase(text: string, pair: { index: number; endIndex: number; raw?: string }) {
+  const before = text.slice(0, pair.index);
+  const after = text.slice(pair.endIndex);
+  const sentenceStart = Math.max(
+    before.lastIndexOf("."),
+    before.lastIndexOf(";"),
+    before.lastIndexOf("\n"),
+    before.lastIndexOf("<think>")
+  );
+  const previousCoordinate = before.lastIndexOf("]");
+  const likelyListItem = previousCoordinate >= 0 && pair.index - previousCoordinate < 24;
+  const start = likelyListItem
+    ? Math.max(previousCoordinate + 1, pair.index - 28)
+    : Math.max(0, sentenceStart + 1, pair.index - 140);
+  const sentenceEndRelative = after.search(/[.;\n]/);
+  const nextCoordinateRelative = after.search(/,\s*\[/);
+  const endCandidates = [text.length, pair.endIndex + 140];
+  if (sentenceEndRelative >= 0) endCandidates.push(pair.endIndex + sentenceEndRelative);
+  if (nextCoordinateRelative >= 0 && nextCoordinateRelative < 40) endCandidates.push(pair.endIndex);
+  const end = Math.max(pair.endIndex, Math.min(...endCandidates));
+  const phrase = text
+    .slice(start, end)
+    .replace(/\s+/g, " ")
+    .replace(/^[:,\s]+/, "")
+    .trim();
+  return phrase || pair.raw;
+}
+
+function hasLocalGripperPositionCue(before: string) {
+  return /current\s+(?:position|pose)|my\s+(?:left\s+)?gripper|end.?effector/i.test(localCoordinateContext(before).slice(-90));
+}
+
+function traceObjectLabel(before: string) {
+  const localBefore = localCoordinateContext(before);
+  if (hasLocalGripperPositionCue(before)) {
+    return "gripper position";
+  }
+  const anchored = localBefore.match(
+    /([a-z][a-z0-9 +&/.'-]{2,100}?)\s+(?:located|positioned|sitting|placed|centered)\s+(?:at|near|inside|within|around)?\s*$/i
+  );
+  const anchoredLabel = tailTraceLabel(anchored?.[1] || "");
+  if (anchoredLabel) return anchoredLabel;
+  const match = localBefore.match(
+    /(?:to|toward|towards|over to|at|of|the|a|an)\s+([a-z][a-z0-9 +&/.-]{2,70}?)(?:\s+(?:located|positioned|sitting|placed|is|at|around|near))?\s*$/i
+  );
+  return tailTraceLabel(match?.[1] || "");
+}
+
+function traceCoordinateRole(text: string, pairIndex: number, before: string): SpatialRole {
+  const objectLabel = traceObjectLabel(before);
+  const localTraceCue = /next\s+steps|trajectory|waypoints|point_2d/i.test(before.slice(-90));
+  if (objectLabel && objectLabel !== "gripper position" && !localTraceCue) return "perception";
+
+  const traceStartCandidates = [
+    text.toLowerCase().lastIndexOf("next steps", pairIndex),
+    text.toLowerCase().lastIndexOf("trajectory", pairIndex),
+    text.toLowerCase().lastIndexOf("waypoints", pairIndex),
+    text.toLowerCase().lastIndexOf("point_2d", pairIndex)
+  ].filter((index) => index >= 0);
+  const traceStart = traceStartCandidates.length > 0 ? Math.max(...traceStartCandidates) : -1;
+  if (traceStart >= 0 && pairIndex - traceStart < 240) return "trajectory";
+  if (/current\s+(?:position|pose)|next\s+steps|trajectory|waypoint|gripper trajectory|point_2d/i.test(before)) {
+    return "trajectory";
+  }
+  return "perception";
+}
+
+function parseCoordinateTraceMarks(text: string, imageSize: ImageSize, source: SpatialSource, sequenceStart: number) {
+  if (!hasCoordinateTracePayload(text)) return [];
+  const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
+  const listItems = coordinateListItems(text);
+  let sequence = sequenceStart;
+  const seen = new Set<string>();
+  return coordinateTracePairs(text)
+    .map((pair, index) => {
+      const before = text.slice(Math.max(0, pair.index - 150), pair.index);
+      const listItem = listItems.get(pair.index);
+      const inferredRole = traceCoordinateRole(text, pair.index, before);
+      const role = listItem ? "perception" : inferredRole;
+      if (role === "perception" && !listItem) return null;
+      const label =
+        role === "perception" && listItem
+          ? listItem.label
+          : hasLocalGripperPositionCue(before)
+            ? "gripper start"
+            : "gripper trajectory";
+      const [centerX, centerY, coordinateMode] = scalePair("reasoning point_2d", pair.x, pair.y, imageSize);
+      const clampedX = Math.max(0, Math.min(imageSize.width, centerX));
+      const clampedY = Math.max(0, Math.min(imageSize.height, centerY));
+      const tracePhrase = listItem?.phrase || coordinateTracePhrase(text, pair);
+      const duplicateKey = `${role}:${label.toLowerCase()}:${Math.round(clampedX)}:${Math.round(clampedY)}`;
+      if (seen.has(duplicateKey)) return null;
+      seen.add(duplicateKey);
+      const mark: SpatialMark = {
+        id: `${source}-trace-coordinate-${pair.index}-${index}`,
+        kind: "point",
+        role,
+        sourceKey: role === "perception" ? "reasoning object point" : "reasoning trajectory point",
+        coordinateMode,
+        source,
+        x: Math.max(0, Math.min(imageSize.width - side, clampedX - side / 2)),
+        y: Math.max(0, Math.min(imageSize.height - side, clampedY - side / 2)),
+        width: side,
+        height: side,
+        centerX: clampedX,
+        centerY: clampedY,
+        label,
+        detail: tracePhrase,
+        sequence
+      };
+      sequence += 1;
+      return mark;
+    })
+    .filter((mark): mark is SpatialMark => Boolean(mark))
+    .slice(0, 80);
 }
 
 function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSource) {
@@ -1167,6 +1629,9 @@ function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSo
     fallbackSequence += 1;
     const label = spatialLabel(record, `point ${sequence}`);
     const detail = spatialDetail(record, label);
+    const time = spatialTime(record);
+    const recordRole = spatialRoleForRecord(record);
+    let addedPoint = false;
 
     for (const key of POINT_KEYS) {
       const point = normalizePoint(key, record[key], imageSize);
@@ -1176,6 +1641,7 @@ function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSo
       marks.push({
         id: `${source}-${key}-${index}-point`,
         kind: "point",
+        role: recordRole || "trajectory",
         sourceKey: key,
         coordinateMode,
         source,
@@ -1187,8 +1653,10 @@ function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSo
         centerY,
         label,
         detail,
+        time,
         sequence
       });
+      addedPoint = true;
       break;
     }
 
@@ -1196,9 +1664,34 @@ function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSo
       const bbox = normalizeBbox(key, record[key], imageSize);
       if (!bbox) continue;
       const [x, y, width, height, coordinateMode] = bbox;
+      if (recordRole === "trajectory") {
+        const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
+        const centerX = x + width / 2;
+        const centerY = y + height / 2;
+        marks.push({
+          id: `${source}-${key}-${index}-bbox-trajectory-center`,
+          kind: "point",
+          role: "trajectory",
+          sourceKey: `${key} center`,
+          coordinateMode,
+          source,
+          x: centerX - side / 2,
+          y: centerY - side / 2,
+          width: side,
+          height: side,
+          centerX,
+          centerY,
+          label,
+          detail: detail ? `${detail} Trajectory bbox rendered as its center point.` : "Trajectory bbox rendered as its center point.",
+          time,
+          sequence
+        });
+        break;
+      }
       marks.push({
         id: `${source}-${key}-${index}-bbox`,
         kind: "bbox",
+        role: recordRole || "perception",
         sourceKey: key,
         coordinateMode,
         source,
@@ -1210,11 +1703,46 @@ function parseSpatialMarks(text: string, imageSize: ImageSize, source: SpatialSo
         centerY: y + height / 2,
         label,
         detail,
+        time,
         sequence
       });
       break;
     }
+
+    if (!addedPoint) {
+      for (const key of BBOX_KEYS) {
+        const point = normalizeBboxPointFallback(key, record[key], imageSize);
+        if (!point) continue;
+        const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
+        const [centerX, centerY, coordinateMode] = point;
+        const fallbackDetail = detail
+          ? `${detail} Bbox value had two coordinates, so it is shown as a point marker.`
+          : "Bbox value had two coordinates, so it is shown as a point marker.";
+        marks.push({
+          id: `${source}-${key}-${index}-bbox-point`,
+          kind: "point",
+          role: recordRole || "perception",
+          sourceKey: `${key} point`,
+          coordinateMode,
+          source,
+          x: centerX - side / 2,
+          y: centerY - side / 2,
+          width: side,
+          height: side,
+          centerX,
+          centerY,
+          label,
+          detail: fallbackDetail,
+          time,
+          sequence
+        });
+        break;
+      }
+    }
   });
+  if (source === "thinking" || records.length === 0) {
+    marks.push(...parseCoordinateTraceMarks(text, imageSize, source, fallbackSequence));
+  }
   return marks.slice(0, 160);
 }
 
@@ -1225,7 +1753,8 @@ function makeStreamState(model: string): StreamState {
     answer: "",
     schema: "plain_content",
     created: Math.floor(Date.now() / 1000),
-    model
+    model,
+    logs: []
   };
 }
 
@@ -1236,7 +1765,8 @@ function idleStreamState(model = DEFAULT_MODEL): StreamState {
     answer: "",
     schema: "plain_content",
     created: Math.floor(Date.now() / 1000),
-    model
+    model,
+    logs: []
   };
 }
 
@@ -1276,6 +1806,76 @@ function streamStateToResult(streamState: StreamState): ApiResult | null {
       usage: streamState.usage || null
     }
   };
+}
+
+function openAiContentText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (isObjectRecord(part) && typeof part.text === "string") return part.text;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+function openAiContentImageCount(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  return content.filter(
+    (part) =>
+      isObjectRecord(part) &&
+      (part.type === "image_url" || part.type === "input_image" || isObjectRecord(part.image_url))
+  ).length;
+}
+
+function payloadMessages(payload: unknown): Record<string, unknown>[] {
+  if (!isObjectRecord(payload) || !Array.isArray(payload.messages)) return [];
+  return payload.messages.filter(isObjectRecord);
+}
+
+type PlanningStagePromptView = {
+  key: string;
+  title: string;
+  mode: string;
+  time: string;
+  elapsed: string;
+  imageCount: number;
+  systemPrompt: string;
+  userPrompt: string;
+};
+
+function planningStagePromptViews(result: ApiResult | null): PlanningStagePromptView[] {
+  const stages = Array.isArray(result?.planning_stages) ? result.planning_stages : [];
+  return stages
+    .map((stage, index) => {
+      const messages = payloadMessages(stage.payload);
+      const systemMessage = messages.find((message) => message.role === "system");
+      const userMessage = messages.find((message) => message.role === "user");
+      const systemPrompt = systemMessage ? openAiContentText(systemMessage.content) : "";
+      const userPrompt = userMessage ? openAiContentText(userMessage.content) : "";
+      if (!systemPrompt && !userPrompt) return null;
+      const phase = typeof stage.phase === "string" && stage.phase ? stage.phase : `Stage ${index + 1}`;
+      const mode = typeof stage.mode === "string" && stage.mode ? stage.mode : "planning";
+      const time = typeof stage.time === "string" && stage.time ? stage.time : "unknown time";
+      const elapsed =
+        typeof stage.elapsed_seconds === "number" && Number.isFinite(stage.elapsed_seconds)
+          ? `${stage.elapsed_seconds.toFixed(1)}s`
+          : "";
+      return {
+        key: `${phase}-${mode}-${time}-${index}`,
+        title: phase,
+        mode,
+        time,
+        elapsed,
+        imageCount: userMessage ? openAiContentImageCount(userMessage.content) : 0,
+        systemPrompt,
+        userPrompt
+      };
+    })
+    .filter((view): view is PlanningStagePromptView => Boolean(view));
 }
 
 function parseSseBlock(block: string): ParsedSseEvent | null {
@@ -1798,9 +2398,10 @@ export default function App() {
 
   const streamResult = useMemo(() => streamStateToResult(streamState), [streamState]);
   const activeResult = result || streamResult;
+  const activeContent = useMemo(() => resultContentText(activeResult), [activeResult]);
   const parsedOutput = useMemo(
-    () => parseReasoning(activeResult?.content, activeResult?.reasoning),
-    [activeResult?.content, activeResult?.reasoning]
+    () => parseReasoning(activeContent, activeResult?.reasoning),
+    [activeContent, activeResult?.reasoning]
   );
   const jsonOutput = useMemo(
     () => activeResult?.openai || activeResult?.raw || activeResult || requestPreview,
@@ -1875,7 +2476,9 @@ export default function App() {
           kind: "video",
           previewUrl: example.mediaUrl,
           dataUrl: "",
-          sourceUrl
+          sourceUrl,
+          posterUrl: example.posterUrl,
+          planningTrace: example.planningTrace
         };
       }
 
@@ -1917,7 +2520,9 @@ export default function App() {
         kind: mime.startsWith("image/") ? "image" : "video",
         previewUrl: example.mediaUrl,
         dataUrl: await readBlobAsDataUrl(blob),
-        sourceUrl
+        sourceUrl,
+        posterUrl: example.posterUrl,
+        planningTrace: example.planningTrace
       };
     }
 
@@ -1955,7 +2560,9 @@ export default function App() {
       kind: data.mime.startsWith("image/") ? "image" : "video",
       previewUrl: example.mediaUrl,
       dataUrl: data.dataUrl,
-      sourceUrl: example.mediaUrl
+      sourceUrl: example.mediaUrl,
+      posterUrl: example.posterUrl,
+      planningTrace: example.planningTrace
     };
   }
 
@@ -2092,9 +2699,19 @@ export default function App() {
     let schema = "plain_content";
     let usage: unknown = null;
     let rawResult: ApiResult | null = null;
+    const planningFrames =
+      media?.planningTrace?.frames
+        .map((frame, index) => ({
+          index,
+          phase: frame.phase,
+          time: frame.time,
+          renderMode: planningFrameRenderMode(frame)
+        }))
+        .filter((frame) => frame.renderMode === "perception" || frame.renderMode === "trajectory") || [];
+    const streamEndpoint = planningFrames.length > 0 ? "/api/reason/planning/stream" : "/api/reason/stream";
 
     try {
-      const response = await fetch("/api/reason/stream", {
+      const response = await fetch(streamEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -2102,6 +2719,7 @@ export default function App() {
           prompt: effectivePrompt,
           systemPrompt,
           model,
+          planningFrames: planningFrames.length > 0 ? planningFrames : undefined,
           video: media?.kind === "video" ? media.sourceUrl || media.dataUrl : undefined,
           image: media?.kind === "image" ? media.dataUrl : undefined,
             params: {
@@ -2134,11 +2752,27 @@ export default function App() {
 
         for (const event of drained.events) {
           if (event.event === "state") {
-            const data = event.data as { phase?: StreamPhase };
+            const data = event.data as { phase?: StreamPhase; note?: string };
             if (data.phase) {
               setStreamState((current) => ({ ...current, phase: data.phase || current.phase }));
-              setStatus(statusForPhase(data.phase));
+              setStatus(data.note || statusForPhase(data.phase));
             }
+          } else if (event.event === "planning_stage") {
+            const data = event.data as { phase?: string; mode?: string; elapsedSeconds?: number };
+            const phaseLabel = data.phase || (data.mode === "trajectory" ? "Grasp" : "Perceive");
+            setStatus(`${phaseLabel} pass complete${Number.isFinite(data.elapsedSeconds) ? ` in ${formatDuration(data.elapsedSeconds)}` : ""}`);
+          } else if (event.event === "log") {
+            const data = event.data as StreamLogEntry;
+            const logEntry: StreamLogEntry = {
+              label: data.label || "Backend log",
+              detail: data.detail,
+              elapsedSeconds: data.elapsedSeconds,
+              level: data.level || "info"
+            };
+            setStreamState((current) => ({
+              ...current,
+              logs: [...(current.logs || []), logEntry].slice(-16)
+            }));
           } else if (event.event === "delta") {
             const data = event.data as { channel?: "reasoning" | "answer"; text?: string; schema?: string };
             const text = data.text || "";
@@ -2862,6 +3496,7 @@ function ExperiencePanel({
                     aria-label={`Preview of ${media.name}`}
                     controls
                     playsInline
+                    poster={media.posterUrl}
                     preload="metadata"
                     src={media.previewUrl}
                   />
@@ -2889,9 +3524,11 @@ function ExperiencePanel({
           )}
 
           <PromptBox
-            label="User Prompt"
+            label={media?.planningTrace ? "Robot Task" : "User Prompt"}
             hint={
-              vlaMode
+              media?.planningTrace
+                ? "Shared task brief. Vite splits this into separate Perceive and Grasp NIM calls with frame-specific prompts."
+                : vlaMode
                 ? "Ask a VQA/caption question about the visible scene. Keep important actions early in the clip."
                 : "Describe the video or ask a question. Enable reasoning by asking for the <think> format."
             }
@@ -3073,9 +3710,11 @@ function ExperiencePanel({
                 parsedOutput={parsedOutput}
                 reasoningExpanded={reasoningExpanded}
                 result={result}
-                setReasoningExpanded={setReasoningExpanded}
-                streamPhase={streamPhase}
-              />
+            setReasoningExpanded={setReasoningExpanded}
+            streamCreated={streamState.created}
+            streamLogs={streamState.logs}
+            streamPhase={streamPhase}
+          />
             )}
           </div>
         </section>
@@ -3239,7 +3878,7 @@ function ExampleModal({
                       {example.mediaKind === "image" ? (
                         <img src={example.mediaUrl} alt="" />
                       ) : (
-                        <video src={example.mediaUrl} muted preload="metadata" />
+                        <video src={example.mediaUrl} poster={example.posterUrl} muted preload="metadata" />
                       )}
                     </div>
                     <div className="exampleText">
@@ -3283,6 +3922,241 @@ function ExampleModal({
   );
 }
 
+function planningFrameRenderMode(frame?: PlanningTraceFrame) {
+  if (!frame) return "raw";
+  if (frame.renderMode) return frame.renderMode;
+  const phase = frame.phase.toLowerCase();
+  if (phase.includes("perceive")) return "perception";
+  if (phase.includes("grasp") || phase.includes("plan")) return "trajectory";
+  return "raw";
+}
+
+function planningFrameCoordinateIndex(planningTrace: PlanningTrace | undefined, frameIndex: number) {
+  if (!planningTrace) return 0;
+  const selectedIndex = Math.max(0, Math.min(planningTrace.frames.length - 1, frameIndex));
+  const explicitIndex = planningTrace.frames[selectedIndex]?.coordinateFrameIndex;
+  const coordinateIndex = typeof explicitIndex === "number" ? explicitIndex : selectedIndex;
+  return Math.max(0, Math.min(planningTrace.frames.length - 1, coordinateIndex));
+}
+
+function marksForPlanningFrame(marks: SpatialMark[], frame?: PlanningTraceFrame) {
+  const renderMode = planningFrameRenderMode(frame);
+  if (renderMode === "perception") return marks.filter((mark) => mark.role === "perception");
+  if (renderMode === "trajectory") return marks.filter((mark) => mark.role === "trajectory");
+  return [];
+}
+
+function planningLabel(mark: SpatialMark) {
+  return `${mark.label || ""} ${mark.detail || ""}`.toLowerCase();
+}
+
+function derivedTrajectoryMarksFromPerception(finalMarks: SpatialMark[], imageSize: ImageSize) {
+  const perceptionBoxes = finalMarks.filter((mark) => mark.role === "perception" && mark.kind === "bbox");
+  if (perceptionBoxes.length < 2) return [];
+  const drill =
+    perceptionBoxes.find((mark) => /drill|decker|cordless|power|tool/.test(planningLabel(mark))) ||
+    perceptionBoxes.find((mark) => !/box|bin|crate|basket|container|yellow|green/.test(planningLabel(mark)));
+  const container =
+    perceptionBoxes.find((mark) => /box|bin|crate|basket|container|yellow|green/.test(planningLabel(mark))) ||
+    perceptionBoxes.find((mark) => mark !== drill);
+  if (!drill || !container) return [];
+  const side = Math.max(24, Math.min(imageSize.width, imageSize.height) * 0.055);
+  const liftY = Math.max(side, Math.min(drill.centerY, container.y) - imageSize.height * 0.1);
+  const releaseY = Math.max(container.y + side, Math.min(container.y + container.height - side / 2, container.centerY));
+  const points = [
+    {
+      label: "approach drill handle",
+      x: drill.centerX,
+      y: drill.centerY,
+      detail: "Derived fallback from the detected drill box because no usable Grasp point_2d waypoints were returned."
+    },
+    {
+      label: "grasp drill handle",
+      x: drill.centerX,
+      y: drill.centerY,
+      detail: "Close around the visible drill handle."
+    },
+    {
+      label: "lift clear",
+      x: drill.centerX,
+      y: liftY,
+      detail: "Lift above the work surface before transfer."
+    },
+    {
+      label: "move over yellow box",
+      x: container.centerX,
+      y: container.y + container.height * 0.28,
+      detail: "Move toward the detected container opening."
+    },
+    {
+      label: "release into box",
+      x: container.centerX,
+      y: releaseY,
+      detail: "Release inside the detected container."
+    }
+  ];
+  return points.map((point, index) => ({
+    id: `final-derived-trajectory-${index}`,
+    kind: "point" as const,
+    role: "trajectory" as const,
+    sourceKey: "derived point_2d",
+    coordinateMode: "pixel" as const,
+    source: "final" as const,
+    x: Math.max(0, Math.min(imageSize.width - side, point.x - side / 2)),
+    y: Math.max(0, Math.min(imageSize.height - side, point.y - side / 2)),
+    width: side,
+    height: side,
+    centerX: Math.max(0, Math.min(imageSize.width, point.x)),
+    centerY: Math.max(0, Math.min(imageSize.height, point.y)),
+    label: point.label,
+    detail: point.detail,
+    time: "00:02.00",
+    sequence: index + 1
+  }));
+}
+
+function trajectoryMarksForPlanning(marks: SpatialMark[], imageSize: ImageSize | null) {
+  const trajectory = marks.filter((mark) => mark.role === "trajectory");
+  const trajectoryPoints = trajectory.filter((mark) => mark.kind === "point");
+  const usableWaypoints = trajectoryPoints.filter((mark) => {
+    const text = `${mark.sourceKey} ${mark.label} ${mark.detail || ""}`.toLowerCase();
+    return (
+      text.includes("point") ||
+      /waypoint|trajectory|end.?effector|approach|grasp|lift|move|release|place|handle|path/.test(text)
+    );
+  });
+  if (usableWaypoints.length >= 2) return usableWaypoints;
+  const fallback = imageSize ? derivedTrajectoryMarksFromPerception(marks, imageSize) : [];
+  return fallback.length > 0 ? fallback : trajectory;
+}
+
+function cinematicMarksForPlanningFrame(
+  marks: SpatialMark[],
+  frame: PlanningTraceFrame | undefined,
+  frameIndex: number,
+  imageSize: ImageSize | null
+) {
+  const renderMode = planningFrameRenderMode(frame);
+  if (renderMode === "perception") return marks.filter((mark) => mark.role === "perception");
+  const trajectory = trajectoryMarksForPlanning(marks, imageSize);
+  if (renderMode === "trajectory") return trajectory;
+  if (!frame || frameIndex <= 0 || trajectory.length === 0) return [];
+  const phase = frame.phase.toLowerCase();
+  const pointMarks = trajectory.filter((mark) => mark.kind === "point");
+  const otherMarks = trajectory.filter((mark) => mark.kind !== "point");
+  const pointCount = phase.includes("approach")
+    ? 1
+    : phase.includes("transfer")
+      ? Math.max(3, Math.ceil(pointMarks.length * 0.75))
+      : phase.includes("place")
+        ? pointMarks.length
+        : 0;
+  return pointCount > 0 ? [...otherMarks, ...pointMarks.slice(0, pointCount)] : [];
+}
+
+function spatialMarkDisplayLabel(mark: SpatialMark, compact = false) {
+  const label = (mark.label || (mark.role === "perception" ? "object" : "waypoint")).trim();
+  const maxLength = compact ? 18 : 34;
+  if (label.length <= maxLength) return label;
+  return `${label.slice(0, maxLength - 1).trim()}…`;
+}
+
+function isConnectedTrajectoryPoint(mark: SpatialMark) {
+  if (mark.kind !== "point" || mark.role !== "trajectory") return false;
+  const text = `${mark.label} ${mark.sourceKey} ${mark.detail || ""}`.toLowerCase();
+  return /gripper|end.?effector|trajectory|waypoint|path|approach|grasp|lift|move|release|place|start/.test(text);
+}
+
+function SpatialMarksSvg({
+  className = "",
+  compact = false,
+  imageSize,
+  marks,
+  showPath = true
+}: {
+  className?: string;
+  compact?: boolean;
+  imageSize: ImageSize;
+  marks: SpatialMark[];
+  showPath?: boolean;
+}) {
+  const sortedMarks = [...marks].sort((a, b) => {
+    if (a.source !== b.source) return a.source === "thinking" ? -1 : 1;
+    return a.sequence - b.sequence;
+  });
+  const thinkingPoints = sortedMarks.filter((mark) => mark.source === "thinking" && isConnectedTrajectoryPoint(mark));
+  const finalPoints = sortedMarks.filter((mark) => mark.source === "final" && isConnectedTrajectoryPoint(mark));
+  return (
+    <svg
+      aria-hidden="true"
+      className={`spatialSvg${compact ? " spatialSvgCompact" : ""}${className ? ` ${className}` : ""}`}
+      preserveAspectRatio="xMidYMid meet"
+      viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
+    >
+      {showPath && thinkingPoints.length > 1 ? (
+        <polyline
+          className="spatialPath spatialPathThinking"
+          points={thinkingPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
+        />
+      ) : null}
+      {showPath && finalPoints.length > 1 ? (
+        <polyline
+          className="spatialPath spatialPathFinal"
+          points={finalPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
+        />
+      ) : null}
+      {sortedMarks.map((mark) => {
+        const labelY = mark.kind === "bbox" ? Math.max(20, mark.y + 24) : Math.max(18, mark.y - 8);
+        const semanticClass =
+          mark.kind === "point"
+            ? isConnectedTrajectoryPoint(mark)
+              ? "spatialTrajectoryMark"
+              : "spatialObjectMark"
+            : mark.role === "perception"
+              ? "spatialObjectMark"
+              : "spatialTrajectoryMark";
+        return (
+          <g key={mark.id}>
+            <title>
+              {mark.source === "thinking" ? "Reasoning trace" : "Final answer"} #{mark.sequence}: {mark.label}
+              {mark.detail ? ` — ${mark.detail}` : ""}
+            </title>
+            <rect
+              className={`${mark.kind === "point" ? "spatialPointBox" : "spatialBbox"} ${
+                mark.source === "thinking" ? "spatialThinkingMark" : "spatialFinalMark"
+              } ${semanticClass}`}
+              height={mark.height}
+              rx={Math.max(4, Math.min(mark.width, mark.height) * 0.08)}
+              width={mark.width}
+              x={mark.x}
+              y={mark.y}
+            />
+            {mark.kind === "point" ? (
+              <circle
+                className={`spatialPointDot ${mark.source === "thinking" ? "spatialThinkingDot" : "spatialFinalDot"} ${
+                  isConnectedTrajectoryPoint(mark) ? "spatialTrajectoryDot" : "spatialObjectDot"
+                }`}
+                cx={mark.centerX}
+                cy={mark.centerY}
+                r={compact ? 12 : 5}
+              />
+            ) : null}
+            <text
+              className={`spatialPointLabel ${mark.source === "thinking" ? "spatialTraceLabel" : "spatialFinalLabel"} ${
+                isConnectedTrajectoryPoint(mark) ? "spatialTrajectoryLabel" : "spatialObjectLabel"
+              }`}
+              x={mark.x + 8}
+              y={labelY}
+            >
+              {spatialMarkDisplayLabel(mark, compact)}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function SpatialTrajectoryOverlay({
   answerText,
   media,
@@ -3293,142 +4167,291 @@ function SpatialTrajectoryOverlay({
   reasoningText: string;
 }) {
   const [imageSize, setImageSize] = useState<ImageSize | null>(null);
+  const [showFinalAnswer, setShowFinalAnswer] = useState(true);
   const [showReasoningTrace, setShowReasoningTrace] = useState(false);
+  const [selectedPlanningFrame, setSelectedPlanningFrame] = useState(0);
+  const spatialImageRef = useRef<HTMLImageElement | null>(null);
+  const planningTrace = media?.planningTrace;
+  const selectedFrameIndex = planningTrace
+    ? Math.max(0, Math.min(planningTrace.frames.length - 1, selectedPlanningFrame))
+    : 0;
+  const selectedFrame = planningTrace?.frames[selectedFrameIndex];
+  const selectedFrameMode = planningFrameRenderMode(selectedFrame);
+  const selectedCoordinateFrameIndex = planningFrameCoordinateIndex(planningTrace, selectedFrameIndex);
+  const selectedCoordinateFrame = planningTrace?.frames[selectedCoordinateFrameIndex];
+  const imageSource =
+    media?.kind === "image"
+      ? media.previewUrl
+      : planningTrace
+        ? selectedFrameMode === "raw"
+          ? selectedFrame?.imageUrl
+          : selectedCoordinateFrame?.imageUrl
+        : undefined;
+
+  function updateImageSizeFromElement(image: HTMLImageElement | null) {
+    if (!image) return;
+    const width = image.naturalWidth || image.clientWidth;
+    const height = image.naturalHeight || image.clientHeight;
+    if (width > 0 && height > 0) setImageSize({ width, height });
+  }
+
   useEffect(() => {
-    setShowReasoningTrace(false);
-  }, [answerText, media?.previewUrl, reasoningText]);
+    const hasReasoningTrace = hasSpatialPayload(reasoningText);
+    setShowReasoningTrace(hasReasoningTrace);
+    setShowFinalAnswer(!hasReasoningTrace);
+    setSelectedPlanningFrame(planningTrace?.defaultFrameIndex ?? 0);
+  }, [answerText, media?.previewUrl, planningTrace?.title, reasoningText]);
+
+  useEffect(() => {
+    setImageSize(null);
+    const image = spatialImageRef.current;
+    if (image?.complete) updateImageSizeFromElement(image);
+  }, [imageSource]);
+
   const canParseSpatial = useMemo(
     () => hasSpatialPayload(reasoningText) || hasSpatialPayload(answerText),
     [answerText, reasoningText]
   );
-  const allMarks = useMemo(() => {
+  const parsedMarks = useMemo(() => {
     if (!imageSize) return [];
     return [
       ...parseSpatialMarks(reasoningText, imageSize, "thinking"),
       ...parseSpatialMarks(answerText, imageSize, "final")
     ];
   }, [answerText, imageSize, reasoningText]);
-  const thinkingMarks = allMarks.filter((mark) => mark.source === "thinking");
-  const finalMarks = allMarks.filter((mark) => mark.source === "final");
-  const marks = showReasoningTrace ? allMarks : finalMarks;
-  const points = marks.filter((mark) => mark.kind === "point");
-  const boxes = marks.filter((mark) => mark.kind === "bbox");
-  const thinkingPoints = thinkingMarks.filter((mark) => mark.kind === "point");
-  const finalPoints = finalMarks.filter((mark) => mark.kind === "point");
-  const visibleThinkingPoints = showReasoningTrace ? thinkingPoints : [];
-  const visibleThinkingMarks = showReasoningTrace ? thinkingMarks : [];
-  const visibleFinalMarks = finalMarks;
+  const parsedThinkingMarks = parsedMarks.filter((mark) => mark.source === "thinking");
+  const parsedFinalMarks = parsedMarks.filter((mark) => mark.source === "final");
+  const derivedFinalTrajectoryMarks = useMemo(() => {
+    if (!planningTrace || !imageSize) return [];
+    const hasUsableTrajectoryPoints =
+      parsedFinalMarks.filter((mark) => {
+        if (mark.role !== "trajectory" || mark.kind !== "point") return false;
+        const text = `${mark.sourceKey} ${mark.label} ${mark.detail || ""}`.toLowerCase();
+        return (
+          text.includes("point") ||
+          /waypoint|trajectory|end.?effector|approach|grasp|lift|move|release|place|handle|path/.test(text)
+        );
+      }).length >= 2;
+    return hasUsableTrajectoryPoints ? [] : derivedTrajectoryMarksFromPerception(parsedFinalMarks, imageSize);
+  }, [imageSize, parsedFinalMarks, planningTrace]);
+  const thinkingMarks = parsedThinkingMarks;
+  const finalMarks = [...parsedFinalMarks, ...derivedFinalTrajectoryMarks];
+  const marks = [
+    ...(showReasoningTrace ? thinkingMarks : []),
+    ...(showFinalAnswer ? finalMarks : [])
+  ];
+  const visibleMarks = planningTrace ? cinematicMarksForPlanningFrame(marks, selectedFrame, selectedFrameIndex, imageSize) : marks;
+  const points = visibleMarks.filter((mark) => mark.kind === "point");
+  const boxes = visibleMarks.filter((mark) => mark.kind === "bbox");
+  const visibleThinkingMarks = planningTrace
+    ? showReasoningTrace
+      ? cinematicMarksForPlanningFrame(thinkingMarks, selectedFrame, selectedFrameIndex, imageSize)
+      : []
+    : showReasoningTrace
+      ? thinkingMarks
+      : [];
+  const visibleFinalMarks = showFinalAnswer
+    ? planningTrace
+      ? cinematicMarksForPlanningFrame(finalMarks, selectedFrame, selectedFrameIndex, imageSize)
+      : finalMarks
+    : [];
+  const selectedOverlayLabel =
+    selectedFrameMode === "perception"
+      ? "Perceive boxes"
+      : selectedFrameMode === "trajectory"
+        ? "Grasp trajectory"
+        : visibleMarks.length > 0
+          ? "Plan progression"
+          : "Raw execution frame";
   const traceState = showReasoningTrace ? "shown" : "hidden";
+  const finalState = showFinalAnswer ? "shown" : "hidden";
+  const cardTitle = planningTrace ? planningTrace.title : "Final path in image coordinate space";
+  const cardSubtitle = planningTrace?.subtitle || (planningTrace ? "Select a keyframe to inspect the overlaid plan." : "");
 
-  if (!media || media.kind !== "image" || !canParseSpatial) return null;
+  if (!media || !imageSource || !canParseSpatial) return null;
 
   return (
     <article className="spatialOverlayCard">
       <div className="spatialTopline">
         <div>
-          <p className="responseLabel">Spatial trajectory</p>
-          <h3>Final path in image coordinate space</h3>
-        </div>
-        <div className="spatialToolbar">
-          <span>
-            {finalMarks.length} final · {thinkingMarks.length} trace {traceState} · {points.length} points · {boxes.length} boxes
-          </span>
-          {thinkingMarks.length > 0 ? (
+          <p className="responseLabel">{planningTrace ? "Robot planning trace" : "Spatial trajectory"}</p>
+          <h3>{cardTitle}</h3>
+          {cardSubtitle ? <p className="spatialSubtitle">{cardSubtitle}</p> : null}
+          </div>
+          <div className="spatialToolbar">
+            <span>
+              {planningTrace ? `${selectedOverlayLabel} · ` : ""}
+              {finalMarks.length} final {finalState} · {thinkingMarks.length} trace {traceState} · {points.length} points · {boxes.length} boxes shown
+            </span>
+          {finalMarks.length > 0 ? (
             <button
-              aria-checked={showReasoningTrace}
-              className={showReasoningTrace ? "spatialTraceToggle checked" : "spatialTraceToggle"}
-              onClick={() => setShowReasoningTrace((value) => !value)}
+              aria-checked={showFinalAnswer}
+              className={showFinalAnswer ? "spatialTraceToggle spatialFinalToggle checked" : "spatialTraceToggle spatialFinalToggle"}
+              onClick={() =>
+                setShowFinalAnswer((value) => {
+                  const nextValue = !value;
+                  if (nextValue) setShowReasoningTrace(false);
+                  return nextValue;
+                })
+              }
               role="switch"
               type="button"
             >
               <span />
-              {showReasoningTrace ? "Hide reasoning trace" : "Show reasoning trace"}
+              {showFinalAnswer ? "Final answer on" : "Final answer off"}
+            </button>
+          ) : null}
+          {thinkingMarks.length > 0 ? (
+            <button
+              aria-checked={showReasoningTrace}
+              className={showReasoningTrace ? "spatialTraceToggle checked" : "spatialTraceToggle"}
+              onClick={() =>
+                setShowReasoningTrace((value) => {
+                  const nextValue = !value;
+                  if (nextValue) setShowFinalAnswer(false);
+                  return nextValue;
+                })
+              }
+              role="switch"
+              type="button"
+            >
+              <span />
+              {showReasoningTrace ? "Reasoning trace on" : "Reasoning trace off"}
             </button>
           ) : null}
         </div>
       </div>
-      {thinkingMarks.length > 0 ? (
+      {thinkingMarks.length > 0 || finalMarks.length > 0 ? (
         <div className="spatialLegend" aria-label="Spatial overlay legend">
-          <span className="finalLegend">Final answer</span>
-          <span className={showReasoningTrace ? "traceLegend" : "traceLegend mutedLegend"}>Reasoning trace</span>
+          {finalMarks.length > 0 ? (
+            <button
+              aria-checked={showFinalAnswer}
+              className={showFinalAnswer ? "spatialLegendToggle finalLegend" : "spatialLegendToggle finalLegend mutedLegend"}
+              onClick={() =>
+                setShowFinalAnswer((value) => {
+                  const nextValue = !value;
+                  if (nextValue) setShowReasoningTrace(false);
+                  return nextValue;
+                })
+              }
+              role="switch"
+              type="button"
+            >
+              {showFinalAnswer ? "Final answer on" : "Final answer off"}
+            </button>
+          ) : null}
+          {thinkingMarks.length > 0 ? (
+            <button
+              aria-checked={showReasoningTrace}
+              className={showReasoningTrace ? "spatialLegendToggle traceLegend" : "spatialLegendToggle traceLegend mutedLegend"}
+              onClick={() =>
+                setShowReasoningTrace((value) => {
+                  const nextValue = !value;
+                  if (nextValue) setShowFinalAnswer(false);
+                  return nextValue;
+                })
+              }
+              role="switch"
+              type="button"
+            >
+              {showReasoningTrace ? "Reasoning trace on" : "Reasoning trace off"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {planningTrace ? (
+        <div className="planningFilmstrip" aria-label="Robot planning trace keyframes">
+          {planningTrace.frames.map((frame, index) => {
+            const selected = index === selectedFrameIndex;
+            const frameMode = planningFrameRenderMode(frame);
+            const frameMarks = imageSize ? cinematicMarksForPlanningFrame(marks, frame, index, imageSize) : [];
+            const hasFramePath = frameMarks.filter((mark) => mark.kind === "point").length > 1;
+            const frameImageUrl = frame.imageUrl;
+            const frameBadge =
+              frameMode === "perception"
+                ? "boxes"
+                : frameMode === "trajectory"
+                  ? "trajectory"
+                  : frameMarks.length > 0
+                    ? "trace"
+                    : "";
+            return (
+              <button
+                aria-pressed={selected}
+                className={selected ? "planningFrame active" : "planningFrame"}
+                key={`${frame.time}-${frame.phase}`}
+                onClick={() => setSelectedPlanningFrame(index)}
+                type="button"
+              >
+                <div className="planningFrameMedia">
+                  <img src={frameImageUrl} alt="" />
+                  {imageSize && frameMarks.length > 0 ? (
+                    <SpatialMarksSvg
+                      className="planningFrameOverlay"
+                      compact
+                      imageSize={imageSize}
+                      marks={frameMarks}
+                      showPath={hasFramePath}
+                    />
+                  ) : null}
+                </div>
+                <span>{frame.time}</span>
+                <strong>{frame.phase}</strong>
+                {frameBadge ? <em>{frameBadge}</em> : null}
+                {frame.caption ? <small>{frame.caption}</small> : null}
+              </button>
+            );
+          })}
         </div>
       ) : null}
       <div className="spatialCanvas">
         <img
           className="spatialImage"
-          src={media.previewUrl}
-          alt={`${media.name} with generated point and box overlay`}
-          onLoad={(event) => {
-            const image = event.currentTarget;
-            setImageSize({
-              width: image.naturalWidth || image.clientWidth,
-              height: image.naturalHeight || image.clientHeight
-            });
-          }}
+          ref={spatialImageRef}
+          src={imageSource}
+          alt={
+            selectedCoordinateFrame
+              ? `${media.name} ${selectedCoordinateFrame.phase} coordinate frame with generated point and box overlay`
+              : `${media.name} with generated point and box overlay`
+          }
+          onLoad={(event) => updateImageSizeFromElement(event.currentTarget)}
         />
-        {imageSize && marks.length > 0 ? (
-          <svg
-            aria-hidden="true"
-            className="spatialSvg"
-            preserveAspectRatio="xMidYMid meet"
-            viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
-          >
-            {visibleThinkingPoints.length > 1 ? (
-              <polyline
-                className="spatialPath spatialPathThinking"
-                points={visibleThinkingPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
-              />
-            ) : null}
-            {finalPoints.length > 1 ? (
-              <polyline
-                className="spatialPath spatialPathFinal"
-                points={finalPoints.map((point) => `${point.centerX},${point.centerY}`).join(" ")}
-              />
-            ) : null}
-            {marks.map((mark) => (
-              <g key={mark.id}>
-                <title>
-                  {mark.source === "thinking" ? "Reasoning trace" : "Final answer"} #{mark.sequence}: {mark.label}
-                  {mark.detail ? ` — ${mark.detail}` : ""}
-                </title>
-                <rect
-                  className={`${mark.kind === "point" ? "spatialPointBox" : "spatialBbox"} ${
-                    mark.source === "thinking" ? "spatialThinkingMark" : "spatialFinalMark"
-                  }`}
-                  height={mark.height}
-                  rx={Math.max(4, Math.min(mark.width, mark.height) * 0.08)}
-                  width={mark.width}
-                  x={mark.x}
-                  y={mark.y}
-                />
-                {mark.kind === "point" ? (
-                  <circle
-                    className={`spatialPointDot ${mark.source === "thinking" ? "spatialThinkingDot" : "spatialFinalDot"}`}
-                    cx={mark.centerX}
-                    cy={mark.centerY}
-                    r={5}
-                  />
-                ) : null}
-                <text
-                  className={`spatialPointLabel ${mark.source === "thinking" ? "spatialTraceLabel" : "spatialFinalLabel"}`}
-                  x={mark.x + 8}
-                  y={Math.max(18, mark.y - 8)}
-                >
-                  {spatialMarkSvgPrefix(mark)}
-                  {mark.sequence}
-                </text>
-              </g>
-            ))}
-          </svg>
+        {imageSize && visibleMarks.length > 0 ? (
+          <SpatialMarksSvg imageSize={imageSize} marks={visibleMarks} showPath={selectedFrameMode === "trajectory" || !planningTrace} />
         ) : null}
       </div>
-      {marks.length > 0 ? (
+      {selectedCoordinateFrame ? (
+        <p className="planningCoordinateNote">
+          <strong>
+            Coordinate frame: {selectedCoordinateFrame.phase} · {selectedCoordinateFrame.time}
+          </strong>
+          {selectedFrameMode === "perception"
+            ? "Perceive renders object boxes on this frame."
+            : selectedFrameMode === "trajectory"
+              ? "Grasp renders the planned 2D trajectory in this frame's coordinate space."
+              : visibleMarks.length > 0
+                ? "This cinematic execution tile projects the plan progression onto the step frame; exact trajectory coordinates are measured on the Grasp frame."
+                : "This execution step is shown as a raw frame without overlays."}
+        </p>
+      ) : null}
+      {selectedFrame?.caption ? (
+        <p className="planningFrameCaption">
+          <strong>
+            {selectedFrame.phase} · {selectedFrame.time}
+          </strong>
+          {selectedFrame.caption}
+          <span>{selectedOverlayLabel}</span>
+        </p>
+      ) : null}
+      {visibleMarks.length > 0 ? (
         <div className="spatialSequenceGroups">
           <SpatialMarkList label="Final answer" marks={visibleFinalMarks} />
           {showReasoningTrace && visibleThinkingMarks.length > 0 ? (
             <SpatialMarkList label="Reasoning trace" marks={visibleThinkingMarks} />
           ) : null}
         </div>
+      ) : planningTrace && marks.length > 0 ? (
+        <p className="spatialLoading">This execution step is shown as a raw frame. Select Perceive for boxes or Grasp for the planned 2D path.</p>
       ) : thinkingMarks.length > 0 && !showReasoningTrace ? (
         <p className="spatialLoading">Reasoning trace is hidden. Toggle it on to inspect trace coordinates.</p>
       ) : (
@@ -3442,10 +4465,6 @@ function spatialMarkPrefix(mark: SpatialMark) {
   return mark.source === "thinking" ? "Trace" : "Final";
 }
 
-function spatialMarkSvgPrefix(mark: SpatialMark) {
-  return mark.source === "thinking" ? "R" : "F";
-}
-
 function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[] }) {
   if (marks.length === 0) return null;
   return (
@@ -3457,6 +4476,7 @@ function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[]
             <strong>
               {spatialMarkPrefix(mark)} #{mark.sequence}
             </strong>
+            {mark.time ? <small>{mark.time}</small> : null}
             <span>{mark.label}</span>
             {mark.detail ? <em>{mark.detail}</em> : null}
             <code>
@@ -3472,6 +4492,53 @@ function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[]
   );
 }
 
+function PlanningStagePromptInspector({ result }: { result: ApiResult | null }) {
+  const stages = useMemo(() => planningStagePromptViews(result), [result]);
+  if (stages.length === 0) return null;
+
+  return (
+    <details className="stagePromptInspector">
+      <summary>
+        <span>Stage prompts</span>
+        <em>{stages.length} NIM calls</em>
+      </summary>
+      <p>
+        These are the exact per-step text prompts sent to NIM. Image data URLs are redacted, but the
+        image count and coordinate-frame timestamp are preserved.
+      </p>
+      <div className="stagePromptGrid">
+        {stages.map((stage) => (
+          <section className="stagePromptCard" key={stage.key}>
+            <div className="stagePromptHeader">
+              <div>
+                <strong>{stage.title}</strong>
+                <span>{stage.mode}</span>
+              </div>
+              <code>{stage.time}</code>
+            </div>
+            <div className="stagePromptMeta" aria-label={`${stage.title} request metadata`}>
+              <span>{stage.imageCount} image</span>
+              {stage.elapsed ? <span>{stage.elapsed}</span> : null}
+            </div>
+            {stage.userPrompt ? (
+              <>
+                <p className="stagePromptLabel">User prompt</p>
+                <pre>{stage.userPrompt}</pre>
+              </>
+            ) : null}
+            {stage.systemPrompt ? (
+              <details className="stageSystemPromptDetails">
+                <summary>System prompt</summary>
+                <pre>{stage.systemPrompt}</pre>
+              </details>
+            ) : null}
+          </section>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function PreviewOutput({
   isRunning,
   longProgress,
@@ -3480,6 +4547,8 @@ function PreviewOutput({
   reasoningExpanded,
   result,
   setReasoningExpanded,
+  streamCreated,
+  streamLogs,
   streamPhase
 }: {
   isRunning: boolean;
@@ -3489,9 +4558,15 @@ function PreviewOutput({
   reasoningExpanded: boolean;
   result: ApiResult | null;
   setReasoningExpanded: (expanded: boolean) => void;
+  streamCreated: number;
+  streamLogs: StreamLogEntry[];
   streamPhase: StreamPhase;
 }) {
   const progressCard = longProgress ? <LongVideoProgress progress={longProgress} /> : null;
+  const standardProgressCard =
+    isRunning && !longProgress ? (
+      <StandardRunProgress created={streamCreated} logs={streamLogs} media={media} phase={streamPhase} />
+    ) : null;
 
   if (result?.status === "error" || result?.error) {
     return (
@@ -3535,20 +4610,32 @@ function PreviewOutput({
     );
   }
 
-  if (result?.content || result?.reasoning) {
-    const hasAnswer = Boolean(parsedOutput.answer || result.content);
-    const answerText = parsedOutput.answer || result.content || "";
+  const resultText = resultContentText(result);
+  if (result?.content || result?.reasoning || resultText) {
+    const hasAnswer = Boolean(parsedOutput.answer || result.content || resultText);
+    const answerText = parsedOutput.answer || result.content || resultText || "";
     const timelineItems = stitchedTimelineItems(result);
     const isLongVideoResult = Boolean(result?.long_video || longProgress);
-    const collapseResponse = isLongVideoResult && hasAnswer;
+    const isSpatialResult = hasSpatialPayload(answerText) || hasSpatialPayload(parsedOutput.reasoning);
+    const collapseResponse = (isLongVideoResult || isSpatialResult) && hasAnswer;
     return (
       <div className="responseStack">
         {progressCard}
+        {standardProgressCard}
         {timelineItems.length > 0 ? <StitchedTimeline items={timelineItems} /> : null}
         <SpatialTrajectoryOverlay answerText={answerText} media={media} reasoningText={parsedOutput.reasoning} />
+        <PlanningStagePromptInspector result={result} />
         {hasAnswer && collapseResponse ? (
           <details className="answer rawResponseDetails">
-            <summary>{looksLikeJsonResponse(answerText) ? "Stitched JSON response" : "Raw stitched response"}</summary>
+            <summary>
+              {isLongVideoResult
+                ? looksLikeJsonResponse(answerText)
+                  ? "Stitched JSON response"
+                  : "Raw stitched response"
+                : looksLikeJsonResponse(answerText)
+                  ? "Spatial JSON response"
+                  : "Raw spatial response"}
+            </summary>
             <pre>{answerText || "No final response returned."}</pre>
           </details>
         ) : hasAnswer ? (
@@ -3575,7 +4662,7 @@ function PreviewOutput({
     return (
       <div className="responseStack">
         {progressCard}
-        {progressCard ? null : <GeneratingOutput />}
+        {progressCard ? null : standardProgressCard || <GeneratingOutput />}
       </div>
     );
   }
@@ -3662,6 +4749,41 @@ function SummaryTimelineList({ empty, items }: { empty: string; items: TimelineI
   );
 }
 
+function TimelineOverviewStrip({ items }: { items: TimelineItem[] }) {
+  if (items.length === 0) return null;
+  const firstRange = rangeParts(items[0].range);
+  const lastRange = rangeParts(items[items.length - 1].range);
+  return (
+    <section className="timelineOverviewStrip" aria-label="Stitched timeline overview">
+      <div className="timelineOverviewHeader">
+        <span>Timeline overview</span>
+        <small>
+          {firstRange.start} - {lastRange.end} · {items.length} shown
+        </small>
+      </div>
+      <div className="timelineOverviewRail">
+        {items.map((item, index) => {
+          const isEndpoint = index === 0 || index === items.length - 1;
+          const range = rangeParts(item.range);
+          return (
+            <div
+              className={`timelineOverviewEvent${isStaticTimelineItem(item) ? " static" : " dynamic"}${
+                isEndpoint ? " endpoint" : ""
+              }`}
+              key={item.id || index}
+              title={`${item.range} ${item.title} ${item.caption}`}
+            >
+              <span className="timelineOverviewMarker" />
+              <strong>{range.start}</strong>
+              <em>{item.title || "event"}</em>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function StitchedTimeline({ items }: { items: TimelineItem[] }) {
   const timelineSignature = useMemo(
     () => items.map((item) => `${item.range}:${item.title}:${item.caption}`).join("|"),
@@ -3681,6 +4803,7 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
   const summaryItems = dynamicItems.filter(isSummaryTimelineItem);
   const dynamicEventItems = dynamicItems.filter((item) => !isSummaryTimelineItem(item));
   const summaryFirst = showDynamic && !showStatic && summaryItems.length > 0;
+  const overviewItems = summaryFirst ? summaryItems : visibleItems;
   const title =
     summaryFirst
       ? "Summary timeline"
@@ -3720,6 +4843,7 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
           </button>
         </div>
       </div>
+      {overviewItems.length > 0 ? <TimelineOverviewStrip items={overviewItems} /> : null}
       {summaryFirst ? (
         <>
           <SummaryTimelineList empty="No summary events were returned." items={summaryItems} />
@@ -3891,9 +5015,14 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
   }, [progress.chunks, selectedIndex]);
   const hasTimeline = progress.partialTimeline.length > 0 || progress.chunks.some((chunk) => eventsFromChunk(chunk).length > 0);
   const chunksFinished = total > 0 && completed + failed >= total && running === 0;
+  const complete = phase === "complete" || (chunksFinished && percent >= 100);
+  const compactComplete = compact && complete;
+  useEffect(() => {
+    if (complete) setCompact(true);
+  }, [complete]);
   return (
     <>
-      <article className={`longProgressCard${compact ? " compact" : ""}`} aria-live="polite">
+      <article className={`longProgressCard${compact ? " compact" : ""}${compactComplete ? " compactComplete" : ""}`} aria-live="polite">
         <div className="longProgressHeader">
           <div>
             <p className="responseLabel">Long Video Analysis</p>
@@ -3906,25 +5035,29 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
             </button>
           </div>
         </div>
-        <div className="longProgressMeta">
-          <span>Phase: {phase.replace(/_/g, " ")}</span>
-          <span>Chunks: {completed + failed}/{total || "?"}</span>
-          <span>Running: {running}</span>
-          <span>Elapsed: {formatDuration(progress.elapsedSeconds)}</span>
-          <span>ETA: {progress.etaSeconds === 0 ? "complete" : formatDuration(progress.etaSeconds)}</span>
-        </div>
+        {!compactComplete ? (
+          <div className="longProgressMeta">
+            <span>Phase: {phase.replace(/_/g, " ")}</span>
+            <span>Chunks: {completed + failed}/{total || "?"}</span>
+            <span>Running: {running}</span>
+            <span>Elapsed: {formatDuration(progress.elapsedSeconds)}</span>
+            <span>ETA: {progress.etaSeconds === 0 ? "complete" : formatDuration(progress.etaSeconds)}</span>
+          </div>
+        ) : null}
         <div className="longProgressTrack" aria-label={`Long video progress ${percent}%`}>
           <span style={{ width: `${percent}%` }} />
         </div>
-        {progress.steps?.length ? <LongStepList steps={progress.steps} /> : null}
-        <div className="longCoverageGrid">
-          <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
-          <span>Frames: {progress.frameCount ?? "scanning"}</span>
-          <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
-          <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
-          {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
-          <span>Concurrency: {progress.concurrency || 4}</span>
-        </div>
+        {!compactComplete && progress.steps?.length ? <LongStepList steps={progress.steps} /> : null}
+        {!compactComplete ? (
+          <div className="longCoverageGrid">
+            <span>Duration: {progress.durationText || formatDuration(progress.durationSeconds)}</span>
+            <span>Frames: {progress.frameCount ?? "scanning"}</span>
+            <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
+            <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
+            {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
+            <span>Concurrency: {progress.concurrency || 4}</span>
+          </div>
+        ) : null}
         {!compact ? (
           <>
             {progress.warnings.length > 0 ? (
@@ -4039,6 +5172,145 @@ function LongChunkInspector({ chunk }: { chunk: LongChunkProgress }) {
       </details>
     </section>
   );
+}
+
+function StandardRunProgress({
+  created,
+  logs,
+  media,
+  phase
+}: {
+  created: number;
+  logs: StreamLogEntry[];
+  media: MediaState | null;
+  phase: StreamPhase;
+}) {
+  const isPlanningRun = Boolean(media?.planningTrace);
+  const percent = standardRunPercent(phase);
+  const steps = standardRunSteps(phase, isPlanningRun);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (phase === "complete" || phase === "error" || phase === "stopped") return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [phase]);
+  const latestElapsed = Math.max(
+    0,
+    ...logs.map((log) => (Number.isFinite(Number(log.elapsedSeconds)) ? Number(log.elapsedSeconds) : 0))
+  );
+  const runElapsed = Math.max(0, now / 1000 - created);
+  const activeElapsed = Math.max(latestElapsed, runElapsed);
+  return (
+    <article className="standardProgressCard" aria-live="polite">
+      <div className="longProgressHeader">
+        <div>
+          <p className="responseLabel">{isPlanningRun ? "Robot planning inference" : "Inference"}</p>
+          <h3>{standardRunMessage(phase, isPlanningRun)}</h3>
+          {logs.length > 0 ? <p className="standardProgressSubline">Latest backend log at {formatDuration(activeElapsed)}</p> : null}
+        </div>
+        <span className="longPresetBadge">{phase.replace(/_/g, " ")}</span>
+      </div>
+      <div className="longProgressTrack" aria-label={`Inference progress ${percent}%`}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <LongStepList steps={steps} />
+      {logs.length > 0 ? (
+        <details className="standardLogPanel" open={isPlanningRun}>
+          <summary>
+            <span>Backend logs</span>
+            <em>{logs.length}</em>
+          </summary>
+          <ol>
+            {logs.map((log, index) => (
+              <li className={log.level === "warn" ? "warn" : log.level === "error" ? "error" : ""} key={`${log.label}-${index}`}>
+                <code>{Number.isFinite(Number(log.elapsedSeconds)) ? formatDuration(log.elapsedSeconds) : "--"}</code>
+                <strong>{log.label}</strong>
+                {log.detail ? <span>{log.detail}</span> : null}
+              </li>
+            ))}
+          </ol>
+        </details>
+      ) : null}
+    </article>
+  );
+}
+
+function standardRunPercent(phase: StreamPhase) {
+  if (phase === "preparing_media") return 15;
+  if (phase === "waiting_first_token") return 42;
+  if (phase === "reasoning") return 65;
+  if (phase === "answer") return 86;
+  if (phase === "complete") return 100;
+  if (phase === "error" || phase === "stopped") return 100;
+  return 8;
+}
+
+function standardRunMessage(phase: StreamPhase, isPlanningRun: boolean) {
+  if (phase === "preparing_media") return "Preparing media";
+  if (phase === "waiting_first_token") return isPlanningRun ? "Preparing frame fallback and waiting for the NIM" : "Waiting for the NIM";
+  if (phase === "reasoning") return isPlanningRun ? "Perceiving objects and planning" : "Streaming reasoning";
+  if (phase === "answer") return isPlanningRun ? "Receiving boxes and trajectory JSON" : "Streaming response";
+  if (phase === "complete") return "Complete";
+  if (phase === "error") return "Backend error";
+  if (phase === "stopped") return "Stopped";
+  return "Starting inference";
+}
+
+function standardRunSteps(phase: StreamPhase, isPlanningRun: boolean): LongStepProgress[] {
+  const activeIndex =
+    phase === "preparing_media"
+      ? 0
+      : phase === "waiting_first_token"
+        ? 1
+        : phase === "reasoning"
+          ? 2
+          : phase === "answer"
+            ? 3
+            : phase === "complete"
+              ? 5
+              : phase === "error" || phase === "stopped"
+                ? 4
+                : 0;
+  const labels = isPlanningRun
+    ? [
+        ["media", "Prepare media", "Use native video first; fall back to timestamped image frames if the NIM rejects decode."],
+        ["nim", "Call Super NIM", "Send the staged Perceive/Grasp prompt and wait for the first token."],
+        ["perceive", "Perceive object boxes", "Parse bbox_2d object labels for the 00:00.00 coordinate frame."],
+        ["grasp", "Plan grasp trajectory", "Parse point_2d waypoints for the Grasp-frame coordinate space."],
+        ["render", "Render planning trace", "Draw boxes on Perceive and the trajectory on Grasp; execution frames stay raw."]
+      ]
+    : [
+        ["media", "Prepare media", "Package the current image or video request."],
+        ["nim", "Call NIM", "Send the request and wait for the first token."],
+        ["reason", "Stream reasoning", "Receive the optional thinking trace."],
+        ["answer", "Stream answer", "Receive the final response."],
+        ["render", "Render output", "Format response JSON, timeline, or spatial overlays."]
+      ];
+  return labels.map(([key, label, detail], index) => {
+    const status =
+      phase === "error"
+        ? index === activeIndex
+          ? "error"
+          : index < activeIndex
+            ? "done"
+            : "pending"
+        : phase === "stopped"
+          ? index < activeIndex
+            ? "done"
+            : "pending"
+          : index < activeIndex
+            ? "done"
+            : index === activeIndex
+              ? "running"
+              : "pending";
+    return {
+      key,
+      label,
+      detail,
+      status,
+      progress: status === "done" ? 100 : status === "running" ? 65 : 0
+    } as LongStepProgress;
+  });
 }
 
 function GeneratingOutput() {

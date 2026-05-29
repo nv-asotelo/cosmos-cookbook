@@ -187,6 +187,68 @@ print(json.dumps({
     "frames": frames
 }))
 `;
+const PLANNING_FRAME_EXTRACTOR_PY = String.raw`
+import json
+import os
+import sys
+
+import av
+
+video_path, output_dir, targets_raw, width_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+targets = json.loads(targets_raw)
+target_width = int(float(width_raw)) if width_raw else 768
+
+def fmt(seconds):
+    seconds = max(0.0, float(seconds or 0.0))
+    minutes = int(seconds // 60)
+    rem = seconds - minutes * 60
+    return f"{minutes:02d}:{rem:05.2f}"
+
+container = av.open(video_path)
+stream = container.streams.video[0]
+frame_rate = float(stream.average_rate) if stream.average_rate else 25.0
+sorted_targets = sorted([(max(0.0, float(item.get("seconds", 0.0))), index) for index, item in enumerate(targets)])
+results = [None for _ in targets]
+next_target = 0
+last_image = None
+last_ts = 0.0
+
+def save_image(image, target_index, actual_ts):
+    if target_width > 0 and image.width > target_width:
+        ratio = target_width / float(image.width)
+        image = image.resize((target_width, max(1, int(round(image.height * ratio)))))
+    frame_path = os.path.join(output_dir, f"planning_frame_{target_index:03d}.jpg")
+    image.save(frame_path, format="JPEG", quality=82, optimize=True)
+    results[target_index] = {
+        "path": frame_path,
+        "timestamp": actual_ts,
+        "timestamp_text": fmt(actual_ts),
+        "target_timestamp": targets[target_index].get("seconds", 0.0),
+        "target_timestamp_text": targets[target_index].get("time") or fmt(targets[target_index].get("seconds", 0.0)),
+    }
+
+for index, frame in enumerate(container.decode(stream)):
+    if next_target >= len(sorted_targets):
+        break
+    ts = float(frame.pts * frame.time_base) if frame.pts is not None else (float(index) / frame_rate if frame_rate else 0.0)
+    image = frame.to_image().convert("RGB")
+    last_image = image
+    last_ts = ts
+    half_frame = 0.5 / max(frame_rate, 1.0)
+    while next_target < len(sorted_targets) and ts + half_frame >= sorted_targets[next_target][0]:
+        _, target_index = sorted_targets[next_target]
+        save_image(image, target_index, ts)
+        next_target += 1
+
+if last_image is not None:
+    while next_target < len(sorted_targets):
+        _, target_index = sorted_targets[next_target]
+        save_image(last_image, target_index, last_ts)
+        next_target += 1
+
+container.close()
+print(json.dumps({"count": len([item for item in results if item]), "frames": results}))
+`;
 
 function dataUrlToBuffer(dataUrl) {
   const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
@@ -279,7 +341,7 @@ function frameFallbackLimit() {
 function frameFallbackAllowed() {
   if (process.env.REASONER_ENABLE_FRAME_FALLBACK === "1") return true;
   if (process.env.REASONER_DISABLE_FRAME_FALLBACK === "1") return false;
-  return false;
+  return !isAlpamayoBackend;
 }
 
 function nativeVideoFallbackMessage(message) {
@@ -295,7 +357,6 @@ function shouldRetryWithFrameFallback(prepared, resultOrError) {
     (resultOrError instanceof Error ? resultOrError.message : "");
   return (
     prepared?.media?.mode === "video_url" &&
-    backend === "nim_local" &&
     frameFallbackAllowed() &&
     nativeVideoFallbackMessage(message)
   );
@@ -348,6 +409,90 @@ async function extractFrameDataUrls(mediaDataUrl, framesPerSecond, maxFrames) {
     }
     if (frames.length === 0) throw new Error("Could not extract frames from video");
     return { tempDir, frames, frameCount: frames.length, fps: info.fps || framesPerSecond };
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function timeTextToSeconds(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+  if (!match) return Number(value) || 0;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function runPlanningFrameExtractor(videoPath, outputDir, targets, targetWidth = 768) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      pythonForFrames(),
+      ["-", videoPath, outputDir, JSON.stringify(targets), String(targetWidth || 768)],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Planning frame extractor exited with ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(PLANNING_FRAME_EXTRACTOR_PY);
+  });
+}
+
+async function extractPlanningFrameDataUrls(mediaSource, planningFrames, mediaKind) {
+  const frames = planningFrames.map((frame, index) => ({
+    index,
+    phase: String(frame.phase || `Frame ${index + 1}`),
+    mode: String(frame.renderMode || frame.mode || "raw"),
+    time: String(frame.time || "00:00.00"),
+    seconds: timeTextToSeconds(frame.time || 0)
+  }));
+
+  if (mediaKind === "image") {
+    return {
+      tempDir: null,
+      frames: frames.map((frame) => ({
+        ...frame,
+        dataUrl: mediaSource,
+        actualTime: frame.time
+      }))
+    };
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "reason-vite-planning-"));
+  try {
+    const { buffer } = await mediaSourceToBuffer(mediaSource);
+    const videoPath = path.join(tempDir, "input.mp4");
+    const frameDir = path.join(tempDir, "frames");
+    await fs.mkdir(frameDir);
+    await fs.writeFile(videoPath, buffer);
+    const extracted = await runPlanningFrameExtractor(videoPath, frameDir, frames, 768);
+    const outputFrames = [];
+    for (const [index, frame] of frames.entries()) {
+      const extractedFrame = extracted.frames?.[index];
+      if (!extractedFrame?.path) throw new Error(`Could not extract ${frame.phase} frame at ${frame.time}`);
+      const bytes = await fs.readFile(extractedFrame.path);
+      outputFrames.push({
+        ...frame,
+        dataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}`,
+        actualTime: extractedFrame.timestamp_text || frame.time
+      });
+    }
+    return { tempDir, frames: outputFrames };
   } catch (error) {
     await fs.rm(tempDir, { recursive: true, force: true });
     throw error;
@@ -565,18 +710,93 @@ function stripReasoningFormatInstruction(prompt) {
     .trim();
 }
 
+function planningTaskBrief(prompt) {
+  const cleaned = stripReasoningFormatInstruction(prompt);
+  const blocks = cleaned
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => {
+      if (/^stage\s*\d+\s*\/\s*(perceive|grasp)\s*prompt:/i.test(block)) return false;
+      if (/^return the final answer as valid json/i.test(block)) return false;
+      if (/^if this task is extended to multiple chunks/i.test(block)) return false;
+      return true;
+    });
+  return blocks.join("\n\n").trim();
+}
+
+function compactPlanningTask(prompt) {
+  const cleaned = planningTaskBrief(prompt);
+  const taskMatch = cleaned.match(/you are given the(?: robot)? task:?\s*["“]([^"”]+)["”]/i);
+  if (taskMatch?.[1]) return `You are given the task "${taskMatch[1]}".`;
+  return cleaned.split(/\n/).map((line) => line.trim()).filter(Boolean)[0] || "Plan the robot action from the visible image.";
+}
+
+function compactTrajectoryPrompt(prompt) {
+  const task = compactPlanningTask(prompt);
+  return `${task} Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.`;
+}
+
+function balancedJsonCandidates(text) {
+  const candidates = [];
+  const source = String(text || "");
+  for (let start = 0; start < source.length; start += 1) {
+    const open = source[start];
+    if (open !== "{" && open !== "[") continue;
+    const close = open === "{" ? "}" : "]";
+    const stack = [close];
+    let inString = false;
+    let escaped = false;
+    for (let index = start + 1; index < source.length; index += 1) {
+      const char = source[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === "{" || char === "[") {
+        stack.push(char === "{" ? "}" : "]");
+      } else if (char === "}" || char === "]") {
+        if (char !== stack.at(-1)) break;
+        stack.pop();
+        if (stack.length === 0) {
+          candidates.push(source.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
 function maybeJsonText(value) {
   const text = String(value || "").trim();
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1].trim() : text;
-  const first = candidate.search(/[\[{]/);
-  if (first < 0) return null;
-  const trimmed = candidate.slice(first);
-  for (let end = trimmed.length; end > Math.max(1, trimmed.length - 400); end -= 1) {
+  if (!text) return null;
+  const candidates = [text];
+  const fencedMatches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const match of fencedMatches) candidates.push(match[1].trim());
+  for (const candidate of [...candidates]) {
+    candidates.push(...balancedJsonCandidates(candidate));
+    const first = candidate.search(/[\[{]/);
+    if (first >= 0) candidates.push(candidate.slice(first));
+  }
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const trimmed = String(candidate || "").trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
     try {
-      return JSON.parse(trimmed.slice(0, end));
+      return JSON.parse(trimmed);
     } catch {
-      // Keep searching for a valid JSON tail.
+      // Try the next balanced or fenced candidate.
     }
   }
   return null;
@@ -651,6 +871,225 @@ async function postOpenAiJson(baseUrl, payload, timeoutMs, parentSignal) {
     clearTimeout(timer);
     parentSignal?.removeEventListener?.("abort", abort);
   }
+}
+
+function planningStageSystemPrompt(stage, systemPrompt) {
+  const base = String(systemPrompt || "").trim();
+  const stageInstruction =
+    stage.mode === "perception"
+      ? "This is the Perceive pass. Return compact valid JSON only with object labels and bbox_2d rectangles measured in the attached image coordinate frame."
+      : "This is the Grasp pass. Specify the 2D trajectory the end effector should follow in pixel space. Return compact valid JSON only with point_2d trajectory coordinates measured in the attached image coordinate frame.";
+  return [base, stageInstruction, "Keep any <think> reasoning brief and coordinate-focused. Do not include markdown fences or coordinates from any other frame."]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function planningStagePrompt({ stage, taskPrompt }) {
+  const task = compactPlanningTask(taskPrompt);
+  const trajectoryTask = compactTrajectoryPrompt(taskPrompt);
+  const coordinateFrame = `${stage.phase.toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${stage.time}`;
+  if (stage.mode === "perception") {
+    return `Robot task:
+${task}
+
+The attached image is the ${stage.phase} frame at ${stage.time}. Use this image as the only coordinate reference.
+
+Identify task-relevant objects. Return object boxes only. Each bbox_2d must contain exactly four 0-1000 image coordinates in this order: [left_x, top_y, right_x, bottom_y]. Do not return point_2d or trajectory in this pass.
+
+Answer the question using the following format:
+<think>
+Briefly name the visible task-relevant objects and any simple coordinate references you used.
+</think>
+Write the final JSON immediately after the </think> tag.
+
+Return valid JSON only:
+{
+  "perception_coordinate_frame": "${coordinateFrame}",
+  "perception": [
+    {"time": "${stage.time}", "label": "object name", "bbox_2d": [left_x, top_y, right_x, bottom_y], "caption": "why it matters"}
+  ]
+}`;
+  }
+
+  return `Robot task:
+${trajectoryTask}
+
+The attached image is the ${stage.phase} frame at ${stage.time}. Use this image as the only coordinate reference.
+
+Return several trajectory waypoints only as point_2d values. Do not return bbox_2d for trajectory waypoints.
+
+Answer the question using the following format:
+<think>
+Briefly name the visible references and the planned end-effector path in image coordinates.
+</think>
+Write the final JSON immediately after the </think> tag.
+
+Return valid JSON only:
+{
+  "trajectory_coordinate_frame": "${coordinateFrame}",
+  "trajectory": [
+    {"time": "${stage.time}", "label": "gripper trajectory", "point_2d": [x, y]}
+  ]
+}`;
+}
+
+function arrayFromParsed(parsed, keys, depth = 0) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== "object" || depth > 5) return [];
+  for (const key of keys) {
+    if (Array.isArray(parsed[key])) return parsed[key];
+  }
+  if (keys.some((key) => key in parsed)) return [parsed];
+  if (keys.some((key) => key === "perception") && (parsed.bbox_2d || parsed.bounding_box || parsed.bbox)) return [parsed];
+  if (keys.some((key) => key === "trajectory") && (parsed.point_2d || parsed.point || parsed.waypoint || parsed.waypoints)) return [parsed];
+  for (const value of Object.values(parsed)) {
+    const nested = arrayFromParsed(value, keys, depth + 1);
+    if (nested.length > 0) return nested;
+  }
+  return [];
+}
+
+function bboxNumbers(record) {
+  const raw = record?.bbox_2d || record?.bbox || record?.bounding_box || record?.box;
+  const numbers = Array.isArray(raw) ? raw.map(Number).filter(Number.isFinite) : [];
+  return numbers.length >= 4 ? numbers.slice(0, 4) : null;
+}
+
+function bboxCenter(record) {
+  const bbox = bboxNumbers(record);
+  if (!bbox) return null;
+  const [left, top, right, bottom] = bbox;
+  return {
+    x: (left + right) / 2,
+    y: (top + bottom) / 2,
+    left,
+    top,
+    right,
+    bottom
+  };
+}
+
+function perceptionLabel(record) {
+  return String(record?.label || record?.name || record?.object || record?.class || "").toLowerCase();
+}
+
+function fallbackTrajectoryFromPerception(perception, time = "00:02.00") {
+  const boxed = perception.filter((item) => bboxNumbers(item));
+  if (boxed.length < 2) return [];
+  const drill =
+    boxed.find((item) => /drill|black|decker|cordless|tool/i.test(perceptionLabel(item))) ||
+    boxed.find((item) => !/box|bin|crate|basket|container|yellow|green/i.test(perceptionLabel(item)));
+  const container =
+    boxed.find((item) => /box|bin|crate|basket|container|yellow|green/i.test(perceptionLabel(item))) ||
+    boxed.find((item) => item !== drill);
+  const drillCenter = bboxCenter(drill);
+  const containerCenter = bboxCenter(container);
+  if (!drillCenter || !containerCenter) return [];
+  const liftY = Math.max(30, Math.min(drillCenter.y, containerCenter.top) - 80);
+  const releaseY = Math.max(containerCenter.top + 40, Math.min(containerCenter.bottom - 20, containerCenter.y));
+  return [
+    { time, label: "approach drill handle", point_2d: [Math.round(drillCenter.x), Math.round(drillCenter.y)], caption: "Derived fallback from detected drill box center." },
+    { time, label: "grasp drill handle", point_2d: [Math.round(drillCenter.x), Math.round(drillCenter.y)], caption: "Derived fallback because the Grasp pass did not return usable waypoints." },
+    { time, label: "lift clear", point_2d: [Math.round(drillCenter.x), Math.round(liftY)], caption: "Lift above the nearby support surface." },
+    { time, label: "move over yellow box", point_2d: [Math.round(containerCenter.x), Math.round(containerCenter.top + 60)], caption: "Move toward the detected container opening." },
+    { time, label: "release into box", point_2d: [Math.round(containerCenter.x), Math.round(releaseY)], caption: "Release inside the detected container." }
+  ];
+}
+
+function recordHasPoint(record) {
+  return Boolean(record?.point_2d || record?.point || record?.waypoint);
+}
+
+async function submitPlanningStage({ endpoint, model, onLog, params, signal, stage, systemPrompt, taskPrompt }) {
+  const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
+    model,
+    prompt: planningStagePrompt({ stage, taskPrompt }),
+    systemPrompt: planningStageSystemPrompt(stage, systemPrompt),
+    mediaDataUrl: stage.dataUrl,
+    mediaKind: "image",
+    params: {
+      ...params,
+      temperature: Math.min(Number(params.temperature) || 0.3, 0.3),
+      top_p: Math.min(Number(params.top_p) || 0.3, 0.3)
+    }
+  });
+  payload.max_tokens = Math.min(Number(params.max_tokens) || 900, stage.mode === "perception" ? 900 : 700);
+  const stageEndpoint = endpoint || baseUrl;
+  onLog?.({
+    label: `${stage.phase} request built`,
+    detail: `${stage.mode} pass · ${stageEndpoint}/chat/completions · 1 image · max_tokens ${payload.max_tokens}`
+  });
+  const startedAt = Date.now();
+  onLog?.({
+    label: `${stage.phase} waiting on NIM`,
+    detail: `Coordinate frame ${stage.actualTime || stage.time}; OpenAI JSON response has no token-level progress until NIM returns. Timeout 90s.`
+  });
+  const data = await postOpenAiJson(stageEndpoint, payload, 90000, signal);
+  const normalized = normalizeReasonerMessage(data);
+  const content = normalized.answer || normalized.combined;
+  const elapsedSeconds = (Date.now() - startedAt) / 1000;
+  onLog?.({
+    label: `${stage.phase} response received`,
+    detail: `${elapsedSeconds.toFixed(1)}s · answer ${String(content || "").length} chars · reasoning ${String(normalized.reasoning || "").length} chars`
+  });
+  return {
+    phase: stage.phase,
+    mode: stage.mode,
+    time: stage.time,
+    actualTime: stage.actualTime,
+    content,
+    reasoning: normalized.reasoning,
+    parsed: maybeJsonText(content),
+    elapsedSeconds,
+    payload: redactedPayload,
+    raw: data
+  };
+}
+
+function mergePlanningStages(stageResults) {
+  const perceptionStage = stageResults.find((stage) => stage.mode === "perception");
+  const trajectoryStage = stageResults.find((stage) => stage.mode === "trajectory");
+  const perception = perceptionStage ? arrayFromParsed(perceptionStage.parsed, ["perception", "objects", "detections"]) : [];
+  const trajectory = trajectoryStage
+    ? arrayFromParsed(trajectoryStage.parsed, ["trajectory", "waypoints", "path", "planned_path", "end_effector_path", "grasp_plan"])
+    : [];
+  const trajectoryPointCount = trajectory.filter(recordHasPoint).length;
+  const fallbackTrajectory =
+    trajectoryPointCount >= 2 ? [] : fallbackTrajectoryFromPerception(perception, trajectoryStage?.time || "00:02.00");
+  const robustTrajectory = trajectoryPointCount >= 2 ? trajectory : [...trajectory, ...fallbackTrajectory];
+  return {
+    planning_mode: "two_call_image_coordinate_frames",
+    perception_coordinate_frame:
+      perceptionStage?.parsed?.perception_coordinate_frame ||
+      (perceptionStage ? `${perceptionStage.phase.toLowerCase()}_${perceptionStage.time}` : undefined),
+    trajectory_coordinate_frame:
+      trajectoryStage?.parsed?.trajectory_coordinate_frame ||
+      (trajectoryStage ? `${trajectoryStage.phase.toLowerCase()}_${trajectoryStage.time}` : undefined),
+    perception,
+    trajectory: robustTrajectory,
+    timeline_summary: [
+      ...(perceptionStage
+        ? [{ start: perceptionStage.time, end: perceptionStage.time, phase: perceptionStage.phase, caption: "Perception pass on its own image frame." }]
+        : []),
+      ...(trajectoryStage
+        ? [{ start: trajectoryStage.time, end: trajectoryStage.time, phase: trajectoryStage.phase, caption: "Trajectory pass on its own image frame." }]
+        : [])
+    ],
+    uncertainties: [
+      ...stageResults.flatMap((stage) => arrayFromParsed(stage.parsed?.uncertainties, ["uncertainties"])),
+      ...(trajectoryPointCount < 2 && fallbackTrajectory.length > 0
+        ? ["Trajectory waypoints were expanded from Perceive boxes because the Grasp pass did not return enough usable point_2d values."]
+        : [])
+    ].filter(Boolean),
+    stage_outputs: stageResults.map((stage) => ({
+      phase: stage.phase,
+      mode: stage.mode,
+      time: stage.time,
+      actual_time: stage.actualTime,
+      elapsed_seconds: stage.elapsedSeconds,
+      content: stage.content
+    }))
+  };
 }
 
 async function runConcurrent(items, concurrency, worker) {
@@ -1524,7 +1963,11 @@ async function readOpenAiStream({ baseUrl, payload, signal, onChunk }) {
       if (!data) continue;
       sawSse = true;
       if (data === "[DONE]") return;
-      onChunk(JSON.parse(data));
+      const parsed = JSON.parse(data);
+      if (parsed?.error || (parsed?.message && !parsed?.choices)) {
+        throw new Error(parsed?.error?.message || parsed?.message || "Reasoner stream returned an error");
+      }
+      onChunk(parsed);
     }
 
     if (done) break;
@@ -1718,6 +2161,203 @@ app.post("/api/reason", async (request, response) => {
   } finally {
     if (prepared?.frameTempDir) await fs.rm(prepared.frameTempDir, { recursive: true, force: true });
     if (fallbackPrepared?.frameTempDir) await fs.rm(fallbackPrepared.frameTempDir, { recursive: true, force: true });
+  }
+});
+
+app.post("/api/reason/planning/stream", async (request, response) => {
+  let extracted;
+  const upstreamAbort = new AbortController();
+  let clientClosed = false;
+  const startedAt = Date.now();
+
+  const abortForClosedClient = () => {
+    if (response.writableEnded) return;
+    clientClosed = true;
+    upstreamAbort.abort();
+  };
+  request.on("aborted", abortForClosedClient);
+  response.on("close", abortForClosedClient);
+
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  response.flushHeaders?.();
+
+  const elapsedSeconds = () => (Date.now() - startedAt) / 1000;
+  const emitLog = ({ label, detail, elapsedSeconds: explicitElapsed, level = "info" } = {}) => {
+    if (!label) return;
+    sse(response, "log", {
+      label,
+      detail,
+      level,
+      elapsedSeconds: Number.isFinite(Number(explicitElapsed)) ? Number(explicitElapsed) : elapsedSeconds()
+    });
+  };
+
+  try {
+    const body = request.body || {};
+    const selectedModel = body.model || defaultModel;
+    const params = body.params || {};
+    const mediaSource = body.video || body.image || body.mediaDataUrl;
+    const mediaKind = body.image ? "image" : body.video ? "video" : body.mediaKind || "video";
+    if (!mediaSource) throw new Error("Planning mode requires an image or video input");
+
+    const rawFrames = Array.isArray(body.planningFrames) ? body.planningFrames : [];
+    const planningFrames = rawFrames
+      .map((frame, index) => ({
+        index,
+        phase: String(frame.phase || `Frame ${index + 1}`),
+        time: String(frame.time || (index === 0 ? "00:00.00" : "00:02.00")),
+        mode: String(frame.renderMode || frame.mode || "").toLowerCase()
+      }))
+      .filter((frame) => frame.mode === "perception" || frame.mode === "trajectory");
+    const stages = planningFrames.length
+      ? planningFrames
+      : [
+          { index: 0, phase: "Perceive", time: "00:00.00", mode: "perception" },
+          { index: 1, phase: "Grasp", time: "00:02.00", mode: "trajectory" }
+        ];
+
+    emitLog({
+      label: "Planning request received",
+      detail: `${stages.length} staged NIM call${stages.length === 1 ? "" : "s"} · model ${selectedModel} · ${mediaKind} input`
+    });
+    emitLog({
+      label: "Coordinate frames queued",
+      detail: stages.map((stage) => `${stage.phase} ${stage.time} (${stage.mode})`).join(" · ")
+    });
+    sse(response, "state", { phase: "preparing_media", note: "Extracting Perceive and Grasp coordinate frames" });
+    const extractStartedAt = Date.now();
+    emitLog({
+      label: "Extracting planning frames",
+      detail:
+        mediaKind === "image"
+          ? "Using the uploaded image directly for each staged coordinate frame."
+          : `Decoding ${stages.length} target video frame${stages.length === 1 ? "" : "s"} for image fallback.`
+    });
+    extracted = await extractPlanningFrameDataUrls(mediaSource, stages, mediaKind);
+    emitLog({
+      label: "Planning frames ready",
+      detail: `${extracted.frames.length} frame${extracted.frames.length === 1 ? "" : "s"} ready in ${(
+        (Date.now() - extractStartedAt) /
+        1000
+      ).toFixed(1)}s · ${extracted.frames.map((frame) => `${frame.phase} actual ${frame.actualTime}`).join(" · ")}`
+    });
+
+    const stageResults = [];
+    for (const stage of extracted.frames) {
+      if (upstreamAbort.signal.aborted) throw new Error("Planning run stopped");
+      sse(response, "state", {
+        phase: "waiting_first_token",
+        note: `Running ${stage.phase} ${stage.mode} pass on ${stage.time}`
+      });
+      emitLog({
+        label: `${stage.phase} pass started`,
+        detail: `${stage.mode} · requested ${stage.time} · actual ${stage.actualTime || stage.time}`
+      });
+      const result = await submitPlanningStage({
+        model: selectedModel,
+        onLog: emitLog,
+        params,
+        signal: upstreamAbort.signal,
+        stage,
+        systemPrompt: body.systemPrompt || body.system_prompt || "",
+        taskPrompt: body.prompt || body.userPrompt || ""
+      });
+      stageResults.push(result);
+      const parsedCount =
+        result.mode === "perception"
+          ? arrayFromParsed(result.parsed, ["perception", "objects", "detections"]).length
+          : arrayFromParsed(result.parsed, ["trajectory", "waypoints", "path", "planned_path", "end_effector_path", "grasp_plan"]).filter(
+              recordHasPoint
+            ).length;
+      emitLog({
+        label: `${result.phase} parsed`,
+        detail: `${result.mode} pass produced ${parsedCount} ${result.mode === "perception" ? "object box" : "waypoint"}${
+          parsedCount === 1 ? "" : "s"
+        }`
+      });
+      sse(response, "planning_stage", {
+        phase: result.phase,
+        mode: result.mode,
+        time: result.time,
+        elapsedSeconds: result.elapsedSeconds,
+        content: result.content
+      });
+    }
+
+    emitLog({
+      label: "Merging planning stages",
+      detail: `${stageResults.length} stage result${stageResults.length === 1 ? "" : "s"} received; combining perception and trajectory JSON.`
+    });
+    const merged = mergePlanningStages(stageResults);
+    const answer = `\`\`\`json\n${JSON.stringify(merged, null, 2)}\n\`\`\``;
+    const stageReasoning = stageResults
+      .map((stage) => {
+        const reasoning = String(stage.reasoning || "").trim();
+        return reasoning ? `${stage.phase} ${stage.mode} pass (${stage.time}):\n${reasoning}` : "";
+      })
+      .filter(Boolean)
+      .join("\n\n");
+    const raw = {
+      ...streamingOpenAiResult({
+        answer,
+        created: Math.floor(Date.now() / 1000),
+        finishReason: "stop",
+        id: `chatcmpl-byo-planning-${Date.now()}`,
+        model: selectedModel,
+        object: "chat.completion",
+        reasoning: stageReasoning,
+        schema: "two_call_robot_planning",
+        usage: null
+      }),
+      planning_stages: stageResults.map((stage) => ({
+        phase: stage.phase,
+        mode: stage.mode,
+        time: stage.time,
+        actual_time: stage.actualTime,
+        elapsed_seconds: stage.elapsedSeconds,
+        content: stage.content,
+        reasoning: stage.reasoning,
+        parsed: stage.parsed,
+        payload: stage.payload
+      })),
+      media: {
+        mode: mediaKind === "image" ? "planning-image-frames" : "planning-video-keyframes",
+        frame_count: extracted.frames.length,
+        coordinate_frames: extracted.frames.map((frame) => ({
+          phase: frame.phase,
+          mode: frame.mode,
+          requested_time: frame.time,
+          actual_time: frame.actualTime
+        }))
+      }
+    };
+    emitLog({
+      label: "Planning trace ready",
+      detail: `${merged.perception?.length || 0} perception record${merged.perception?.length === 1 ? "" : "s"} · ${
+        merged.trajectory?.length || 0
+      } trajectory record${merged.trajectory?.length === 1 ? "" : "s"} · total ${elapsedSeconds().toFixed(1)}s`
+    });
+    sse(response, "state", { phase: "answer" });
+    sse(response, "delta", { channel: "answer", text: answer, schema: "two_call_robot_planning" });
+    sse(response, "raw", raw);
+    sse(response, "state", { phase: "complete" });
+  } catch (error) {
+    if (!clientClosed && !response.writableEnded) {
+      emitLog({
+        label: "Planning stream failed",
+        detail: error instanceof Error ? error.message : "Robot planning stream failed",
+        level: "error"
+      });
+      sse(response, "error", { message: error instanceof Error ? error.message : "Robot planning stream failed" });
+    }
+  } finally {
+    if (extracted?.tempDir) await fs.rm(extracted.tempDir, { recursive: true, force: true });
+    if (!response.writableEnded) response.end();
   }
 });
 

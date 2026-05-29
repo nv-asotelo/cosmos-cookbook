@@ -1268,11 +1268,143 @@ select {
   padding: 14px;
 }
 
+.stagePromptInspector {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #080d05;
+  padding: 0;
+}
+
+.stagePromptInspector > summary {
+  display: flex;
+  min-height: 52px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  list-style: none;
+  padding: 0 16px;
+}
+
+.stagePromptInspector > summary::-webkit-details-marker {
+  display: none;
+}
+
+.stagePromptInspector > summary span {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.stagePromptInspector > summary em {
+  border: 1px solid #5a8f12;
+  border-radius: 999px;
+  color: var(--green);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.stagePromptInspector > p {
+  margin: 0;
+  border-top: 1px solid rgb(118 185 0 / 24%);
+  color: var(--muted);
+  padding: 12px 16px 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.stagePromptGrid {
+  display: grid;
+  gap: 12px;
+  padding: 0 16px 16px;
+}
+
+.stagePromptCard {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #101010;
+  padding: 12px;
+}
+
+.stagePromptHeader,
+.stagePromptMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stagePromptHeader strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.stagePromptHeader span,
+.stagePromptMeta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.stagePromptHeader code {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: #050505;
+  color: var(--green);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.stagePromptLabel,
+.stageSystemPromptDetails summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.stagePromptCard pre {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #050505;
+  color: var(--text);
+  margin: 0;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stageSystemPromptDetails {
+  display: grid;
+  gap: 8px;
+}
+
+.stageSystemPromptDetails summary {
+  cursor: pointer;
+}
+
 .spatialTopline {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
+}
+
+.spatialTopline > div:first-child {
+  flex: 1 1 100%;
+  min-width: 0;
 }
 
 .spatialTopline h3 {
@@ -1280,25 +1412,40 @@ select {
   color: var(--text);
   font-size: 17px;
   line-height: 1.25;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.spatialSubtitle {
+  max-width: none;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .spatialToolbar {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 100%;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .spatialToolbar > span {
-  flex: 0 0 auto;
+  flex: 1 1 260px;
+  min-width: 0;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
   color: var(--muted);
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 700;
+  white-space: normal;
 }
 
 .spatialTraceToggle {
@@ -1352,30 +1499,50 @@ select {
   transform: translateX(12px);
 }
 
+.spatialTraceToggle.spatialFinalToggle.checked {
+  border-color: var(--green);
+}
+
+.spatialTraceToggle.spatialFinalToggle.checked span {
+  border-color: var(--green);
+  background: #182b05;
+}
+
+.spatialTraceToggle.spatialFinalToggle.checked span::after {
+  background: var(--green);
+}
+
 .spatialLegend {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.spatialLegend span {
+.spatialLegendToggle {
   display: inline-flex;
   min-height: 24px;
   align-items: center;
   gap: 6px;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
+  background: #101010;
   color: var(--muted);
+  cursor: pointer;
   padding: 0 9px;
   font-size: 11px;
   font-weight: 800;
 }
 
-.spatialLegend span::before {
+.spatialLegendToggle::before {
   width: 9px;
   height: 9px;
   border-radius: 999px;
   content: "";
+}
+
+.spatialLegendToggle:hover {
+  border-color: rgb(255 255 255 / 28%);
+  color: var(--text);
 }
 
 .finalLegend::before {
@@ -1388,6 +1555,102 @@ select {
 
 .mutedLegend {
   opacity: 0.55;
+}
+
+.planningFilmstrip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  margin-inline: -2px;
+  padding: 10px 2px 12px;
+  scroll-snap-type: x proximity;
+}
+
+.planningFrame {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  flex: 0 0 168px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #101010;
+  color: var(--text);
+  padding: 7px;
+  scroll-snap-align: start;
+  text-align: left;
+}
+
+.planningFrame:not(:last-child)::after {
+  position: absolute;
+  top: 48px;
+  right: -11px;
+  width: 10px;
+  height: 2px;
+  background: rgb(118 185 0 / 55%);
+  content: "";
+}
+
+.planningFrame:hover,
+.planningFrame.active {
+  border-color: var(--green);
+  background: #112006;
+}
+
+.planningFrameMedia {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  border-radius: 5px;
+  background: #000000;
+}
+
+.planningFrameMedia img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.planningFrameOverlay {
+  mix-blend-mode: normal;
+}
+
+.planningFrame span {
+  color: var(--green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.planningFrame strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.planningFrame em {
+  width: fit-content;
+  border: 1px solid rgb(118 185 0 / 45%);
+  border-radius: 999px;
+  color: var(--green);
+  padding: 2px 7px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.planningFrame small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .spatialCanvas {
@@ -1407,6 +1670,35 @@ select {
   object-fit: contain;
 }
 
+.planningFrameCaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.planningFrameCaption strong {
+  color: var(--green);
+}
+
+.planningCoordinateNote {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  border-left: 3px solid var(--green);
+  color: var(--muted);
+  padding-left: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.planningCoordinateNote strong {
+  color: var(--text);
+}
+
 .spatialSvg {
   position: absolute;
   inset: 0;
@@ -1418,7 +1710,7 @@ select {
 .spatialPath {
   fill: none;
   stroke: var(--aqua);
-  stroke-dasharray: 8 6;
+  stroke-dasharray: none;
   stroke-linecap: round;
   stroke-width: 3;
   vector-effect: non-scaling-stroke;
@@ -1450,7 +1742,18 @@ select {
 .spatialBbox.spatialThinkingMark {
   fill: rgb(0 210 255 / 10%);
   stroke: var(--aqua);
-  stroke-dasharray: 6 4;
+  stroke-dasharray: none;
+}
+
+.spatialPointBox.spatialObjectMark {
+  fill: rgb(0 210 255 / 22%);
+  stroke: var(--aqua);
+  stroke-dasharray: none;
+  stroke-width: 4;
+}
+
+.spatialPointBox.spatialTrajectoryMark {
+  stroke-dasharray: none;
 }
 
 .spatialPointBox.spatialFinalMark {
@@ -1474,6 +1777,16 @@ select {
   fill: var(--green);
 }
 
+.spatialObjectDot {
+  fill: var(--aqua);
+  stroke: #001418;
+  stroke-width: 4;
+}
+
+.spatialTrajectoryDot {
+  stroke-width: 2.5;
+}
+
 .spatialPointLabel {
   fill: #ffffff;
   font-size: 18px;
@@ -1490,6 +1803,34 @@ select {
 
 .spatialFinalLabel {
   fill: #ffffff;
+}
+
+.spatialObjectLabel {
+  fill: #dcfbff;
+  stroke: #001418;
+  stroke-width: 5;
+}
+
+.spatialTrajectoryLabel {
+  fill: #ffffff;
+}
+
+.spatialSvgCompact .spatialPath {
+  stroke-width: 2;
+}
+
+.spatialSvgCompact .spatialPointBox,
+.spatialSvgCompact .spatialBbox {
+  stroke-width: 2;
+}
+
+.spatialSvgCompact .spatialPointLabel {
+  font-size: 64px;
+  stroke-width: 12;
+}
+
+.spatialSvgCompact .spatialPointDot {
+  stroke-width: 2;
 }
 
 .spatialSequenceGroups {
@@ -1539,6 +1880,12 @@ select {
 
 .spatialSequenceItem strong {
   color: var(--green);
+}
+
+.spatialSequenceItem small {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
 }
 
 .traceGroup .spatialSequenceItem {
@@ -2142,6 +2489,107 @@ select {
   color: var(--green);
 }
 
+.timelineOverviewStrip {
+  display: grid;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #101b0a 0%, #091006 100%);
+  padding: 12px;
+}
+
+.timelineOverviewHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.timelineOverviewHeader small {
+  color: #8f9d83;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.timelineOverviewRail {
+  position: relative;
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  padding: 7px 4px 2px;
+}
+
+.timelineOverviewRail::before {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  left: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: #4b6b13;
+  content: "";
+}
+
+.timelineOverviewEvent {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  flex: 1 0 104px;
+  min-width: 104px;
+  max-width: 150px;
+  gap: 4px;
+  padding-top: 24px;
+  color: #d6dfcd;
+}
+
+.timelineOverviewMarker {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 3px;
+  height: 22px;
+  border-radius: 999px;
+  background: #8abf20;
+}
+
+.timelineOverviewEvent.endpoint .timelineOverviewMarker {
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--green);
+  border-radius: 50%;
+  background: #091006;
+  box-shadow: 0 0 0 4px rgba(118, 185, 0, 0.12);
+}
+
+.timelineOverviewEvent.static {
+  opacity: 0.5;
+}
+
+.timelineOverviewEvent strong {
+  overflow: hidden;
+  color: var(--green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timelineOverviewEvent em {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rawResponseDetails {
   display: grid;
   gap: 0;
@@ -2173,8 +2621,125 @@ select {
   padding: 18px;
 }
 
+.standardProgressCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #0d1507;
+  color: #d9f4d5;
+  padding: 18px;
+}
+
+.standardProgressSubline {
+  margin: 6px 0 0;
+  color: #aebda1;
+  font-size: 12px;
+}
+
+.standardLogPanel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #26301c;
+  border-radius: 7px;
+  background: #081005;
+}
+
+.standardLogPanel summary {
+  display: flex;
+  min-height: 40px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
+  color: #dcebc8;
+  font-size: 13px;
+  font-weight: 900;
+  list-style: none;
+}
+
+.standardLogPanel summary::-webkit-details-marker {
+  display: none;
+}
+
+.standardLogPanel summary em {
+  border: 1px solid #4b6b13;
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--green);
+  font-style: normal;
+}
+
+.standardLogPanel ol {
+  display: grid;
+  gap: 0;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 0 12px 12px;
+  list-style: none;
+}
+
+.standardLogPanel li {
+  display: grid;
+  grid-template-columns: minmax(54px, auto) minmax(120px, auto) 1fr;
+  gap: 8px;
+  border-top: 1px solid #1f2c17;
+  padding: 9px 0;
+  color: #c9d8ba;
+  font-size: 12px;
+}
+
+.standardLogPanel code {
+  color: var(--green);
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.standardLogPanel strong {
+  color: #f1ffe8;
+}
+
+.standardLogPanel span {
+  color: #aebda1;
+}
+
+.standardLogPanel li.warn code,
+.standardLogPanel li.warn strong {
+  color: #ffd166;
+}
+
+.standardLogPanel li.error code,
+.standardLogPanel li.error strong {
+  color: #ff8f8f;
+}
+
 .longProgressCard.compact {
   gap: 10px;
+}
+
+.longProgressCard.compactComplete {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.longProgressCard.compactComplete .longProgressHeader {
+  align-items: center;
+}
+
+.longProgressCard.compactComplete .responseLabel {
+  display: none;
+}
+
+.longProgressCard.compactComplete h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.longProgressCard.compactComplete .longProgressTrack {
+  height: 8px;
 }
 
 .longProgressHeader,
