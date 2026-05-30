@@ -3185,6 +3185,8 @@ export default function App() {
             setTopP={setTopP}
             setUserPrompt={setUserPrompt}
             status={status}
+            streamCreated={streamState.created}
+            streamLogs={streamState.logs}
             streamPhase={streamState.phase}
             systemPrompt={systemPrompt}
             temperature={temperature}
@@ -3324,6 +3326,8 @@ function ExperiencePanel({
   setTopP,
   setUserPrompt,
   status,
+  streamCreated,
+  streamLogs,
   streamPhase,
   systemPrompt,
   temperature,
@@ -3388,6 +3392,8 @@ function ExperiencePanel({
   setTopP: (value: number) => void;
   setUserPrompt: (value: string) => void;
   status: string;
+  streamCreated: number;
+  streamLogs: StreamLogEntry[];
   streamPhase: StreamPhase;
   systemPrompt: string;
   temperature: number;
@@ -3710,11 +3716,11 @@ function ExperiencePanel({
                 parsedOutput={parsedOutput}
                 reasoningExpanded={reasoningExpanded}
                 result={result}
-            setReasoningExpanded={setReasoningExpanded}
-            streamCreated={streamState.created}
-            streamLogs={streamState.logs}
-            streamPhase={streamPhase}
-          />
+                setReasoningExpanded={setReasoningExpanded}
+                streamCreated={streamCreated}
+                streamLogs={streamLogs}
+                streamPhase={streamPhase}
+              />
             )}
           </div>
         </section>
@@ -4612,8 +4618,8 @@ function PreviewOutput({
 
   const resultText = resultContentText(result);
   if (result?.content || result?.reasoning || resultText) {
-    const hasAnswer = Boolean(parsedOutput.answer || result.content || resultText);
-    const answerText = parsedOutput.answer || result.content || resultText || "";
+    const hasAnswer = Boolean(parsedOutput.answer || result?.content || resultText);
+    const answerText = parsedOutput.answer || result?.content || resultText || "";
     const timelineItems = stitchedTimelineItems(result);
     const isLongVideoResult = Boolean(result?.long_video || longProgress);
     const isSpatialResult = hasSpatialPayload(answerText) || hasSpatialPayload(parsedOutput.reasoning);
