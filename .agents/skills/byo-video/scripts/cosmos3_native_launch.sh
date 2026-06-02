@@ -14,6 +14,8 @@
 #   COSMOS3_PARALLELISM  --parallelism-preset (default: latency)
 #   COSMOS3_OUTPUT_DIR   --o <dir> (default: outputs/ray_serve)
 #   COSMOS3_MAX_WAIT     Seconds to wait for Ray Serve /info (default: 2400)
+#   COSMOS3_DEVICE_MEMORY_BYTES
+#                        Fallback total memory for GB10/NVML NotSupported (default: 137438953472)
 #
 # Writes:
 #   /tmp/gradio_url.txt              http://<host>:<port>  (the framework Gradio URL)
@@ -38,6 +40,7 @@ COSMOS3_PARALLELISM="${COSMOS3_PARALLELISM:-latency}"
 COSMOS3_OUTPUT_DIR="${COSMOS3_OUTPUT_DIR:-outputs/ray_serve}"
 COSMOS3_MAX_WAIT="${COSMOS3_MAX_WAIT:-2400}"
 COSMOS3_UV_GROUP="${COSMOS3_UV_GROUP:-cu130-train}"
+COSMOS3_DEVICE_MEMORY_BYTES="${COSMOS3_DEVICE_MEMORY_BYTES:-137438953472}"
 
 if [[ ! -d "$COSMOS3_DIR" ]]; then
   echo "✗ COSMOS3_DIR=$COSMOS3_DIR not found." >&2
@@ -58,6 +61,42 @@ fi
 
 cd "$COSMOS3_DIR"
 export LD_LIBRARY_PATH=    # required per cosmos-framework setup guidance (PyTorch _C import fix)
+
+# GB10 unified-memory hosts return NVMLError_NotSupported for NVML memory info.
+# cosmos-framework currently queries NVML before it can build default
+# parallelism, even though the value is not used by the current default
+# shard-size path. Patch only this launched process via sitecustomize.
+COSMOS3_SITECUSTOMIZE_DIR="/tmp/cosmos3_gb10_sitecustomize"
+mkdir -p "$COSMOS3_SITECUSTOMIZE_DIR"
+cat > "$COSMOS3_SITECUSTOMIZE_DIR/sitecustomize.py" <<'PY'
+import os
+
+try:
+    import pynvml
+
+    _original_get_memory_info = pynvml.nvmlDeviceGetMemoryInfo
+
+    class _FallbackMemoryInfo:
+        def __init__(self, total):
+            self.total = total
+            self.free = total
+            self.used = 0
+
+    def _get_memory_info_with_gb10_fallback(handle):
+        try:
+            return _original_get_memory_info(handle)
+        except Exception as exc:
+            if exc.__class__.__name__ != "NVMLError_NotSupported":
+                raise
+            total = int(os.environ.get("COSMOS3_DEVICE_MEMORY_BYTES", "137438953472"))
+            return _FallbackMemoryInfo(total)
+
+    pynvml.nvmlDeviceGetMemoryInfo = _get_memory_info_with_gb10_fallback
+except Exception:
+    pass
+PY
+export PYTHONPATH="$COSMOS3_SITECUSTOMIZE_DIR:${PYTHONPATH:-}"
+export COSMOS3_DEVICE_MEMORY_BYTES
 
 mkdir -p "$COSMOS3_OUTPUT_DIR"
 : > /tmp/cosmos3_serve.log

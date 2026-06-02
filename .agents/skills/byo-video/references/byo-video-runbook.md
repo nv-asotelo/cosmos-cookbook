@@ -136,6 +136,7 @@ The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000` an
 
 - `byo_video_setup.py` auto-selects `INFERENCE_BACKEND=cosmos3_native` for `MODEL_SIZE=C3-NANO-GEN` and `MODEL_SIZE=C3-SUPER-GEN` unless the caller explicitly asks for `INFERENCE_BACKEND=nim_local` to test a NIM image.
 - Step 5 clones `NVIDIA/cosmos-framework`, Step 6 runs `uv sync --all-extras --group=${COSMOS3_UV_GROUP:-cu130-train}`, Step 9 launches `scripts/cosmos3_native_launch.sh`, and Step 10 launches the Predict Vite primary plus the required BYO Gradio fallback.
+- On GB10 unified-memory hosts, NVML may return `NVMLError_NotSupported` for device memory. The launcher scopes a `sitecustomize.py` patch to the framework Ray Serve process so this probe falls back to `COSMOS3_DEVICE_MEMORY_BYTES` (default `137438953472`) instead of crashing before model load.
 - `cosmos_framework.inference.ray.gradio` exposes no `--share` flag, but `scripts/cosmos3_upload_gradio.py` (our wrapper) does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:8080`) and SSH port-forward (`ssh -L 8080:localhost:8080 <user@host>`) is the most VPN-tolerant fallback.
 
 ---
