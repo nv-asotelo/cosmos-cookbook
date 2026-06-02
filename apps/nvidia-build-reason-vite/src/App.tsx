@@ -2303,10 +2303,7 @@ export default function App() {
 
   useEffect(() => {
     const example = activeExamples.find((item) => item.id === selectedExampleId);
-    if (example) {
-      applyExampleParameters(example);
-      return;
-    }
+    if (example) return;
     if (activeExamples[0]) {
       void applyExample(activeExamples[0].id, { closeModal: false });
       return;
@@ -2314,7 +2311,7 @@ export default function App() {
     const defaults = modelDefaults(model, backendInfo);
     setFramesPerSecond(defaults.fps);
     setMaxTokens(defaults.maxTokens);
-  }, [activeExamples, backendInfo, model, selectedExampleId]);
+  }, [activeExamples, selectedExampleId]);
 
   useEffect(() => {
     if (defaultExampleLoadedRef.current) return;
