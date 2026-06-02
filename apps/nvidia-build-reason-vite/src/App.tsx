@@ -20,7 +20,9 @@ import { ChangeEvent, DragEvent, ReactNode, RefObject, useEffect, useMemo, useRe
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-reason2-8b.jpg";
 const BUILD_REASON2_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/modelcard";
 const BUILD_REASON2_SYSTEM_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/systemcard";
-const BUILD_REASON2_DEPLOY_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/deploy";
+const BUILD_COSMOS3_SUPER_DEPLOY_URL = "https://build-stage.nvidia.com/nvidia/cosmos3-super-reasoner/deploy";
+const COSMOS3_SUPER_RELEASED_IMAGE = "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0";
+const COSMOS3_SUPER_MODEL_ID = "nvidia/cosmos3-super-reasoner";
 const COSMOS3_INFO_URL =
   (typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_COSMOS3_INFO_URL) ||
   "/api/active-model";
@@ -32,44 +34,73 @@ const DEFAULT_BACKEND =
   "";
 const DEFAULT_USER_PROMPT = "";
 const DEFAULT_SYSTEM_PROMPT = "";
-const DEPLOY_DOCKER_COMMAND = (model: string, backendInfo: BackendInfo | null) => `docker login nvcr.io
+const DEPLOY_LOGIN_COMMAND = `docker login nvcr.io
 Username: $oauthtoken
-Password: <PASTE_API_KEY_HERE>
+Password: <PASTE_API_KEY_HERE>`;
+const deployModelId = (model: string) => {
+  const trimmed = String(model || "").trim();
+  return trimmed && trimmed !== "Detecting model..." ? trimmed : COSMOS3_SUPER_MODEL_ID;
+};
+const deployNimImage = (model: string, backendInfo: BackendInfo | null) => {
+  const liveImage = nimImageForModel(model, backendInfo);
+  return model.toLowerCase().includes("cosmos3-super") && liveImage.endsWith(":latest")
+    ? COSMOS3_SUPER_RELEASED_IMAGE
+    : liveImage;
+};
+const DEPLOY_DOCKER_COMMAND = (model: string, backendInfo: BackendInfo | null) => `export NGC_API_KEY=<PASTE_API_KEY_HERE>
+export NIM_IMAGE="${deployNimImage(model, backendInfo)}"
+export NIM_MODEL_SIZE=super
+export NIM_SERVED_MODEL_NAME="${deployModelId(model)}"
+export LOCAL_NIM_CACHE="\${LOCAL_NIM_CACHE:-$HOME/.cache/nim}"
 
-export NGC_API_KEY=<PASTE_API_KEY_HERE>
-export LOCAL_NIM_CACHE=~/.cache/nim
 mkdir -p "$LOCAL_NIM_CACHE"
 chmod -R a+w "$LOCAL_NIM_CACHE"
+docker pull "$NIM_IMAGE"
 
-docker run -it --rm \\
+docker rm -f cosmos3-super-reasoner 2>/dev/null || true
+
+docker run -d \\
+  --name cosmos3-super-reasoner \\
   --gpus all \\
   --ipc host \\
   --shm-size=32GB \\
   -e NGC_API_KEY \\
+  -e NIM_MODEL_SIZE \\
+  -e NIM_SERVED_MODEL_NAME \\
   -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \\
   -u $(id -u) \\
   -p 8000:8000 \\
-  ${nimImageForModel(model, backendInfo)}`;
+  "$NIM_IMAGE"
+
+until curl -fsS http://127.0.0.1:8000/v1/models; do
+  docker logs --tail 20 cosmos3-super-reasoner
+  sleep 10
+done`;
 const DEPLOY_CURL_COMMAND = (model: string) => `curl -X POST "http://0.0.0.0:8000/v1/chat/completions" \\
   -H "Accept: application/json" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "${model}",
+    "model": "${deployModelId(model)}",
     "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
       {
         "role": "user",
         "content": [
-          { "type": "text", "text": "What is in this video?" },
           {
-            "type": "video_url",
-            "video_url": {
-              "url": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason1-7b/av_construction_stop_timestamped.mp4"
+            "type": "image_url",
+            "image_url": {
+              "url": "https://assets.ngc.nvidia.com/products/api-catalog/phi-3-5-vision/example1b.jpg"
             }
-          }
+          },
+          { "type": "text", "text": "What is in this image?" }
         ]
       }
     ],
-    "max_tokens": 256
+    "max_tokens": 256,
+    "stream": false
   }'`;
 const SAMPLING_DEFAULTS = {
   standard: {
@@ -5906,7 +5937,7 @@ function StaticTab({
 }) {
   const vlaMode = isVlaMode(model, backendInfo);
   const familyLabel = modelFamilyLabel(model);
-  const imageName = nimImageForModel(model, backendInfo);
+  const imageName = deployNimImage(model, backendInfo);
   if (tab === "Model Card") {
     return (
       <div className="staticPanel">
@@ -6057,9 +6088,9 @@ function StaticTab({
       <p className="staticEyebrow">Linux with Docker</p>
       <h2>Deploy</h2>
       <p className="staticLead">
-        Follow the NVIDIA Build deployment flow for a downloadable NIM, with the model references adapted to
-        <code> {modelShortName(model)}</code>. After the service is running, test the same local OpenAI-compatible
-        endpoint with a multimodal chat completion request.
+        Follow the NVIDIA Build deployment flow for a downloadable NIM, with the model references adapted to the
+        released <code>cosmos3-super-reasoner</code>. The <code>cosmos3-reasoner:1.7.0</code> container includes
+        Nano and Super; set <code>NIM_MODEL_SIZE=super</code> before launching to serve Super.
       </p>
 
       <StaticSection title="Step 1: Generate API Key">
@@ -6067,20 +6098,29 @@ function StaticTab({
           Sign in to NVIDIA Build or NGC, create an API key, and use it to authenticate against the NVIDIA container
           registry before pulling the NIM image.
         </p>
+        <pre className="codeBlock">{DEPLOY_LOGIN_COMMAND}</pre>
       </StaticSection>
 
       <StaticSection title="Step 2: Pull and Run the NIM">
         <p>
           Active image: <code>{imageName}</code>
         </p>
+        <p>
+          The launch command below pins the released image, selects the Super model profile, mounts the local NIM
+          cache, and waits until the OpenAI-compatible model endpoint is ready.
+        </p>
         <pre className="codeBlock">{DEPLOY_DOCKER_COMMAND(model, backendInfo)}</pre>
       </StaticSection>
 
       <StaticSection title="Step 3: Test the NIM">
+        <p>
+          After <code>/v1/models</code> is healthy, send a local multimodal chat-completion request against the served
+          model id.
+        </p>
         <pre className="codeBlock">{DEPLOY_CURL_COMMAND(model)}</pre>
       </StaticSection>
 
-      <a className="staticLink" href={BUILD_REASON2_DEPLOY_URL} rel="noreferrer" target="_blank">
+      <a className="staticLink" href={BUILD_COSMOS3_SUPER_DEPLOY_URL} rel="noreferrer" target="_blank">
         NVIDIA Build deploy reference <ExternalLink size={16} />
       </a>
     </div>
