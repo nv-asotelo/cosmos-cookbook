@@ -2222,6 +2222,7 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const defaultExampleLoadedRef = useRef(false);
+  const manualLongVideoTuningRef = useRef(false);
   const [activeTab, setActiveTab] = useState<SectionTab>("Experience");
   const [outputTab, setOutputTab] = useState<OutputTab>("preview");
   const [examplesOpen, setExamplesOpen] = useState(false);
@@ -2257,6 +2258,11 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const vlaMode = isVlaMode(model, backendInfo);
   const activeExamples = useMemo(() => (vlaMode ? ALPAMAYO_LINGOQA_EXAMPLES : DEFAULT_REASON_EXAMPLES), [vlaMode]);
+
+  function setManualFramesPerSecond(value: number) {
+    manualLongVideoTuningRef.current = true;
+    setFramesPerSecond(value);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -2595,6 +2601,7 @@ export default function App() {
       setReasoningEnabled(example.reasoning);
       setUserPrompt(promptForReasoning(example.userPrompt, example.reasoning));
       setSystemPrompt(example.systemPrompt);
+      manualLongVideoTuningRef.current = false;
       applyExampleParameters(example);
       const nextMedia = await mediaFromExample(example, setLoadProgress);
       setMedia(nextMedia);
@@ -2637,8 +2644,10 @@ export default function App() {
     setTopK(params.topK ?? samplingDefaults.topK);
     setRepetitionPenalty(params.repetitionPenalty ?? samplingDefaults.repetitionPenalty);
     setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
-    setFramesPerSecond(params.framesPerSecond ?? (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : mediaDefaults.fps));
-    if (example.longVideoEnabled) setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+    if (!manualLongVideoTuningRef.current) {
+      setFramesPerSecond(params.framesPerSecond ?? (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : mediaDefaults.fps));
+      if (example.longVideoEnabled) setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+    }
     setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
   }
 
@@ -2653,6 +2662,7 @@ export default function App() {
     setTopP(DEFAULT_TOP_P);
     setTopK(DEFAULT_TOP_K);
     setMaxTokens(DEFAULT_MAX_TOKENS);
+    manualLongVideoTuningRef.current = false;
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
     setLongPreset("balanced");
     setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
@@ -3163,7 +3173,7 @@ export default function App() {
             seed={seed}
             selectedExampleId={selectedExampleId}
             setExamplesOpen={setExamplesOpen}
-            setFramesPerSecond={setFramesPerSecond}
+            setFramesPerSecond={setManualFramesPerSecond}
             setLongConcurrency={setLongConcurrency}
             setLongPreset={setLongPreset}
             setMaxTokens={setMaxTokens}
