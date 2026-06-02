@@ -15,7 +15,7 @@ Env vars:
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
   MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B | QWEN35-35B-A3B  (default: C3-2B)
                       C3-NANO-GEN / C3-SUPER-GEN are Cosmos3 OSS *Generators* (diffusion video gen via the
-                      upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
+                      NVIDIA/cosmos-framework package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
                       C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
@@ -117,19 +117,19 @@ _MODEL_CONFIGS = {
         "disk_gb": 256,
         "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.85"],
     },
-    # ── Cosmos3 OSS Generators (diffusion video generation via upstream cosmos3 package) ──
-    # These models use the nvidia-cosmos/cosmos3 Python package (NOT vLLM / NOT NIM).
+    # ── Cosmos3 OSS Generators (diffusion video generation via cosmos-framework) ──
+    # These models use NVIDIA/cosmos-framework (NOT vLLM / NOT NIM).
     # Setup path:
-    #   git clone https://github.com/nvidia-cosmos/cosmos3.git ~/cosmos3
-    #   cd ~/cosmos3 && uv sync --all-extras --group=cu130-train
+    #   git clone https://github.com/NVIDIA/cosmos-framework.git ~/cosmos-framework
+    #   cd ~/cosmos-framework && uv sync --all-extras --group=cu130-train
     # Serve path:
-    #   python -m cosmos3.ray.serve --checkpoint-path Cosmos3-Nano|Cosmos3-Super   # port 8000
-    #   python -m cosmos3.ray.gradio --host 0.0.0.0 --port 8080                    # UI
+    #   python -m cosmos_framework.inference.ray.serve --checkpoint-path Cosmos3-Nano|Cosmos3-Super   # port 8000
+    #   python -m cosmos_framework.inference.ray.gradio --host 0.0.0.0 --port 8080                    # UI
     # See scripts/cosmos3_native_launch.sh for the wrapped launcher used by INFERENCE_BACKEND=cosmos3_native.
     "C3-NANO-GEN": {
         "variants": [
             # nvidia/Cosmos3-Nano — public diffusers Cosmos3OmniDiffusersPipeline (t2i/t2v/i2v).
-            # Driven by --checkpoint-path Cosmos3-Nano in cosmos3.scripts.inference.
+            # Driven by --checkpoint-path Cosmos3-Nano in cosmos_framework inference.
             ("Cosmos3-Nano Generator", "Cosmos3-Nano", "nvidia/Cosmos3-Nano", "~30 GB"),
         ],
         "nim": None,
@@ -319,16 +319,14 @@ ENV           = {**os.environ, "PATH": f"{PATH_EXTRA}:{os.environ.get('PATH', ''
                  "HF_MODULES_CACHE": f"{HF_HOME_DIR}/modules"}
 HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
-_INFERENCE_BACKEND_RAW = os.environ.get("INFERENCE_BACKEND", "hf").lower()
+_INFERENCE_BACKEND_ENV = os.environ.get("INFERENCE_BACKEND")
+_INFERENCE_BACKEND_RAW = (_INFERENCE_BACKEND_ENV or "hf").lower()
 MODEL_SIZE    = os.environ.get("MODEL_SIZE", "ALPAMAYO" if _INFERENCE_BACKEND_RAW == "alpamayo" else "C3-2B").upper()
 # .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
 _MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
-# Cosmos3-Reasoner uses cosmos-reason2 working dir until a dedicated repo is published.
-# Alpamayo uses its own repo checkout. Set COSMOS_DIR or ALPAMAYO_DIR to override.
-_DEFAULT_WORK_DIR = f"{HOME}/amo-1-5" if _INFERENCE_BACKEND_RAW == "alpamayo" else f"{HOME}/cosmos-reason2"
-REASON2_DIR   = os.environ.get("COSMOS_DIR", os.environ.get("ALPAMAYO_DIR", _DEFAULT_WORK_DIR))
-MODELS_BASE   = f"{REASON2_DIR}/models"
+# Working directory is resolved after MODEL_SIZE, because Cosmos3 generators use
+# NVIDIA/cosmos-framework while reasoners still use cosmos-reason2.
 GRADIO_PORT   = int(os.environ.get("GRADIO_PORT", "7860"))
 FRONTEND      = os.environ.get("BYO_VIDEO_FRONTEND", "nvidia_build").strip().lower()
 if FRONTEND == "agent":
@@ -380,6 +378,40 @@ if MODEL_SIZE not in _MODEL_CONFIGS:
     sys.exit(1)
 
 _cfg = _MODEL_CONFIGS[MODEL_SIZE]
+_backend_required = _cfg.get("backend_required")
+if _backend_required:
+    if not _INFERENCE_BACKEND_ENV:
+        INFERENCE_BACKEND = _backend_required
+    elif _INFERENCE_BACKEND_RAW not in {_backend_required, "nim_local"}:
+        warn(
+            f"MODEL_SIZE={MODEL_SIZE} requires INFERENCE_BACKEND={_backend_required}; "
+            f"overriding explicit INFERENCE_BACKEND={_INFERENCE_BACKEND_RAW!r}."
+        )
+        INFERENCE_BACKEND = _backend_required
+    else:
+        INFERENCE_BACKEND = _INFERENCE_BACKEND_RAW
+
+if INFERENCE_BACKEND != _INFERENCE_BACKEND_RAW:
+    _INFERENCE_BACKEND_RAW = INFERENCE_BACKEND
+    os.environ["INFERENCE_BACKEND"] = INFERENCE_BACKEND
+    ENV["INFERENCE_BACKEND"] = INFERENCE_BACKEND
+
+# Cosmos3-Reasoner uses cosmos-reason2, Cosmos3 Generator uses
+# NVIDIA/cosmos-framework, and Alpamayo uses its own repo checkout. Set
+# COSMOS_DIR, COSMOS3_DIR, or ALPAMAYO_DIR to override the relevant checkout.
+if INFERENCE_BACKEND == "alpamayo":
+    _DEFAULT_WORK_DIR = f"{HOME}/amo-1-5"
+    REASON2_DIR = os.environ.get("COSMOS_DIR", os.environ.get("ALPAMAYO_DIR", _DEFAULT_WORK_DIR))
+elif INFERENCE_BACKEND == "cosmos3_native":
+    _DEFAULT_WORK_DIR = f"{HOME}/cosmos-framework"
+    REASON2_DIR = os.environ.get("COSMOS_DIR", os.environ.get("COSMOS3_DIR", _DEFAULT_WORK_DIR))
+    os.environ["COSMOS3_DIR"] = REASON2_DIR
+    ENV["COSMOS3_DIR"] = REASON2_DIR
+else:
+    _DEFAULT_WORK_DIR = f"{HOME}/cosmos-reason2"
+    REASON2_DIR = os.environ.get("COSMOS_DIR", _DEFAULT_WORK_DIR)
+
+MODELS_BASE = f"{REASON2_DIR}/models"
 HF_AUTH_REQUIRED = _cfg.get("hf_auth_required", not _cfg.get("hf_public", False))
 
 # Primary variant (first in list) drives MODEL_DIR/MODEL_NAME defaults
@@ -411,12 +443,16 @@ if MODEL_ID:
     # Only MODEL_NAME is updated to the explicit MODEL_ID override.
 
 # ── Dashboard: 9-step progress checklist ─────────────────────────────────────
+_REPO_STEP_LABEL = {
+    "alpamayo": "Alpamayo 1.5 repo",
+    "cosmos3_native": "cosmos-framework repo",
+}.get(INFERENCE_BACKEND, "cosmos-reason2 repo")
 STEP_LABELS = [
     "GPU detect + VRAM tier",
     "HF auth + token validate",
     "NGC API key",
     "uv install",
-    "cosmos-reason2 repo",
+    _REPO_STEP_LABEL,
     "uv sync + CUDA libs",
     "PyAV + frontend deps",
     "Model weights download",
@@ -696,9 +732,12 @@ ok(f"Model frontend capability: {_tower_label(MODEL_TOWERS)}")
 ok(f"Serving frontend tower: {_tower_label(FRONTEND_TOWERS)}")
 ok(f"Frontend app: {_GRADIO_APP_LABEL} ({GRADIO_APP})")
 if USE_REASON_VITE or USE_PREDICT_VITE:
-    ok(f"Primary Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
+    if USE_REASON_VITE:
+        ok(f"Primary Reason Vite app: {REASON_VITE_APP_DIR} on port {REASON_VITE_PORT}")
+    if USE_PREDICT_VITE:
+        ok(f"Primary Predict Vite app: {PREDICT_VITE_APP_DIR} on port {PREDICT_VITE_PORT}")
 if USE_PREDICT_VITE:
-    ok(f"Primary Predict Vite app: {PREDICT_VITE_APP_DIR} on port {PREDICT_VITE_PORT}")
+    info("Predict Vite will use the generation/Ray backend selected for this model.")
 if LAUNCH_BATCH_INFERENCE_COMPANION:
     ok(f"Companion Batch Inference UI requested on port {BATCH_INFERENCE_PORT}")
 ok(f"VRAM tier: {tier_name}  |  fps={gradio_fps}, max_pixels={max_pixels:,}, prefill_tps={prefill_tps}")
@@ -811,16 +850,31 @@ else:
 STEPS_DONE.append(4)
 
 # ── Step 5: model repo ───────────────────────────────────────────────────────
-_repo_label = "Alpamayo 1.5 repo" if INFERENCE_BACKEND == "alpamayo" else "cosmos-reason2 repo"
+if INFERENCE_BACKEND == "alpamayo":
+    _repo_label = "Alpamayo 1.5 repo"
+    _repo_url = "https://github.com/NVlabs/alpamayo1.5.git"
+elif INFERENCE_BACKEND == "cosmos3_native":
+    _repo_label = "cosmos-framework repo"
+    _repo_url = "https://github.com/NVIDIA/cosmos-framework.git"
+else:
+    _repo_label = "cosmos-reason2 repo"
+    _repo_url = "https://github.com/nvidia-cosmos/cosmos-reason2.git"
+
 header(f"Step 5 — {_repo_label}", eta="<5s if cached, ~15s first time")
-if os.path.exists(f"{REASON2_DIR}/.git") or (
+_repo_ready = os.path.exists(f"{REASON2_DIR}/.git")
+if INFERENCE_BACKEND == "cosmos3_native":
+    _repo_ready = _repo_ready and os.path.isdir(f"{REASON2_DIR}/cosmos_framework")
+if _repo_ready or (
     INFERENCE_BACKEND == "alpamayo"
     and os.path.exists(f"{REASON2_DIR}/pyproject.toml")
     and os.path.isdir(f"{REASON2_DIR}/src/alpamayo1_5")
 ):
     ok(f"{_repo_label} already cloned at {REASON2_DIR}")
 else:
-    _repo_url = "https://github.com/NVlabs/alpamayo1.5.git" if INFERENCE_BACKEND == "alpamayo" else "https://github.com/nvidia-cosmos/cosmos-reason2.git"
+    if os.path.exists(REASON2_DIR) and os.listdir(REASON2_DIR):
+        print(f"  ✗  {REASON2_DIR} exists but is not a usable {_repo_label}.")
+        print("     Set COSMOS_DIR/COSMOS3_DIR/ALPAMAYO_DIR to an empty path or move the existing directory.")
+        sys.exit(1)
     run(f"Cloning {_repo_label}  (~15s)")
     t0 = time.time()
     rc = stream_cmd(
@@ -839,10 +893,19 @@ if os.path.exists(venv_marker):
     if INFERENCE_BACKEND == "alpamayo":
         ENV["UV_NO_SYNC"] = "1"
         os.environ["UV_NO_SYNC"] = "1"
+    if INFERENCE_BACKEND == "cosmos3_native":
+        ENV["LD_LIBRARY_PATH"] = ""
+        os.environ["LD_LIBRARY_PATH"] = ""
     ok("virtualenv already present — skipping uv sync")
 else:
     _extras = os.environ.get("COSMOS_EXTRAS", "cu128")
-    run("Running Alpamayo uv sync  (~2-5 min)" if INFERENCE_BACKEND == "alpamayo" else f"Running uv sync --extra {_extras}  (~2-3 min)")
+    _cosmos3_group = os.environ.get("COSMOS3_UV_GROUP", "cu130-train")
+    if INFERENCE_BACKEND == "alpamayo":
+        run("Running Alpamayo uv sync  (~2-5 min)")
+    elif INFERENCE_BACKEND == "cosmos3_native":
+        run(f"Running uv sync --all-extras --group={_cosmos3_group}  (~2-5 min)")
+    else:
+        run(f"Running uv sync --extra {_extras}  (~2-3 min)")
     t0 = time.time()
     if INFERENCE_BACKEND == "alpamayo":
         rc, out = run_cmd(["uv", "sync"], cwd=REASON2_DIR, env=ENV, timeout=900)
@@ -857,9 +920,18 @@ else:
             if rc == 0:
                 ENV["ALPAMAYO_ATTENTION"] = "eager"
                 os.environ["ALPAMAYO_ATTENTION"] = "eager"
+    elif INFERENCE_BACKEND == "cosmos3_native":
+        ENV["LD_LIBRARY_PATH"] = ""
+        os.environ["LD_LIBRARY_PATH"] = ""
+        rc, out = run_cmd(
+            ["uv", "sync", "--all-extras", "--group", _cosmos3_group],
+            cwd=REASON2_DIR,
+            env=ENV,
+            timeout=1200,
+        )
     else:
         rc, out = run_cmd(["uv", "sync", "--extra", _extras], cwd=REASON2_DIR, env=ENV, timeout=600)
-    if rc != 0 and INFERENCE_BACKEND != "alpamayo":
+    if rc != 0 and INFERENCE_BACKEND not in ("alpamayo", "cosmos3_native"):
         run(f"{_extras} failed, trying uv sync without extras")
         rc, out = run_cmd(["uv", "sync"], cwd=REASON2_DIR, env=ENV, timeout=600)
     if rc != 0:
@@ -973,7 +1045,7 @@ if INFERENCE_BACKEND == "alpamayo":
             print("  ✗  qwen-vl-utils install failed:", out); sys.exit(1)
         ok("qwen-vl-utils installed")
 
-if USE_REASON_VITE:
+if USE_REASON_VITE or USE_PREDICT_VITE:
     def _activate_node_home():
         node_bin = os.path.join(NODE_HOME, "bin")
         node_path = os.path.join(node_bin, "node")
@@ -1177,6 +1249,8 @@ dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
 
 if INFERENCE_BACKEND == "nim_local":
     info("nim_local backend — skipping HF weights download (NIM container ships the model)")
+elif INFERENCE_BACKEND == "cosmos3_native":
+    info("cosmos3_native backend — skipping legacy HF snapshot download (cosmos-framework handles checkpoints)")
 else:
     for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants"]):
         step_label = f"Step 9{'abcde'[i]} — {var_label} weights ({var_dirname})"
@@ -1363,6 +1437,48 @@ if INFERENCE_BACKEND == "alpamayo":
     os.environ["ALPAMAYO_BASE_URL"] = _alpamayo_base
     os.environ["VLLM_BASE_URL"] = _alpamayo_base
 
+# ── Step 9-C: Cosmos3 Generator through NVIDIA/cosmos-framework ──────────────
+if INFERENCE_BACKEND == "cosmos3_native":
+    header("Step 9-C — Start cosmos-framework Ray Serve", eta="~2-10 min for first model load")
+    _cosmos3_launch = "/tmp/cosmos3_native_launch.sh"
+    if not os.path.exists(_cosmos3_launch):
+        print(f"  ✗  {_cosmos3_launch} not found — deploy cosmos3_native_launch.sh first"); sys.exit(1)
+
+    _cosmos3_checkpoint = os.environ.get("COSMOS3_CHECKPOINT", _cfg["variants"][0][1])
+    _cosmos3_serve_port = int(os.environ.get("COSMOS3_SERVE_PORT", "8000"))
+    _cosmos3_gradio_port = int(os.environ.get("COSMOS3_GRADIO_PORT", "8080"))
+    _cosmos3_output_dir = os.environ.get(
+        "COSMOS3_OUTPUT_DIR",
+        os.path.join(REASON2_DIR, "outputs", "ray_serve"),
+    )
+    _cosmos3_base = f"http://localhost:{_cosmos3_serve_port}"
+    info(f"Checkpoint: {_cosmos3_checkpoint} | Ray Serve: {_cosmos3_base} | framework dir: {REASON2_DIR}")
+    _cosmos3_env = {
+        **ENV,
+        "COSMOS3_DIR": REASON2_DIR,
+        "COSMOS3_CHECKPOINT": _cosmos3_checkpoint,
+        "COSMOS3_SERVE_PORT": str(_cosmos3_serve_port),
+        "COSMOS3_GRADIO_PORT": str(_cosmos3_gradio_port),
+        "COSMOS3_OUTPUT_DIR": _cosmos3_output_dir,
+        "COSMOS3_HOST": os.environ.get("COSMOS3_HOST", "0.0.0.0"),
+        "LD_LIBRARY_PATH": "",
+    }
+    rc = stream_cmd(["bash", _cosmos3_launch], env=_cosmos3_env, prefix="C3 │ ")
+    if rc != 0:
+        print(f"  ✗  cosmos-framework launch failed (rc={rc}). Logs: /tmp/cosmos3_serve.log + /tmp/cosmos3_gradio.log"); sys.exit(1)
+
+    os.environ["COSMOS3_BASE_URL"] = _cosmos3_base
+    os.environ["RAY_SERVE_BASE_URL"] = _cosmos3_base
+    os.environ["COSMOS3_BACKEND"] = "cosmos3_native"
+    os.environ["COSMOS3_OUTPUT_DIR"] = _cosmos3_output_dir
+    os.environ["COSMOS3_DIR"] = REASON2_DIR
+    # The framework router serves the default model under an empty key. Keep UI
+    # display names friendly, but send model="" in /generate requests.
+    os.environ.setdefault("COSMOS3_RAY_MODEL_NAME", "")
+    os.environ.setdefault("PREDICT_DISPLAY_MODEL", _cosmos3_checkpoint)
+    MODEL_NAME = _cosmos3_checkpoint
+    ok(f"cosmos-framework Ray Serve live at {_cosmos3_base}")
+
 # ── Step 9b: vLLM server auto-start (BUG-VLLM-AUTOSTART) ─────────────────────
 # In vLLM mode Gradio connects to localhost:8000. If vLLM isn't running, the first
 # inference request fails with "Connection refused". Start it here, before Gradio.
@@ -1423,6 +1539,10 @@ if not os.path.exists(GRADIO_APP):
 if os.path.exists(URL_FILE):
     os.remove(URL_FILE)
 
+_is_cosmos3_generator_backend = INFERENCE_BACKEND == "cosmos3_native" or (
+    INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower()
+)
+
 launch_env = {
     **ENV,
     "MODEL_SIZE":         MODEL_SIZE,
@@ -1448,21 +1568,29 @@ launch_env = {
     "NIM_IMAGE":          os.environ.get("NIM_IMAGE", os.environ.get("IMAGE", "")),
     "NIM_SERVED_MODEL_NAME": os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME),
     "COSMOS_MODEL_ID":    os.environ.get("COSMOS_MODEL_ID", os.environ.get("NIM_SERVED_MODEL_NAME", MODEL_NAME)),
-    "COSMOS_MODEL_COLLECTION": os.environ.get("COSMOS_MODEL_COLLECTION", "cosmos3" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "cosmos-predict1"),
-    "COSMOS_VIDEO_HEIGHT": os.environ.get("COSMOS_VIDEO_HEIGHT", "256" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "704"),
-    "COSMOS_VIDEO_WIDTH": os.environ.get("COSMOS_VIDEO_WIDTH", "448" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "1280"),
-    "COSMOS_VIDEO_FRAMES": os.environ.get("COSMOS_VIDEO_FRAMES", "25" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "121"),
+    "COSMOS_MODEL_COLLECTION": os.environ.get("COSMOS_MODEL_COLLECTION", "cosmos3" if _is_cosmos3_generator_backend else "cosmos-predict1"),
+    "COSMOS_VIDEO_HEIGHT": os.environ.get("COSMOS_VIDEO_HEIGHT", "256" if _is_cosmos3_generator_backend else "704"),
+    "COSMOS_VIDEO_WIDTH": os.environ.get("COSMOS_VIDEO_WIDTH", "448" if _is_cosmos3_generator_backend else "1280"),
+    "COSMOS_VIDEO_FRAMES": os.environ.get("COSMOS_VIDEO_FRAMES", "25" if _is_cosmos3_generator_backend else "121"),
     "COSMOS_VIDEO_FPS":   os.environ.get("COSMOS_VIDEO_FPS", "24"),
     "COSMOS_VIDEO_STEPS": os.environ.get("COSMOS_VIDEO_STEPS", "35"),
-    "COSMOS_GUIDANCE_SCALE": os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if INFERENCE_BACKEND == "nim_local" and "gen" in (MODEL_ID + MODEL_NAME).lower() else "7"),
+    "COSMOS_GUIDANCE_SCALE": os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if _is_cosmos3_generator_backend else "7"),
+    "COSMOS3_BACKEND":    os.environ.get("COSMOS3_BACKEND", INFERENCE_BACKEND),
+    "COSMOS3_BASE_URL":   os.environ.get("COSMOS3_BASE_URL", "http://localhost:8000"),
+    "RAY_SERVE_BASE_URL": os.environ.get("RAY_SERVE_BASE_URL", os.environ.get("COSMOS3_BASE_URL", "http://localhost:8000")),
+    "COSMOS3_OUTPUT_DIR": os.environ.get("COSMOS3_OUTPUT_DIR", os.path.join(REASON2_DIR, "outputs", "ray_serve")),
+    "COSMOS3_DIR":        os.environ.get("COSMOS3_DIR", REASON2_DIR if INFERENCE_BACKEND == "cosmos3_native" else ""),
+    "PREDICT_DISPLAY_MODEL": os.environ.get("PREDICT_DISPLAY_MODEL", MODEL_NAME),
     "VLLM_API_KEY":       os.environ.get("VLLM_API_KEY", "EMPTY"),
     "COSMOS_EXTRAS":      os.environ.get("COSMOS_EXTRAS", "cu128"),
     "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     # MAXLEN-001: always pass explicitly — never rely on vLLM default (8192 breaks video queries)
     "VLLM_MAX_MODEL_LEN": str(_cfg.get("vllm_max_model_len", VLLM_MAX_MODEL_LEN)),
     # PRELOAD-001: skip HF preload when using API-backed servers.
-    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") else "0",
+    "SKIP_HF_PRELOAD":    "1" if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo", "cosmos3_native") else "0",
 }
+if INFERENCE_BACKEND == "cosmos3_native" or "COSMOS3_RAY_MODEL_NAME" in os.environ:
+    launch_env["COSMOS3_RAY_MODEL_NAME"] = os.environ.get("COSMOS3_RAY_MODEL_NAME", "")
 
 def _detect_host_ip():
     env_ip = os.environ.get("BYO_VIDEO_LOCAL_HOST")

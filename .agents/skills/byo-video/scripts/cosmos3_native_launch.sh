@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# cosmos3_native_launch.sh — wrap the upstream nvidia-cosmos/cosmos3 stack for /byo-video.
+# cosmos3_native_launch.sh — wrap NVIDIA/cosmos-framework for /byo-video.
 #
 # Invoked when INFERENCE_BACKEND=cosmos3_native (i.e. for the Cosmos3 OSS *Generator*
 # checkpoints — Cosmos3-Nano, Cosmos3-Super). Starts Ray Serve on :8000 and the upstream
-# Gradio frontend on :8080, then writes the URL files our skill polls for.
+# framework Gradio frontend on :8080, then writes the URL files our skill polls for.
 #
 # Env:
-#   COSMOS3_DIR          Local checkout of nvidia-cosmos/cosmos3 (default: ~/cosmos3)
+#   COSMOS3_DIR          Local checkout of NVIDIA/cosmos-framework (default: ~/cosmos-framework)
 #   COSMOS3_CHECKPOINT   --checkpoint-path arg ("Cosmos3-Nano" | "Cosmos3-Super"). Required.
 #   COSMOS3_GRADIO_PORT  Gradio bind port (default: 8080)
 #   COSMOS3_SERVE_PORT   Ray Serve bind port (default: 8000)
 #   COSMOS3_HOST         Gradio bind host (default: 0.0.0.0 — required for off-box access)
 #   COSMOS3_PARALLELISM  --parallelism-preset (default: latency)
 #   COSMOS3_OUTPUT_DIR   --o <dir> (default: outputs/ray_serve)
+#   COSMOS3_MAX_WAIT     Seconds to wait for Ray Serve /info (default: 2400)
 #
 # Writes:
-#   /tmp/gradio_url.txt              http://<host>:<port>  (the upstream Gradio URL)
-#   /tmp/gradio_live.flag            sentinel: "live\n" once /v1/models-style ready
+#   /tmp/gradio_url.txt              http://<host>:<port>  (the framework Gradio URL)
+#   /tmp/cosmos3_framework_gradio_url.txt
+#   /tmp/gradio_live.flag            sentinel: "live\n" once Gradio is reachable
 #   /tmp/cosmos3_serve.log           Ray Serve stdout/stderr
 #   /tmp/cosmos3_gradio.log          Gradio stdout/stderr
 #
@@ -27,19 +29,21 @@
 
 set -u
 
-COSMOS3_DIR="${COSMOS3_DIR:-$HOME/cosmos3}"
+COSMOS3_DIR="${COSMOS3_DIR:-$HOME/cosmos-framework}"
 COSMOS3_CHECKPOINT="${COSMOS3_CHECKPOINT:?COSMOS3_CHECKPOINT must be Cosmos3-Nano or Cosmos3-Super}"
 COSMOS3_GRADIO_PORT="${COSMOS3_GRADIO_PORT:-8080}"
 COSMOS3_SERVE_PORT="${COSMOS3_SERVE_PORT:-8000}"
 COSMOS3_HOST="${COSMOS3_HOST:-0.0.0.0}"
 COSMOS3_PARALLELISM="${COSMOS3_PARALLELISM:-latency}"
 COSMOS3_OUTPUT_DIR="${COSMOS3_OUTPUT_DIR:-outputs/ray_serve}"
+COSMOS3_MAX_WAIT="${COSMOS3_MAX_WAIT:-2400}"
+COSMOS3_UV_GROUP="${COSMOS3_UV_GROUP:-cu130-train}"
 
 if [[ ! -d "$COSMOS3_DIR" ]]; then
   echo "✗ COSMOS3_DIR=$COSMOS3_DIR not found." >&2
   echo "  Install first:" >&2
-  echo "    git clone https://github.com/nvidia-cosmos/cosmos3.git \"$COSMOS3_DIR\"" >&2
-  echo "    cd \"$COSMOS3_DIR\" && uv sync --all-extras --group=cu130-train" >&2
+  echo "    git clone https://github.com/NVIDIA/cosmos-framework.git \"$COSMOS3_DIR\"" >&2
+  echo "    cd \"$COSMOS3_DIR\" && uv sync --all-extras --group=$COSMOS3_UV_GROUP" >&2
   exit 1
 fi
 
@@ -53,15 +57,15 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 cd "$COSMOS3_DIR"
-export LD_LIBRARY_PATH=    # required per cosmos3 setup.md (PyTorch _C import fix)
+export LD_LIBRARY_PATH=    # required per cosmos-framework setup guidance (PyTorch _C import fix)
 
 mkdir -p "$COSMOS3_OUTPUT_DIR"
 : > /tmp/cosmos3_serve.log
 : > /tmp/cosmos3_gradio.log
-rm -f /tmp/gradio_live.flag /tmp/gradio_url.txt
+rm -f /tmp/gradio_live.flag /tmp/gradio_url.txt /tmp/cosmos3_framework_gradio_url.txt
 
-echo "→ Starting Ray Serve (cosmos3.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
-nohup uv run --no-sync python -m cosmos3.ray.serve \
+echo "→ Starting Ray Serve (cosmos_framework.inference.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
+nohup uv run --no-sync python -m cosmos_framework.inference.ray.serve \
     --parallelism-preset="$COSMOS3_PARALLELISM" \
     --keep-going \
     -o "$COSMOS3_OUTPUT_DIR" \
@@ -69,23 +73,23 @@ nohup uv run --no-sync python -m cosmos3.ray.serve \
     > /tmp/cosmos3_serve.log 2>&1 &
 echo $! > /tmp/cosmos3_serve.pid
 
-echo "→ Waiting up to 180s for Ray Serve to bind :$COSMOS3_SERVE_PORT"
-for i in $(seq 1 60); do
-  if ss -ltn 2>/dev/null | grep -q ":${COSMOS3_SERVE_PORT}\b"; then
-    echo "✓ Ray Serve listening on :$COSMOS3_SERVE_PORT (after ${i}×3s)"
+echo "→ Waiting up to ${COSMOS3_MAX_WAIT}s for Ray Serve /info on :$COSMOS3_SERVE_PORT"
+for i in $(seq 1 "$COSMOS3_MAX_WAIT"); do
+  if curl -fsS "http://localhost:${COSMOS3_SERVE_PORT}/info" >/dev/null 2>&1; then
+    echo "✓ Ray Serve ready on :$COSMOS3_SERVE_PORT (after ${i}s)"
     break
   fi
-  sleep 3
+  sleep 1
 done
 
-if ! ss -ltn 2>/dev/null | grep -q ":${COSMOS3_SERVE_PORT}\b"; then
-  echo "✗ Ray Serve did not bind :$COSMOS3_SERVE_PORT within 180s. Last 30 log lines:" >&2
+if ! curl -fsS "http://localhost:${COSMOS3_SERVE_PORT}/info" >/dev/null 2>&1; then
+  echo "✗ Ray Serve did not become ready on :$COSMOS3_SERVE_PORT within ${COSMOS3_MAX_WAIT}s. Last 30 log lines:" >&2
   tail -30 /tmp/cosmos3_serve.log >&2 || true
   exit 2
 fi
 
-echo "→ Starting Gradio (cosmos3.ray.gradio) on $COSMOS3_HOST:$COSMOS3_GRADIO_PORT"
-nohup uv run --no-sync python -m cosmos3.ray.gradio \
+echo "→ Starting Gradio (cosmos_framework.inference.ray.gradio) on $COSMOS3_HOST:$COSMOS3_GRADIO_PORT"
+nohup uv run --no-sync python -m cosmos_framework.inference.ray.gradio \
     --host "$COSMOS3_HOST" \
     --port "$COSMOS3_GRADIO_PORT" \
     --server-host localhost \
@@ -101,6 +105,7 @@ for i in $(seq 1 30); do
     [[ -z "$PUBLIC_HOST" ]] && PUBLIC_HOST="$COSMOS3_HOST"
     URL="http://${PUBLIC_HOST}:${COSMOS3_GRADIO_PORT}"
     echo "$URL" > /tmp/gradio_url.txt
+    echo "$URL" > /tmp/cosmos3_framework_gradio_url.txt
     echo "live" > /tmp/gradio_live.flag
     echo "✓ Gradio live at $URL"
     exit 0

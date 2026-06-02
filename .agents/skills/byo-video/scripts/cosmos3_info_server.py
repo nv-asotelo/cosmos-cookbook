@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """cosmos3_info_server.py — Active-model probe for byo-video frontends.
 
-Runs on the same host as `cosmos3.ray.serve` and exposes a single HTTP route
-that returns the actual loaded checkpoint name. The cosmos3 Ray Serve `/info`
+Runs on the same host as `cosmos_framework.inference.ray.serve` and exposes a single HTTP route
+that returns the actual loaded checkpoint name. The cosmos-framework Ray Serve `/info`
 endpoint does not include the checkpoint identity — it lives in the
 `--checkpoint-path` CLI arg of the running process. This shim reads that arg
 plus a few host-level signals (GPU name, VRAM, SSD, cosmos3 version, commit)
@@ -60,7 +60,7 @@ def _probe_checkpoint() -> str | None:
     except Exception:
         return None
     for line in out.splitlines():
-        if "cosmos3.ray.serve" in line:
+        if "cosmos_framework.inference.ray.serve" in line or "cosmos3.ray.serve" in line:
             m = CHECKPOINT_RE.search(line)
             if m:
                 return m.group(1)
@@ -80,7 +80,7 @@ def _probe_backend_name() -> str:
         ps = subprocess.check_output(["ps", "-Ao", "args"], text=True, timeout=4, errors="replace").lower()
     except Exception:
         return "unknown"
-    if "cosmos3.ray.serve" in ps:
+    if "cosmos_framework.inference.ray.serve" in ps or "cosmos3.ray.serve" in ps:
         return "Ray Serve (cosmos3_native)"
     if "vllm" in ps:
         return "vLLM"

@@ -123,7 +123,7 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `scripts/byo_video_runtime_monitor.py`: runtime health, alert, and metrics monitor.
 - `scripts/nim_runtime_monitor.py` and `scripts/nim_param_table.json`: NIM boot/readiness monitor and launch-parameter notes from the smoke sprints.
 - `scripts/gradio_cosmos_predict.py` and `scripts/gradio_cosmos_transfer.py`: generation frontends for the Cosmos Predict/Transfer BYO-video variants.
-- `scripts/cosmos3_native_launch.sh`: wraps the upstream `nvidia-cosmos/cosmos3` Ray Serve + Gradio stack
+- `scripts/cosmos3_native_launch.sh`: wraps the `NVIDIA/cosmos-framework` Ray Serve + Gradio stack
   for the Cosmos3 OSS *Generator* checkpoints (Cosmos3-Nano, Cosmos3-Super). Invoked under
   `INFERENCE_BACKEND=cosmos3_native` (auto-set when `MODEL_SIZE` is `C3-NANO-GEN` or `C3-SUPER-GEN`).
   See the "Cosmos3 OSS Backend Routing" section of the runbook.

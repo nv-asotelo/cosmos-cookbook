@@ -1,6 +1,6 @@
 """Cosmos3 Omni Generator (with upload + telemetry).
 
-A wrapper for `cosmos3.ray.gradio` that:
+A wrapper for `cosmos_framework.inference.ray.gradio` that:
   * adds a real image upload widget (drag-and-drop) for i2v / i2i,
   * adds a real video upload widget for v2v / robotics-policy modes,
   * surfaces a top status bar with VRAM free / SSD free / backend name,
@@ -22,8 +22,8 @@ Telemetry source-of-truth:
 
 Telemetry refresh: 5s tick via gr.Timer.
 
-Run on the same host as Ray Serve, with the cosmos3 venv:
-    cd ~/cosmos3
+Run on the same host as Ray Serve, with the cosmos-framework venv:
+    cd ~/cosmos-framework
     uv run --no-sync python ~/cosmos3_upload_gradio.py \
         --host 0.0.0.0 --port 8080 \
         --server-host localhost --server-port 8000 \
@@ -40,9 +40,9 @@ from pathlib import Path
 
 import gradio as gr
 
-from cosmos3.args import OmniSampleOverrides
-from cosmos3.common.args import tyro_cli
-from cosmos3.ray.gradio import (
+from cosmos_framework.inference.args import OmniSampleOverrides
+from cosmos_framework.inference.common.args import tyro_cli
+from cosmos_framework.inference.ray.gradio import (
     Args,
     COMPONENTS,
     EXCLUDE_FIELDS,
@@ -131,16 +131,16 @@ def _backend_probe() -> dict:
     ps_l = ps.lower()
     checkpoint = None
     for line in ps.splitlines():
-        if "cosmos3.ray.serve" in line:
+        if "cosmos_framework.inference.ray.serve" in line or "cosmos3.ray.serve" in line:
             m = _CHECKPOINT_RE.search(line)
             if m:
                 checkpoint = m.group(1)
                 break
-    if "cosmos3.ray.serve" in ps_l or "ray::proxyactor" in ps_l:
+    if "cosmos_framework.inference.ray.serve" in ps_l or "cosmos3.ray.serve" in ps_l or "ray::proxyactor" in ps_l:
         return {
             "name": "Ray Serve (cosmos3_native)",
             "port": 8000,
-            "framework": "cosmos3",
+            "framework": "cosmos-framework",
             "checkpoint": checkpoint,
         }
     if "vllm" in ps_l:

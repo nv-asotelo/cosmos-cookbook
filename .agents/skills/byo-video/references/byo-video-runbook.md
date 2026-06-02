@@ -102,8 +102,8 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 |---|---|---|---|---|
 | `nvidia/Cosmos3-Nano-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-8B` |
 | `nvidia/Cosmos3-Super-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-super` |
-| `nvidia/Cosmos3-Nano` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-NANO-GEN` |
-| `nvidia/Cosmos3-Super` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | cosmos3 upstream package | `C3-SUPER-GEN` |
+| `nvidia/Cosmos3-Nano` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | `NVIDIA/cosmos-framework` | `C3-NANO-GEN` |
+| `nvidia/Cosmos3-Super` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | `NVIDIA/cosmos-framework` | `C3-SUPER-GEN` |
 
 **Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`. Current HF API checks return auth-required for `nvidia/Cosmos3-Nano-Reasoner` and `nvidia/Cosmos3-Super-Reasoner`, so set `HF_TOKEN` with the required access before launch. For `MODEL_SIZE=C3-8B` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
 
@@ -111,11 +111,11 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 
 **Next.js source-capture frontends** live in `apps/nvidia-build-reason-next` and `apps/nvidia-build-predict-next`. They share the same `/api/models`, `/api/active-model`, `/api/reason`, and `/api/predict` contract as the Vite apps and are useful as editable reference captures; launch only the capture that matches the loaded model tower when comparing against the Vite primary.
 
-**Generators** require the upstream `nvidia-cosmos/cosmos3` package and a different runtime:
+**Generators** require `NVIDIA/cosmos-framework` and a different runtime:
 
 ```
-git clone https://github.com/nvidia-cosmos/cosmos3.git ~/cosmos3
-cd ~/cosmos3 && uv sync --all-extras --group=cu130-train
+git clone https://github.com/NVIDIA/cosmos-framework.git ~/cosmos-framework
+cd ~/cosmos-framework && uv sync --all-extras --group=cu130-train
 ```
 
 Then launch via the bundled helper `scripts/cosmos3_native_launch.sh` (deployed to `/tmp/cosmos3_native_launch.sh` on the target):
@@ -124,18 +124,19 @@ Then launch via the bundled helper `scripts/cosmos3_native_launch.sh` (deployed 
 COSMOS3_CHECKPOINT=Cosmos3-Nano  bash /tmp/cosmos3_native_launch.sh   # or Cosmos3-Super
 ```
 
-The helper starts `python -m cosmos3.ray.serve` on `:8000` and `python -m cosmos3.ray.gradio --host 0.0.0.0 --port 8080`, writes `/tmp/gradio_url.txt` (`http://<host>:8080`) and `/tmp/gradio_live.flag`, and leaves PIDs in `/tmp/cosmos3_serve.pid` and `/tmp/cosmos3_gradio.pid` for clean teardown.
+The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000` and `python -m cosmos_framework.inference.ray.gradio --host 0.0.0.0 --port 8080`, writes `/tmp/gradio_url.txt` (`http://<host>:8080`), `/tmp/cosmos3_framework_gradio_url.txt`, and `/tmp/gradio_live.flag`, and leaves PIDs in `/tmp/cosmos3_serve.pid` and `/tmp/cosmos3_gradio.pid` for clean teardown.
 
 **Smoke trace (horde@10.57.233.111, RTX PRO 6000 Blackwell, driver 575, 2026-05-12):**
 - `uv sync --all-extras --group=cu130-train` completed (~5 min, +11 GB venv).
-- `cosmos3.scripts.inference --help` and `cosmos3.ray.gradio --help` return clean.
-- `import cosmos3` resolves to `/home/horde/cosmos3/cosmos3/__init__.py`.
-- Full weight-download + Ray Serve boot deferred to follow-up commit (Cosmos3-Nano ~30 GB; Cosmos3-Super ~60 GB).
+- `cosmos_framework.scripts.inference --help` and `cosmos_framework.inference.ray.gradio --help` return clean.
+- `import cosmos_framework` resolves to `/home/horde/cosmos-framework/cosmos_framework/__init__.py`.
+- Fresh checkpoint download + Ray Serve boot still takes several minutes on first run (Cosmos3-Nano ~30 GB; Cosmos3-Super ~60 GB).
 
-**Open integration items** (follow-up):
+**Setup integration:**
 
-- `byo_video_setup.py` Step 9 / Step 10 currently branch only on `vllm`, `hf`, and `nim_local`. The `cosmos3_native` path is wired into `_MODEL_CONFIGS` and the runbook here, but Step 10 still calls into the legacy Gradio app. Until the setup script branches on `INFERENCE_BACKEND=cosmos3_native`, invoke the helper manually on the target after the install lands.
-- `cosmos3.ray.gradio` exposes no `--share` flag, but `scripts/cosmos3_upload_gradio.py` (our wrapper) does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:8080`) and SSH port-forward (`ssh -L 8080:localhost:8080 <user@host>`) is the most VPN-tolerant fallback.
+- `byo_video_setup.py` auto-selects `INFERENCE_BACKEND=cosmos3_native` for `MODEL_SIZE=C3-NANO-GEN` and `MODEL_SIZE=C3-SUPER-GEN` unless the caller explicitly asks for `INFERENCE_BACKEND=nim_local` to test a NIM image.
+- Step 5 clones `NVIDIA/cosmos-framework`, Step 6 runs `uv sync --all-extras --group=${COSMOS3_UV_GROUP:-cu130-train}`, Step 9 launches `scripts/cosmos3_native_launch.sh`, and Step 10 launches the Predict Vite primary plus the required BYO Gradio fallback.
+- `cosmos_framework.inference.ray.gradio` exposes no `--share` flag, but `scripts/cosmos3_upload_gradio.py` (our wrapper) does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:8080`) and SSH port-forward (`ssh -L 8080:localhost:8080 <user@host>`) is the most VPN-tolerant fallback.
 
 ---
 
@@ -157,7 +158,7 @@ PyTorch has CUDA Version=13.0 and torchvision has CUDA Version=12.8.
 The fix is documented in `docs/setup.md` under "Advanced: custom torch/cuda versions" but easy to miss. Force-install both with an explicit backend pin:
 
 ```bash
-cd ~/cosmos3
+cd ~/cosmos-framework
 uv pip install 'torch==2.10.0' 'torchvision==0.25.0' --reinstall --torch-backend=cu128
 ```
 
@@ -168,7 +169,7 @@ uv run --no-sync python -c \
   'import torch, torchvision; torchvision.extension._check_cuda_version(); print("OK")'
 ```
 
-Finally, **the launcher must use `uv run --no-sync python -m ...`** when invoking `cosmos3.ray.serve` / `cosmos3.ray.gradio`. Without `--no-sync`, `uv run` auto-resolves dependencies on every invocation and re-installs the cu130 wheel from its cache, silently undoing the manual pin. The bundled `scripts/cosmos3_native_launch.sh` already passes `--no-sync`.
+Finally, **the launcher must use `uv run --no-sync python -m ...`** when invoking `cosmos_framework.inference.ray.serve` / `cosmos_framework.inference.ray.gradio`. Without `--no-sync`, `uv run` auto-resolves dependencies on every invocation and re-installs the cu130 wheel from its cache, silently undoing the manual pin. The bundled `scripts/cosmos3_native_launch.sh` already passes `--no-sync`.
 
 ---
 
@@ -188,7 +189,7 @@ Source: internal benchmark `Cosmos 3 vs Cosmos Predict 2.5.xlsx` (pivot table) �
 | Num frames | Form default (model default 189) | Lower this to halve diffusion time at the cost of clip duration |
 | Seed | `0` | Pin for reproducibility; leave blank for random |
 | Sampler | `unipc` | Default in `OmniSetupArgs` |
-| Num steps | 35 (default) | What the live `cosmos3.ray.serve` uses |
+| Num steps | 35 (default) | What the live `cosmos_framework.inference.ray.serve` uses |
 | Vision path | URL or `/path/on/server` | The upload wrapper sets this automatically when you drop an image |
 
 ### ETA table (1× GPU, 480p i2v, steady-state)
@@ -221,7 +222,7 @@ From the internal Diffusion Speed leaderboard:
 2. Pin Resolution=480p, FPS=24, Seed=0 in the form. Reproducible + ~70 s per clip.
 3. Pre-upload the conditioning image (the upload widget writes to `/tmp` and updates `vision_path` automatically; first-fetch from a remote URL adds 1–3 s).
 4. If demo audience is on VPN: use the gradio.live URL when available (`ui.launch(share=True)` in `cosmos3_upload_gradio.py`) — long-poll reconnect tolerates short network drops mid-inference. If frpc is blocked, fall back to SSH port-forward.
-5. The mp4 lands in `~/cosmos3/outputs/ray_serve/generate_<timestamp>_<short>/vision.mp4` on the server; the Gradio gallery streams it from `allowed_paths`.
+5. The mp4 lands in `~/cosmos-framework/outputs/ray_serve/generate_<timestamp>_<short>/vision.mp4` on the server; the Gradio gallery streams it from `allowed_paths`.
 
 ---
 
@@ -351,7 +352,7 @@ AskUserQuestion({
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
 | Q1 Backend | NIM (local Docker) | `INFERENCE_BACKEND=nim_local` · `NIM_IMAGE=nvcr.io/nim/nvidia/<model-short-id>:latest` (resolved from MODEL_ID) · requires `NGC_API_KEY` |
-| Q1 Backend | Cosmos3 native (auto) | `INFERENCE_BACKEND=cosmos3_native` — auto-selected when `MODEL_SIZE ∈ {C3-NANO-GEN, C3-SUPER-GEN}`; wraps the upstream `nvidia-cosmos/cosmos3` Ray Serve + Gradio stack. See "Cosmos3 OSS Backend Routing" below. |
+| Q1 Backend | Cosmos3 native (auto) | `INFERENCE_BACKEND=cosmos3_native` — auto-selected when `MODEL_SIZE ∈ {C3-NANO-GEN, C3-SUPER-GEN}`; wraps the `NVIDIA/cosmos-framework` Ray Serve + Gradio stack. See "Cosmos3 OSS Backend Routing" below. |
 | Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
 | Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
 | Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
@@ -412,8 +413,8 @@ AskUserQuestion({
       options: [
         { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — chat VLM, ~16 GB BF16, vLLM-served, HF_TOKEN may be required" },
         { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — chat VLM, ~60 GB BF16, vLLM-served, HF_TOKEN may be required" },
-        { label: "Cosmos3-Nano (Generator)",  description: "nvidia/Cosmos3-Nano — diffusion video gen (t2i/t2v/i2v), ~30 GB; needs cosmos3 upstream package" },
-        { label: "Cosmos3-Super (Generator)", description: "nvidia/Cosmos3-Super — diffusion video gen (t2i/t2v/i2v), ~60 GB; needs cosmos3 upstream package" }
+        { label: "Cosmos3-Nano (Generator)",  description: "nvidia/Cosmos3-Nano — diffusion video gen (t2i/t2v/i2v), ~30 GB; needs NVIDIA/cosmos-framework" },
+        { label: "Cosmos3-Super (Generator)", description: "nvidia/Cosmos3-Super — diffusion video gen (t2i/t2v/i2v), ~60 GB; needs NVIDIA/cosmos-framework" }
       ]
     }
   ]
@@ -699,13 +700,15 @@ for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos
 done
 ```
 
-**Step 2** — Deploy optional NIM helpers when `INFERENCE_BACKEND=nim_local`:
+**Step 2** — Deploy shell helpers for NIM and Cosmos3 generator backends:
 
 ```bash
 B64=$(base64 -i "$SCRIPT_DIR/nim_catalog.py" | tr -d '\n')
 brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').write(base64.b64decode('${B64}'))\""
 B64=$(base64 -i "$SCRIPT_DIR/nim_launch.sh" | tr -d '\n')
 brev exec <name> "python3 -c \"import base64; open('/tmp/nim_launch.sh','wb').write(base64.b64decode('${B64}'))\" && chmod +x /tmp/nim_launch.sh"
+B64=$(base64 -i "$SCRIPT_DIR/cosmos3_native_launch.sh" | tr -d '\n')
+brev exec <name> "python3 -c \"import base64; open('/tmp/cosmos3_native_launch.sh','wb').write(base64.b64decode('${B64}'))\" && chmod +x /tmp/cosmos3_native_launch.sh"
 ```
 
 If a script exceeds the shell argument buffer, use `brev copy "$SCRIPT_DIR/<script>" <name>:/tmp/<script>` instead of base64.

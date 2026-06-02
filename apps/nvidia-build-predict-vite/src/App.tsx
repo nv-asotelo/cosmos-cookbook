@@ -415,6 +415,7 @@ const DEFAULT_CONTENT_ITEM =
   findContentItem(CONTENT_SELECT_GROUPS, "robot-cutting-board-sorting") ?? CONTENT_SELECT_GROUPS[0].items[0];
 const DEFAULT_PROMPT = DEFAULT_CONTENT_ITEM.prompt;
 const DEFAULT_CONTENT_PARAMS = visibleParams(DEFAULT_CONTENT_ITEM.params);
+const DEFAULT_ADVANCED_PARAMS = advancedParams(DEFAULT_CONTENT_ITEM.params);
 
 function visibleParams(params?: GenerationParams) {
   return {
@@ -424,6 +425,14 @@ function visibleParams(params?: GenerationParams) {
     steps: params?.steps ?? QUICK_VIDEO_PARAMS.num_steps,
     guidance: params?.guidance ?? QUICK_VIDEO_PARAMS.guidance,
     seed: params?.seed ?? 0
+  };
+}
+
+function advancedParams(params?: GenerationParams) {
+  return {
+    imageSize: params?.imageSize ?? CANONICAL_SAMPLE_PARAMS.imageSize ?? 256,
+    shift: params?.shift ?? CANONICAL_SAMPLE_PARAMS.shift ?? 10,
+    sigmaMax: params?.sigmaMax ?? CANONICAL_SAMPLE_PARAMS.sigmaMax ?? 80
   };
 }
 
@@ -618,6 +627,9 @@ export default function Page() {
   const [guidanceScale, setGuidanceScale] = useState(DEFAULT_CONTENT_PARAMS.guidance);
   const [steps, setSteps] = useState(DEFAULT_CONTENT_PARAMS.steps);
   const [seed, setSeed] = useState(DEFAULT_CONTENT_PARAMS.seed);
+  const [imageSize, setImageSize] = useState(DEFAULT_ADVANCED_PARAMS.imageSize);
+  const [shift, setShift] = useState(DEFAULT_ADVANCED_PARAMS.shift);
+  const [sigmaMax, setSigmaMax] = useState(DEFAULT_ADVANCED_PARAMS.sigmaMax);
   const [status, setStatus] = useState("Ready");
   const [isRunning, setIsRunning] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
@@ -746,6 +758,7 @@ export default function Page() {
 
   function applyExample(example: ExampleItem) {
     const params = visibleParams(example.params);
+    const advanced = advancedParams(example.params);
     setSelectedExampleId(example.id);
     setGeneratorMode(example.mode);
     setPrompt(example.prompt);
@@ -755,6 +768,9 @@ export default function Page() {
     setSteps(params.steps);
     setGuidanceScale(params.guidance);
     setSeed(params.seed);
+    setImageSize(advanced.imageSize);
+    setShift(advanced.shift);
+    setSigmaMax(advanced.sigmaMax);
     setMedia(
       example.mediaUrl
         ? {
@@ -793,6 +809,7 @@ export default function Page() {
       ]);
       if (contentLoadTokenRef.current !== loadToken) return;
       const params = visibleParams(item.params);
+      const advanced = advancedParams(item.params);
       setSelectedContentItemId(item.id);
       setGeneratorMode("Image-to-Video");
       setPrompt(item.prompt);
@@ -802,6 +819,9 @@ export default function Page() {
       setSteps(params.steps);
       setGuidanceScale(params.guidance);
       setSeed(params.seed);
+      setImageSize(advanced.imageSize);
+      setShift(advanced.shift);
+      setSigmaMax(advanced.sigmaMax);
       setMedia(contentItemToMedia(item));
       setSelectedPreviewVideo({ url: item.previewVideoUrl, name: item.previewVideoName });
       setStatus("Ready");
@@ -826,6 +846,7 @@ export default function Page() {
 
   function reset() {
     const params = visibleParams(DEFAULT_CONTENT_ITEM.params);
+    const advanced = advancedParams(DEFAULT_CONTENT_ITEM.params);
     contentLoadTokenRef.current += 1;
     setLoadingContentItemId(null);
     setModel(DEFAULT_MODEL);
@@ -838,6 +859,9 @@ export default function Page() {
     setGuidanceScale(params.guidance);
     setSteps(params.steps);
     setSeed(params.seed);
+    setImageSize(advanced.imageSize);
+    setShift(advanced.shift);
+    setSigmaMax(advanced.sigmaMax);
     setSelectedExampleId(EXAMPLES[0].id);
     setSelectedContentItemId(DEFAULT_CONTENT_ITEM.id);
     setSelectedPreviewVideo({ url: DEFAULT_CONTENT_ITEM.previewVideoUrl, name: DEFAULT_CONTENT_ITEM.previewVideoName });
@@ -905,14 +929,15 @@ export default function Page() {
           seed,
           actionMode: generatorMode === "Action Policy" ? activeExample.params?.actionMode ?? "policy" : undefined,
           domainName: generatorMode === "Action Policy" ? activeExample.params?.domainName : undefined,
-          imageSize: generationParams?.imageSize,
+          imageSize: generatorMode === "Action Policy" ? generationParams?.imageSize : imageSize,
           actionChunkSize: generatorMode === "Action Policy" ? activeExample.params?.actionChunkSize : undefined,
           rawActionDim: generatorMode === "Action Policy" ? activeExample.params?.rawActionDim : undefined,
-          shift: generationParams?.shift,
+          shift: generatorMode === "Action Policy" ? generationParams?.shift : shift,
           negativePrompt: generationParams?.negativePrompt,
           conditionFrameIndexesVision: generationParams?.conditionFrameIndexesVision,
+          conditionVideoKeep: generationParams?.conditionVideoKeep,
           modelMode: generationParams?.modelMode,
-          sigmaMax: generationParams?.sigmaMax,
+          sigmaMax: generatorMode === "Action Policy" ? generationParams?.sigmaMax : sigmaMax,
           guidanceInterval: generationParams?.guidanceInterval,
           normalizeCfg: generationParams?.normalizeCfg,
           videoSaveQuality: generationParams?.videoSaveQuality,
@@ -1162,6 +1187,27 @@ export default function Page() {
               value={prompt}
               onChange={setPrompt}
               rows={4}
+            />
+
+            <ModelParameterControls
+              fps={fps}
+              guidanceScale={guidanceScale}
+              imageSize={imageSize}
+              numFrames={numFrames}
+              resolution={String(resolution)}
+              seed={seed}
+              setFps={setFps}
+              setGuidanceScale={setGuidanceScale}
+              setImageSize={setImageSize}
+              setNumFrames={setNumFrames}
+              setResolution={setResolution}
+              setSeed={setSeed}
+              setShift={setShift}
+              setSigmaMax={setSigmaMax}
+              setSteps={setSteps}
+              shift={shift}
+              sigmaMax={sigmaMax}
+              steps={steps}
             />
 
             <div className="runBar">
@@ -1564,6 +1610,112 @@ function CuratedOutputPreview({ item = DEFAULT_CONTENT_ITEM }: { item?: ContentS
         <p>Canonical output is preloaded. Run the active backend again to create a fresh video.</p>
       </div>
     </article>
+  );
+}
+
+function ModelParameterControls({
+  fps,
+  guidanceScale,
+  imageSize,
+  numFrames,
+  resolution,
+  seed,
+  setFps,
+  setGuidanceScale,
+  setImageSize,
+  setNumFrames,
+  setResolution,
+  setSeed,
+  setShift,
+  setSigmaMax,
+  setSteps,
+  shift,
+  sigmaMax,
+  steps
+}: {
+  fps: number;
+  guidanceScale: number;
+  imageSize: number;
+  numFrames: number;
+  resolution: string;
+  seed: number;
+  setFps: (value: number) => void;
+  setGuidanceScale: (value: number) => void;
+  setImageSize: (value: number) => void;
+  setNumFrames: (value: number) => void;
+  setResolution: (value: string) => void;
+  setSeed: (value: number) => void;
+  setShift: (value: number) => void;
+  setSigmaMax: (value: number) => void;
+  setSteps: (value: number) => void;
+  shift: number;
+  sigmaMax: number;
+  steps: number;
+}) {
+  return (
+    <section className="parameterShell" aria-label="Model parameters">
+      <div className="parameterTopline">
+        <h3>Model Parameters</h3>
+        <span>Applied on Generate</span>
+      </div>
+      <div className="parameterGrid">
+        <label className="numberField">
+          <span>Resolution</span>
+          <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
+            <option value="480">480</option>
+            <option value="720">720</option>
+            <option value="256">256</option>
+          </select>
+        </label>
+        <NumberControl label="Frames" min={1} max={189} step={1} value={numFrames} onChange={setNumFrames} />
+        <NumberControl label="Steps" min={1} max={80} step={1} value={steps} onChange={setSteps} />
+        <NumberControl label="FPS" min={1} max={60} step={1} value={fps} onChange={setFps} />
+        <NumberControl label="Guidance" min={0} max={20} step={0.5} value={guidanceScale} onChange={setGuidanceScale} />
+        <NumberControl label="Seed" min={0} max={999999} step={1} value={seed} onChange={setSeed} />
+      </div>
+      <details className="advancedParameterDetails">
+        <summary>Advanced parameters</summary>
+        <div className="parameterGrid advancedParameterGrid">
+          <NumberControl label="Shift" min={0} max={20} step={0.5} value={shift} onChange={setShift} />
+          <NumberControl label="Sigma max" min={1} max={120} step={1} value={sigmaMax} onChange={setSigmaMax} />
+          <NumberControl label="Image size" min={128} max={1024} step={1} value={imageSize} onChange={setImageSize} />
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function NumberControl({
+  label,
+  max,
+  min,
+  onChange,
+  step,
+  value
+}: {
+  label: string;
+  max: number;
+  min: number;
+  onChange: (value: number) => void;
+  step: number;
+  value: number;
+}) {
+  return (
+    <label className="numberField">
+      <span>{label}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => {
+          const next = Number(event.target.value);
+          if (!Number.isFinite(next)) return;
+          onChange(Math.min(max, Math.max(min, next)));
+        }}
+      />
+    </label>
   );
 }
 

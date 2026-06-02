@@ -881,11 +881,57 @@ select:focus,
   margin-top: 18px;
 }
 
+.parameterShell {
+  margin-top: 18px;
+}
+
+.parameterTopline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.parameterTopline h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.parameterTopline span {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.numberField {
+  display: block;
+  min-width: 0;
+}
+
 .numberField input,
 .numberField select {
   height: 36px;
   margin-top: 6px;
   padding: 0 9px;
+}
+
+.advancedParameterDetails {
+  margin-top: 12px;
+}
+
+.advancedParameterDetails summary {
+  width: max-content;
+  color: var(--green);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.advancedParameterGrid {
+  margin-top: 10px;
 }
 
 .runBar {
