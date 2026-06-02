@@ -18,8 +18,8 @@ import {
 import { ChangeEvent, DragEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-reason2-8b.jpg";
-const BUILD_REASON2_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/modelcard";
 const BUILD_REASON2_SYSTEM_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-reason2-8b/systemcard";
+const BUILD_COSMOS3_NANO_MODEL_CARD_URL = "https://build-stage.nvidia.com/nvidia/cosmos3-nano-reasoner/modelcard";
 const BUILD_COSMOS3_SUPER_DEPLOY_URL = "https://build-stage.nvidia.com/nvidia/cosmos3-super-reasoner/deploy";
 const COSMOS3_SUPER_RELEASED_IMAGE = "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0";
 const COSMOS3_SUPER_MODEL_ID = "nvidia/cosmos3-super-reasoner";
@@ -5935,89 +5935,205 @@ function StaticTab({
   model: string;
   tab: SectionTab;
 }) {
-  const vlaMode = isVlaMode(model, backendInfo);
-  const familyLabel = modelFamilyLabel(model);
   const imageName = deployNimImage(model, backendInfo);
   if (tab === "Model Card") {
     return (
       <div className="staticPanel">
         <p className="staticEyebrow">Overview</p>
-        <h2>{model}</h2>
+        <h2>nvidia/cosmos3-super-reasoner</h2>
         <p className="staticLead">
-          {vlaMode
-            ? "Alpamayo is loaded as a VLA-backed BYO-video endpoint. The current frontend path is captioning and VQA over adapter-sampled frames, with full driving trajectory/action mode called out as not active."
-            : `${familyLabel} is a vision-language reasoning surface for images and videos. This Vite deployment is tuned for physical-world understanding tasks that benefit from structured reasoning, visible trace playback, and concise final answers.`}
+          Vision language model that excels in understanding the physical world using structured reasoning on videos or
+          images.
         </p>
 
-        <StaticSection title="ModelCard++">
+        <StaticSection title="Cosmos3-Super-Reasoner Overview">
           <p>
-            {vlaMode
-              ? "This card follows the NVIDIA Build model-card layout while reflecting the active Alpamayo adapter. It separates the user-facing VQA/caption mode from the deeper VLA trajectory mode that still needs a dedicated adapter path."
-              : `This card follows the NVIDIA Build model-card layout while reflecting the active ${familyLabel} deployment shown here. It summarizes intended inputs, outputs, integration notes, and operational risks for evaluating the local OpenAI-compatible endpoint.`}
+            This tab follows the Build-stage Cosmos3-Nano-Reasoner model-card copy, adapted here for the active
+            Cosmos3-Super-Reasoner deployment served by the released Cosmos3 Reasoner NIM.
           </p>
         </StaticSection>
 
         <StaticSection title="Description">
           <p>
-            The UI sends multimodal chat messages to a local reasoner service and renders streamed reasoning when the
-            backend returns it. The experience is intended for robotics, industrial inspection, smart-city review,
-            annotation, and video-understanding workflows where spatial and temporal cues matter.
+            NVIDIA Cosmos3-Nano is an open and customizable model for physical AI and robotics that enables robots and
+            vision AI agents to reason like humans, using prior knowledge, physics understanding and common sense to
+            understand and act in the real world. This model understands space, time, and fundamental physics, and can
+            serve as a planning model to reason what steps an embodied agent might take next. It is part of
+            Cosmos3-Nano, an Omni model capable of reasoning and generation capabilities.
           </p>
+          <p>The model is ready for commercial use.</p>
+          <dl>
+            <dt>Model Developer</dt>
+            <dd>NVIDIA</dd>
+          </dl>
+        </StaticSection>
+
+        <StaticSection title="Model Versions">
+          <p>Cosmos3-Nano is a part of the Cosmos3 framework.</p>
+          <p>Cosmos3 includes the following models:</p>
+          <ul>
+            <li>
+              Cosmos3-Nano (Reasoning tower): Given a text prompt and an input video, think and generate the answer
+              with respect to the input text prompt and video.
+            </li>
+            <li>
+              Cosmos3-Super (Reasoning tower): Given a text prompt and an input video, think and generate the answer
+              with respect to the input text prompt and video.
+            </li>
+          </ul>
+          <RuntimeDetails backendInfo={backendInfo} model={model} />
         </StaticSection>
 
         <StaticSection title="Input">
-          <dl>
-            <dt>Type</dt>
-            <dd>Text with video or image</dd>
-            <dt>Formats</dt>
-            <dd>{ACCEPTED_MEDIA_HELP}</dd>
-            <dt>Prompting</dt>
-            <dd>
-              {vlaMode ? (
-                <>
-                  Prompts are VQA/caption questions over sampled frames. Use short, front-loaded clips unless adapter
-                  sampling settings are raised.
-                </>
-              ) : (
-                <>Reasoning prompts can request a <code>&lt;think&gt;</code> trace followed by the answer.</>
-              )}
-            </dd>
-          </dl>
+          <p>Input Type(s): Text, Text+Image, Text+Video</p>
+          <p>Input Format(s):</p>
+          <ul>
+            <li>Text: String</li>
+            <li>Image: jpg, png, jpeg, webp</li>
+            <li>Video: mp4</li>
+          </ul>
+          <p>Input Parameters:</p>
+          <ul>
+            <li>Text: One-dimensional (1D)</li>
+            <li>Image: Two-dimensional (2D)</li>
+            <li>Video: Three-dimensional (3D)</li>
+          </ul>
+          <p>Other Properties Related to Input:</p>
+          <ul>
+            <li>Video inputs are recommended at a frame rate of 4 fps.</li>
+            <li>Long-context inputs are supported up to 256K tokens.</li>
+            <li>Image inputs may be passed as files or URLs.</li>
+            <li>Video inputs should be mp4 and follow the 4 fps recommendation for Reasoner usage.</li>
+          </ul>
+          <p>Input Size and Length Limits:</p>
+          <ul>
+            <li>Text: up to 256K tokens in the context window.</li>
+            <li>Image: standard supported image formats passed as file or URL.</li>
+            <li>Video: mp4 at the recommended 4 fps.</li>
+          </ul>
         </StaticSection>
 
         <StaticSection title="Output">
-          <dl>
-            <dt>Type</dt>
-            <dd>Text</dd>
-            <dt>Reasoning trace</dt>
-            <dd>Displayed when returned as inline <code>&lt;think&gt;</code> content or streamed reasoning deltas.</dd>
-            <dt>Recommended review</dt>
-            <dd>Validate conclusions against the source media before using outputs in production workflows.</dd>
-          </dl>
+          <p>Output Type(s): Text</p>
+          <p>Output Format: String</p>
+          <p>Output Parameters: Text: One-dimensional (1D)</p>
+          <p>Other Properties Related to Output:</p>
+          <ul>
+            <li>Default max_tokens=4096+ is recommended for reasoning outputs; longer outputs may be requested.</li>
+            <li>
+              Reasoning outputs may include structured reasoning, 2D/3D point localization, and bounding-box coordinates
+              for vision-based tasks.
+            </li>
+            <li>
+              Outputs are not guaranteed to be correct and should not be treated as safety-certified decisions or ground
+              truth.
+            </li>
+          </ul>
         </StaticSection>
 
         <StaticSection title="Software Integration">
-          <RuntimeDetails backendInfo={backendInfo} model={model} />
-          <dl>
-            <dt>Model type</dt>
-            <dd>VLM / Reasoner</dd>
-            <dt>Primary backend</dt>
-            <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
-            <dt>Endpoint</dt>
-            <dd>{backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
-          </dl>
+          <p>Runtime Engine(s):</p>
+          <ul>
+            <li>vLLM for OpenAI-compatible Reasoner serving.</li>
+            <li>PyTorch and Cosmos framework workflows for local development and integration.</li>
+          </ul>
+          <p>Supported Hardware Microarchitecture Compatibility:</p>
+          <ul>
+            <li>NVIDIA Ampere</li>
+            <li>NVIDIA Blackwell</li>
+            <li>NVIDIA Hopper</li>
+          </ul>
+          <p>Operating System(s):</p>
+          <ul>
+            <li>Linux. Other operating systems have not been tested.</li>
+          </ul>
+          <p>Note: Only BF16 precision is tested.</p>
+          <p>
+            The integration of foundation and fine-tuned models into AI systems requires additional testing using
+            use-case-specific data to ensure safe and effective deployment. Iterative testing and validation at both unit
+            and system levels are essential to mitigate risks, meet technical and functional requirements, and ensure
+            compliance with safety and ethical standards before deployment.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Limitations">
+          <p>
+            Cosmos3-Nano-Reasoner may produce incorrect reasoning in challenging scenarios. Object states, causal
+            relationships, spatial geometry, temporal ordering, agent intent, and future outcomes can be misinferred.
+            Complex or long-context inputs may yield hallucinated entities, inconsistent interpretations, or implausible
+            predictions.
+          </p>
+        </StaticSection>
+
+        <StaticSection title="Usage">
+          <p>
+            See Cosmos for details:{" "}
+            <a href="https://github.com/NVIDIA/cosmos" rel="noreferrer" target="_blank">
+              https://github.com/nvidia/cosmos
+            </a>
+          </p>
+          <h4>Quality Benchmarks</h4>
+          <p>
+            Please see the Cosmos3 technical paper for detailed evaluations of the base model:{" "}
+            <a
+              href="https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf"
+              rel="noreferrer"
+              target="_blank"
+            >
+              https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf
+            </a>
+          </p>
+          <h4>License and Terms of Use:</h4>
+          <p>
+            GOVERNING TERMS: This trial service is governed by the NVIDIA API Trial Terms of Service. Use of the model
+            is governed by OpenMDW1.1 license.
+          </p>
+          <p>Models are commercially usable.</p>
+          <p>
+            You are free to create and distribute Derivative Models. NVIDIA does not claim ownership to any outputs
+            generated using the Models or Derivative Models.
+          </p>
+          <h4>Deployment Geography:</h4>
+          <p>Global</p>
+          <h4>Release Date:</h4>
+          <ul>
+            <li>Build.NVIDIA.com 5/31/2026</li>
+            <li>Huggingface 5/31/2026</li>
+            <li>Downloadable NIM - Cosmos3-Reasoner 5/31/2026</li>
+          </ul>
         </StaticSection>
 
         <StaticSection title="Ethical Considerations">
           <p>
-            Users are responsible for evaluating whether inputs, outputs, and downstream decisions are appropriate for
-            their domain. Add domain-specific guardrails, validation, logging policies, and human review before deploying
-            decisions that affect people, property, or safety.
+            NVIDIA believes Trustworthy AI is a shared responsibility and we have established policies and practices to
+            enable development for a wide array of AI applications. Developers should work with their internal model team
+            to ensure this model meets requirements for the relevant industry and use case and addresses unforeseen
+            product misuse.
+          </p>
+          <p>
+            Please make sure you have proper rights and permissions for all input image and video content; if image or
+            video includes people, personal health information, or intellectual property, the image or video generated
+            will not blur or maintain proportions of image subjects included.
+          </p>
+          <p>
+            Users are responsible for model inputs and outputs. Users are responsible for ensuring safe integration of
+            this model, including implementing guardrails as well as other safety mechanisms, prior to deployment.
+          </p>
+          <p>
+            For more detailed information on ethical considerations for this model, please see the Model Card++
+            Explainability, Bias, Safety &amp; Security, and Privacy subcards.
+          </p>
+          <p>
+            Please report security vulnerabilities or NVIDIA AI Concerns{" "}
+            <a href="https://www.nvidia.com/en-us/support/submit-security-vulnerability/" rel="noreferrer" target="_blank">
+              here
+            </a>
+            .
           </p>
         </StaticSection>
 
-        <a className="staticLink" href={BUILD_REASON2_MODEL_CARD_URL} rel="noreferrer" target="_blank">
-          NVIDIA Build model-card reference <ExternalLink size={16} />
+        <a className="staticLink" href={BUILD_COSMOS3_NANO_MODEL_CARD_URL} rel="noreferrer" target="_blank">
+          Build-stage Cosmos3 model-card reference <ExternalLink size={16} />
         </a>
       </div>
     );
