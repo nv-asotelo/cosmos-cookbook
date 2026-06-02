@@ -476,12 +476,27 @@ if _smi_rc == 0 and _smi_out.strip():
     gpu_line   = _smi_out.strip().splitlines()[0]
     parts_     = [p.strip() for p in gpu_line.split(",")]
     gpu_name   = parts_[0]
-    vram_free  = int(parts_[1].split()[0])
-    vram_total = int(parts_[2].split()[0])
+    try:
+        vram_free  = int(parts_[1].split()[0])
+        vram_total = int(parts_[2].split()[0])
+    except (IndexError, ValueError):
+        warn(
+            "nvidia-smi did not report discrete GPU memory "
+            f"({gpu_line!r}); using LOW_VRAM fallback tier."
+        )
+        vram_free  = 0
+        vram_total = 0
+        LOW_VRAM   = True
+        tier_name  = "low-VRAM (memory query unavailable)"
+        gradio_fps = 4
+        max_pixels = 131072
+        prefill_tps = 15
 
     _gpu_upper  = gpu_name.upper()
     _h100_class = any(tag in _gpu_upper for tag in ("H100", "A100", "H200", "GB200"))
-    if _h100_class and vram_free >= 60000:
+    if vram_total <= 0:
+        pass
+    elif _h100_class and vram_free >= 60000:
         tier_name   = "H100/A100"
         gradio_fps  = 8
         max_pixels  = 1048576

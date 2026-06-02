@@ -156,6 +156,14 @@ if [ -n "$HF_TOKEN" ]; then
     export HF_TOKEN
 fi
 
+DOCKER_CONFIG="$(mktemp -d /tmp/nim-docker-config.XXXXXX)"
+chmod 700 "$DOCKER_CONFIG"
+export DOCKER_CONFIG
+cleanup_docker_config() {
+    rm -rf "$DOCKER_CONFIG"
+}
+trap cleanup_docker_config EXIT
+
 # 0. Idempotency: if a container of this name is already running AND /v1/models
 #    is healthy, reuse it. This protects in-progress first-run model downloads.
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
