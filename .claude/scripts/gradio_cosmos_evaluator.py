@@ -438,7 +438,14 @@ def refresh_state(
 def switch_endpoint(control_url: str, endpoint: str) -> Tuple[str, Any]:
     ok, body = _service_post(control_url, "/runtime/vlm/switch", {"endpoint": endpoint}, timeout=HTTP_TIMEOUT_S)
     if ok:
-        return f"Active endpoint switched to `{endpoint}`.", body
+        runtime, runtime_raw = _runtime(control_url)
+        active = runtime.get("active_endpoint") if isinstance(runtime, dict) else None
+        if active == endpoint:
+            return f"Confirmed active endpoint: `{endpoint}`.", {"switch": body, "runtime": runtime_raw}
+        return f"Switch requested for `{endpoint}`, but runtime reports `{active or 'unknown'}`.", {
+            "switch": body,
+            "runtime": runtime_raw,
+        }
     return f"Endpoint switch failed for `{endpoint}`.", body
 
 
@@ -614,6 +621,8 @@ def build_app() -> gr.Blocks:
                         )
                     with gr.Column(scale=4):
                         endpoint = gr.Dropdown(label="Evaluator VLM endpoint", choices=DEFAULT_ENDPOINTS, value="cosmos3-super-reasoner")
+                        confirm_endpoint_btn = gr.Button("Confirm endpoint change", variant="secondary")
+                        endpoint_confirm_status = gr.Markdown("Endpoint change has not been confirmed in this session.")
                         nim_model_md = gr.Markdown("Loaded NIM model: `unknown`")
                         weather = gr.Textbox(label="Weather", value=DEFAULT_PRESET["weather"])
                         time_of_day = gr.Textbox(
@@ -745,6 +754,7 @@ def build_app() -> gr.Blocks:
             ],
             outputs=[result_md, details_table, raw_response, payload_preview, request_status],
         )
+        confirm_endpoint_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[endpoint_confirm_status, switch_raw])
         switch_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[switch_status, switch_raw])
         fetch_config_btn.click(
             fetch_config,
