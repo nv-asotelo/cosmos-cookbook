@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 try:
     import gradio as gr
@@ -36,6 +36,7 @@ OBSTACLE_URL = os.environ.get("COSMOS_EVALUATOR_OBSTACLE_URL", "http://localhost
 DATA_DIR = Path(os.environ.get("COSMOS_EVALUATOR_DATA_DIR", "~/cosmos-evaluator/checks/sample_data/cosmos_public")).expanduser()
 CONTAINER_DATA_PREFIX = os.environ.get("COSMOS_EVALUATOR_CONTAINER_DATA_PREFIX", "/data").rstrip("/")
 REQUEST_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_REQUEST_TIMEOUT_S", "7200"))
+RUN_REQUEST_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_RUN_TIMEOUT_S", "180"))
 HTTP_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_HTTP_TIMEOUT_S", "15"))
 
 SAMPLE_BASENAME = os.environ.get(
@@ -443,34 +444,73 @@ def run_evaluator(
     nim_url: str,
     vlm_url: str,
     control_url: str,
-) -> Tuple[str, List[List[Any]], Any, str, str]:
+) -> Iterator[Tuple[str, List[List[Any]], str, str, str]]:
     try:
+        started = time.time()
+        yield (
+            '<div class="ok-box">Preparing evaluator request.</div>',
+            [],
+            "{}",
+            payload_text,
+            "Starting.",
+        )
+
+        yield (
+            '<div class="ok-box">Checking runtime and endpoint compatibility.</div>',
+            [],
+            "{}",
+            payload_text,
+            "Checking runtime.",
+        )
         endpoints, _ = _runtime_endpoints(control_url)
         nim_model, _ = _detect_nim_model(nim_url)
         mismatch = _mismatch_message(endpoint, endpoints, nim_model)
         if mismatch and not allow_mismatch:
-            return (
+            yield (
                 f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
                 [],
-                {"blocked": True, "reason": mismatch},
+                _json({"blocked": True, "reason": mismatch}),
                 payload_text,
                 "Blocked before API request.",
             )
+            return
 
         if endpoint:
+            yield (
+                f'<div class="ok-box">Switching evaluator runtime to {html.escape(endpoint)}.</div>',
+                [],
+                "{}",
+                payload_text,
+                "Switching runtime.",
+            )
             switched, switch_body = _service_post(control_url, "/runtime/vlm/switch", {"endpoint": endpoint}, timeout=HTTP_TIMEOUT_S)
             if not switched:
-                return (
-                    "Runtime switch failed.",
+                yield (
+                    '<div class="warning-box">Runtime switch failed.</div>',
                     [],
-                    switch_body,
+                    _json(switch_body),
                     payload_text,
                     "Runtime switch failed before preset request.",
                 )
+                return
 
         if use_edited_json:
+            yield (
+                '<div class="ok-box">Using edited JSON payload.</div>',
+                [],
+                "{}",
+                payload_text,
+                "Using edited JSON.",
+            )
             payload = json.loads(payload_text)
         else:
+            yield (
+                '<div class="ok-box">Staging video path and building original evaluator payload.</div>',
+                [],
+                "{}",
+                payload_text,
+                "Building request.",
+            )
             video_path = _video_api_path(source, upload, server_path)
             payload = _build_payload(
                 video_path,
@@ -481,15 +521,29 @@ def run_evaluator(
             )
             payload_text = _json(payload)
 
-        ok, body = _service_post(vlm_url, "/process/preset", payload)
+        yield (
+            '<div class="ok-box">Submitting /process/preset. The page is still live while the evaluator runs.</div>',
+            [],
+            "{}",
+            payload_text,
+            "Evaluator request in flight.",
+        )
+        ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S)
         summary, rows = _response_summary(body)
         status = '<div class="ok-box">Preset evaluator completed.</div>' if ok else '<div class="warning-box">Preset evaluator returned an error.</div>'
-        return status + "\n\n" + summary, rows, body, _json(payload), "Success." if ok else "Request failed."
+        elapsed = round(time.time() - started, 2)
+        yield (
+            status + "\n\n" + summary,
+            rows,
+            _json(body),
+            _json(payload),
+            f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
+        )
     except Exception as exc:
-        return (
+        yield (
             f'<div class="warning-box">{html.escape(str(exc))}</div>',
             [],
-            {"error": str(exc)},
+            _json({"error": str(exc)}),
             payload_text,
             "Request failed before completion.",
         )
@@ -598,7 +652,7 @@ def build_app() -> gr.Blocks:
                     label="Scoring details",
                     interactive=False,
                 )
-                raw_response = gr.JSON(label="Raw evaluator response")
+                raw_response = gr.Code(label="Raw evaluator response", language="json", lines=16)
 
             with gr.TabItem("Advanced View"):
                 with gr.Row():
@@ -720,6 +774,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     initial_local_url = f"http://127.0.0.1:{PORT}"
     demo = build_app()
+    demo.queue(default_concurrency_limit=4)
     result = demo.launch(server_name="0.0.0.0", server_port=PORT, share=SHARE, prevent_thread_lock=True)
     local_url = initial_local_url
     share_url = None
