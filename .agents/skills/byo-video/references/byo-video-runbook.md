@@ -4,17 +4,19 @@
 > `~/.claude/scripts` examples. Before executing, apply the adapter in
 > `../SKILL.md`; for shared use, prefer the bundled `../scripts/` directory.
 
-**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of four frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
+**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to the available frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
 - **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=batch_inference` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — default NVIDIA Build-style Gradio skin for upload-one-video/image workflows, prompt presets, reasoning on/off indicators, backend controls, and parameter tuning.
 - **Dataset browser + result viewer** -> `BYO_VIDEO_FRONTEND=fiftyone` — guided batch UI with FiftyOne installed and available for dataset browsing, sample inspection, and result review. Gradio still launches as a live sidecar.
+- **Cosmos Evaluator workbench** -> `BYO_VIDEO_FRONTEND=cosmos_evaluator` — Gradio API console for `nv-asotelo/cosmos-evaluator`, with sample preset run, upload staging, runtime VLM switching, health checks, and generated `curl` commands.
 - **NVIDIA Build-style model playground (Default)** -> `BYO_VIDEO_FRONTEND=nvidia_build` — model-specific Gradio surface that follows the corresponding build.nvidia.com playground for Cosmos / Cosmos3 / Cosmos Predict / Cosmos Reason selections.
 
 Default to `BYO_VIDEO_FRONTEND=nvidia_build` for shareable model-page demos or
 unspecified frontend requests. Select `batch_inference` only when the user asks for
 guided dataset loading, concurrent batch inference, worker-safety smoke testing,
-or result writeback.
+or result writeback. Select `cosmos_evaluator` only for the evaluator REST stack,
+not for general VLM chat playgrounds.
 
 For Build-style playgrounds, serve only the tower the loaded model can actually
 run. VLM/reasoner checkpoints use Reason surfaces. VFM/generator checkpoints use
@@ -28,6 +30,7 @@ Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and w
 
 **Canonical scripts (stable, versioned — do not read from /tmp/):**
 - `~/.claude/scripts/gradio_cr2_byo.py`  — default Build-style Gradio app (all supported models)
+- `~/.claude/scripts/gradio_cosmos_evaluator.py` — Cosmos Evaluator Gradio workbench
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 - `~/.claude/scripts/byo_video_batch_inference.py` — Batch Inference frontend for HF dataset batch inference and FiftyOne support (filename retains `batch_inference` for backward compat)
 - `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
@@ -697,7 +700,7 @@ SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 **Step 1** — Deploy required Python scripts:
 
 ```bash
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_evaluator gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -731,30 +734,63 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). Works on any reachable target — Brev, SSH host, or local Docker — provided NGC_API_KEY and Docker are present. The user supplies the target via the Phase 1 picker; the skill never assumes a default host.
 
-**Cosmos Evaluator + Cosmos3 Super Reasoner NIM path:**
+**Cosmos Evaluator + Cosmos3 Reasoner NIM path:**
 
 When the user asks to serve `nv-asotelo/cosmos-evaluator` with the Cosmos3
-Super Reasoner NIM, use the helper script rather than the BYO-video Gradio
-launcher:
+Reasoner NIM, use the helper script. It launches the evaluator services, runs
+the smoke test, then starts the Cosmos Evaluator Gradio workbench:
 
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 ssh horde@<ip> "bash -s" < "$SCRIPT_DIR/cosmos_evaluator_horde_setup.sh"
 ```
 
+The default is `NIM_MODEL_SIZE=super`. On an L40-class host, override with
+`NIM_MODEL_SIZE=nano` because the Super BF16 profile is expected to hit CUDA
+OOM there:
+
+```bash
+ssh horde@<ip> "NIM_MODEL_SIZE=nano bash -s" < "$SCRIPT_DIR/cosmos_evaluator_horde_setup.sh"
+```
+
 The helper expects `~/.cosmos_evaluator/nim.env` on the target with
 `NGC_API_KEY=...` and chmod 0600/0400. It clones
 `https://github.com/nv-asotelo/cosmos-evaluator.git` at
-`codex/cosmos3-super-nim`, builds the evaluator images, launches:
+`codex/cosmos3-super-nim`, builds the evaluator images, clones this cookbook
+branch for the Gradio script, and launches:
 
 | Component | Port |
 |---|---:|
-| Cosmos3 NIM (`nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`, `NIM_MODEL_SIZE=super`) | 8000 |
+| Cosmos3 NIM (`nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`, default `NIM_MODEL_SIZE=super`) | 8000 |
 | Obstacle correspondence | 8082 |
 | VLM preset | 8083 |
 | Hallucination | 8085 |
 | Attribute verification | 8086 |
 | VLM switch/control API | 8090 |
+| Cosmos Evaluator Gradio workbench | 7860 |
+
+Open the workbench through direct host access or an SSH tunnel:
+
+```bash
+ssh -L 7860:localhost:7860 -L 8000:localhost:8000 -L 8083:localhost:8083 \
+  -L 8090:localhost:8090 -L 8086:localhost:8086 -L 8085:localhost:8085 \
+  -L 8082:localhost:8082 horde@<ip>
+```
+
+Then open `http://localhost:7860`.
+
+Basic View is for a new technical user: start with the smoke-test sample video,
+edit the four environment preset fields, click **Run evaluator**, and read the
+score summary plus raw JSON. Uploads are copied into
+`~/cosmos-evaluator/checks/sample_data/cosmos_public` and sent to the evaluator
+as `/data/<filename>`.
+
+Advanced View exposes the working API surface: service URLs, health/config JSON,
+runtime endpoint switching, editable `/process/preset` payload, and generated
+`curl` commands for health, runtime status, runtime switch, and preset run. It
+also warns when the selected evaluator endpoint expects Super but the loaded NIM
+model is Nano, blocking Basic View runs unless the operator explicitly enables
+the mismatch override.
 
 The evaluator VLM switch API is:
 
@@ -765,9 +801,11 @@ curl -X POST http://localhost:8090/runtime/vlm/switch \
   -d '{"endpoint":"cosmos3-super-reasoner"}'
 ```
 
-Single-L40 Horde hosts are expected to be tight for Cosmos3 Super; if the NIM
-container exits during model load, preserve `docker logs cosmos3-nim` and report
-the VRAM/load failure instead of silently falling back to Nano.
+Single-L40 Horde hosts are expected to fail Cosmos3 Super with CUDA OOM. Preserve
+`docker logs cosmos3-nim` and report the VRAM/load failure; use Nano on L40.
+RTX PRO 6000 Blackwell Server Edition can host Super, but it is a tight fit: a
+validated host showed `nvidia/cosmos3-super-reasoner` loaded with roughly 90 GB
+VRAM used and only a few GB free.
 
 **Source of truth for available VLM NIMs — fetch this URL every time the user selects NIM:**
 
@@ -1117,7 +1155,7 @@ The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 Deploy scripts:
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_evaluator gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1446,7 +1484,7 @@ Both live at `~/.claude/scripts/` on Alex's Mac (canonical, versioned). Deploy v
 
 ```bash
 # Deploy both scripts to the instance
-for script in byo_video_setup gradio_cr2_byo; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_evaluator; do
   B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -1571,7 +1609,7 @@ Agent steps:
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
    SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_evaluator gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
      B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""

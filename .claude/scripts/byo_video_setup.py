@@ -18,7 +18,7 @@ Env vars:
                       upstream nvidia-cosmos/cosmos3 package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
                       C3-super are the OSS *Reasoners* (chat VLM via vLLM).
   MODEL_DIR         — override local download path for primary model
-  BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
+  BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone | cosmos_evaluator (default: nvidia_build)
   BYO_VIDEO_MOT_TOWER — reasoning | generation | both for future Omni/MoT models. Single-tower
                       VLM/VFM models ignore this because their frontend is inferred from the loaded model.
   GRADIO_PORT       — port for Gradio (default: 7860)
@@ -315,6 +315,8 @@ if FRONTEND == "agent":
     FRONTEND = "batch_inference"
 if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playground"):
     FRONTEND = "nvidia_build"
+if FRONTEND in ("cosmos-evaluator", "evaluator", "cosmos_evaluator_ui"):
+    FRONTEND = "cosmos_evaluator"
 BATCH_INFERENCE_PORT = int(os.environ.get("BATCH_INFERENCE_PORT", "7861"))
 BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
 BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
@@ -351,6 +353,136 @@ def credits_spent():
     elapsed = time.time() - SETUP_START
     cost = BREV_RATE_PER_HOUR * elapsed / 3600
     return f" | Credits: ${cost:.3f}"
+
+def _ensure_cosmos_evaluator_gradio_cmd():
+    app = os.environ.get("GRADIO_APP", "/tmp/gradio_cosmos_evaluator.py")
+    if not os.path.exists(app):
+        print(f"  ✗  {app} not found — deploy gradio_cosmos_evaluator.py first")
+        sys.exit(1)
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "run", "--with", "gradio", "--with", "requests", "--with", "jinja2>=3.1.2", "python", "-u", app]
+
+    py = shutil.which("python3") or shutil.which("python")
+    if not py:
+        print("  ✗  python3 not found; cannot launch evaluator Gradio")
+        sys.exit(1)
+    pip_rc, _pip_out = run_cmd([py, "-m", "pip", "--version"], env=ENV, timeout=10)
+    if pip_rc == 0:
+        run("Installing evaluator Gradio dependencies in the user site")
+        rc = stream_cmd(
+            [py, "-m", "pip", "install", "--user", "-q", "gradio", "requests", "jinja2>=3.1.2"],
+            env=ENV,
+            prefix="pip │ ",
+        )
+        if rc == 0:
+            return [py, "-u", app]
+        warn("User-site pip install failed; trying a temporary venv")
+
+    venv_dir = os.environ.get("COSMOS_EVALUATOR_GRADIO_VENV", "/tmp/cosmos-evaluator-gradio-venv")
+    if not os.path.exists(os.path.join(venv_dir, "bin", "python")):
+        run(f"Creating evaluator Gradio venv at {venv_dir}")
+        rc = stream_cmd([py, "-m", "venv", venv_dir], env=ENV, prefix="venv │ ")
+        if rc != 0:
+            print(f"  ✗  Could not create {venv_dir}")
+            sys.exit(1)
+    venv_py = os.path.join(venv_dir, "bin", "python")
+    run("Installing evaluator Gradio dependencies")
+    rc = stream_cmd([venv_py, "-m", "pip", "install", "-q", "gradio", "requests", "jinja2>=3.1.2"], env=ENV, prefix="pip │ ")
+    if rc != 0:
+        print("  ✗  Could not install gradio/requests for evaluator UI")
+        sys.exit(1)
+    return [venv_py, "-u", app]
+
+def _launch_cosmos_evaluator_frontend():
+    header("Cosmos Evaluator UI — Launch Gradio frontend", eta="~5-20s")
+    cmd = _ensure_cosmos_evaluator_gradio_cmd()
+    gradio_env = dict(ENV)
+    gradio_env.update({
+        "GRADIO_PORT": str(GRADIO_PORT),
+        "GRADIO_SHARE": os.environ.get("GRADIO_SHARE", "true"),
+        "COSMOS_EVALUATOR_DATA_DIR": os.environ.get(
+            "COSMOS_EVALUATOR_DATA_DIR",
+            os.path.expanduser("~/cosmos-evaluator/checks/sample_data/cosmos_public"),
+        ),
+        "PYTHONUNBUFFERED": "1",
+    })
+    if os.path.exists(URL_FILE):
+        os.remove(URL_FILE)
+    if os.path.exists("/tmp/gradio_live.flag"):
+        os.remove("/tmp/gradio_live.flag")
+    subprocess.run(["bash", "-c", f"fuser -k {GRADIO_PORT}/tcp 2>/dev/null || true"])
+    proc = subprocess.Popen(
+        cmd,
+        env=gradio_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    with open("/tmp/gradio_demo.pid", "w") as f:
+        f.write(str(proc.pid))
+
+    url = None
+    local_url = f"http://127.0.0.1:{GRADIO_PORT}"
+    url_pattern = re.compile(r'(https?://[^\s"\']+gradio\.live[^\s"\']*)')
+    local_url_pattern = re.compile(r'Running on local URL:\s+(http://[^\s]+)')
+    launch_url_pattern = re.compile(r'\[launch\]\s+(https?://[^\s]+)')
+    t_launch = time.time()
+
+    with open(LOG_FILE, "w") as log:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            log.write(line)
+            log.flush()
+            stripped = line.rstrip()
+            if stripped:
+                print(f"     {DIM}{stripped}{RESET}", flush=True)
+            for pattern in (url_pattern, local_url_pattern, launch_url_pattern):
+                match = pattern.search(stripped)
+                if match:
+                    candidate = match.group(1).rstrip(".").rstrip("/")
+                    if "127.0.0.1" in candidate or "0.0.0.0" in candidate:
+                        host = os.environ.get("BYO_VIDEO_LOCAL_HOST")
+                        if host:
+                            candidate = f"http://{host}:{GRADIO_PORT}"
+                    url = candidate
+                    break
+            if url:
+                break
+            if time.time() - t_launch > 180:
+                warn("No Gradio URL after 180s; using local fallback")
+                url = local_url
+                break
+
+        if not url:
+            print("  ✗  Evaluator Gradio printed no URL. Check /tmp/gradio_demo.log")
+            proc.terminate()
+            sys.exit(1)
+
+        with open(URL_FILE, "w") as f:
+            f.write(url + "\n")
+        with open("/tmp/gradio_live.flag", "w") as f:
+            f.write(url + "\n")
+        ok("Cosmos Evaluator Gradio frontend is live")
+        print(f"  {BOLD}URL:{RESET}  {hyperlink(url)}", flush=True)
+        print(f"  {DIM}If direct access is blocked: ssh -L {GRADIO_PORT}:localhost:{GRADIO_PORT} <user@host>{RESET}", flush=True)
+
+        try:
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                stripped = line.rstrip()
+                if stripped:
+                    print(f"     {DIM}{stripped}{RESET}", flush=True)
+        finally:
+            proc.wait()
+    sys.exit(proc.returncode or 0)
+
+if FRONTEND == "cosmos_evaluator":
+    _launch_cosmos_evaluator_frontend()
 
 if MODEL_SIZE not in _MODEL_CONFIGS:
     print(f"  ✗  MODEL_SIZE={MODEL_SIZE} not supported. Use CR1-7B, C3-2B, C3-8B, C3-32B, C3-super, C3-NANO-GEN, C3-SUPER-GEN, 2B, 8B, 32B, PREDICT1-5B, PREDICT1-7B, PREDICT25-2B, PREDICT25-14B, NEM-12B, OMNI-30B, GM-4-31B, QW3-2B, QW3-8B, or QW3-32B.")

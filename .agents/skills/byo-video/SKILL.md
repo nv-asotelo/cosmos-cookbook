@@ -26,6 +26,10 @@ descriptive labels and map the answer to the env var afterward:
   user wants the guided batch UI with FiftyOne available for sample inspection
   and result review. The setup script still starts a live Gradio sidecar and
   prints its link.
+- **Cosmos Evaluator workbench** -> `BYO_VIDEO_FRONTEND=cosmos_evaluator`
+  for the `nv-asotelo/cosmos-evaluator` REST stack: sample preset run,
+  upload-to-`/data` staging, runtime VLM switching, health checks, and generated
+  API commands.
 - **NVIDIA Build-style model playground (Default)** -> `BYO_VIDEO_FRONTEND=nvidia_build`
   for a model-specific Gradio surface that mirrors the corresponding
   build.nvidia.com playground when the selected model is from the Cosmos,
@@ -51,7 +55,9 @@ dataset/batch workflow. Use `BYO_VIDEO_FRONTEND=batch_inference` when the user
 asks for a guided inference flow, HF public dataset loading, concurrent batch
 processing, or the worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio`
 for the generic single-video upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when
-the user specifically wants FiftyOne available alongside result writeback.
+the user specifically wants FiftyOne available alongside result writeback. Use
+`BYO_VIDEO_FRONTEND=cosmos_evaluator` only for the Cosmos Evaluator service
+stack, not for general VLM chat playgrounds.
 
 ## Codex Mode Note
 
@@ -117,6 +123,9 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   structured prompts, and export artifacts through the batch-inference API.
 - `scripts/gradio_cr2_byo.py`: default Build-style Gradio app for video/image
   inference across supported BYO-video models.
+- `scripts/gradio_cosmos_evaluator.py`: Gradio evaluator workbench for the
+  `nv-asotelo/cosmos-evaluator` REST stack, including Basic/Advanced views,
+  runtime endpoint switching, upload staging, and generated API commands.
 - `scripts/alpamayo_openai_server.py`: OpenAI-compatible `/v1/models` and
   `/v1/chat/completions` adapter for Alpamayo VQA/captioning over BYO images
   and videos.
@@ -134,8 +143,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   companion switch/status service for Gradio restarts.
 - `scripts/cosmos_evaluator_horde_setup.sh`: clones the nv-asotelo
   `cosmos-evaluator` branch with Cosmos3 Super Reasoner NIM support, builds the
-  evaluator service images, launches the full stack on Horde, and runs smoke
-  checks.
+  evaluator service images, launches the full stack on Horde, runs smoke checks,
+  and starts the evaluator Gradio workbench.
 - `scripts/smoke_cr2_byo.py` and `scripts/smoke_nem_vl.py`: smoke tests.
 
 ## Operating Rules
