@@ -51,9 +51,6 @@ DEFAULT_PRESET = {
     "region_geography": "Dense City Center",
     "road_surface_conditions": "Dry",
 }
-DEFAULT_KEYFRAME_INTERVAL_S = 2.0
-DEFAULT_KEYFRAME_WIDTH = 640
-DEFAULT_LONG_VIDEO_MAX_FRAMES = 5
 
 DEFAULT_ENDPOINT = "qwen3.5-397b-a17b"
 DEFAULT_ENDPOINTS = [DEFAULT_ENDPOINT, "cosmos3-super-reasoner", "cosmos3-nano-reasoner"]
@@ -279,12 +276,8 @@ def _build_payload(
     time_of_day: str,
     geography: str,
     road_surface: str,
-    analysis_mode: str,
-    keyframe_interval_s: float,
-    keyframe_width: int,
-    max_frames: int,
 ) -> Dict[str, Any]:
-    payload = {
+    return {
         "augmented_video_url": video_path,
         "preset_conditions": {
             "name": "environment",
@@ -294,13 +287,6 @@ def _build_payload(
             "road_surface_conditions": road_surface,
         },
     }
-    if analysis_mode == "Long video analysis":
-        payload["preset_check_config"] = {
-            "keyframe_interval_s": float(keyframe_interval_s),
-            "keyframe_width": int(keyframe_width),
-            "max_frames": int(max_frames),
-        }
-    return payload
 
 
 def _preview_payload(
@@ -311,10 +297,6 @@ def _preview_payload(
     time_of_day: str,
     geography: str,
     road_surface: str,
-    analysis_mode: str,
-    keyframe_interval_s: float,
-    keyframe_width: int,
-    max_frames: int,
 ) -> str:
     if source == "Uploaded video" and upload is not None:
         name = _safe_filename(getattr(upload, "name", None) or str(upload))
@@ -330,10 +312,6 @@ def _preview_payload(
             time_of_day,
             geography,
             road_surface,
-            analysis_mode,
-            keyframe_interval_s,
-            keyframe_width,
-            max_frames,
         )
     )
 
@@ -458,10 +436,6 @@ def run_evaluator(
     time_of_day: str,
     geography: str,
     road_surface: str,
-    analysis_mode: str,
-    keyframe_interval_s: float,
-    keyframe_width: int,
-    max_frames: int,
     endpoint: str,
     allow_mismatch: bool,
     use_edited_json: bool,
@@ -504,10 +478,6 @@ def run_evaluator(
                 time_of_day,
                 geography,
                 road_surface,
-                analysis_mode,
-                keyframe_interval_s,
-                keyframe_width,
-                max_frames,
             )
             payload_text = _json(payload)
 
@@ -561,10 +531,6 @@ def build_app() -> gr.Blocks:
         DEFAULT_PRESET["time_of_day_illumination"],
         DEFAULT_PRESET["region_geography"],
         DEFAULT_PRESET["road_surface_conditions"],
-        "Long video analysis",
-        DEFAULT_KEYFRAME_INTERVAL_S,
-        DEFAULT_KEYFRAME_WIDTH,
-        DEFAULT_LONG_VIDEO_MAX_FRAMES,
     )
     initial_commands = _curl_commands(
         NIM_URL,
@@ -604,15 +570,6 @@ def build_app() -> gr.Blocks:
                             label="Video source",
                             choices=["Sample video", "Uploaded video", "Server path"],
                             value="Sample video",
-                        )
-                        analysis_mode = gr.Radio(
-                            label="Analysis mode",
-                            choices=["Long video analysis", "Normal evaluator behavior"],
-                            value="Long video analysis",
-                            info=(
-                                "Long mode sends at most 5 sampled frames across the clip for Cosmos3 NIM. "
-                                "Normal mode leaves the evaluator's original frame sampling untouched."
-                            ),
                         )
                         upload = gr.File(label="Upload MP4", file_types=[".mp4"], file_count="single")
                         server_path = gr.Textbox(
@@ -663,28 +620,6 @@ def build_app() -> gr.Blocks:
                     value=False,
                     info="When disabled, Basic View fields generate the payload.",
                 )
-                with gr.Row():
-                    keyframe_interval_s = gr.Slider(
-                        minimum=0.5,
-                        maximum=30.0,
-                        value=DEFAULT_KEYFRAME_INTERVAL_S,
-                        step=0.5,
-                        label="Long mode sampling interval seconds",
-                        info="Candidate frame spacing before selecting up to 5 frames across the clip.",
-                    )
-                    keyframe_width = gr.Number(
-                        value=DEFAULT_KEYFRAME_WIDTH,
-                        precision=0,
-                        label="Long mode keyframe width",
-                    )
-                    max_frames = gr.Slider(
-                        minimum=1,
-                        maximum=5,
-                        value=DEFAULT_LONG_VIDEO_MAX_FRAMES,
-                        step=1,
-                        label="Long mode max frames",
-                        info="Cosmos3 NIM accepts at most 5 images in one prompt.",
-                    )
                 payload_preview = gr.Code(label="Preset request body", value=initial_payload, language="json", lines=16)
                 commands = gr.Code(label="Generated API commands", value=initial_commands, language="shell", lines=20)
                 switch_btn = gr.Button("Switch to selected endpoint", variant="secondary")
@@ -719,10 +654,6 @@ def build_app() -> gr.Blocks:
             time_of_day,
             geography,
             road_surface,
-            analysis_mode,
-            keyframe_interval_s,
-            keyframe_width,
-            max_frames,
         ]
         for component in preview_inputs:
             component.change(_preview_payload, inputs=preview_inputs, outputs=payload_preview)
@@ -741,10 +672,6 @@ def build_app() -> gr.Blocks:
                 time_of_day,
                 geography,
                 road_surface,
-                analysis_mode,
-                keyframe_interval_s,
-                keyframe_width,
-                max_frames,
                 endpoint,
                 allow_mismatch,
                 use_edited_json,
