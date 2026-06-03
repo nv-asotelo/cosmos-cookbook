@@ -181,7 +181,7 @@ def _runtime_endpoints(control_url: str) -> Tuple[List[Dict[str, Any]], Any]:
 
 def _health_map(vlm_url: str, attribute_url: str, hallucination_url: str, obstacle_url: str) -> Dict[str, Any]:
     services = {
-        "VLM": (vlm_url, "/health"),
+        "Evaluator service": (vlm_url, "/health"),
         "Attribute": (attribute_url, "/health"),
         "Hallucination": (hallucination_url, "/health"),
         "Obstacle": (obstacle_url, "/health"),
@@ -195,12 +195,19 @@ def _health_map(vlm_url: str, attribute_url: str, hallucination_url: str, obstac
     return result
 
 
+def _route_uses_local_nim(active_endpoint: Optional[str]) -> bool:
+    return bool(active_endpoint and "cosmos3" in str(active_endpoint))
+
+
 def _status_html(health: Dict[str, Any], runtime: Dict[str, Any], nim_model: Optional[str]) -> str:
-    active = html.escape(str(runtime.get("active_endpoint") or "unknown"))
-    model = html.escape(str(nim_model or "unreachable"))
+    active_endpoint = str(runtime.get("active_endpoint") or "")
+    active = active_endpoint or "unknown"
+    model = str(nim_model or "unreachable")
+    local_nim_title = "Local Cosmos3 NIM"
+    local_nim_value = f"{model} (active route)" if _route_uses_local_nim(active_endpoint) else f"{model} (standby only)"
     cards = [
-        ("NIM model", model, bool(nim_model)),
-        ("Runtime", active, bool(runtime)),
+        ("Active evaluator target", active, bool(runtime)),
+        (local_nim_title, local_nim_value, bool(nim_model)),
     ]
     for name, data in health.items():
         ok = bool(data.get("ok"))
@@ -404,7 +411,13 @@ def refresh_state(
     choices = [item.get("endpoint") for item in endpoints if item.get("endpoint")] or DEFAULT_ENDPOINTS
     active = runtime.get("active_endpoint") if isinstance(runtime, dict) else None
     value = active if active in choices else choices[0]
-    model_md = f"Loaded NIM model: `{nim_model or 'unreachable'}`"
+    if active and not _route_uses_local_nim(str(active)):
+        model_md = (
+            f"Active evaluator target: `{active}` hosted endpoint. "
+            f"The local Cosmos3 NIM is standby only: `{nim_model or 'unreachable'}`."
+        )
+    else:
+        model_md = f"Active evaluator target uses local Cosmos3 NIM: `{nim_model or 'unreachable'}`."
     return (
         _status_html(health, runtime, nim_model),
         gr.update(choices=choices, value=value),
@@ -606,8 +619,8 @@ def build_app() -> gr.Blocks:
             </div>
             <div class="nv-hero">
               <h1>Cosmos Evaluator Workbench</h1>
-              <p>Run the evaluator smoke example, stage your own MP4, switch the active VLM endpoint, and inspect the REST commands that drive the service.</p>
-              <span class="nv-pill">Basic evaluator</span><span class="nv-pill">Advanced API console</span><span class="nv-pill">Cosmos3 NIM runtime</span>
+              <p>Run the evaluator smoke example, stage your own MP4, choose the single active evaluator target, and inspect the REST commands that drive the service.</p>
+              <span class="nv-pill">Basic evaluator</span><span class="nv-pill">Advanced API console</span><span class="nv-pill">Local NIM diagnostics</span>
             </div>
             """
         )
@@ -632,10 +645,14 @@ def build_app() -> gr.Blocks:
                             info="Path visible to evaluator containers, usually /data/<filename>.",
                         )
                     with gr.Column(scale=4):
-                        endpoint = gr.Dropdown(label="Evaluator VLM endpoint", choices=DEFAULT_ENDPOINTS, value=DEFAULT_ENDPOINT)
+                        endpoint = gr.Dropdown(label="Active evaluator target", choices=DEFAULT_ENDPOINTS, value=DEFAULT_ENDPOINT)
                         confirm_endpoint_btn = gr.Button("Confirm endpoint change", variant="secondary")
                         endpoint_confirm_status = gr.Markdown("Endpoint change has not been confirmed in this session.")
-                        nim_model_md = gr.Markdown("Loaded NIM model: `unknown`")
+                        nim_model_md = gr.Markdown("Active route unknown. Local Cosmos3 NIM standby: `unknown`.")
+                        gr.Markdown(
+                            "Only the active evaluator target is used for a run. "
+                            "The local Cosmos3 NIM is shown for diagnostics and standby switching."
+                        )
                         weather = gr.Textbox(label="Weather", value=DEFAULT_PRESET["weather"])
                         time_of_day = gr.Textbox(
                             label="Time of day / illumination",
@@ -644,6 +661,7 @@ def build_app() -> gr.Blocks:
                         geography = gr.Textbox(label="Region / geography", value=DEFAULT_PRESET["region_geography"])
                         road_surface = gr.Textbox(label="Road surface", value=DEFAULT_PRESET["road_surface_conditions"])
                         run_btn = gr.Button("Run evaluator", variant="primary")
+                        run_status = gr.Markdown("Ready.")
 
                 result_md = gr.Markdown("Run the evaluator to see the score summary.")
                 details_table = gr.Dataframe(
@@ -656,8 +674,8 @@ def build_app() -> gr.Blocks:
 
             with gr.TabItem("Advanced View"):
                 with gr.Row():
-                    nim_url = gr.Textbox(label="NIM URL", value=NIM_URL)
-                    vlm_url = gr.Textbox(label="VLM URL", value=VLM_URL)
+                    nim_url = gr.Textbox(label="Local Cosmos3 NIM URL", value=NIM_URL)
+                    vlm_url = gr.Textbox(label="Evaluator service URL", value=VLM_URL)
                     control_url = gr.Textbox(label="Runtime/control URL", value=CONTROL_URL)
                 with gr.Row():
                     attribute_url = gr.Textbox(label="Attribute URL", value=ATTRIBUTE_URL)
@@ -667,7 +685,7 @@ def build_app() -> gr.Blocks:
                 allow_mismatch = gr.Checkbox(
                     label="Allow endpoint/model mismatch",
                     value=False,
-                    info="Use only when the selected endpoint is hosted or you are intentionally testing an unloaded local NIM.",
+                    info="Only affects local Cosmos3 targets. Hosted Qwen does not use the local NIM model.",
                 )
                 use_edited_json = gr.Checkbox(
                     label="Use edited JSON payload for Basic View run",
@@ -693,7 +711,6 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     hall_config = gr.JSON(label="Hallucination config")
                     obs_config = gr.JSON(label="Obstacle config")
-                request_status = gr.Markdown()
 
         refresh_inputs = [nim_url, vlm_url, control_url, attribute_url, hallucination_url, obstacle_url]
         refresh_outputs = [status_html, endpoint, runtime_raw, endpoints_raw, health_raw, nim_model_md]
@@ -734,7 +751,7 @@ def build_app() -> gr.Blocks:
                 vlm_url,
                 control_url,
             ],
-            outputs=[result_md, details_table, raw_response, payload_preview, request_status],
+            outputs=[result_md, details_table, raw_response, payload_preview, run_status],
         )
         confirm_endpoint_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[endpoint_confirm_status, switch_raw])
         switch_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[switch_status, switch_raw])
