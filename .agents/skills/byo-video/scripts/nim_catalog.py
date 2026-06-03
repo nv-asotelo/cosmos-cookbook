@@ -83,6 +83,25 @@ class NimImage:
 # doubt, set False; agents can always upgrade after reading the card.
 #
 KNOWN_VLM_NIMS = [
+    # ── Cosmos3 Reasoner family (NVIDIA, video-native) ───────────────────
+    NimImage("cosmos3-nano-reasoner",
+             "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
+             "Cosmos3 Reasoner", "Cosmos3 Nano Reasoner 8B (NIM)",
+             "nvidia/cosmos3-nano-reasoner",
+             min_vram_mb=40000, supports_video=True,
+             env={"NIM_MODEL_SIZE": "nano"},
+             notes="Cosmos3 Reasoner NIM 1.7.0; set NIM_MODEL_SIZE=nano. "
+                   "Served as nvidia/cosmos3-nano-reasoner."),
+    NimImage("cosmos3-super-reasoner",
+             "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
+             "Cosmos3 Reasoner", "Cosmos3 Super Reasoner 32B (NIM)",
+             "nvidia/cosmos3-super-reasoner",
+             min_vram_mb=80000, supports_video=True,
+             env={"NIM_MODEL_SIZE": "super"},
+             notes="Cosmos3 Reasoner NIM 1.7.0; set NIM_MODEL_SIZE=super. "
+                   "Served as nvidia/cosmos3-super-reasoner. H100/H200-class "
+                   "VRAM recommended; single L40/L40S hosts may fail to load."),
+
     # ── Cosmos Reason2 family (NVIDIA, video-native) ─────────────────────
     NimImage("cosmos-reason2-2b",  "nvcr.io/nim/nvidia/cosmos-reason2-2b:latest",
              "Cosmos Reason2", "Cosmos Reason2 2B (NIM)",

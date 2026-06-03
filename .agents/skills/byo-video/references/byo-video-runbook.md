@@ -731,6 +731,44 @@ Write progress to local machine `/tmp/byo_video_progress.json`:
 
 The NIM (local Docker) backend pulls a NIM container from `nvcr.io/nim/nvidia/<model-short>:latest` and runs it on the target's port 8000. The Gradio app talks to the container via the standard OpenAI-compatible client (same code path as vLLM, just a different `VLLM_BASE_URL`). Works on any reachable target — Brev, SSH host, or local Docker — provided NGC_API_KEY and Docker are present. The user supplies the target via the Phase 1 picker; the skill never assumes a default host.
 
+**Cosmos Evaluator + Cosmos3 Super Reasoner NIM path:**
+
+When the user asks to serve `nv-asotelo/cosmos-evaluator` with the Cosmos3
+Super Reasoner NIM, use the helper script rather than the BYO-video Gradio
+launcher:
+
+```bash
+SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
+ssh horde@<ip> "bash -s" < "$SCRIPT_DIR/cosmos_evaluator_horde_setup.sh"
+```
+
+The helper expects `~/.cosmos_evaluator/nim.env` on the target with
+`NGC_API_KEY=...` and chmod 0600/0400. It clones
+`https://github.com/nv-asotelo/cosmos-evaluator.git` at
+`codex/cosmos3-super-nim`, builds the evaluator images, launches:
+
+| Component | Port |
+|---|---:|
+| Cosmos3 NIM (`nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`, `NIM_MODEL_SIZE=super`) | 8000 |
+| Obstacle correspondence | 8082 |
+| VLM preset | 8083 |
+| Hallucination | 8085 |
+| Attribute verification | 8086 |
+| VLM switch/control API | 8090 |
+
+The evaluator VLM switch API is:
+
+```bash
+curl http://localhost:8090/runtime/vlm
+curl -X POST http://localhost:8090/runtime/vlm/switch \
+  -H 'Content-Type: application/json' \
+  -d '{"endpoint":"cosmos3-super-reasoner"}'
+```
+
+Single-L40 Horde hosts are expected to be tight for Cosmos3 Super; if the NIM
+container exits during model load, preserve `docker logs cosmos3-nim` and report
+the VRAM/load failure instead of silently falling back to Nano.
+
 **Source of truth for available VLM NIMs — fetch this URL every time the user selects NIM:**
 
 > [https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html](https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html)
@@ -1287,6 +1325,8 @@ CR2-2B is in the Docker catalog only. CR2-8B is in both. The "[NIM] Skipped — 
 
 | Family | Short-id | Min VRAM | Notes |
 |---|---|---|---|
+| Cosmos3 Reasoner | `cosmos3-nano-reasoner` | 40 GB | NIM 1.7.0 image `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`; set `NIM_MODEL_SIZE=nano`; served as `nvidia/cosmos3-nano-reasoner`. |
+| Cosmos3 Reasoner | `cosmos3-super-reasoner` | 80 GB | Same NIM image; set `NIM_MODEL_SIZE=super`; served as `nvidia/cosmos3-super-reasoner`. H100/H200-class VRAM recommended. |
 | Cosmos Reason2 | `cosmos-reason2-2b` | 20 GB | FP8; reasoning; temp ≥ 0.3 to avoid `<think>+EOS` bug at greedy decode. Container only — not on hosted API. |
 | Cosmos Reason2 | `cosmos-reason2-8b` | 40 GB | FP8; reasoning; Efficient Video Sampling (EVS); same temp constraint as 2B. Container + hosted API. |
 | Cosmos Reason2 | `cosmos-reason2-32b` | 80 GB | Preview/private: default NGC key saw `DENIED` on 2026-05-07; needs allowlist before self-serve smoke. |

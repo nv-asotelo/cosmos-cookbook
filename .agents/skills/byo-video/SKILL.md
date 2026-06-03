@@ -132,6 +132,10 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - `scripts/nim_catalog.py`, `scripts/nim_launch.sh`, and
   `scripts/nim_switch_service.py`: NIM model catalog, launch helper, and
   companion switch/status service for Gradio restarts.
+- `scripts/cosmos_evaluator_horde_setup.sh`: clones the nv-asotelo
+  `cosmos-evaluator` branch with Cosmos3 Super Reasoner NIM support, builds the
+  evaluator service images, launches the full stack on Horde, and runs smoke
+  checks.
 - `scripts/smoke_cr2_byo.py` and `scripts/smoke_nem_vl.py`: smoke tests.
 
 ## Operating Rules
@@ -143,5 +147,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   name. Former CR2 hosts may be reverse Cosmos-3-Super-Reasoner lanes.
 - For NIM-local mode, refresh `nim_catalog.py upstream` before presenting a model
   list, and warn if upstream docs include a model missing from `KNOWN_VLM_NIMS`.
+- For Cosmos Evaluator deployments, use the evaluator fork's `deploy/horde/*`
+  scripts through `cosmos_evaluator_horde_setup.sh`; do not paste NGC keys into
+  command arguments.
 - If a remote setup fails, capture the phase, instance, and one-line error in
   `/tmp/byo_video_observer_result.json` before asking the user for recovery.
