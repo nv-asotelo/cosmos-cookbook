@@ -4111,18 +4111,44 @@ function isConnectedTrajectoryPoint(mark: SpatialMark) {
   return /gripper|end.?effector|trajectory|waypoint|path|approach|grasp|lift|move|release|place|start/.test(text);
 }
 
+function spatialMarkPointData(mark: SpatialMark) {
+  return `${Math.round(mark.centerX)},${Math.round(mark.centerY)}`;
+}
+
+function spatialMarkBboxData(mark: SpatialMark) {
+  return `${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(mark.x + mark.width)},${Math.round(
+    mark.y + mark.height
+  )}`;
+}
+
+function visualizedSpatialMarks(marks: SpatialMark[], visualizedMarkId: string | null) {
+  if (!visualizedMarkId) return marks;
+  const selected = marks.find((mark) => mark.id === visualizedMarkId);
+  if (!selected) return marks;
+  if (isConnectedTrajectoryPoint(selected)) {
+    const pathMarks = marks
+      .filter((mark) => mark.source === selected.source && isConnectedTrajectoryPoint(mark))
+      .sort((a, b) => a.sequence - b.sequence);
+    const selectedPathIndex = pathMarks.findIndex((mark) => mark.id === selected.id);
+    return selectedPathIndex >= 0 ? pathMarks.slice(0, selectedPathIndex + 1) : [selected];
+  }
+  return [selected];
+}
+
 function SpatialMarksSvg({
   className = "",
   compact = false,
   imageSize,
   marks,
-  showPath = true
+  showPath = true,
+  visualized = false
 }: {
   className?: string;
   compact?: boolean;
   imageSize: ImageSize;
   marks: SpatialMark[];
   showPath?: boolean;
+  visualized?: boolean;
 }) {
   const sortedMarks = [...marks].sort((a, b) => {
     if (a.source !== b.source) return a.source === "thinking" ? -1 : 1;
@@ -4133,7 +4159,9 @@ function SpatialMarksSvg({
   return (
     <svg
       aria-hidden="true"
-      className={`spatialSvg${compact ? " spatialSvgCompact" : ""}${className ? ` ${className}` : ""}`}
+      className={`spatialSvg${compact ? " spatialSvgCompact" : ""}${visualized ? " spatialSvgVisualized" : ""}${
+        className ? ` ${className}` : ""
+      }`}
       preserveAspectRatio="xMidYMid meet"
       viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
     >
@@ -4214,6 +4242,7 @@ function SpatialTrajectoryOverlay({
   const [showFinalAnswer, setShowFinalAnswer] = useState(true);
   const [showReasoningTrace, setShowReasoningTrace] = useState(false);
   const [selectedPlanningFrame, setSelectedPlanningFrame] = useState(0);
+  const [visualizedMarkId, setVisualizedMarkId] = useState<string | null>(null);
   const spatialImageRef = useRef<HTMLImageElement | null>(null);
   const planningTrace = media?.planningTrace;
   const selectedFrameIndex = planningTrace
@@ -4244,6 +4273,7 @@ function SpatialTrajectoryOverlay({
     setShowReasoningTrace(hasReasoningTrace);
     setShowFinalAnswer(!hasReasoningTrace);
     setSelectedPlanningFrame(planningTrace?.defaultFrameIndex ?? 0);
+    setVisualizedMarkId(null);
   }, [answerText, media?.previewUrl, planningTrace?.title, reasoningText]);
 
   useEffect(() => {
@@ -4285,8 +4315,10 @@ function SpatialTrajectoryOverlay({
     ...(showFinalAnswer ? finalMarks : [])
   ];
   const visibleMarks = planningTrace ? cinematicMarksForPlanningFrame(marks, selectedFrame, selectedFrameIndex, imageSize) : marks;
-  const points = visibleMarks.filter((mark) => mark.kind === "point");
-  const boxes = visibleMarks.filter((mark) => mark.kind === "bbox");
+  const visualizedMark = visibleMarks.find((mark) => mark.id === visualizedMarkId) || null;
+  const overlayMarks = visualizedSpatialMarks(visibleMarks, visualizedMarkId);
+  const points = overlayMarks.filter((mark) => mark.kind === "point");
+  const boxes = overlayMarks.filter((mark) => mark.kind === "bbox");
   const visibleThinkingMarks = planningTrace
     ? showReasoningTrace
       ? cinematicMarksForPlanningFrame(thinkingMarks, selectedFrame, selectedFrameIndex, imageSize)
@@ -4335,6 +4367,7 @@ function SpatialTrajectoryOverlay({
                 setShowFinalAnswer((value) => {
                   const nextValue = !value;
                   if (nextValue) setShowReasoningTrace(false);
+                  setVisualizedMarkId(null);
                   return nextValue;
                 })
               }
@@ -4353,6 +4386,7 @@ function SpatialTrajectoryOverlay({
                 setShowReasoningTrace((value) => {
                   const nextValue = !value;
                   if (nextValue) setShowFinalAnswer(false);
+                  setVisualizedMarkId(null);
                   return nextValue;
                 })
               }
@@ -4375,6 +4409,7 @@ function SpatialTrajectoryOverlay({
                 setShowFinalAnswer((value) => {
                   const nextValue = !value;
                   if (nextValue) setShowReasoningTrace(false);
+                  setVisualizedMarkId(null);
                   return nextValue;
                 })
               }
@@ -4392,6 +4427,7 @@ function SpatialTrajectoryOverlay({
                 setShowReasoningTrace((value) => {
                   const nextValue = !value;
                   if (nextValue) setShowFinalAnswer(false);
+                  setVisualizedMarkId(null);
                   return nextValue;
                 })
               }
@@ -4424,7 +4460,10 @@ function SpatialTrajectoryOverlay({
                 aria-pressed={selected}
                 className={selected ? "planningFrame active" : "planningFrame"}
                 key={`${frame.time}-${frame.phase}`}
-                onClick={() => setSelectedPlanningFrame(index)}
+                onClick={() => {
+                  setSelectedPlanningFrame(index);
+                  setVisualizedMarkId(null);
+                }}
                 type="button"
               >
                 <div className="planningFrameMedia">
@@ -4460,8 +4499,13 @@ function SpatialTrajectoryOverlay({
           }
           onLoad={(event) => updateImageSizeFromElement(event.currentTarget)}
         />
-        {imageSize && visibleMarks.length > 0 ? (
-          <SpatialMarksSvg imageSize={imageSize} marks={visibleMarks} showPath={selectedFrameMode === "trajectory" || !planningTrace} />
+        {imageSize && overlayMarks.length > 0 ? (
+          <SpatialMarksSvg
+            imageSize={imageSize}
+            marks={overlayMarks}
+            showPath={Boolean(visualizedMark) || selectedFrameMode === "trajectory" || !planningTrace}
+            visualized={Boolean(visualizedMark)}
+          />
         ) : null}
       </div>
       {selectedCoordinateFrame ? (
@@ -4489,9 +4533,19 @@ function SpatialTrajectoryOverlay({
       ) : null}
       {visibleMarks.length > 0 ? (
         <div className="spatialSequenceGroups">
-          <SpatialMarkList label="Final answer" marks={visibleFinalMarks} />
+          <SpatialMarkList
+            label="Final answer"
+            marks={visibleFinalMarks}
+            onVisualize={setVisualizedMarkId}
+            visualizedMarkId={visualizedMarkId}
+          />
           {showReasoningTrace && visibleThinkingMarks.length > 0 ? (
-            <SpatialMarkList label="Reasoning trace" marks={visibleThinkingMarks} />
+            <SpatialMarkList
+              label="Reasoning trace"
+              marks={visibleThinkingMarks}
+              onVisualize={setVisualizedMarkId}
+              visualizedMarkId={visualizedMarkId}
+            />
           ) : null}
         </div>
       ) : planningTrace && marks.length > 0 ? (
@@ -4509,28 +4563,61 @@ function spatialMarkPrefix(mark: SpatialMark) {
   return mark.source === "thinking" ? "Trace" : "Final";
 }
 
-function SpatialMarkList({ label, marks }: { label: string; marks: SpatialMark[] }) {
+function SpatialMarkList({
+  label,
+  marks,
+  onVisualize,
+  visualizedMarkId
+}: {
+  label: string;
+  marks: SpatialMark[];
+  onVisualize: (markId: string | null) => void;
+  visualizedMarkId: string | null;
+}) {
   if (marks.length === 0) return null;
   return (
     <section className={label === "Reasoning trace" ? "spatialSequenceGroup traceGroup" : "spatialSequenceGroup"}>
       <p>{label}</p>
       <ol className="spatialSequence" aria-label={`${label} coordinate sequence`}>
-        {marks.map((mark) => (
-          <li className="spatialSequenceItem" key={`sequence-${mark.id}`}>
-            <strong>
-              {spatialMarkPrefix(mark)} #{mark.sequence}
-            </strong>
-            {mark.time ? <small>{mark.time}</small> : null}
-            <span>{mark.label}</span>
-            {mark.detail ? <em>{mark.detail}</em> : null}
-            <code>
-              {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
-              {mark.kind === "bbox"
-                ? `${Math.round(mark.x)}, ${Math.round(mark.y)}, ${Math.round(mark.width)}×${Math.round(mark.height)}`
-                : `${Math.round(mark.centerX)}, ${Math.round(mark.centerY)}`}
-            </code>
-          </li>
-        ))}
+        {marks.map((mark) => {
+          const isVisualized = visualizedMarkId === mark.id;
+          const isTrajectory = isConnectedTrajectoryPoint(mark);
+          const pointData = spatialMarkPointData(mark);
+          const bboxData = mark.kind === "bbox" ? spatialMarkBboxData(mark) : undefined;
+          return (
+            <li className={isVisualized ? "spatialSequenceItem visualized" : "spatialSequenceItem"} key={`sequence-${mark.id}`}>
+              <strong>
+                {spatialMarkPrefix(mark)} #{mark.sequence}
+              </strong>
+              {mark.time ? <small>{mark.time}</small> : null}
+              <span>{mark.label}</span>
+              {mark.detail ? <em>{mark.detail}</em> : null}
+              <code>
+                {mark.sourceKey} {mark.coordinateMode === "cosmos-1000" ? "0-1000" : mark.coordinateMode} →{" "}
+                {mark.kind === "bbox"
+                  ? `${Math.round(mark.x)}, ${Math.round(mark.y)}, ${Math.round(mark.width)}×${Math.round(mark.height)}`
+                  : `${Math.round(mark.centerX)}, ${Math.round(mark.centerY)}`}
+              </code>
+              <button
+                aria-label={`${isVisualized ? "Hide" : "Visualize"} ${
+                  isTrajectory ? "trajectory point" : mark.kind === "bbox" ? "bounding box" : "point"
+                } (${pointData})`}
+                aria-pressed={isVisualized}
+                className={`${isTrajectory ? "reason2gen-pin" : "vision-tuple-pin"}${isVisualized ? " active" : ""}`}
+                data-reason2gen-label={isTrajectory ? mark.label : undefined}
+                data-reason2gen-point={isTrajectory ? pointData : undefined}
+                data-reason2gen-trajectory={isTrajectory ? "true" : undefined}
+                data-vision-bbox={bboxData}
+                data-vision-label={mark.label}
+                data-vision-point={pointData}
+                onClick={() => onVisualize(isVisualized ? null : mark.id)}
+                type="button"
+              >
+                {isVisualized ? "Hide" : "Visualize"}
+              </button>
+            </li>
+          );
+        })}
       </ol>
     </section>
   );
@@ -5725,6 +5812,8 @@ function PromptBox({
   rows: number;
   onChange: (value: string) => void;
 }) {
+  const [promptVisible, setPromptVisible] = useState(false);
+  const hasPrompt = value.trim().length > 0;
   return (
     <div className="promptBox">
       <div className="promptTopline">
@@ -5733,10 +5822,32 @@ function PromptBox({
           <span className="requiredDot">*</span>
           <span className="infoDot">i</span>
         </label>
-        <span>
-          {value.length}/{max}
-        </span>
+        <div className="promptActions">
+          {hasPrompt ? (
+            <button
+              aria-expanded={promptVisible}
+              aria-label={promptVisible ? "Hide prompt" : "Show prompt"}
+              className={promptVisible ? "video-caption-reveal vision-language-prompt expanded" : "video-caption-reveal vision-language-prompt"}
+              onClick={() => setPromptVisible((visible) => !visible)}
+              type="button"
+            >
+              <span className="video-caption-icon" aria-hidden="true">
+                T
+              </span>
+              <span className="video-caption-text">{promptVisible ? "Hide prompt" : "Show prompt"}</span>
+            </button>
+          ) : null}
+          <span className="promptCounter">
+            {value.length}/{max}
+          </span>
+        </div>
       </div>
+      {promptVisible ? (
+        <div className="promptRevealPanel">
+          <strong>Prompt:</strong>
+          <pre>{value}</pre>
+        </div>
+      ) : null}
       <textarea
         rows={rows}
         value={value}
