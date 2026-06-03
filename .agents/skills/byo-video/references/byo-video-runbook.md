@@ -124,7 +124,7 @@ Then launch via the bundled helper `scripts/cosmos3_native_launch.sh` (deployed 
 COSMOS3_CHECKPOINT=Cosmos3-Nano  bash /tmp/cosmos3_native_launch.sh   # or Cosmos3-Super
 ```
 
-The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000` and `python -m cosmos_framework.inference.ray.gradio --host 0.0.0.0 --port 8080`, writes `/tmp/gradio_url.txt` (`http://<host>:8080`), `/tmp/cosmos3_framework_gradio_url.txt`, and `/tmp/gradio_live.flag`, and leaves PIDs in `/tmp/cosmos3_serve.pid` and `/tmp/cosmos3_gradio.pid` for clean teardown.
+The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000`, reuses an existing healthy Ray Serve instance when `/info` already responds, and leaves the Ray PID in `/tmp/cosmos3_serve.pid` for clean teardown. Set `COSMOS3_FRAMEWORK_GRADIO=true` to best-effort launch the upstream framework Gradio sidecar on `:8080`; that sidecar writes `/tmp/cosmos3_framework_gradio_url.txt` only and is not the required BYO-video fallback UI.
 
 **Smoke trace (horde@10.57.233.111, RTX PRO 6000 Blackwell, driver 575, 2026-05-12):**
 - `uv sync --all-extras --group=cu130-train` completed (~5 min, +11 GB venv).
@@ -136,9 +136,10 @@ The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000` an
 
 - `byo_video_setup.py` auto-selects `INFERENCE_BACKEND=cosmos3_native` for `MODEL_SIZE=C3-NANO-GEN` and `MODEL_SIZE=C3-SUPER-GEN` unless the caller explicitly asks for `INFERENCE_BACKEND=nim_local` to test a NIM image.
 - Step 5 clones `NVIDIA/cosmos-framework`, Step 6 runs `uv sync --all-extras --group=${COSMOS3_UV_GROUP:-cu130-train}`, Step 9 launches `scripts/cosmos3_native_launch.sh`, and Step 10 launches the Predict Vite primary plus the required BYO Gradio fallback.
+- The launcher treats Ray Serve `/info` as the required readiness gate. The upstream `cosmos_framework.inference.ray.gradio` sidecar is disabled by default because some generator checkpoints can fail its bundled example assertion; opt in with `COSMOS3_FRAMEWORK_GRADIO=true`. When it binds, it writes `/tmp/cosmos3_framework_gradio_url.txt` only. The required BYO Gradio fallback owns `/tmp/gradio_url.txt` and `/tmp/gradio_live.flag`.
 - On GB10 unified-memory hosts, NVML may return `NVMLError_NotSupported` for device memory. The launcher scopes a `sitecustomize.py` patch to the framework Ray Serve process so this probe falls back to `COSMOS3_DEVICE_MEMORY_BYTES` (default `137438953472`) instead of crashing before model load.
 - Framework guardrails are disabled by default for BYO generator serving because `nvidia/Cosmos-Guardrail1` is gated. Set `COSMOS3_GUARDRAILS=true` only when the target has access to that checkpoint.
-- `cosmos_framework.inference.ray.gradio` exposes no `--share` flag, but `scripts/cosmos3_upload_gradio.py` (our wrapper) does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:8080`) and SSH port-forward (`ssh -L 8080:localhost:8080 <user@host>`) is the most VPN-tolerant fallback.
+- `cosmos_framework.inference.ray.gradio` exposes no `--share` flag, but the required BYO Gradio fallback does call `ui.queue()` + `ui.launch(share=True)`. The gradio.live tunnel can fail to register on networks that block outbound frpc; if it does, the LAN URL still works (`http://<host>:7860`) and SSH port-forward (`ssh -L 7860:localhost:7860 <user@host>`) is the most VPN-tolerant fallback.
 
 ---
 

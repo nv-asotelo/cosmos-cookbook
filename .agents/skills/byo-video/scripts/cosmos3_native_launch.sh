@@ -2,26 +2,31 @@
 # cosmos3_native_launch.sh — wrap NVIDIA/cosmos-framework for /byo-video.
 #
 # Invoked when INFERENCE_BACKEND=cosmos3_native (i.e. for the Cosmos3 OSS *Generator*
-# checkpoints — Cosmos3-Nano, Cosmos3-Super). Starts Ray Serve on :8000 and the upstream
-# framework Gradio frontend on :8080, then writes the URL files our skill polls for.
+# checkpoints — Cosmos3-Nano, Cosmos3-Super). Starts Ray Serve on :8000 and can
+# optionally start the upstream framework Gradio frontend on :8080. The required
+# BYO-video Gradio fallback is launched later by byo_video_setup.py on GRADIO_PORT.
 #
 # Env:
 #   COSMOS3_DIR          Local checkout of NVIDIA/cosmos-framework (default: ~/cosmos-framework)
 #   COSMOS3_CHECKPOINT   --checkpoint-path arg ("Cosmos3-Nano" | "Cosmos3-Super"). Required.
-#   COSMOS3_GRADIO_PORT  Gradio bind port (default: 8080)
+#   COSMOS3_GRADIO_PORT  Upstream framework Gradio bind port (default: 8080)
 #   COSMOS3_SERVE_PORT   Ray Serve bind port (default: 8000)
 #   COSMOS3_HOST         Gradio bind host (default: 0.0.0.0 — required for off-box access)
 #   COSMOS3_PARALLELISM  --parallelism-preset (default: latency)
 #   COSMOS3_OUTPUT_DIR   --o <dir> (default: outputs/ray_serve)
 #   COSMOS3_MAX_WAIT     Seconds to wait for Ray Serve /info (default: 2400)
+#   COSMOS3_FRAMEWORK_GRADIO
+#                        Start upstream framework Gradio sidecar when true (default: false)
+#   COSMOS3_FRAMEWORK_GRADIO_REQUIRED
+#                        Treat framework Gradio startup failure as fatal when true (default: false)
+#   COSMOS3_GRADIO_MAX_WAIT
+#                        Seconds to wait for framework Gradio bind (default: 60)
 #   COSMOS3_DEVICE_MEMORY_BYTES
 #                        Fallback total memory for GB10/NVML NotSupported (default: 137438953472)
 #   COSMOS3_GUARDRAILS   Enable gated Cosmos guardrails when true (default: false)
 #
 # Writes:
-#   /tmp/gradio_url.txt              http://<host>:<port>  (the framework Gradio URL)
-#   /tmp/cosmos3_framework_gradio_url.txt
-#   /tmp/gradio_live.flag            sentinel: "live\n" once Gradio is reachable
+#   /tmp/cosmos3_framework_gradio_url.txt  http://<host>:<port> when optional framework Gradio binds
 #   /tmp/cosmos3_serve.log           Ray Serve stdout/stderr
 #   /tmp/cosmos3_gradio.log          Gradio stdout/stderr
 #
@@ -40,16 +45,24 @@ COSMOS3_HOST="${COSMOS3_HOST:-0.0.0.0}"
 COSMOS3_PARALLELISM="${COSMOS3_PARALLELISM:-latency}"
 COSMOS3_OUTPUT_DIR="${COSMOS3_OUTPUT_DIR:-outputs/ray_serve}"
 COSMOS3_MAX_WAIT="${COSMOS3_MAX_WAIT:-2400}"
+COSMOS3_FRAMEWORK_GRADIO="${COSMOS3_FRAMEWORK_GRADIO:-false}"
+COSMOS3_FRAMEWORK_GRADIO_REQUIRED="${COSMOS3_FRAMEWORK_GRADIO_REQUIRED:-false}"
+COSMOS3_GRADIO_MAX_WAIT="${COSMOS3_GRADIO_MAX_WAIT:-60}"
 COSMOS3_UV_GROUP="${COSMOS3_UV_GROUP:-cu130-train}"
 COSMOS3_DEVICE_MEMORY_BYTES="${COSMOS3_DEVICE_MEMORY_BYTES:-137438953472}"
 COSMOS3_GUARDRAILS="${COSMOS3_GUARDRAILS:-false}"
 
+_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _COSMOS3_GUARDRAIL_ARGS=("--no-guardrails")
-case "$(printf '%s' "$COSMOS3_GUARDRAILS" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes|on)
-    _COSMOS3_GUARDRAIL_ARGS=("--guardrails")
-    ;;
-esac
+if _truthy "$COSMOS3_GUARDRAILS"; then
+  _COSMOS3_GUARDRAIL_ARGS=("--guardrails")
+fi
 
 if [[ ! -d "$COSMOS3_DIR" ]]; then
   echo "✗ COSMOS3_DIR=$COSMOS3_DIR not found." >&2
@@ -119,19 +132,23 @@ export PYTHONPATH="$COSMOS3_SITECUSTOMIZE_DIR:${PYTHONPATH:-}"
 export COSMOS3_DEVICE_MEMORY_BYTES
 
 mkdir -p "$COSMOS3_OUTPUT_DIR"
-: > /tmp/cosmos3_serve.log
 : > /tmp/cosmos3_gradio.log
-rm -f /tmp/gradio_live.flag /tmp/gradio_url.txt /tmp/cosmos3_framework_gradio_url.txt
+rm -f /tmp/cosmos3_framework_gradio_url.txt
 
-echo "→ Starting Ray Serve (cosmos_framework.inference.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
-nohup uv run --no-sync python -m cosmos_framework.inference.ray.serve \
-    --parallelism-preset="$COSMOS3_PARALLELISM" \
-    "${_COSMOS3_GUARDRAIL_ARGS[@]}" \
-    --keep-going \
-    -o "$COSMOS3_OUTPUT_DIR" \
-    --checkpoint-path "$COSMOS3_CHECKPOINT" \
-    > /tmp/cosmos3_serve.log 2>&1 &
-echo $! > /tmp/cosmos3_serve.pid
+if curl -fsS "http://localhost:${COSMOS3_SERVE_PORT}/info" >/dev/null 2>&1; then
+  echo "✓ Ray Serve already ready on :$COSMOS3_SERVE_PORT — reusing existing process"
+else
+  : > /tmp/cosmos3_serve.log
+  echo "→ Starting Ray Serve (cosmos_framework.inference.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
+  nohup uv run --no-sync python -m cosmos_framework.inference.ray.serve \
+      --parallelism-preset="$COSMOS3_PARALLELISM" \
+      "${_COSMOS3_GUARDRAIL_ARGS[@]}" \
+      --keep-going \
+      -o "$COSMOS3_OUTPUT_DIR" \
+      --checkpoint-path "$COSMOS3_CHECKPOINT" \
+      > /tmp/cosmos3_serve.log 2>&1 &
+  echo $! > /tmp/cosmos3_serve.pid
+fi
 
 echo "→ Waiting up to ${COSMOS3_MAX_WAIT}s for Ray Serve /info on :$COSMOS3_SERVE_PORT"
 for i in $(seq 1 "$COSMOS3_MAX_WAIT"); do
@@ -148,6 +165,12 @@ if ! curl -fsS "http://localhost:${COSMOS3_SERVE_PORT}/info" >/dev/null 2>&1; th
   exit 2
 fi
 
+if ! _truthy "$COSMOS3_FRAMEWORK_GRADIO"; then
+  echo "→ Skipping upstream framework Gradio sidecar (COSMOS3_FRAMEWORK_GRADIO=false)"
+  echo "✓ Ray Serve live on :$COSMOS3_SERVE_PORT"
+  exit 0
+fi
+
 echo "→ Starting Gradio (cosmos_framework.inference.ray.gradio) on $COSMOS3_HOST:$COSMOS3_GRADIO_PORT"
 nohup uv run --no-sync python -m cosmos_framework.inference.ray.gradio \
     --host "$COSMOS3_HOST" \
@@ -158,21 +181,23 @@ nohup uv run --no-sync python -m cosmos_framework.inference.ray.gradio \
     > /tmp/cosmos3_gradio.log 2>&1 &
 echo $! > /tmp/cosmos3_gradio.pid
 
-echo "→ Waiting up to 60s for Gradio to bind :$COSMOS3_GRADIO_PORT"
-for i in $(seq 1 30); do
+echo "→ Waiting up to ${COSMOS3_GRADIO_MAX_WAIT}s for Gradio to bind :$COSMOS3_GRADIO_PORT"
+for i in $(seq 1 "$COSMOS3_GRADIO_MAX_WAIT"); do
   if ss -ltn 2>/dev/null | grep -q ":${COSMOS3_GRADIO_PORT}\b"; then
     PUBLIC_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [[ -z "$PUBLIC_HOST" ]] && PUBLIC_HOST="$COSMOS3_HOST"
     URL="http://${PUBLIC_HOST}:${COSMOS3_GRADIO_PORT}"
-    echo "$URL" > /tmp/gradio_url.txt
     echo "$URL" > /tmp/cosmos3_framework_gradio_url.txt
-    echo "live" > /tmp/gradio_live.flag
     echo "✓ Gradio live at $URL"
     exit 0
   fi
-  sleep 2
+  sleep 1
 done
 
-echo "✗ Gradio did not bind :$COSMOS3_GRADIO_PORT within 60s. Last 30 log lines:" >&2
+echo "⚠ Gradio did not bind :$COSMOS3_GRADIO_PORT within ${COSMOS3_GRADIO_MAX_WAIT}s. Last 30 log lines:" >&2
 tail -30 /tmp/cosmos3_gradio.log >&2 || true
-exit 3
+if _truthy "$COSMOS3_FRAMEWORK_GRADIO_REQUIRED"; then
+  exit 3
+fi
+echo "✓ Ray Serve live on :$COSMOS3_SERVE_PORT; continuing without upstream framework Gradio"
+exit 0

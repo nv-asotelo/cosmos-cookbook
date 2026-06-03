@@ -28,7 +28,8 @@ const port = Number(process.env.PORT || 5175);
 function activeBackend() {
   const explicit = String(process.env.COSMOS3_BACKEND || process.env.PREDICT_BACKEND || process.env.INFERENCE_BACKEND || "").toLowerCase();
   if (explicit.includes("nim")) return "nim_local";
-  if (process.env.NIM_INFER_URL || process.env.NIM_BASE_URL) return "nim_local";
+  if (explicit) return "cosmos3-generate";
+  if (process.env.NIM_INFER_URL || process.env.COSMOS3_INFER_URL) return "nim_local";
   return "cosmos3-generate";
 }
 
