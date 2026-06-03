@@ -1085,10 +1085,16 @@ for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
 
-tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
+COPYFILE_DISABLE=1 tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite /tmp/nvidia-build-predict-vite /tmp/nvidia-build-reason-next /tmp/nvidia-build-predict-next && tar -C /tmp -xzf -"
 ```
+
+The Vite app tarball must include each app's `public/` directory. Predict Vite
+serves the example image grid from
+`/tmp/nvidia-build-predict-vite/public/examples`; if that directory is omitted,
+missing image requests can return the Vite HTML fallback and the Examples modal
+will show blank cards.
 
 Launch setup:
 ```bash
@@ -1531,7 +1537,7 @@ Agent steps:
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
    done
 
-   tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
+   COPYFILE_DISABLE=1 tar -C apps -czf - _shared nvidia-build-reason-vite nvidia-build-predict-vite nvidia-build-reason-next nvidia-build-predict-next | \
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "rm -rf /tmp/_shared /tmp/nvidia-build-reason-vite /tmp/nvidia-build-predict-vite /tmp/nvidia-build-reason-next /tmp/nvidia-build-predict-next && tar -C /tmp -xzf -"
    ```
