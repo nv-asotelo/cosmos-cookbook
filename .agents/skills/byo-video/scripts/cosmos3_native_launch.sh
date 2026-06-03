@@ -16,6 +16,7 @@
 #   COSMOS3_MAX_WAIT     Seconds to wait for Ray Serve /info (default: 2400)
 #   COSMOS3_DEVICE_MEMORY_BYTES
 #                        Fallback total memory for GB10/NVML NotSupported (default: 137438953472)
+#   COSMOS3_GUARDRAILS   Enable gated Cosmos guardrails when true (default: false)
 #
 # Writes:
 #   /tmp/gradio_url.txt              http://<host>:<port>  (the framework Gradio URL)
@@ -41,6 +42,14 @@ COSMOS3_OUTPUT_DIR="${COSMOS3_OUTPUT_DIR:-outputs/ray_serve}"
 COSMOS3_MAX_WAIT="${COSMOS3_MAX_WAIT:-2400}"
 COSMOS3_UV_GROUP="${COSMOS3_UV_GROUP:-cu130-train}"
 COSMOS3_DEVICE_MEMORY_BYTES="${COSMOS3_DEVICE_MEMORY_BYTES:-137438953472}"
+COSMOS3_GUARDRAILS="${COSMOS3_GUARDRAILS:-false}"
+
+_COSMOS3_GUARDRAIL_ARGS=("--no-guardrails")
+case "$(printf '%s' "$COSMOS3_GUARDRAILS" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    _COSMOS3_GUARDRAIL_ARGS=("--guardrails")
+    ;;
+esac
 
 if [[ ! -d "$COSMOS3_DIR" ]]; then
   echo "✗ COSMOS3_DIR=$COSMOS3_DIR not found." >&2
@@ -117,6 +126,7 @@ rm -f /tmp/gradio_live.flag /tmp/gradio_url.txt /tmp/cosmos3_framework_gradio_ur
 echo "→ Starting Ray Serve (cosmos_framework.inference.ray.serve --checkpoint-path $COSMOS3_CHECKPOINT) on :$COSMOS3_SERVE_PORT"
 nohup uv run --no-sync python -m cosmos_framework.inference.ray.serve \
     --parallelism-preset="$COSMOS3_PARALLELISM" \
+    "${_COSMOS3_GUARDRAIL_ARGS[@]}" \
     --keep-going \
     -o "$COSMOS3_OUTPUT_DIR" \
     --checkpoint-path "$COSMOS3_CHECKPOINT" \
