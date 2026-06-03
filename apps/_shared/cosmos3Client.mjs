@@ -175,6 +175,45 @@ function isPathInside(candidate, root) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function addHostCandidate(hosts, value) {
+  for (const part of String(value || "").split(",")) {
+    const raw = part.trim();
+    if (!raw) continue;
+    try {
+      hosts.add(new URL(raw).hostname);
+      continue;
+    } catch {
+      // Plain host or host:port.
+    }
+    hosts.add(raw.replace(/:\d+$/, ""));
+  }
+}
+
+function localPublicAssetHosts() {
+  const hosts = new Set(["localhost", "127.0.0.1"]);
+  addHostCandidate(hosts, process.env.BYO_VIDEO_LOCAL_HOST);
+  addHostCandidate(hosts, process.env.PREDICT_VITE_HOST);
+  addHostCandidate(hosts, process.env.VITE_HOST);
+  addHostCandidate(hosts, process.env.HOST);
+  addHostCandidate(hosts, process.env.HOSTNAME);
+  return hosts;
+}
+
+function localPublicAssetPorts() {
+  return new Set(
+    [
+      "",
+      process.env.PORT,
+      process.env.PREDICT_VITE_PORT,
+      process.env.VITE_PORT,
+      "5174",
+      "5175",
+    ]
+      .filter((port) => port !== undefined && port !== null)
+      .map((port) => String(port).trim()),
+  );
+}
+
 function localPublicAssetPathname(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -183,8 +222,8 @@ function localPublicAssetPathname(value) {
   try {
     const url = new URL(raw);
     const isHttp = url.protocol === "http:" || url.protocol === "https:";
-    const isViteHost = ["localhost", "127.0.0.1", "10.57.233.111"].includes(url.hostname);
-    const isVitePort = url.port === "5175" || url.port === "";
+    const isViteHost = localPublicAssetHosts().has(url.hostname);
+    const isVitePort = localPublicAssetPorts().has(url.port || "");
     if (isHttp && isViteHost && isVitePort) return url.pathname;
   } catch {
     // Not a URL; keep it as-is for Ray to handle if it is already a local path.
