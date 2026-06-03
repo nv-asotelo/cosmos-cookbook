@@ -780,9 +780,10 @@ ssh -L 7860:localhost:7860 -L 8000:localhost:8000 -L 8083:localhost:8083 \
 Then open `http://localhost:7860`.
 
 Basic View is for a new technical user: start with the smoke-test sample video,
-choose **Long video analysis** or **Normal evaluator behavior**, edit the four
-environment preset fields, click **Run evaluator**, and read the score summary
-plus raw JSON. Uploads are copied into
+leave the default hosted `qwen3.5-397b-a17b` evaluator endpoint selected unless
+you are explicitly testing the local Cosmos3 NIM, choose **Long video analysis**
+or **Normal evaluator behavior**, edit the four environment preset fields, click
+**Run evaluator**, and read the score summary plus raw JSON. Uploads are copied into
 `~/cosmos-evaluator/checks/sample_data/cosmos_public` and sent to the evaluator
 as `/data/<filename>`. Long video analysis sends a `preset_check_config` override
 with `max_frames=5`; the evaluator samples those frames across the video timeline
@@ -793,10 +794,10 @@ clips if the selected VLM endpoint rejects the number of sampled frames.
 Advanced View exposes the working API surface: service URLs, health/config JSON,
 runtime endpoint switching, editable `/process/preset` payload, and generated
 `curl` commands for health, runtime status, runtime switch, and preset run. It
-also warns when the selected evaluator endpoint expects Super but the loaded NIM
-model is Nano, blocking Basic View runs unless the operator explicitly enables
-the mismatch override. Switching to `qwen3.5-397b-a17b` routes the evaluator to
-the hosted NVIDIA API endpoint, so local L40 VRAM is no longer the bottleneck;
+also warns when a selected local Cosmos3 endpoint expects a different loaded NIM
+model, blocking Basic View runs unless the operator explicitly enables the
+mismatch override. The default `qwen3.5-397b-a17b` endpoint routes the evaluator
+to the hosted NVIDIA API endpoint, so local L40 VRAM is no longer the bottleneck;
 the long-video frame cap is still useful because hosted multimodal endpoints can
 also enforce per-request image-count limits.
 
@@ -806,11 +807,12 @@ The evaluator VLM switch API is:
 curl http://localhost:8090/runtime/vlm
 curl -X POST http://localhost:8090/runtime/vlm/switch \
   -H 'Content-Type: application/json' \
-  -d '{"endpoint":"cosmos3-super-reasoner"}'
+  -d '{"endpoint":"qwen3.5-397b-a17b"}'
 ```
 
 Single-L40 Horde hosts are expected to fail Cosmos3 Super with CUDA OOM. Preserve
-`docker logs cosmos3-nim` and report the VRAM/load failure; use Nano on L40.
+`docker logs cosmos3-nim` and report the VRAM/load failure; use hosted Qwen by
+default or Nano when testing the local Cosmos3 NIM path on L40.
 RTX PRO 6000 Blackwell Server Edition can host Super, but it is a tight fit: a
 validated host showed `nvidia/cosmos3-super-reasoner` loaded with roughly 90 GB
 VRAM used and only a few GB free.

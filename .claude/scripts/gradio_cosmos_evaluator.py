@@ -55,7 +55,8 @@ DEFAULT_KEYFRAME_INTERVAL_S = 2.0
 DEFAULT_KEYFRAME_WIDTH = 640
 DEFAULT_LONG_VIDEO_MAX_FRAMES = 5
 
-DEFAULT_ENDPOINTS = ["cosmos3-super-reasoner", "cosmos3-nano-reasoner", "qwen3.5-397b-a17b"]
+DEFAULT_ENDPOINT = "qwen3.5-397b-a17b"
+DEFAULT_ENDPOINTS = [DEFAULT_ENDPOINT, "cosmos3-super-reasoner", "cosmos3-nano-reasoner"]
 
 
 CSS = """
@@ -572,7 +573,7 @@ def build_app() -> gr.Blocks:
         ATTRIBUTE_URL,
         HALLUCINATION_URL,
         OBSTACLE_URL,
-        "cosmos3-super-reasoner",
+        DEFAULT_ENDPOINT,
         initial_payload,
     )
 
@@ -620,7 +621,7 @@ def build_app() -> gr.Blocks:
                             info="Path visible to evaluator containers, usually /data/<filename>.",
                         )
                     with gr.Column(scale=4):
-                        endpoint = gr.Dropdown(label="Evaluator VLM endpoint", choices=DEFAULT_ENDPOINTS, value="cosmos3-super-reasoner")
+                        endpoint = gr.Dropdown(label="Evaluator VLM endpoint", choices=DEFAULT_ENDPOINTS, value=DEFAULT_ENDPOINT)
                         confirm_endpoint_btn = gr.Button("Confirm endpoint change", variant="secondary")
                         endpoint_confirm_status = gr.Markdown("Endpoint change has not been confirmed in this session.")
                         nim_model_md = gr.Markdown("Loaded NIM model: `unknown`")
