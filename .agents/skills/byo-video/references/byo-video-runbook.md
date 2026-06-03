@@ -4,7 +4,7 @@
 > `~/.claude/scripts` examples. Before executing, apply the adapter in
 > `../SKILL.md`; for shared use, prefer the bundled `../scripts/` directory.
 
-**Single-model deployment skill.** Deploys any supported model (Cosmos Reason2, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of four frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
+**Single-model deployment skill.** Deploys any supported model (Cosmos3 Super/Nano Reasoner, legacy Cosmos Reason NIMs, Nemotron-Nano-12B-v2-VL, Qwen3-VL, etc.) to one of four frontend modes. When presenting a frontend picker, use these descriptive labels rather than raw implementation names, then map the selected option to `BYO_VIDEO_FRONTEND`:
 
 - **Guided dataset batch UI** -> `BYO_VIDEO_FRONTEND=batch_inference` — guided browser UI for HF public dataset selection, concurrent video processing, worker-safety smoke testing, result export, and FiftyOne result writeback when available. Gradio still launches as a live sidecar.
 - **Single-video upload UI** -> `BYO_VIDEO_FRONTEND=gradio` — default NVIDIA Build-style Gradio skin for upload-one-video/image workflows, prompt presets, reasoning on/off indicators, backend controls, and parameter tuning.
@@ -100,12 +100,22 @@ Cosmos3 ships **two distinct architectures** under one family, served by **diffe
 
 | Cosmos3 model | Class | HF library | Backend | Picker `MODEL_SIZE` |
 |---|---|---|---|---|
-| `nvidia/Cosmos3-Nano-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-8B` |
-| `nvidia/Cosmos3-Super-Reasoner` | Reasoner (chat VLM) | transformers, `qwen3_vl` | vLLM (existing path) | `C3-super` |
+| `nvidia/Cosmos3-Nano-Reasoner` | Reasoner (chat VLM) | official released NIM, converter fallback | `nim_local` with `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` + `NIM_MODEL_SIZE=nano`; vLLM/HF fallback runs `safetensors_to_vlm` conversion | `C3-8B` |
+| `nvidia/Cosmos3-Super-Reasoner` | Reasoner (chat VLM) | official released NIM, converter fallback | `nim_local` with `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` + `NIM_MODEL_SIZE=super`; vLLM/HF fallback runs `safetensors_to_vlm` conversion | `C3-super` |
 | `nvidia/Cosmos3-Nano` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | `NVIDIA/cosmos-framework` | `C3-NANO-GEN` |
 | `nvidia/Cosmos3-Super` | Generator (diffusion video) | diffusers, `Cosmos3OmniDiffusersPipeline` | `NVIDIA/cosmos-framework` | `C3-SUPER-GEN` |
 
-**Reasoners** load identically to other VLMs — `INFERENCE_BACKEND=vllm`, served on `localhost:8000`. Current HF API checks return auth-required for `nvidia/Cosmos3-Nano-Reasoner` and `nvidia/Cosmos3-Super-Reasoner`, so set `HF_TOKEN` with the required access before launch. For `MODEL_SIZE=C3-8B` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
+**Reasoners** now default to the official released local NIM: set `INFERENCE_BACKEND=nim_local`, `NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`, and choose `NIM_MODEL_SIZE=nano` or `NIM_MODEL_SIZE=super`. The shared image defaults to Nano when `NIM_MODEL_SIZE` is omitted, so always set it explicitly for Super. For `MODEL_SIZE=C3-8B|C3-super` and `BYO_VIDEO_FRONTEND=nvidia_build`, the primary surface is the Vite Build skin in `apps/nvidia-build-reason-vite` on port `5173`; Gradio still launches as the required fallback sidecar and writes `/tmp/gradio_url.txt` plus `/tmp/gradio_live.flag`.
+
+If the user explicitly asks to run Cosmos3 Nano/Super Reasoner outside NIM (`INFERENCE_BACKEND=vllm` or `INFERENCE_BACKEND=hf`), `byo_video_setup.py` must first run the `NVIDIA/cosmos-framework` VLM safetensors converter. It clones or reuses `COSMOS3_DIR` / `COSMOS_FRAMEWORK_DIR`, prepares the framework env, then runs:
+
+```bash
+python -m cosmos_framework.scripts.convert_model_to_vlm_safetensors \
+  --checkpoint-path Cosmos3-Super \
+  -o ~/cosmos-framework/examples/checkpoints/Cosmos3-Super-VLM
+```
+
+Use `--checkpoint-path Cosmos3-Nano` and `Cosmos3-Nano-VLM` for the Nano reasoner. Do not try to load the raw Cosmos3 Reasoner checkpoint directly into vLLM/HF without this conversion.
 
 **Predict / generator playgrounds** use the matching Vite Build skin in `apps/nvidia-build-predict-vite` on port `5174` only when `BYO_VIDEO_FRONTEND=nvidia_build` and the selected model is a Cosmos Predict / Video2World / generator class. If the loaded model is a VLM reasoner, kill stale Predict Vite / Next.js capture processes instead of advertising those URLs. Set `BYO_VIDEO_LAUNCH_BATCH_INFERENCE=1` to keep the guided Batch Inference UI live alongside the selected model-matched skin.
 
@@ -134,7 +144,9 @@ The helper starts `python -m cosmos_framework.inference.ray.serve` on `:8000`, r
 
 **Setup integration:**
 
-- `byo_video_setup.py` auto-selects `INFERENCE_BACKEND=cosmos3_native` for `MODEL_SIZE=C3-NANO-GEN` and `MODEL_SIZE=C3-SUPER-GEN` unless the caller explicitly asks for `INFERENCE_BACKEND=nim_local` to test a NIM image.
+- `byo_video_setup.py` defaults `INFERENCE_BACKEND=nim_local` Cosmos3 Reasoner runs to the released `cosmos3-reasoner:1.7.0` NIM. `MODEL_SIZE=C3-8B` injects `NIM_MODEL_SIZE=nano`; `MODEL_SIZE=C3-super` injects `NIM_MODEL_SIZE=super`.
+- `byo_video_setup.py` auto-selects `INFERENCE_BACKEND=cosmos3_native` only for `MODEL_SIZE=C3-NANO-GEN` and `MODEL_SIZE=C3-SUPER-GEN` unless the caller explicitly asks for `INFERENCE_BACKEND=nim_local` to test a NIM image.
+- For `MODEL_SIZE=C3-8B|C3-super` with `INFERENCE_BACKEND=vllm|hf`, Step 9 runs `cosmos_framework.scripts.convert_model_to_vlm_safetensors` before starting the local VLM server.
 - Step 5 clones `NVIDIA/cosmos-framework`, Step 6 runs `uv sync --all-extras --group=${COSMOS3_UV_GROUP:-cu130-train}`, Step 9 launches `scripts/cosmos3_native_launch.sh`, and Step 10 launches the Predict Vite primary plus the required BYO Gradio fallback.
 - The launcher treats Ray Serve `/info` as the required readiness gate. The upstream `cosmos_framework.inference.ray.gradio` sidecar is disabled by default because some generator checkpoints can fail its bundled example assertion; opt in with `COSMOS3_FRAMEWORK_GRADIO=true`. When it binds, it writes `/tmp/cosmos3_framework_gradio_url.txt` only. The required BYO Gradio fallback owns `/tmp/gradio_url.txt` and `/tmp/gradio_live.flag`.
 - On GB10 unified-memory hosts, NVML may return `NVMLError_NotSupported` for device memory. The launcher scopes a `sitecustomize.py` patch to the framework Ray Serve process so this probe falls back to `COSMOS3_DEVICE_MEMORY_BYTES` (default `137438953472`) instead of crashing before model load.
@@ -317,9 +329,9 @@ AskUserQuestion({
       header: "Backend",
       multiSelect: false,
       options: [
-        { label: "vLLM (Recommended)", description: "~15–20 min setup, quantization support, fast inference" },
+        { label: "NIM (local Docker) (Recommended)", description: "Pull nvcr.io NIM container, serve OpenAI-compatible API on port 8000 — needs NGC_API_KEY + Docker on the target" },
+        { label: "vLLM", description: "~15–20 min setup; Cosmos3 Reasoner requires safetensors_to_vlm conversion first" },
         { label: "HF Transformers", description: "~8–12 min setup, no quantization, simpler" },
-        { label: "NIM (local Docker)", description: "Pull nvcr.io NIM container, serve OpenAI-compatible API on port 8000 — needs NGC_API_KEY + Docker on the target" }
       ]
     },
     {
@@ -327,10 +339,10 @@ AskUserQuestion({
       header: "Model",
       multiSelect: false,
       options: [
-        { label: "Cosmos Reason2 2B", description: "nvidia/Cosmos-Reason2-2B (public, ≥40GB VRAM)" },
-        { label: "Cosmos Reason2 8B", description: "nvidia/Cosmos-Reason2-8B (public, ≥80GB VRAM)" },
-        { label: "Cosmos Reason2 32B", description: "nvidia/Cosmos-Reason2-32B (public, ≥141GB VRAM — H200 required)" },
-        { label: "Something else", description: "Cosmos 3 (private), Cosmos Transfer, Nemotron, non-NVIDIA models" }
+        { label: "Cosmos3 Super Reasoner", description: "Official released NIM nvidia/Cosmos3-Super-Reasoner, NIM_MODEL_SIZE=super, ≥96GB VRAM" },
+        { label: "Cosmos3 Nano Reasoner", description: "Official released NIM nvidia/Cosmos3-Nano-Reasoner, NIM_MODEL_SIZE=nano, ≥40GB VRAM" },
+        { label: "Older Cosmos Reason / VLM NIMs", description: "Choose only when the user explicitly asks for Reason1/Reason2 or another older VLM NIM" },
+        { label: "Something else", description: "Cosmos3 generators, Cosmos Transfer, Nemotron, non-NVIDIA models" }
       ]
     },
     {
@@ -354,15 +366,15 @@ AskUserQuestion({
 |---|---|---|
 | Q1 Backend | vLLM | `INFERENCE_BACKEND=vllm` |
 | Q1 Backend | HF Transformers | `INFERENCE_BACKEND=hf` |
-| Q1 Backend | NIM (local Docker) | `INFERENCE_BACKEND=nim_local` · `NIM_IMAGE=nvcr.io/nim/nvidia/<model-short-id>:latest` (resolved from MODEL_ID) · requires `NGC_API_KEY` |
+| Q1 Backend | NIM (local Docker) | `INFERENCE_BACKEND=nim_local` · `MODEL=cosmos3-reasoner-super` by default when no model is specified · requires `NGC_API_KEY` |
 | Q1 Backend | Cosmos3 native (auto) | `INFERENCE_BACKEND=cosmos3_native` — auto-selected when `MODEL_SIZE ∈ {C3-NANO-GEN, C3-SUPER-GEN}`; wraps the `NVIDIA/cosmos-framework` Ray Serve + Gradio stack. See "Cosmos3 OSS Backend Routing" below. |
-| Q2 Model | Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` |
-| Q2 Model | Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` |
-| Q2 Model | Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` |
+| Q2 Model | Cosmos3 Super Reasoner | `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_NAME=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `MODEL=cosmos3-reasoner-super` · `NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` · `NIM_MODEL_SIZE=super` · `INFERENCE_BACKEND=nim_local` |
+| Q2 Model | Cosmos3 Nano Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `MODEL=cosmos3-reasoner-nano` · `NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` · `NIM_MODEL_SIZE=nano` · `INFERENCE_BACKEND=nim_local` |
+| Q2 Model | Older Cosmos Reason / VLM NIMs | Fire OLDER COSMOS / VLM NIM sub-picker (see below) |
 | Q2 Model | Something else | Fire SOMETHING ELSE sub-picker (see below) |
 | Q3 Env | New Brev instance | `DEPLOY_TARGET=brev:new` · fire the New Brev provisioner follow-up below |
 | Q3 Follow-up | Standard Brev | `BREV_PROVISIONER=standard` |
-| Q3 Follow-up | Nemoclaw/OpenClaw Brev | `BREV_PROVISIONER=nemoclaw` · `BREV_LAUNCHABLE_URL=https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Azt0aYgVNFEuz7opyx3gscmowS` · require `MODEL_ID=nvidia/Cosmos3-Super-Reasoner`, `MODEL_SIZE=C3-super`, `INFERENCE_BACKEND=vllm`, H200 |
+| Q3 Follow-up | Nemoclaw/OpenClaw Brev | `BREV_PROVISIONER=nemoclaw` · `BREV_LAUNCHABLE_URL=https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Azt0aYgVNFEuz7opyx3gscmowS` · require `MODEL_ID=nvidia/Cosmos3-Super-Reasoner`, `MODEL_SIZE=C3-super`, `INFERENCE_BACKEND=nim_local`, `NIM_MODEL_SIZE=super`, H200/RTX PRO 6000 Blackwell-class VRAM |
 | Q3 Env | Existing Brev | Follow-up AskUserQuestion: "Instance name?" → `DEPLOY_TARGET=brev:<name>` |
 | Q3 Env | SSH target | Follow-up AskUserQuestion: "user@host or IP?" → `DEPLOY_TARGET=ssh:<user@host>` |
 | Q3 Env | Local machine | `DEPLOY_TARGET=local` |
@@ -384,6 +396,33 @@ AskUserQuestion({
   ]
 })
 ```
+
+**OLDER COSMOS / VLM NIM sub-picker** — fire only when the user selected "Older Cosmos Reason / VLM NIMs" or explicitly named Reason1/Reason2:
+
+```
+AskUserQuestion({
+  questions: [
+    {
+      question: "Which older VLM NIM?",
+      header: "Legacy VLM",
+      multiSelect: false,
+      options: [
+        { label: "Cosmos Reason2 2B", description: "nvidia/Cosmos-Reason2-2B (legacy public, ≥40GB VRAM)" },
+        { label: "Cosmos Reason2 8B", description: "nvidia/Cosmos-Reason2-8B (legacy public, ≥80GB VRAM)" },
+        { label: "Cosmos Reason2 32B", description: "nvidia/Cosmos-Reason2-32B (legacy public, ≥141GB VRAM — H200 required)" },
+        { label: "Cosmos Reason1 7B", description: "Older release; native video fallback may use frames" }
+      ]
+    }
+  ]
+})
+```
+
+| Selection | Sets |
+|---|---|
+| Cosmos Reason2 2B | `MODEL_ID=nvidia/Cosmos-Reason2-2B` · `MODEL_SIZE=2B` · `MODEL=cosmos-reason2-2b` |
+| Cosmos Reason2 8B | `MODEL_ID=nvidia/Cosmos-Reason2-8B` · `MODEL_SIZE=8B` · `MODEL=cosmos-reason2-8b` |
+| Cosmos Reason2 32B | `MODEL_ID=nvidia/Cosmos-Reason2-32B` · `MODEL_SIZE=32B` · `MODEL=cosmos-reason2-32b` |
+| Cosmos Reason1 7B | `MODEL_ID=nvidia/Cosmos-Reason1-7B` · `MODEL_SIZE=CR1-7B` · `MODEL=cosmos-reason1-7b` |
 
 **SOMETHING ELSE sub-picker** — fire immediately when user selects "Something else" for Q2. Because `AskUserQuestion` caps at 4 options per question, fan out by family:
 
@@ -414,8 +453,8 @@ AskUserQuestion({
       header: "Cosmos3",
       multiSelect: false,
       options: [
-        { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — chat VLM, ~16 GB BF16, vLLM-served, HF_TOKEN may be required" },
-        { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — chat VLM, ~60 GB BF16, vLLM-served, HF_TOKEN may be required" },
+        { label: "Cosmos3-Nano-Reasoner",  description: "nvidia/Cosmos3-Nano-Reasoner — official released NIM, NIM_MODEL_SIZE=nano, ≥40GB VRAM" },
+        { label: "Cosmos3-Super-Reasoner", description: "nvidia/Cosmos3-Super-Reasoner — official released NIM, NIM_MODEL_SIZE=super, ≥96GB VRAM" },
         { label: "Cosmos3-Nano (Generator)",  description: "nvidia/Cosmos3-Nano — diffusion video gen (t2i/t2v/i2v), ~30 GB; needs NVIDIA/cosmos-framework" },
         { label: "Cosmos3-Super (Generator)", description: "nvidia/Cosmos3-Super — diffusion video gen (t2i/t2v/i2v), ~60 GB; needs NVIDIA/cosmos-framework" }
       ]
@@ -426,8 +465,8 @@ AskUserQuestion({
 
 | Selection | Sets |
 |---|---|
-| Cosmos3-Nano-Reasoner | `HF_TOKEN=<token>` · `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `INFERENCE_BACKEND=vllm` |
-| Cosmos3-Super-Reasoner | `HF_TOKEN=<token>` · `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `INFERENCE_BACKEND=vllm` |
+| Cosmos3-Nano-Reasoner | `MODEL_ID=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner` · `MODEL_SIZE=C3-8B` · `MODEL=cosmos3-reasoner-nano` · `NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` · `NIM_MODEL_SIZE=nano` · `INFERENCE_BACKEND=nim_local` |
+| Cosmos3-Super-Reasoner | `MODEL_ID=nvidia/Cosmos3-Super-Reasoner` · `MODEL_NAME=nvidia/Cosmos3-Super-Reasoner` · `MODEL_SIZE=C3-super` · `MODEL=cosmos3-reasoner-super` · `NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` · `NIM_MODEL_SIZE=super` · `INFERENCE_BACKEND=nim_local` |
 | Cosmos3-Nano (Generator) | `MODEL_ID=nvidia/Cosmos3-Nano` · `MODEL_SIZE=C3-NANO-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
 | Cosmos3-Super (Generator) | `MODEL_ID=nvidia/Cosmos3-Super` · `MODEL_SIZE=C3-SUPER-GEN` · `INFERENCE_BACKEND=cosmos3_native` |
 
@@ -758,8 +797,8 @@ A previous version (commit `4ed5951`) wired a "Switch to selected NIM" button in
    Valid short-ids come from `python3 /tmp/nim_catalog.py list --no-probe` (or the static panel inside Gradio).
 
 **Agent runbook for "switch the NIM" requests:**
-1. Run `python3 ~/.claude/scripts/nim_catalog.py upstream` to refresh the catalog from `docs.nvidia.com/nim/vision-language-models/latest/introduction.html`. Surface any upstream model name not in `KNOWN_VLM_NIMS` as a one-line note.
-2. Resolve the user's request (e.g. *"Cosmos Reason2 2B"*) to a short-id (e.g. `cosmos-reason2-2b`) via the slug map in `nim_catalog.py`.
+1. Run `python3 .agents/skills/byo-video/scripts/nim_catalog.py upstream` from this repository to refresh the catalog from `docs.nvidia.com/nim/vision-language-models/latest/introduction.html`. Surface any upstream model name not in `KNOWN_VLM_NIMS` as a one-line note.
+2. Resolve the user's request (e.g. *"Cosmos3 Super Reasoner"*) to a short-id (e.g. `cosmos3-reasoner-super`) via the slug map in `nim_catalog.py`.
 3. SSH to the target. Run `docker rm -f cosmos-nim` then `MODEL=<short-id> NGC_API_KEY="$NGC_API_KEY" bash /tmp/nim_launch.sh`. Stream the log so the user can see progress. Do not put credentials in argv.
 4. Verify with `curl -sf http://localhost:8000/v1/models | jq '.data[0].id'` — confirm the served model id matches.
 5. Tell the user to refresh the Gradio page.
@@ -788,9 +827,12 @@ brev exec <name> "python3 -c \"import base64; open('/tmp/nim_catalog.py','wb').w
   3. Forwards known per-NIM env overrides such as `NIM_MAX_MODEL_LEN`, `NIM_MODEL_PROFILE`, `NIM_MEDIA_IO_KWARGS`, and comma-separated `NIM_EXTRA_ENV=KEY=VALUE,...`.
   4. Waits up to 1800s for `GET /v1/models` by default; Omni and Gemma use 2400s because first boot can run 20-30 min.
 - Step 10 — Gradio always launches with `VLLM_BASE_URL=http://localhost:8000/v1`; Batch Inference / FiftyOne selections launch their companion UI after Gradio is live. The Gradio and Batch Inference frontends auto-detect the served model name via `/v1/models` (so `_SERVER_MODEL_ID` or the Batch Inference `server.model` field matches the NIM-served id, e.g. `nvidia/cosmos-reason2-8b`).
+- The released Cosmos3 Reasoner image is shared: `cosmos3-reasoner-super` and `cosmos3-reasoner-nano` both pull `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`, with `NIM_MODEL_SIZE=super|nano` injected by the catalog.
 
 **NIM image short-id resolution (in `byo_video_setup.py`):**
 ```
+MODEL_ID=nvidia/Cosmos3-Super-Reasoner → short=cosmos3-reasoner-super → nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0 + NIM_MODEL_SIZE=super
+MODEL_ID=nvidia/Cosmos3-Nano-Reasoner  → short=cosmos3-reasoner-nano  → nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0 + NIM_MODEL_SIZE=nano
 MODEL_ID=nvidia/Cosmos-Reason2-8B   →  short=cosmos-reason2-8b   →  nvcr.io/nim/nvidia/cosmos-reason2-8b:latest
 MODEL_ID=nvidia/Cosmos-Reason2-2B   →  short=cosmos-reason2-2b   →  nvcr.io/nim/nvidia/cosmos-reason2-2b:latest
 MODEL_ID=nvidia/Cosmos-Reason2-32B  →  short=cosmos-reason2-32b  →  nvcr.io/nim/nvidia/cosmos-reason2-32b:latest
@@ -1105,7 +1147,7 @@ Cosmos3 Nano Reasoner Vite Build skin on the verified Horde host:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519 horde@10.57.232.110 \
-  "nohup bash -c 'export HF_TOKEN=<hf_token_with_access> INFERENCE_BACKEND=vllm MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
+  "nohup bash -c 'export NGC_API_KEY=<nvapi_key> INFERENCE_BACKEND=nim_local NIM_IMAGE=nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0 NIM_MODEL_SIZE=nano MODEL=cosmos3-reasoner-nano MODEL_ID=nvidia/Cosmos3-Nano-Reasoner MODEL_NAME=nvidia/Cosmos3-Nano-Reasoner MODEL_SIZE=C3-8B BYO_VIDEO_FRONTEND=nvidia_build REASON_VITE_PORT=5173 BATCH_INFERENCE_DATASET=pjramg/Safe_Unsafe_Test && python3 /tmp/byo_video_setup.py > /tmp/byo_video_setup.log 2>&1' &"
 ```
 
 Tail logs:
@@ -1164,8 +1206,8 @@ Read `vram_free_mb` and `vram_needed_mb` from the failure JSON. Build options fr
 AskUserQuestion: "The requested model (<MODEL_SIZE>, needs ~<vram_needed_mb/1000>GB VRAM) won't fit on <instance>
 (<vram_free_mb/1000>GB free). Switch to a model that fits, or abort?"
 Options (show only what fits — examples for 40GB free):
-  "Cosmos Reason2 2B (needs ~40GB)"    → MODEL_ID=nvidia/Cosmos-Reason2-2B, MODEL_SIZE=2B
-  "Cosmos3-Nano-Reasoner (needs ~40GB)" → MODEL_ID=nvidia/Cosmos3-Nano-Reasoner, MODEL_SIZE=C3-8B
+  "Cosmos3-Nano-Reasoner (needs ~40GB)" → MODEL_ID=nvidia/Cosmos3-Nano-Reasoner, MODEL_SIZE=C3-8B, MODEL=cosmos3-reasoner-nano, NIM_MODEL_SIZE=nano
+  "Cosmos Reason2 2B (legacy, needs ~40GB)" → MODEL_ID=nvidia/Cosmos-Reason2-2B, MODEL_SIZE=2B
   "Abort — exit without deleting instance"
 ```
 
@@ -1232,11 +1274,13 @@ Only AskUserQuestion when all providers exhausted — present the failure summar
 
 | Model | Size | Min VRAM | MODEL_SIZE | Use case |
 |---|---|---|---|---|
+| Cosmos3 Super Reasoner NIM | Super VLM | 96 GB | `C3-super` | Official released Super reasoner; `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0` with `NIM_MODEL_SIZE=super`; default high-quality BYO-video reasoner |
+| Cosmos3 Nano Reasoner NIM | Nano VLM | 40 GB | `C3-8B` | Official released Nano reasoner; same image with `NIM_MODEL_SIZE=nano`; smaller/faster BYO-video reasoner |
 | Cosmos Reason2 BF16 | 2B VLM | 40 GB | `2B` | Video understanding: robotics, AV, Metropolis |
 | Cosmos Reason2 FP8 | 2B VLM | 24 GB | `2B` | Same, quantized |
 | Cosmos Reason2 BF16 | 8B VLM | 80 GB | `8B` | Higher quality video understanding |
 | Cosmos Reason2 BF16 | 32B VLM | 141 GB | `32B` | Public; H200 SXM minimum (H100 80GB insufficient) |
-| Cosmos3-Nano-Reasoner | 8B VLM | 40 GB | `C3-8B` | HF_TOKEN required when HF API returns 401; verify access before launch |
+| Cosmos3-Nano-Reasoner local fallback | Nano VLM | 40 GB | `C3-8B` | Only for explicit vLLM/HF requests; setup runs `safetensors_to_vlm` conversion through `NVIDIA/cosmos-framework` first |
 | Cosmos3-Reasoner 2B/32B | 2B/32B | 40/80+ GB | `C3-2B`, `C3-32B` | Gated HF_TOKEN; nvidia org required |
 | Nemotron-Nano-12B-v2-VL BF16 | 12B VLM | 40 GB | `NEM-12B` | vLLM-only; gated; opencv backend |
 | Nemotron-Nano-12B-v2-VL FP8 | 12B VLM | 24 GB | `NEM-12B` | FP8 quantized |
@@ -1272,7 +1316,7 @@ Transfer2.5 and Predict2 are datacenter-only (H100/A100 80GB+).
 
 ## VLM NIM Catalog (for `INFERENCE_BACKEND=nim_local`)
 
-Canonical catalog: `~/.claude/scripts/nim_catalog.py` → `KNOWN_VLM_NIMS`. The agent walks BOTH `https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html` AND every versioned release-notes page in `KNOWN_RELEASE_VERSIONS` to keep older containers (e.g. Cosmos Reason1 7B) discoverable when a newer release drops them from the introduction table. When a name appears upstream that is NOT in `KNOWN_VLM_NIMS`, surface it to the user as a one-line PR-this hint.
+Canonical catalog: `.agents/skills/byo-video/scripts/nim_catalog.py` → `KNOWN_VLM_NIMS`. The agent walks BOTH `https://docs.nvidia.com/nim/vision-language-models/latest/introduction.html` AND every versioned release-notes page in `KNOWN_RELEASE_VERSIONS` to keep older containers (e.g. Cosmos Reason1 7B) discoverable when a newer release drops them from the introduction table. When a name appears upstream that is NOT in `KNOWN_VLM_NIMS`, surface it to the user as a one-line PR-this hint.
 
 Two catalogs to keep separate:
 
@@ -1287,6 +1331,8 @@ CR2-2B is in the Docker catalog only. CR2-8B is in both. The "[NIM] Skipped — 
 
 | Family | Short-id | Min VRAM | Notes |
 |---|---|---|---|
+| Cosmos3 Reasoner | `cosmos3-reasoner-super` | 96 GB | Official released shared NIM `nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0`; injects `NIM_MODEL_SIZE=super` and serves `nvidia/Cosmos3-Super-Reasoner`. Default for Super/NIM requests. |
+| Cosmos3 Reasoner | `cosmos3-reasoner-nano` | 40 GB | Same released shared NIM; injects `NIM_MODEL_SIZE=nano` and serves `nvidia/Cosmos3-Nano-Reasoner`. |
 | Cosmos Reason2 | `cosmos-reason2-2b` | 20 GB | FP8; reasoning; temp ≥ 0.3 to avoid `<think>+EOS` bug at greedy decode. Container only — not on hosted API. |
 | Cosmos Reason2 | `cosmos-reason2-8b` | 40 GB | FP8; reasoning; Efficient Video Sampling (EVS); same temp constraint as 2B. Container + hosted API. |
 | Cosmos Reason2 | `cosmos-reason2-32b` | 80 GB | Preview/private: default NGC key saw `DENIED` on 2026-05-07; needs allowlist before self-serve smoke. |

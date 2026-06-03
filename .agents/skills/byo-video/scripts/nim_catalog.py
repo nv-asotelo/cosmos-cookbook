@@ -83,6 +83,33 @@ class NimImage:
 # doubt, set False; agents can always upgrade after reading the card.
 #
 KNOWN_VLM_NIMS = [
+    # ── Cosmos3 Reasoner family (official released shared NIM) ───────────
+    NimImage("cosmos3-reasoner-nano",
+             "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
+             "Cosmos3 Reasoner",
+             "Cosmos3 Nano Reasoner (NIM)",
+             "nvidia/Cosmos3-Nano-Reasoner",
+             min_vram_mb=40000, supports_video=True,
+             env={
+                 "NIM_MODEL_SIZE": "nano",
+                 "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Nano-Reasoner",
+             },
+             notes="Official 1.7.0 shared Cosmos3 Reasoner NIM. "
+                   "NIM_MODEL_SIZE=nano selects the Nano reasoner."),
+    NimImage("cosmos3-reasoner-super",
+             "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
+             "Cosmos3 Reasoner",
+             "Cosmos3 Super Reasoner (NIM)",
+             "nvidia/Cosmos3-Super-Reasoner",
+             min_vram_mb=96000, supports_video=True,
+             env={
+                 "NIM_MODEL_SIZE": "super",
+                 "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Super-Reasoner",
+             },
+             notes="Official 1.7.0 shared Cosmos3 Reasoner NIM. "
+                   "NIM_MODEL_SIZE=super selects the Super reasoner; "
+                   "uses nearly all VRAM on a 98 GB RTX PRO 6000 Blackwell."),
+
     # ── Cosmos Reason2 family (NVIDIA, video-native) ─────────────────────
     NimImage("cosmos-reason2-2b",  "nvcr.io/nim/nvidia/cosmos-reason2-2b:latest",
              "Cosmos Reason2", "Cosmos Reason2 2B (NIM)",
@@ -388,7 +415,11 @@ def _matches_family(name: str, family: str) -> bool:
     while we want to match all sizes (2B/8B/32B). Compare lowercased
     prefix-form, ignoring punctuation differences."""
     norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())
-    return norm(family) in norm(name) or norm(name) in norm(family)
+    name_norm = norm(name)
+    family_norm = norm(family)
+    if family_norm == "cosmos3reasoner":
+        return name_norm.startswith("cosmos3") and "reasoner" in name_norm
+    return family_norm in name_norm or name_norm in family_norm
 
 
 def probe_image(image: str, timeout: int = 30) -> bool:

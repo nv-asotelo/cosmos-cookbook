@@ -13,10 +13,13 @@ selected companion frontend URL. Gradio is always written to
 Env vars:
   HF_TOKEN          — required for gated model download (checks ~/.cache/huggingface/token if not set)
   NGC_API_KEY       — required for NIM mode (nvapi-... prefix)
-  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B | QWEN35-35B-A3B  (default: C3-2B)
+  MODEL_SIZE        — CR1-7B | 2B | 8B | 32B | C3-2B | C3-8B | C3-32B | C3-super | C3-NANO-GEN | C3-SUPER-GEN | PREDICT1-5B | PREDICT1-7B | PREDICT25-2B | PREDICT25-14B | NEM-12B | OMNI-30B | GM-4-31B | QW3-2B | QW3-8B | QW3-32B | QWEN35-35B-A3B  (default: C3-super for nim_local, C3-2B otherwise)
                       C3-NANO-GEN / C3-SUPER-GEN are Cosmos3 OSS *Generators* (diffusion video gen via the
                       NVIDIA/cosmos-framework package; INFERENCE_BACKEND=cosmos3_native). C3-8B and
-                      C3-super are the OSS *Reasoners* (chat VLM via vLLM).
+                      C3-super are Reasoners. In nim_local mode they use the official released
+                      nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0 image with NIM_MODEL_SIZE=nano|super.
+                      In vLLM/HF fallback mode, setup first converts the Cosmos3 checkpoint through
+                      NVIDIA/cosmos-framework's convert_model_to_vlm_safetensors script.
   MODEL_DIR         — override local download path for primary model
   BYO_VIDEO_FRONTEND — nvidia_build | gradio | batch_inference | fiftyone (default: nvidia_build)
   BYO_VIDEO_MOT_TOWER — reasoning | generation | both for future Omni/MoT models. Single-tower
@@ -78,7 +81,7 @@ def stream_cmd(args, cwd=None, env=None, prefix=""):
 
 # ── Size-driven model config (mirrors gradio_cr2_byo.py MODEL_CONFIGS) ───────
 _MODEL_CONFIGS = {
-    # ── Cosmos3-Reasoner (HF auth may be required; setup verifies repo access before download) ──
+    # ── Cosmos3-Reasoner (official NIM by default; converter-backed local fallback) ──
     "C3-2B": {
         "variants": [
             ("C3R-2B BF16", "Cosmos3-Reasoner-2B", "nvidia/Cosmos3-Reasoner-2B-Private", "~TBD"),
@@ -91,7 +94,14 @@ _MODEL_CONFIGS = {
             # Smoke-verified on horde RTX PRO 6000 Blackwell 2026-05-12 (~3m boot, warm cache).
             ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "~16 GB"),
         ],
-        "nim": None,
+        "nim": "cosmos3-reasoner-nano",
+        "nim_env": {
+            "NIM_MODEL_SIZE": "nano",
+            "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Nano-Reasoner",
+        },
+        "nim_max_wait": 1800,
+        "vlm_checkpoint": "Cosmos3-Nano",
+        "vlm_output_dirname": "Cosmos3-Nano-VLM",
     },
     "C3-32B": {
         "variants": [
@@ -112,7 +122,14 @@ _MODEL_CONFIGS = {
             # an RTX PRO 6000 Blackwell (95 GB) with gpu-memory-utilization 0.85.
             ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "~60 GB"),
         ],
-        "nim": None,
+        "nim": "cosmos3-reasoner-super",
+        "nim_env": {
+            "NIM_MODEL_SIZE": "super",
+            "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Super-Reasoner",
+        },
+        "nim_max_wait": 2400,
+        "vlm_checkpoint": "Cosmos3-Super",
+        "vlm_output_dirname": "Cosmos3-Super-VLM",
         # ~60 GB weights + venv + HF cache → 256 GB minimum is plenty; keep 1 TB recommendation for safety on multi-model hosts.
         "disk_gb": 256,
         "vllm_extra_flags": ["--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.85"],
@@ -321,9 +338,14 @@ HF_TOKEN      = os.environ.get("HF_TOKEN", "")
 NGC_API_KEY   = os.environ.get("NGC_API_KEY", "")
 _INFERENCE_BACKEND_ENV = os.environ.get("INFERENCE_BACKEND")
 _INFERENCE_BACKEND_RAW = (_INFERENCE_BACKEND_ENV or "hf").lower()
-MODEL_SIZE    = os.environ.get("MODEL_SIZE", "ALPAMAYO" if _INFERENCE_BACKEND_RAW == "alpamayo" else "C3-2B").upper()
+_DEFAULT_MODEL_SIZE = (
+    "ALPAMAYO" if _INFERENCE_BACKEND_RAW == "alpamayo"
+    else "C3-super" if _INFERENCE_BACKEND_RAW == "nim_local"
+    else "C3-2B"
+)
+MODEL_SIZE    = os.environ.get("MODEL_SIZE", _DEFAULT_MODEL_SIZE).upper()
 # .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
-_MODEL_SIZE_FIX = {"C3-SUPER": "C3-super"}
+_MODEL_SIZE_FIX = {"C3-SUPER": "C3-super", "C3-NANO": "C3-8B", "C3-NANO-REASONER": "C3-8B"}
 MODEL_SIZE = _MODEL_SIZE_FIX.get(MODEL_SIZE, MODEL_SIZE)
 # Working directory is resolved after MODEL_SIZE, because Cosmos3 generators use
 # NVIDIA/cosmos-framework while reasoners still use cosmos-reason2.
@@ -1245,12 +1267,124 @@ def download_model(model_name, model_dir, size_hint, dl_env):
     return True
 
 
+def _has_vlm_safetensors(model_dir):
+    if not model_dir or not os.path.exists(os.path.join(model_dir, "config.json")):
+        return False
+    try:
+        return any(name.endswith(".safetensors") for name in os.listdir(model_dir))
+    except OSError:
+        return False
+
+
+def _cosmos3_framework_dir():
+    return (
+        os.environ.get("COSMOS3_DIR")
+        or os.environ.get("COSMOS_FRAMEWORK_DIR")
+        or os.path.join(HOME, "cosmos-framework")
+    )
+
+
+def _ensure_cosmos3_framework_repo(framework_dir):
+    package_dir = os.path.join(framework_dir, "cosmos_framework")
+    if os.path.isdir(package_dir):
+        ok(f"cosmos-framework already present at {framework_dir}")
+        return
+    if os.path.exists(framework_dir) and os.listdir(framework_dir):
+        print(f"  ✗  {framework_dir} exists but does not contain cosmos_framework.")
+        print("     Set COSMOS3_DIR/COSMOS_FRAMEWORK_DIR to a valid checkout or empty path.")
+        sys.exit(1)
+    run(f"Cloning NVIDIA/cosmos-framework for Cosmos3 VLM conversion at {framework_dir}")
+    rc = stream_cmd(
+        ["git", "clone", "https://github.com/NVIDIA/cosmos-framework.git", framework_dir],
+        env=ENV,
+        prefix="C3VLM │ ",
+    )
+    if rc != 0:
+        print("  ✗  cosmos-framework clone failed")
+        sys.exit(1)
+
+
+def _prepare_cosmos3_converter_env(framework_dir, dl_env):
+    pyproject = os.path.join(framework_dir, "pyproject.toml")
+    if not os.path.exists(pyproject):
+        return
+    if os.path.isdir(os.path.join(framework_dir, ".venv")):
+        ok("cosmos-framework converter virtualenv already present")
+        return
+    group = os.environ.get("COSMOS3_UV_GROUP", "cu130-train")
+    run(f"Preparing cosmos-framework converter environment (uv sync --all-extras --group={group})")
+    rc = stream_cmd(
+        ["uv", "sync", "--all-extras", "--group", group],
+        cwd=framework_dir,
+        env=dl_env,
+        prefix="C3VLM │ ",
+    )
+    if rc != 0:
+        warn("cosmos-framework uv sync failed; will try converter with the current Python environment")
+
+
+def ensure_cosmos3_reasoner_vlm_safetensors(dl_env):
+    """Convert Cosmos3 Nano/Super Reasoner checkpoints before local VLM serving.
+
+    Official NIM mode does not need this. Local vLLM/HF fallback does: the
+    Cosmos3 Reasoner checkpoints must be transformed by the converter in
+    NVIDIA/cosmos-framework before they can be loaded as VLM safetensors.
+    """
+    checkpoint = _cfg.get("vlm_checkpoint")
+    if not checkpoint or INFERENCE_BACKEND not in {"vllm", "hf"}:
+        return None
+
+    framework_dir = _cosmos3_framework_dir()
+    output_dir = os.environ.get("COSMOS3_VLM_SAFETENSORS_PATH")
+    if not output_dir:
+        output_dir = MODEL_DIR if os.environ.get("MODEL_DIR") else os.path.join(
+            framework_dir,
+            "examples",
+            "checkpoints",
+            _cfg.get("vlm_output_dirname") or f"{checkpoint}-VLM",
+        )
+
+    if _has_vlm_safetensors(output_dir):
+        ok(f"Converted Cosmos3 VLM safetensors already present at {output_dir}")
+        return output_dir
+
+    _ensure_cosmos3_framework_repo(framework_dir)
+    _prepare_cosmos3_converter_env(framework_dir, dl_env)
+    os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+    run(f"Converting {checkpoint} to VLM safetensors at {output_dir}")
+    module = "cosmos_framework.scripts.convert_model_to_vlm_safetensors"
+    uv_bin = shutil.which("uv")
+    converter_cmds = []
+    if uv_bin:
+        converter_cmds.append([uv_bin, "run", "python", "-m", module, "--checkpoint-path", checkpoint, "-o", output_dir])
+    converter_cmds.append(["python3", "-m", module, "--checkpoint-path", checkpoint, "-o", output_dir])
+
+    rc = 1
+    for cmd in converter_cmds:
+        rc = stream_cmd(cmd, cwd=framework_dir, env=dl_env, prefix="C3VLM │ ")
+        if rc == 0:
+            break
+    if rc != 0 or not _has_vlm_safetensors(output_dir):
+        print("  ✗  Cosmos3 Reasoner VLM safetensors conversion failed.")
+        print(f"     Expected config.json and *.safetensors in: {output_dir}")
+        sys.exit(1)
+    ok(f"Cosmos3 Reasoner VLM safetensors ready at {output_dir}")
+    return output_dir
+
+
 dl_env = {**ENV, "HF_TOKEN": HF_TOKEN}
 
 if INFERENCE_BACKEND == "nim_local":
     info("nim_local backend — skipping HF weights download (NIM container ships the model)")
 elif INFERENCE_BACKEND == "cosmos3_native":
     info("cosmos3_native backend — skipping legacy HF snapshot download (cosmos-framework handles checkpoints)")
+elif _cfg.get("vlm_checkpoint"):
+    _converted_model_dir = ensure_cosmos3_reasoner_vlm_safetensors(dl_env)
+    if _converted_model_dir:
+        MODEL_DIR = _converted_model_dir
+        ENV["MODEL_DIR"] = MODEL_DIR
+        os.environ["MODEL_DIR"] = MODEL_DIR
+        ok(f"Using converted Cosmos3 VLM safetensors at {MODEL_DIR}")
 else:
     for i, (var_label, var_dirname, var_hf_id, var_size) in enumerate(_cfg["variants"]):
         step_label = f"Step 9{'abcde'[i]} — {var_label} weights ({var_dirname})"
@@ -1273,8 +1407,16 @@ def _resolve_nim_launch_config(model_id, model_size, cfg):
         or cfg.get("nim")
         or (cfg["variants"][0][2] if cfg.get("variants") else "")
     )
+
+    def _strip_nim_tag(value):
+        return re.sub(r":[^/:]+$", "", value)
+
     requested_l = requested.lower()
-    _predict_nim_aliases = {
+    _nim_aliases = {
+        "nvidia/cosmos3-nano-reasoner": "cosmos3-reasoner-nano",
+        "cosmos3-nano-reasoner": "cosmos3-reasoner-nano",
+        "nvidia/cosmos3-super-reasoner": "cosmos3-reasoner-super",
+        "cosmos3-super-reasoner": "cosmos3-reasoner-super",
         "nvidia/cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
         "cosmos-predict1-5b-video2world": "nvidia/cosmos-predict1-5b",
         "nvidia/cosmos-predict1-7b-video2world": "nvidia/cosmos-predict1-7b-video2world",
@@ -1284,11 +1426,19 @@ def _resolve_nim_launch_config(model_id, model_size, cfg):
         "nvidia/cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
         "cosmos-predict2.5-14b": "nvidia/cosmos-predict2-5-14b",
     }
-    requested_l = _predict_nim_aliases.get(requested_l, requested_l)
+    requested_l = _nim_aliases.get(requested_l, requested_l)
     if requested_l.startswith("nvcr.io/nim/"):
         requested_l = requested_l[len("nvcr.io/nim/"):]
-    if requested_l.endswith(":latest"):
-        requested_l = requested_l[:-len(":latest")]
+    requested_l = _strip_nim_tag(requested_l)
+    requested_leaf = requested_l.split("/")[-1]
+    requested_size = str(
+        os.environ.get("NIM_MODEL_SIZE")
+        or (cfg.get("nim_env", {}) or {}).get("NIM_MODEL_SIZE")
+        or ""
+    ).lower()
+    if requested_leaf == "cosmos3-reasoner" and requested_size in {"nano", "super"}:
+        requested_l = f"cosmos3-reasoner-{requested_size}"
+        requested_leaf = requested_l
 
     catalog = []
     for candidate_dir in ("/tmp", os.path.dirname(os.path.abspath(__file__))):
@@ -1305,15 +1455,14 @@ def _resolve_nim_launch_config(model_id, model_size, cfg):
         image_key = getattr(nim, "image", "").lower()
         if image_key.startswith("nvcr.io/nim/"):
             image_key = image_key[len("nvcr.io/nim/"):]
-        if image_key.endswith(":latest"):
-            image_key = image_key[:-len(":latest")]
+        image_key = _strip_nim_tag(image_key)
         tokens = {
             getattr(nim, "short_id", "").lower(),
             getattr(nim, "served_model_id", "").lower(),
             image_key,
             image_key.split("/")[-1],
         }
-        if requested_l in tokens or requested_l.split("/")[-1] in tokens:
+        if requested_l in tokens or requested_leaf in tokens:
             matched = nim
             break
 

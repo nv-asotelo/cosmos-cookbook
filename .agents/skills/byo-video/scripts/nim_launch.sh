@@ -4,7 +4,7 @@
 # Backward-compatible positional args are still accepted, but automation should
 # pass credentials through env or a chmod-0600 NIM_CREDENTIAL_FILE.
 # Env overrides:
-#   MODEL            — short id from nim_catalog.py (default cosmos-reason2-8b)
+#   MODEL            — short id from nim_catalog.py (default cosmos3-reasoner-super)
 #   IMAGE            — full image override (otherwise resolved from nim_catalog.py)
 #   PORT             — host port (default 8000)
 #   CONTAINER_NAME   — docker container name (default cosmos-nim)
@@ -40,7 +40,7 @@ fi
 NGC_API_KEY="${1:-${NGC_API_KEY:-}}"
 HF_TOKEN="${2:-${HF_TOKEN:-}}"
 
-MODEL="${MODEL:-cosmos-reason2-8b}"
+MODEL="${MODEL:-cosmos3-reasoner-super}"
 IMAGE="${IMAGE:-}"
 PORT="${PORT:-8000}"
 CONTAINER_NAME="${CONTAINER_NAME:-cosmos-nim}"
@@ -81,17 +81,22 @@ except Exception:
 requested = os.environ.get("MODEL_TO_RESOLVE", "").lower()
 if requested.startswith("nvcr.io/nim/"):
     requested = requested[len("nvcr.io/nim/"):]
-if requested.endswith(":latest"):
-    requested = requested[:-len(":latest")]
+
+def _strip_tag(value: str) -> str:
+    return re.sub(r":[^/:]+$", "", value)
+
+requested = _strip_tag(requested)
 requested_leaf = requested.split("/")[-1]
+requested_size = os.environ.get("NIM_MODEL_SIZE", "").lower()
+if requested_leaf == "cosmos3-reasoner" and requested_size in {"nano", "super"}:
+    requested = f"cosmos3-reasoner-{requested_size}"
+    requested_leaf = requested
 
 def _image_key(image: str) -> str:
     key = image.lower()
     if key.startswith("nvcr.io/nim/"):
         key = key[len("nvcr.io/nim/"):]
-    if key.endswith(":latest"):
-        key = key[:-len(":latest")]
-    return key
+    return _strip_tag(key)
 
 for nim in KNOWN_VLM_NIMS:
     image_key = _image_key(getattr(nim, "image", ""))

@@ -831,7 +831,21 @@ def _uv_python_cmd() -> list[str]:
 def _model_size_for_target(target: Dict[str, Any]) -> Optional[str]:
     short_id = str(target.get("short_id") or "").lower()
     served = str(target.get("served_model_id") or "").lower()
-    token = f"{short_id} {served}"
+    target_env = target.get("env") if isinstance(target.get("env"), dict) else {}
+    env_text = " ".join(f"{key}={value}" for key, value in target_env.items()).lower()
+    token = f"{short_id} {served} {env_text}"
+    if (
+        "cosmos3-reasoner-super" in token
+        or "cosmos3-super-reasoner" in token
+        or "nim_model_size=super" in token
+    ):
+        return "C3-super"
+    if (
+        "cosmos3-reasoner-nano" in token
+        or "cosmos3-nano-reasoner" in token
+        or "nim_model_size=nano" in token
+    ):
+        return "C3-8B"
     if "cosmos-reason2-2b" in token:
         return "2B"
     if "cosmos-reason2-8b" in token:
@@ -844,8 +858,6 @@ def _model_size_for_target(target: Dict[str, Any]) -> Optional[str]:
         return "NEM-12B"
     if "gemma-4-31b-it" in token:
         return "GM-4-31B"
-    if "cosmos3-super-reasoner" in token:
-        return "C3-super"
     return None
 
 
