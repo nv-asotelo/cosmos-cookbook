@@ -72,9 +72,19 @@ cat > "$COSMOS3_SITECUSTOMIZE_DIR/sitecustomize.py" <<'PY'
 import os
 
 try:
+    import importlib.metadata as _metadata
     import pynvml
 
+    _original_version = _metadata.version
     _original_get_memory_info = pynvml.nvmlDeviceGetMemoryInfo
+
+    def _version_with_cosmos3_fallback(distribution_name):
+        try:
+            return _original_version(distribution_name)
+        except _metadata.PackageNotFoundError:
+            if distribution_name == "cosmos3":
+                return os.environ.get("COSMOS3_VERSION_FALLBACK", "cosmos-framework")
+            raise
 
     class _FallbackMemoryInfo:
         def __init__(self, total):
@@ -91,6 +101,7 @@ try:
             total = int(os.environ.get("COSMOS3_DEVICE_MEMORY_BYTES", "137438953472"))
             return _FallbackMemoryInfo(total)
 
+    _metadata.version = _version_with_cosmos3_fallback
     pynvml.nvmlDeviceGetMemoryInfo = _get_memory_info_with_gb10_fallback
 except Exception:
     pass
