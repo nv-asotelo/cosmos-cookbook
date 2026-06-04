@@ -121,6 +121,25 @@ body, .gradio-container {
 .run-progress-fill { height: 100%; background: linear-gradient(90deg, #76b900, #f97316); }
 .run-progress-meta { display: grid; gap: 3px; margin-top: 8px; color: #d8d8d8; font-size: 13px; }
 .run-progress-meta code { color: #fef3c7; }
+.score-table-wrap {
+  border: 1px solid var(--nv-border); border-radius: 8px; overflow: hidden; background: #0f0f0f; margin: 10px 0 14px;
+}
+.score-table-title { padding: 10px 12px; color: #d8d8d8; border-bottom: 1px solid var(--nv-border); font-weight: 700; }
+.score-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; line-height: 1.45; }
+.score-table col.check { width: 20%; }
+.score-table col.score { width: 8%; }
+.score-table col.preset { width: 18%; }
+.score-table col.explanation { width: 54%; }
+.score-table th {
+  text-align: left; background: #191919; color: #f3f3f3; padding: 10px 12px; border-bottom: 1px solid var(--nv-border);
+}
+.score-table td {
+  vertical-align: top; color: #e8e8e8; padding: 10px 12px; border-top: 1px solid #2a2a2a; overflow-wrap: anywhere;
+  word-break: normal; white-space: normal;
+}
+.score-table td + td, .score-table th + th { border-left: 1px solid #2a2a2a; }
+.score-table .score-cell { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; color: #d9f99d; }
+.score-table .empty-cell { color: #aaa; text-align: center; }
 """
 
 
@@ -459,6 +478,39 @@ def _response_summary(body: Any) -> Tuple[str, List[List[Any]]]:
     return "\n\n".join(lines) if lines else "Evaluator returned a response.", rows
 
 
+def _score_label(score: Any) -> str:
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
+        if float(score).is_integer():
+            return str(int(score))
+        return f"{float(score):.3g}"
+    return str(score if score is not None else "")
+
+
+def _details_html(rows: List[List[Any]]) -> str:
+    body_rows = []
+    for row in rows:
+        check, score, preset, explanation = (list(row) + ["", "", "", ""])[:4]
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(check or ''))}</td>"
+            f'<td class="score-cell">{html.escape(_score_label(score))}</td>'
+            f"<td>{html.escape(str(preset or ''))}</td>"
+            f"<td>{html.escape(str(explanation or ''))}</td>"
+            "</tr>"
+        )
+    if not body_rows:
+        body_rows.append('<tr><td class="empty-cell" colspan="4">Run the evaluator to see scoring details.</td></tr>')
+    return (
+        '<div class="score-table-wrap">'
+        '<div class="score-table-title">Scoring details</div>'
+        '<table class="score-table">'
+        '<colgroup><col class="check"><col class="score"><col class="preset"><col class="explanation"></colgroup>'
+        "<thead><tr><th>Check</th><th>Score</th><th>Preset</th><th>Explanation</th></tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
+
+
 def refresh_state(
     nim_url: str,
     vlm_url: str,
@@ -520,7 +572,7 @@ def run_evaluator(
     nim_url: str,
     vlm_url: str,
     control_url: str,
-) -> Tuple[str, List[List[Any]], str, str, str]:
+) -> Tuple[str, str, str, str, str]:
     try:
         started = time.time()
         endpoints, _ = _runtime_endpoints(control_url)
@@ -529,7 +581,7 @@ def run_evaluator(
         if mismatch and not allow_mismatch:
             return (
                 f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
-                [],
+                _details_html([]),
                 _json({"blocked": True, "reason": mismatch}),
                 payload_text,
                 "Blocked before API request.",
@@ -541,7 +593,7 @@ def run_evaluator(
             if not switched:
                 return (
                     '<div class="warning-box">Runtime switch failed.</div>',
-                    [],
+                    _details_html([]),
                     _json(switch_body),
                     payload_text,
                     "Runtime switch failed before preset request.",
@@ -567,7 +619,7 @@ def run_evaluator(
         elapsed = round(time.time() - started, 2)
         return (
             status + "\n\n" + summary,
-            rows,
+            _details_html(rows),
             _json(body),
             _json(payload),
             f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
@@ -575,7 +627,7 @@ def run_evaluator(
     except Exception as exc:
         return (
             f'<div class="warning-box">{html.escape(str(exc))}</div>',
-            [],
+            _details_html([]),
             _json({"error": str(exc)}),
             payload_text,
             "Request failed before completion.",
@@ -585,7 +637,7 @@ def run_evaluator(
 def _finish_job(
     job_id: str,
     result_md: str,
-    rows: List[List[Any]],
+    details_html: str,
     raw_response: str,
     payload_text: str,
     run_status: str,
@@ -600,7 +652,7 @@ def _finish_job(
         done=True,
         delivered=False,
         result_md=result_md,
-        rows=rows,
+        details_html=details_html,
         raw_response=raw_response,
         payload_text=payload_text,
         run_status=run_status,
@@ -650,7 +702,7 @@ def _run_evaluator_job(
             _finish_job(
                 job_id,
                 f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
-                [],
+                _details_html([]),
                 _json({"blocked": True, "reason": mismatch}),
                 payload_text,
                 "Blocked before API request.",
@@ -665,7 +717,7 @@ def _run_evaluator_job(
                 _finish_job(
                     job_id,
                     '<div class="warning-box">Runtime switch failed.</div>',
-                    [],
+                    _details_html([]),
                     _json(switch_body),
                     payload_text,
                     "Runtime switch failed before preset request.",
@@ -693,7 +745,7 @@ def _run_evaluator_job(
         _finish_job(
             job_id,
             status + "\n\n" + summary,
-            rows,
+            _details_html(rows),
             _json(body),
             _json(payload),
             f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
@@ -703,7 +755,7 @@ def _run_evaluator_job(
         _finish_job(
             job_id,
             f'<div class="warning-box">{html.escape(str(exc))}</div>',
-            [],
+            _details_html([]),
             _json({"error": str(exc)}),
             payload_text,
             "Request failed before completion.",
@@ -726,7 +778,7 @@ def start_evaluator_job(
     nim_url: str,
     vlm_url: str,
     control_url: str,
-) -> Tuple[str, str, str, List[List[Any]], str, str, str]:
+) -> Tuple[str, str, str, str, str, str, str]:
     job_id = uuid.uuid4().hex
     if source == "Uploaded video" and not use_edited_json:
         staged_path = _stage_upload(upload)
@@ -744,7 +796,7 @@ def start_evaluator_job(
         done=False,
         delivered=False,
         result_md='<div class="ok-box">Evaluator run started. Polling job status.</div>',
-        rows=[],
+        details_html=_details_html([]),
         raw_response="{}",
         payload_text=payload_text,
         run_status="Starting evaluator job.",
@@ -776,7 +828,7 @@ def start_evaluator_job(
         job_id,
         _progress_html(job),
         job["result_md"],
-        job["rows"],
+        job["details_html"],
         job["raw_response"],
         job["payload_text"],
         job["run_status"],
@@ -796,7 +848,7 @@ def poll_evaluator_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any, Any]:
     return (
         _progress_html(job),
         job.get("result_md", gr.update()),
-        job.get("rows", []),
+        job.get("details_html", _details_html([])),
         job.get("raw_response", "{}"),
         job.get("payload_text", gr.update()),
         job.get("run_status", gr.update()),
@@ -908,12 +960,7 @@ def build_app() -> gr.Blocks:
                         progress_status = gr.HTML(value=_progress_html())
 
                 result_md = gr.Markdown("Run the evaluator to see the score summary.")
-                details_table = gr.Dataframe(
-                    headers=["Check", "Score", "Preset", "Explanation"],
-                    datatype=["str", "number", "str", "str"],
-                    label="Scoring details",
-                    interactive=False,
-                )
+                details_table = gr.HTML(value=_details_html([]))
                 raw_response = gr.Code(label="Raw evaluator response", language="json", lines=16)
 
             with gr.TabItem("Advanced View"):
