@@ -63,83 +63,106 @@ RUN_JOBS_LOCK = threading.Lock()
 
 CSS = """
 :root {
-  --nv-bg: #050505;
-  --nv-panel: #121212;
-  --nv-panel-2: #1b1b1b;
-  --nv-border: #343434;
+  --nv-bg: #f5f7fb;
+  --nv-panel: #ffffff;
+  --nv-panel-2: #eef3f8;
+  --nv-border: #d5dbe5;
   --nv-green: #76b900;
-  --nv-text: #f3f3f3;
-  --nv-muted: #b9b9b9;
-  --nv-red: #ef4444;
-  --nv-yellow: #f59e0b;
+  --nv-text: #141820;
+  --nv-muted: #596273;
+  --nv-red: #b42318;
+  --nv-yellow: #b54708;
 }
 body, .gradio-container {
   background: var(--nv-bg) !important;
   color: var(--nv-text) !important;
+  color-scheme: light !important;
   font-family: Inter, Arial, sans-serif !important;
 }
 .gradio-container { max-width: 1500px !important; margin: 0 auto !important; }
-.nv-appbar {
-  height: 46px; border-bottom: 1px solid var(--nv-border); background: #080808;
-  display: flex; align-items: center; gap: 24px; padding: 0 18px; color: #ddd;
+.gradio-container .block,
+.gradio-container .form,
+.gradio-container .panel,
+.gradio-container .tabitem,
+.gradio-container .tabs,
+.gradio-container .input-container,
+.gradio-container textarea,
+.gradio-container input,
+.gradio-container select {
+  background: #ffffff !important;
+  color: var(--nv-text) !important;
+  border-color: var(--nv-border) !important;
 }
-.nv-logo { font-weight: 800; color: white; }
+.gradio-container label,
+.gradio-container p,
+.gradio-container .prose,
+.gradio-container .block-info,
+.gradio-container .wrap {
+  color: var(--nv-text) !important;
+}
+.gradio-container input::placeholder,
+.gradio-container textarea::placeholder { color: #7b8494 !important; }
+.nv-appbar {
+  height: 46px; border-bottom: 1px solid var(--nv-border); background: #ffffff;
+  display: flex; align-items: center; gap: 24px; padding: 0 18px; color: #202938;
+}
+.nv-logo { font-weight: 800; color: #101828; }
 .nv-logo span { color: var(--nv-green); }
-.nv-nav { display: flex; gap: 18px; color: #aaa; font-size: 13px; }
+.nv-nav { display: flex; gap: 18px; color: #667085; font-size: 13px; }
 .nv-hero {
   border: 1px solid var(--nv-border); border-radius: 8px; padding: 20px 24px; margin-bottom: 14px;
-  background: linear-gradient(90deg, #0b0b0b, #111 74%, #151515);
+  background: linear-gradient(90deg, #ffffff, #f6f9fc 74%, #edf7e7);
 }
-.nv-hero h1 { margin: 0; color: white; font-size: 30px; line-height: 1.15; letter-spacing: 0; }
-.nv-hero p { color: #d8d8d8; max-width: 820px; margin: 8px 0 0; }
+.nv-hero h1 { margin: 0; color: #101828; font-size: 30px; line-height: 1.15; letter-spacing: 0; }
+.nv-hero p { color: #475467; max-width: 820px; margin: 8px 0 0; }
 .nv-pill {
   display: inline-block; border: 1px solid var(--nv-border); border-radius: 999px; padding: 3px 8px;
-  margin: 10px 6px 0 0; color: #d6d6d6; font-size: 12px; background: #171717;
+  margin: 10px 6px 0 0; color: #344054; font-size: 12px; background: #ffffff;
 }
 .status-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px;
   margin: 0 0 10px;
 }
 .status-card { border: 1px solid var(--nv-border); border-radius: 8px; background: var(--nv-panel); padding: 10px; }
-.status-title { color: #aaa; font-size: 12px; margin-bottom: 4px; }
-.status-ok { color: #86efac; font-weight: 700; }
-.status-warn { color: #fde68a; font-weight: 700; }
-.status-bad { color: #fca5a5; font-weight: 700; }
-.api-note { color: #c7c7c7; font-size: 13px; line-height: 1.45; }
+.status-title { color: #667085; font-size: 12px; margin-bottom: 4px; }
+.status-ok { color: #2f6b00; font-weight: 700; }
+.status-warn { color: #a15c07; font-weight: 700; }
+.status-bad { color: #b42318; font-weight: 700; }
+.api-note { color: #475467; font-size: 13px; line-height: 1.45; }
 .warning-box {
-  border: 1px solid #92400e; background: #251504; color: #fde68a; border-radius: 8px;
+  border: 1px solid #fedf89; background: #fffbeb; color: #7a2e0e; border-radius: 8px;
   padding: 10px 12px; margin: 6px 0;
 }
 .ok-box {
-  border: 1px solid #365314; background: #111d07; color: #d9f99d; border-radius: 8px;
+  border: 1px solid #b7e08b; background: #f3fbe9; color: #2f5f00; border-radius: 8px;
   padding: 10px 12px; margin: 6px 0;
 }
 .run-progress {
-  border: 1px solid #3b3b3b; background: #101010; border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+  border: 1px solid var(--nv-border); background: #ffffff; border-radius: 8px; padding: 10px 12px; margin: 8px 0;
 }
-.run-progress-track { height: 10px; background: #2a2a2a; border-radius: 999px; overflow: hidden; }
+.run-progress-track { height: 10px; background: #e7ebf0; border-radius: 999px; overflow: hidden; }
 .run-progress-fill { height: 100%; background: linear-gradient(90deg, #76b900, #f97316); }
-.run-progress-meta { display: grid; gap: 3px; margin-top: 8px; color: #d8d8d8; font-size: 13px; }
-.run-progress-meta code { color: #fef3c7; }
+.run-progress-meta { display: grid; gap: 3px; margin-top: 8px; color: #344054; font-size: 13px; }
+.run-progress-meta code { color: #7a2e0e; background: #fff7ed; }
 .score-table-wrap {
-  border: 1px solid var(--nv-border); border-radius: 8px; overflow: hidden; background: #0f0f0f; margin: 10px 0 14px;
+  border: 1px solid var(--nv-border); border-radius: 8px; overflow: hidden; background: #ffffff; margin: 10px 0 14px;
 }
-.score-table-title { padding: 10px 12px; color: #d8d8d8; border-bottom: 1px solid var(--nv-border); font-weight: 700; }
+.score-table-title { padding: 10px 12px; color: #344054; border-bottom: 1px solid var(--nv-border); font-weight: 700; }
 .score-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; line-height: 1.45; }
 .score-table col.check { width: 20%; }
 .score-table col.score { width: 8%; }
 .score-table col.preset { width: 18%; }
 .score-table col.explanation { width: 54%; }
 .score-table th {
-  text-align: left; background: #191919; color: #f3f3f3; padding: 10px 12px; border-bottom: 1px solid var(--nv-border);
+  text-align: left; background: #eef3f8; color: #1d2939; padding: 10px 12px; border-bottom: 1px solid var(--nv-border);
 }
 .score-table td {
-  vertical-align: top; color: #e8e8e8; padding: 10px 12px; border-top: 1px solid #2a2a2a; overflow-wrap: anywhere;
+  vertical-align: top; color: #1d2939; padding: 10px 12px; border-top: 1px solid #e4e7ec; overflow-wrap: anywhere;
   word-break: normal; white-space: normal;
 }
-.score-table td + td, .score-table th + th { border-left: 1px solid #2a2a2a; }
-.score-table .score-cell { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; color: #d9f99d; }
-.score-table .empty-cell { color: #aaa; text-align: center; }
+.score-table td + td, .score-table th + th { border-left: 1px solid #e4e7ec; }
+.score-table .score-cell { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; color: #2f6b00; }
+.score-table .empty-cell { color: #667085; text-align: center; }
 """
 
 
@@ -331,10 +354,62 @@ def _safe_filename(name: str) -> str:
     return stem or f"upload_{int(time.time())}.mp4"
 
 
+def _uploaded_file_path(file_value: Any) -> Optional[str]:
+    if file_value is None:
+        return None
+    if isinstance(file_value, dict):
+        candidate = file_value.get("path") or file_value.get("name")
+    else:
+        candidate = getattr(file_value, "path", None) or getattr(file_value, "name", None) or str(file_value)
+    if not candidate:
+        return None
+    path = Path(str(candidate))
+    return str(path) if path.exists() else None
+
+
+def _local_video_path_from_server_path(server_path: str) -> Optional[str]:
+    path = (server_path or "").strip()
+    if not path:
+        return None
+    direct = Path(path)
+    if direct.exists():
+        return str(direct)
+    prefix = f"{CONTAINER_DATA_PREFIX}/"
+    if path.startswith(prefix):
+        candidate = DATA_DIR / path[len(prefix):]
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _video_preview_value(source: str, upload: Any, server_path: str) -> Optional[str]:
+    if source == "Uploaded video":
+        return _uploaded_file_path(upload)
+    if source == "Server path":
+        return _local_video_path_from_server_path(server_path)
+    return sample_video_value()
+
+
+def _upload_video_change(
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+) -> Tuple[Any, Optional[str], str]:
+    source = "Uploaded video" if _uploaded_file_path(upload) else "Sample video"
+    video_value = _video_preview_value(source, upload, server_path)
+    payload_text = _preview_payload(source, upload, server_path, weather, time_of_day, geography, road_surface)
+    return gr.update(value=source), video_value, payload_text
+
+
 def _stage_upload(file_value: Any) -> str:
     if file_value is None:
         raise ValueError("Choose an uploaded video or switch the source to the sample/server path.")
-    src = getattr(file_value, "name", None) or str(file_value)
+    src = _uploaded_file_path(file_value)
+    if not src:
+        raise ValueError("Uploaded file is no longer available.")
     src_path = Path(src)
     if not src_path.exists():
         raise ValueError(f"Uploaded file is no longer available: {src}")
@@ -389,7 +464,8 @@ def _preview_payload(
     road_surface: str,
 ) -> str:
     if source == "Uploaded video" and upload is not None:
-        name = _safe_filename(getattr(upload, "name", None) or str(upload))
+        upload_path = _uploaded_file_path(upload)
+        name = _safe_filename(Path(upload_path).name if upload_path else "upload.mp4")
         video_path = f"{CONTAINER_DATA_PREFIX}/{name}"
     elif source == "Server path":
         video_path = (server_path or "").strip() or f"{CONTAINER_DATA_PREFIX}/my_video.mp4"
@@ -927,7 +1003,7 @@ def build_app() -> gr.Blocks:
             with gr.TabItem("Basic View"):
                 with gr.Row():
                     with gr.Column(scale=5):
-                        sample_video = gr.Video(label="Sample video", value=sample_video_value(), height=260)
+                        video_preview = gr.Video(label="Video preview", value=sample_video_value(), height=260)
                         source = gr.Radio(
                             label="Video source",
                             choices=["Sample video", "Uploaded video", "Server path"],
@@ -1017,8 +1093,15 @@ def build_app() -> gr.Blocks:
             geography,
             road_surface,
         ]
-        for component in preview_inputs:
+        for component in [source, server_path, weather, time_of_day, geography, road_surface]:
             component.change(_preview_payload, inputs=preview_inputs, outputs=payload_preview)
+        source.change(_video_preview_value, inputs=[source, upload, server_path], outputs=video_preview)
+        server_path.change(_video_preview_value, inputs=[source, upload, server_path], outputs=video_preview)
+        upload.change(
+            _upload_video_change,
+            inputs=[upload, server_path, weather, time_of_day, geography, road_surface],
+            outputs=[source, video_preview, payload_preview],
+        )
 
         command_inputs = [nim_url, vlm_url, control_url, attribute_url, hallucination_url, obstacle_url, endpoint, payload_preview]
         for component in command_inputs:
