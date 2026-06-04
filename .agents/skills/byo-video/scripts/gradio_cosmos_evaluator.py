@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import gradio as gr
@@ -55,6 +57,8 @@ DEFAULT_PRESET = {
 
 DEFAULT_ENDPOINT = "qwen3.5-397b-a17b"
 DEFAULT_ENDPOINTS = [DEFAULT_ENDPOINT, "cosmos3-super-reasoner", "cosmos3-nano-reasoner"]
+RUN_JOBS: Dict[str, Dict[str, Any]] = {}
+RUN_JOBS_LOCK = threading.Lock()
 
 
 CSS = """
@@ -110,11 +114,70 @@ body, .gradio-container {
   border: 1px solid #365314; background: #111d07; color: #d9f99d; border-radius: 8px;
   padding: 10px 12px; margin: 6px 0;
 }
+.run-progress {
+  border: 1px solid #3b3b3b; background: #101010; border-radius: 8px; padding: 10px 12px; margin: 8px 0;
+}
+.run-progress-track { height: 10px; background: #2a2a2a; border-radius: 999px; overflow: hidden; }
+.run-progress-fill { height: 100%; background: linear-gradient(90deg, #76b900, #f97316); }
+.run-progress-meta { display: grid; gap: 3px; margin-top: 8px; color: #d8d8d8; font-size: 13px; }
+.run-progress-meta code { color: #fef3c7; }
 """
 
 
 def _json(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True)
+
+
+def _set_job(job_id: str, **updates: Any) -> None:
+    with RUN_JOBS_LOCK:
+        job = RUN_JOBS.setdefault(job_id, {})
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def _snapshot_job(job_id: str) -> Dict[str, Any]:
+    with RUN_JOBS_LOCK:
+        return dict(RUN_JOBS.get(job_id, {}))
+
+
+def _eta_label(job: Dict[str, Any]) -> str:
+    if job.get("done") or int(job.get("progress") or 0) >= 100:
+        return "complete"
+    eta_seconds = job.get("eta_seconds")
+    eta_started_at = job.get("eta_started_at")
+    if not eta_seconds:
+        return "estimating"
+    elapsed = time.time() - float(eta_started_at or time.time())
+    remaining = max(0, int(round(float(eta_seconds) - elapsed)))
+    timeout = int(RUN_REQUEST_TIMEOUT_S)
+    if job.get("api_call") == "POST /process/preset":
+        return f"about {remaining}s, timeout {timeout}s"
+    return f"about {remaining}s"
+
+
+def _progress_html(job: Optional[Dict[str, Any]] = None) -> str:
+    job = job or {}
+    progress = max(0, min(100, int(job.get("progress") or 0)))
+    status = html.escape(str(job.get("status") or "Ready."))
+    api_call = html.escape(str(job.get("api_call") or "none"))
+    eta = html.escape(_eta_label(job) if job else "not running")
+    return (
+        '<div class="run-progress">'
+        '<div class="run-progress-track">'
+        f'<div class="run-progress-fill" style="width: {progress}%"></div>'
+        '</div>'
+        '<div class="run-progress-meta">'
+        f"<div><strong>{progress}%</strong> {status}</div>"
+        f"<div>API call: <code>{api_call}</code></div>"
+        f"<div>ETA: {eta}</div>"
+        "</div></div>"
+    )
+
+
+def _endpoint_is_local_nim(endpoint: str, endpoints: List[Dict[str, Any]]) -> bool:
+    meta = _endpoint_lookup(endpoints).get(endpoint, {})
+    base_url = str(meta.get("base_url") or "")
+    return bool(meta.get("nim_image")) or "cosmos3-nim" in base_url or "localhost:8000" in base_url
 
 
 def _service_get(base_url: str, path: str, timeout: float = HTTP_TIMEOUT_S) -> Tuple[bool, Any]:
@@ -457,29 +520,14 @@ def run_evaluator(
     nim_url: str,
     vlm_url: str,
     control_url: str,
-) -> Iterator[Tuple[str, List[List[Any]], str, str, str]]:
+) -> Tuple[str, List[List[Any]], str, str, str]:
     try:
         started = time.time()
-        yield (
-            '<div class="ok-box">Preparing evaluator request.</div>',
-            [],
-            "{}",
-            payload_text,
-            "Starting.",
-        )
-
-        yield (
-            '<div class="ok-box">Checking runtime and endpoint compatibility.</div>',
-            [],
-            "{}",
-            payload_text,
-            "Checking runtime.",
-        )
         endpoints, _ = _runtime_endpoints(control_url)
         nim_model, _ = _detect_nim_model(nim_url)
         mismatch = _mismatch_message(endpoint, endpoints, nim_model)
         if mismatch and not allow_mismatch:
-            yield (
+            return (
                 f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
                 [],
                 _json({"blocked": True, "reason": mismatch}),
@@ -489,16 +537,9 @@ def run_evaluator(
             return
 
         if endpoint:
-            yield (
-                f'<div class="ok-box">Switching evaluator runtime to {html.escape(endpoint)}.</div>',
-                [],
-                "{}",
-                payload_text,
-                "Switching runtime.",
-            )
             switched, switch_body = _service_post(control_url, "/runtime/vlm/switch", {"endpoint": endpoint}, timeout=HTTP_TIMEOUT_S)
             if not switched:
-                yield (
+                return (
                     '<div class="warning-box">Runtime switch failed.</div>',
                     [],
                     _json(switch_body),
@@ -508,22 +549,8 @@ def run_evaluator(
                 return
 
         if use_edited_json:
-            yield (
-                '<div class="ok-box">Using edited JSON payload.</div>',
-                [],
-                "{}",
-                payload_text,
-                "Using edited JSON.",
-            )
             payload = json.loads(payload_text)
         else:
-            yield (
-                '<div class="ok-box">Staging video path and building original evaluator payload.</div>',
-                [],
-                "{}",
-                payload_text,
-                "Building request.",
-            )
             video_path = _video_api_path(source, upload, server_path)
             payload = _build_payload(
                 video_path,
@@ -534,18 +561,11 @@ def run_evaluator(
             )
             payload_text = _json(payload)
 
-        yield (
-            '<div class="ok-box">Submitting /process/preset. The page is still live while the evaluator runs.</div>',
-            [],
-            "{}",
-            payload_text,
-            "Evaluator request in flight.",
-        )
         ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S)
         summary, rows = _response_summary(body)
         status = '<div class="ok-box">Preset evaluator completed.</div>' if ok else '<div class="warning-box">Preset evaluator returned an error.</div>'
         elapsed = round(time.time() - started, 2)
-        yield (
+        return (
             status + "\n\n" + summary,
             rows,
             _json(body),
@@ -553,13 +573,234 @@ def run_evaluator(
             f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
         )
     except Exception as exc:
-        yield (
+        return (
             f'<div class="warning-box">{html.escape(str(exc))}</div>',
             [],
             _json({"error": str(exc)}),
             payload_text,
             "Request failed before completion.",
         )
+
+
+def _finish_job(
+    job_id: str,
+    result_md: str,
+    rows: List[List[Any]],
+    raw_response: str,
+    payload_text: str,
+    run_status: str,
+    ok: bool,
+) -> None:
+    _set_job(
+        job_id,
+        progress=100,
+        status="Complete." if ok else "Finished with an error.",
+        api_call="done",
+        eta_seconds=0,
+        done=True,
+        delivered=False,
+        result_md=result_md,
+        rows=rows,
+        raw_response=raw_response,
+        payload_text=payload_text,
+        run_status=run_status,
+    )
+
+
+def _track_job(job_id: str, progress: int, status: str, api_call: str, eta_seconds: float) -> None:
+    _set_job(
+        job_id,
+        progress=progress,
+        status=status,
+        api_call=api_call,
+        eta_seconds=eta_seconds,
+        eta_started_at=time.time(),
+        run_status=status,
+    )
+
+
+def _run_evaluator_job(
+    job_id: str,
+    source: str,
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+    endpoint: str,
+    allow_mismatch: bool,
+    use_edited_json: bool,
+    payload_text: str,
+    nim_url: str,
+    vlm_url: str,
+    control_url: str,
+) -> None:
+    started = time.time()
+    try:
+        _track_job(job_id, 8, "Reading available evaluator targets.", "GET /runtime/vlm/endpoints", 5)
+        endpoints, _ = _runtime_endpoints(control_url)
+        nim_model = None
+        if _endpoint_is_local_nim(endpoint, endpoints):
+            _track_job(job_id, 18, "Checking local Cosmos3 NIM model.", "GET /v1/models", 8)
+            nim_model, _ = _detect_nim_model(nim_url)
+
+        mismatch = _mismatch_message(endpoint, endpoints, nim_model)
+        if mismatch and not allow_mismatch:
+            _finish_job(
+                job_id,
+                f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
+                [],
+                _json({"blocked": True, "reason": mismatch}),
+                payload_text,
+                "Blocked before API request.",
+                False,
+            )
+            return
+
+        if endpoint:
+            _track_job(job_id, 28, f"Confirming active evaluator target {endpoint}.", "POST /runtime/vlm/switch", 6)
+            switched, switch_body = _service_post(control_url, "/runtime/vlm/switch", {"endpoint": endpoint}, timeout=HTTP_TIMEOUT_S)
+            if not switched:
+                _finish_job(
+                    job_id,
+                    '<div class="warning-box">Runtime switch failed.</div>',
+                    [],
+                    _json(switch_body),
+                    payload_text,
+                    "Runtime switch failed before preset request.",
+                    False,
+                )
+                return
+
+        _track_job(job_id, 42, "Preparing evaluator payload.", "build preset payload", 4)
+        if use_edited_json:
+            payload = json.loads(payload_text)
+        else:
+            video_path = _video_api_path(source, upload, server_path)
+            payload = _build_payload(video_path, weather, time_of_day, geography, road_surface)
+            payload_text = _json(payload)
+            _set_job(job_id, payload_text=payload_text)
+
+        preset_eta = 30 if source == "Sample video" else min(120, max(30, RUN_REQUEST_TIMEOUT_S / 2))
+        _track_job(job_id, 60, "Posting preset request and waiting for evaluator response.", "POST /process/preset", preset_eta)
+        ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S)
+
+        _track_job(job_id, 92, "Rendering score summary and raw response.", "render response", 3)
+        summary, rows = _response_summary(body)
+        status = '<div class="ok-box">Preset evaluator completed.</div>' if ok else '<div class="warning-box">Preset evaluator returned an error.</div>'
+        elapsed = round(time.time() - started, 2)
+        _finish_job(
+            job_id,
+            status + "\n\n" + summary,
+            rows,
+            _json(body),
+            _json(payload),
+            f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
+            ok,
+        )
+    except Exception as exc:
+        _finish_job(
+            job_id,
+            f'<div class="warning-box">{html.escape(str(exc))}</div>',
+            [],
+            _json({"error": str(exc)}),
+            payload_text,
+            "Request failed before completion.",
+            False,
+        )
+
+
+def start_evaluator_job(
+    source: str,
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+    endpoint: str,
+    allow_mismatch: bool,
+    use_edited_json: bool,
+    payload_text: str,
+    nim_url: str,
+    vlm_url: str,
+    control_url: str,
+) -> Tuple[str, str, str, List[List[Any]], str, str, str]:
+    job_id = uuid.uuid4().hex
+    if source == "Uploaded video" and not use_edited_json:
+        staged_path = _stage_upload(upload)
+        source = "Server path"
+        upload = None
+        server_path = staged_path
+        payload_text = _preview_payload(source, upload, server_path, weather, time_of_day, geography, road_surface)
+    _set_job(
+        job_id,
+        progress=3,
+        status="Queued evaluator run.",
+        api_call="start background job",
+        eta_seconds=5,
+        eta_started_at=time.time(),
+        done=False,
+        delivered=False,
+        result_md='<div class="ok-box">Evaluator run started. Polling job status.</div>',
+        rows=[],
+        raw_response="{}",
+        payload_text=payload_text,
+        run_status="Starting evaluator job.",
+    )
+    thread = threading.Thread(
+        target=_run_evaluator_job,
+        args=(
+            job_id,
+            source,
+            upload,
+            server_path,
+            weather,
+            time_of_day,
+            geography,
+            road_surface,
+            endpoint,
+            allow_mismatch,
+            use_edited_json,
+            payload_text,
+            nim_url,
+            vlm_url,
+            control_url,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    job = _snapshot_job(job_id)
+    return (
+        job_id,
+        _progress_html(job),
+        job["result_md"],
+        job["rows"],
+        job["raw_response"],
+        job["payload_text"],
+        job["run_status"],
+    )
+
+
+def poll_evaluator_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any, Any]:
+    if not job_id:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    job = _snapshot_job(job_id)
+    if not job:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    if job.get("done") and job.get("delivered"):
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    if job.get("done"):
+        _set_job(job_id, delivered=True)
+    return (
+        _progress_html(job),
+        job.get("result_md", gr.update()),
+        job.get("rows", []),
+        job.get("raw_response", "{}"),
+        job.get("payload_text", gr.update()),
+        job.get("run_status", gr.update()),
+    )
 
 
 def refresh_commands(
@@ -627,6 +868,8 @@ def build_app() -> gr.Blocks:
 
         status_html = gr.HTML(value="<div class=\"api-note\">Click Refresh status to query services.</div>")
         refresh_btn = gr.Button("Refresh status", variant="secondary")
+        evaluator_job_id = gr.Textbox(label="Evaluator job id", value="", visible=False)
+        evaluator_timer = gr.Timer(1.0, active=True)
 
         with gr.Tabs():
             with gr.TabItem("Basic View"):
@@ -662,6 +905,7 @@ def build_app() -> gr.Blocks:
                         road_surface = gr.Textbox(label="Road surface", value=DEFAULT_PRESET["road_surface_conditions"])
                         run_btn = gr.Button("Run evaluator", variant="primary")
                         run_status = gr.Markdown("Ready.")
+                        progress_status = gr.HTML(value=_progress_html())
 
                 result_md = gr.Markdown("Run the evaluator to see the score summary.")
                 details_table = gr.Dataframe(
@@ -733,8 +977,10 @@ def build_app() -> gr.Blocks:
         for component in command_inputs:
             component.change(refresh_commands, inputs=command_inputs, outputs=commands)
 
+        run_outputs = [evaluator_job_id, progress_status, result_md, details_table, raw_response, payload_preview, run_status]
+        poll_outputs = [progress_status, result_md, details_table, raw_response, payload_preview, run_status]
         run_btn.click(
-            run_evaluator,
+            start_evaluator_job,
             inputs=[
                 source,
                 upload,
@@ -751,8 +997,10 @@ def build_app() -> gr.Blocks:
                 vlm_url,
                 control_url,
             ],
-            outputs=[result_md, details_table, raw_response, payload_preview, run_status],
+            outputs=run_outputs,
+            queue=False,
         )
+        evaluator_timer.tick(poll_evaluator_job, inputs=[evaluator_job_id], outputs=poll_outputs, queue=False)
         confirm_endpoint_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[endpoint_confirm_status, switch_raw])
         switch_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[switch_status, switch_raw])
         fetch_config_btn.click(
