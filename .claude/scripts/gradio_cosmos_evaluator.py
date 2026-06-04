@@ -439,6 +439,24 @@ def _metric_card(label: str, value: str) -> str:
     )
 
 
+def _preset_request_count(trace: List[Dict[str, Any]]) -> int:
+    return sum(1 for item in trace if item.get("method") == "POST" and item.get("path") == "/process/preset")
+
+
+def _vlm_inference_label(job: Dict[str, Any], metrics: Dict[str, Any], trace: List[Dict[str, Any]], is_batch: bool) -> str:
+    completed = metrics.get("completed_count")
+    if not isinstance(completed, (int, float)) or isinstance(completed, bool):
+        completed = _preset_request_count(trace)
+    if is_batch:
+        total = metrics.get("video_count", job.get("batch_total", "n/a"))
+        return f"{int(completed)}/{total} inferred"
+    if completed:
+        return "1 inferred"
+    if job.get("api_call") == "POST /process/preset":
+        return "in flight"
+    return "0"
+
+
 def _telemetry_html(job: Optional[Dict[str, Any]] = None) -> str:
     job = job or {}
     metrics = job.get("metrics") or {}
@@ -449,13 +467,14 @@ def _telemetry_html(job: Optional[Dict[str, Any]] = None) -> str:
     is_batch = bool(metrics.get("batch") or job.get("kind") == "batch")
     cards = [
         _metric_card(
-            "Avg API calls/video" if is_batch else "Frontend API calls/video",
+            "Control/API calls/video" if is_batch else "Control/API calls",
             _fmt_num(metrics.get("frontend_api_calls_per_video"), "", 1)
             if is_batch and metrics.get("frontend_api_calls_per_video") is not None
             else str(metrics.get("frontend_api_calls", len(trace) or "n/a")),
         ),
+        _metric_card("VLM inference calls", _vlm_inference_label(job, metrics, trace, is_batch)),
         _metric_card("Videos", f"{metrics.get('success_count', 0)}/{metrics.get('video_count', job.get('batch_total', 'n/a'))}" if is_batch else "1"),
-        _metric_card("Avg frontend call", _fmt_ms(metrics.get("avg_frontend_call_ms"))),
+        _metric_card("Avg control/API call", _fmt_ms(metrics.get("avg_frontend_call_ms"))),
         _metric_card("E2E wall time", _fmt_num(metrics.get("e2e_s"), "s")),
         _metric_card("Avg preset POST" if is_batch else "Preset POST time", _fmt_num(metrics.get("preset_call_s"), "s")),
         _metric_card("Recent avg E2E", _fmt_num(history.get("avg_e2e_s"), "s")),
@@ -483,20 +502,25 @@ def _telemetry_html(job: Optional[Dict[str, Any]] = None) -> str:
     if history.get("runs"):
         hist_note = (
             f"Recent average across {history['runs']} run(s): "
-            f"{_fmt_num(history.get('avg_api_calls'), ' calls', 1)}, "
+            f"{_fmt_num(history.get('avg_api_calls'), ' control/API calls', 1)}, "
             f"{_fmt_num(history.get('avg_e2e_s'), 's E2E')}, "
-            f"{_fmt_ms(history.get('avg_frontend_call_ms'))} avg frontend call."
+            f"{_fmt_ms(history.get('avg_frontend_call_ms'))} avg control/API call."
         )
     token_note = "TTFT and token usage are not exposed by the current non-streaming /process/preset response."
     if metrics.get("tokens_per_second") is not None:
         token_note = f"Token rate uses {metrics.get('token_rate_basis')} from response usage metadata."
+    inference_note = (
+        "Only POST /process/preset triggers evaluator inference. "
+        "The evaluator code performs one chat.completions call per preset run; "
+        "GET /v1/models and /runtime/vlm calls are readiness, endpoint-list, or switch checks."
+    )
     return (
         '<div class="metrics-wrap">'
-        '<div class="metrics-title">Run telemetry</div>'
+        '<div class="metrics-title">Run telemetry: control/API vs inference</div>'
         f'<div class="metrics-grid">{"".join(cards)}</div>'
-        '<table class="call-table"><thead><tr><th>Method</th><th>API call</th><th>Status</th><th>Time</th></tr></thead>'
+        '<table class="call-table"><thead><tr><th>Method</th><th>Control/API call</th><th>Status</th><th>Time</th></tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table>'
-        f'<div class="metric-note">Internal VLM call count: 1 inferred per preset run. Active jobs: {active}. '
+        f'<div class="metric-note">{html.escape(inference_note)} Active jobs: {active}. '
         f'Max concurrent evaluator jobs: {MAX_CONCURRENT_RUNS}. Hosted endpoints can still rate-limit concurrent calls. '
         f'{html.escape(hist_note)} {html.escape(token_note)}</div>'
         '</div>'
