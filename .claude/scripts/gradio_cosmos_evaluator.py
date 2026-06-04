@@ -40,6 +40,7 @@ CONTAINER_DATA_PREFIX = os.environ.get("COSMOS_EVALUATOR_CONTAINER_DATA_PREFIX",
 REQUEST_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_REQUEST_TIMEOUT_S", "7200"))
 RUN_REQUEST_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_RUN_TIMEOUT_S", "180"))
 HTTP_TIMEOUT_S = float(os.environ.get("COSMOS_EVALUATOR_HTTP_TIMEOUT_S", "15"))
+MAX_CONCURRENT_RUNS = max(1, int(os.environ.get("COSMOS_EVALUATOR_MAX_CONCURRENT_RUNS", "2")))
 
 SAMPLE_BASENAME = os.environ.get(
     "COSMOS_EVALUATOR_SAMPLE_VIDEO",
@@ -58,7 +59,9 @@ DEFAULT_PRESET = {
 DEFAULT_ENDPOINT = "qwen3.5-397b-a17b"
 DEFAULT_ENDPOINTS = [DEFAULT_ENDPOINT, "cosmos3-super-reasoner", "cosmos3-nano-reasoner"]
 RUN_JOBS: Dict[str, Dict[str, Any]] = {}
+RUN_HISTORY: List[Dict[str, Any]] = []
 RUN_JOBS_LOCK = threading.Lock()
+RUN_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_RUNS)
 
 
 CSS = """
@@ -144,6 +147,23 @@ body, .gradio-container {
 .run-progress-fill { height: 100%; background: linear-gradient(90deg, #76b900, #f97316); }
 .run-progress-meta { display: grid; gap: 3px; margin-top: 8px; color: #344054; font-size: 13px; }
 .run-progress-meta code { color: #7a2e0e; background: #fff7ed; }
+.metrics-wrap {
+  border: 1px solid var(--nv-border); border-radius: 8px; background: #ffffff; padding: 12px; margin: 8px 0 14px;
+}
+.metrics-title { color: #1d2939; font-weight: 800; margin-bottom: 8px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; }
+.metric-card { border: 1px solid #e4e7ec; border-radius: 8px; background: #f8fafc; padding: 9px 10px; }
+.metric-label { color: #667085; font-size: 12px; margin-bottom: 3px; }
+.metric-value { color: #101828; font-size: 18px; font-weight: 800; line-height: 1.15; overflow-wrap: anywhere; }
+.metric-note { color: #667085; font-size: 12px; margin-top: 8px; line-height: 1.45; }
+.call-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 10px; font-size: 13px; }
+.call-table th {
+  text-align: left; color: #344054; background: #eef3f8; padding: 8px; border: 1px solid #e4e7ec;
+}
+.call-table td {
+  color: #1d2939; padding: 8px; border: 1px solid #e4e7ec; vertical-align: top; overflow-wrap: anywhere;
+}
+.call-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .score-table-wrap {
   border: 1px solid var(--nv-border); border-radius: 8px; overflow: hidden; background: #ffffff; margin: 10px 0 14px;
 }
@@ -180,6 +200,208 @@ def _set_job(job_id: str, **updates: Any) -> None:
 def _snapshot_job(job_id: str) -> Dict[str, Any]:
     with RUN_JOBS_LOCK:
         return dict(RUN_JOBS.get(job_id, {}))
+
+
+def _active_job_count() -> int:
+    with RUN_JOBS_LOCK:
+        return sum(1 for job in RUN_JOBS.values() if not job.get("done"))
+
+
+def _running_job_count() -> int:
+    with RUN_JOBS_LOCK:
+        return sum(1 for job in RUN_JOBS.values() if not job.get("done") and job.get("runner_state") == "running")
+
+
+def _record_history(metrics: Dict[str, Any]) -> None:
+    with RUN_JOBS_LOCK:
+        RUN_HISTORY.append(metrics)
+        del RUN_HISTORY[:-30]
+
+
+def _history_summary() -> Dict[str, Any]:
+    with RUN_JOBS_LOCK:
+        history = list(RUN_HISTORY)
+    if not history:
+        return {"runs": 0}
+    def avg(key: str) -> Optional[float]:
+        values = [float(item[key]) for item in history if isinstance(item.get(key), (int, float))]
+        return sum(values) / len(values) if values else None
+    return {
+        "runs": len(history),
+        "successes": sum(1 for item in history if item.get("ok")),
+        "avg_e2e_s": avg("e2e_s"),
+        "avg_api_calls": avg("frontend_api_calls"),
+        "avg_frontend_call_ms": avg("avg_frontend_call_ms"),
+        "avg_preset_s": avg("preset_call_s"),
+    }
+
+
+def _fmt_num(value: Any, suffix: str = "", digits: int = 2) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "n/a"
+    return f"{float(value):.{digits}f}{suffix}"
+
+
+def _fmt_ms(value: Any) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "not exposed"
+    return f"{float(value):.0f} ms"
+
+
+def _extract_environment(body: Any) -> Dict[str, Any]:
+    data = _unwrap_success(body)
+    result = data.get("result", data) if isinstance(data, dict) else {}
+    environment = result.get("environment", result) if isinstance(result, dict) else {}
+    return environment if isinstance(environment, dict) else {}
+
+
+def _find_numeric(data: Any, names: set[str]) -> Optional[float]:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in names and isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+        for value in data.values():
+            found = _find_numeric(value, names)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = _find_numeric(value, names)
+            if found is not None:
+                return found
+    return None
+
+
+def _trace_call(
+    trace: Optional[List[Dict[str, Any]]],
+    method: str,
+    base_url: str,
+    path: str,
+    started: float,
+    ok: bool,
+    status_code: Optional[int],
+) -> None:
+    if trace is None:
+        return
+    trace.append(
+        {
+            "method": method,
+            "path": path,
+            "url": f"{base_url.rstrip('/')}{path}",
+            "duration_ms": round((time.time() - started) * 1000, 2),
+            "ok": ok,
+            "status_code": status_code,
+        }
+    )
+
+
+def _metrics_from_run(
+    ok: bool,
+    body: Any,
+    trace: List[Dict[str, Any]],
+    started: float,
+    endpoint: str,
+) -> Dict[str, Any]:
+    e2e_s = round(time.time() - started, 3)
+    environment = _extract_environment(body)
+    frames = environment.get("frames_used")
+    evaluator_processing_s = environment.get("processing_time_s")
+    metadata_duration_ms = _find_numeric(body, {"duration_ms"})
+    preset_calls = [item for item in trace if item.get("path") == "/process/preset"]
+    preset_call_s = (preset_calls[-1]["duration_ms"] / 1000) if preset_calls else None
+    frontend_call_durations = [float(item.get("duration_ms", 0)) for item in trace]
+    avg_frontend_call_ms = sum(frontend_call_durations) / len(frontend_call_durations) if frontend_call_durations else None
+    total_tokens = _find_numeric(body, {"total_tokens", "totalTokens"})
+    completion_tokens = _find_numeric(body, {"completion_tokens", "output_tokens", "completionTokens", "outputTokens"})
+    prompt_tokens = _find_numeric(body, {"prompt_tokens", "input_tokens", "promptTokens", "inputTokens"})
+    ttft_ms = _find_numeric(body, {"ttft_ms", "time_to_first_token_ms", "timeToFirstTokenMs"})
+    tokens_for_rate = total_tokens if total_tokens is not None else completion_tokens
+    return {
+        "ok": ok,
+        "endpoint": endpoint,
+        "e2e_s": e2e_s,
+        "frontend_api_calls": len(trace),
+        "avg_frontend_call_ms": avg_frontend_call_ms,
+        "preset_call_s": preset_call_s,
+        "evaluator_processing_s": evaluator_processing_s,
+        "metadata_duration_ms": metadata_duration_ms,
+        "frames_used": frames,
+        "frames_per_second": (float(frames) / e2e_s) if isinstance(frames, (int, float)) and e2e_s > 0 else None,
+        "videos_per_minute": (60 / e2e_s) if e2e_s > 0 else None,
+        "ttft_ms": ttft_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "tokens_per_second": (float(tokens_for_rate) / e2e_s) if tokens_for_rate is not None and e2e_s > 0 else None,
+        "token_rate_basis": "total tokens" if total_tokens is not None else ("completion tokens" if completion_tokens is not None else None),
+        "api_trace": list(trace),
+    }
+
+
+def _metric_card(label: str, value: str) -> str:
+    return (
+        '<div class="metric-card">'
+        f'<div class="metric-label">{html.escape(label)}</div>'
+        f'<div class="metric-value">{html.escape(value)}</div>'
+        '</div>'
+    )
+
+
+def _telemetry_html(job: Optional[Dict[str, Any]] = None) -> str:
+    job = job or {}
+    metrics = job.get("metrics") or {}
+    trace = metrics.get("api_trace") or job.get("api_trace") or []
+    history = _history_summary()
+    active = _active_job_count()
+    running = _running_job_count()
+    cards = [
+        _metric_card("Frontend API calls/video", str(metrics.get("frontend_api_calls", len(trace) or "n/a"))),
+        _metric_card("Avg frontend call", _fmt_ms(metrics.get("avg_frontend_call_ms"))),
+        _metric_card("E2E wall time", _fmt_num(metrics.get("e2e_s"), "s")),
+        _metric_card("Preset POST time", _fmt_num(metrics.get("preset_call_s"), "s")),
+        _metric_card("Recent avg E2E", _fmt_num(history.get("avg_e2e_s"), "s")),
+        _metric_card("E2E throughput", _fmt_num(metrics.get("videos_per_minute"), " videos/min")),
+        _metric_card("Frame throughput", _fmt_num(metrics.get("frames_per_second"), " fps")),
+        _metric_card("TTFT", _fmt_ms(metrics.get("ttft_ms"))),
+        _metric_card("Tokens/sec", _fmt_num(metrics.get("tokens_per_second"), " tok/s")),
+        _metric_card("Concurrency", f"{running}/{MAX_CONCURRENT_RUNS} running"),
+    ]
+    rows = []
+    for item in trace:
+        status = item.get("status_code")
+        status_text = str(status) if status is not None else ("ok" if item.get("ok") else "error")
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('method', '')))}</td>"
+            f"<td>{html.escape(str(item.get('path', '')))}</td>"
+            f"<td class=\"num\">{html.escape(status_text)}</td>"
+            f"<td class=\"num\">{html.escape(_fmt_ms(item.get('duration_ms')))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append('<tr><td colspan="4">No evaluator run yet.</td></tr>')
+    hist_note = "No completed run history yet."
+    if history.get("runs"):
+        hist_note = (
+            f"Recent average across {history['runs']} run(s): "
+            f"{_fmt_num(history.get('avg_api_calls'), ' calls', 1)}, "
+            f"{_fmt_num(history.get('avg_e2e_s'), 's E2E')}, "
+            f"{_fmt_ms(history.get('avg_frontend_call_ms'))} avg frontend call."
+        )
+    token_note = "TTFT and token usage are not exposed by the current non-streaming /process/preset response."
+    if metrics.get("tokens_per_second") is not None:
+        token_note = f"Token rate uses {metrics.get('token_rate_basis')} from response usage metadata."
+    return (
+        '<div class="metrics-wrap">'
+        '<div class="metrics-title">Run telemetry</div>'
+        f'<div class="metrics-grid">{"".join(cards)}</div>'
+        '<table class="call-table"><thead><tr><th>Method</th><th>API call</th><th>Status</th><th>Time</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        f'<div class="metric-note">Internal VLM call count: 1 inferred per preset run. Active jobs: {active}. '
+        f'Max concurrent evaluator jobs: {MAX_CONCURRENT_RUNS}. Hosted endpoints can still rate-limit concurrent calls. '
+        f'{html.escape(hist_note)} {html.escape(token_note)}</div>'
+        '</div>'
+    )
 
 
 def _eta_label(job: Dict[str, Any]) -> str:
@@ -222,7 +444,13 @@ def _endpoint_is_local_nim(endpoint: str, endpoints: List[Dict[str, Any]]) -> bo
     return bool(meta.get("nim_image")) or "cosmos3-nim" in base_url or "localhost:8000" in base_url
 
 
-def _service_get(base_url: str, path: str, timeout: float = HTTP_TIMEOUT_S) -> Tuple[bool, Any]:
+def _service_get(
+    base_url: str,
+    path: str,
+    timeout: float = HTTP_TIMEOUT_S,
+    trace: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[bool, Any]:
+    started = time.time()
     try:
         resp = requests.get(f"{base_url.rstrip('/')}{path}", timeout=timeout)
         try:
@@ -230,13 +458,23 @@ def _service_get(base_url: str, path: str, timeout: float = HTTP_TIMEOUT_S) -> T
         except Exception:
             body = resp.text
         if resp.ok:
+            _trace_call(trace, "GET", base_url, path, started, True, resp.status_code)
             return True, body
+        _trace_call(trace, "GET", base_url, path, started, False, resp.status_code)
         return False, {"status_code": resp.status_code, "body": body}
     except Exception as exc:
+        _trace_call(trace, "GET", base_url, path, started, False, None)
         return False, {"error": str(exc)}
 
 
-def _service_post(base_url: str, path: str, payload: Dict[str, Any], timeout: float = REQUEST_TIMEOUT_S) -> Tuple[bool, Any]:
+def _service_post(
+    base_url: str,
+    path: str,
+    payload: Dict[str, Any],
+    timeout: float = REQUEST_TIMEOUT_S,
+    trace: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[bool, Any]:
+    started = time.time()
     try:
         resp = requests.post(f"{base_url.rstrip('/')}{path}", json=payload, timeout=timeout)
         try:
@@ -244,9 +482,12 @@ def _service_post(base_url: str, path: str, payload: Dict[str, Any], timeout: fl
         except Exception:
             body = resp.text
         if resp.ok:
+            _trace_call(trace, "POST", base_url, path, started, True, resp.status_code)
             return True, body
+        _trace_call(trace, "POST", base_url, path, started, False, resp.status_code)
         return False, {"status_code": resp.status_code, "body": body}
     except Exception as exc:
+        _trace_call(trace, "POST", base_url, path, started, False, None)
         return False, {"error": str(exc)}
 
 
@@ -256,8 +497,8 @@ def _unwrap_success(body: Any) -> Any:
     return body
 
 
-def _detect_nim_model(nim_url: str) -> Tuple[Optional[str], Any]:
-    ok, body = _service_get(nim_url, "/v1/models")
+def _detect_nim_model(nim_url: str, trace: Optional[List[Dict[str, Any]]] = None) -> Tuple[Optional[str], Any]:
+    ok, body = _service_get(nim_url, "/v1/models", trace=trace)
     if not ok:
         return None, body
     try:
@@ -267,16 +508,16 @@ def _detect_nim_model(nim_url: str) -> Tuple[Optional[str], Any]:
     return model, body
 
 
-def _runtime(control_url: str) -> Tuple[Dict[str, Any], Any]:
-    ok, body = _service_get(control_url, "/runtime/vlm")
+def _runtime(control_url: str, trace: Optional[List[Dict[str, Any]]] = None) -> Tuple[Dict[str, Any], Any]:
+    ok, body = _service_get(control_url, "/runtime/vlm", trace=trace)
     if not ok:
         return {}, body
     data = _unwrap_success(body)
     return data if isinstance(data, dict) else {}, body
 
 
-def _runtime_endpoints(control_url: str) -> Tuple[List[Dict[str, Any]], Any]:
-    ok, body = _service_get(control_url, "/runtime/vlm/endpoints")
+def _runtime_endpoints(control_url: str, trace: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], Any]:
+    ok, body = _service_get(control_url, "/runtime/vlm/endpoints", trace=trace)
     if not ok:
         return [], body
     data = _unwrap_success(body)
@@ -718,7 +959,10 @@ def _finish_job(
     payload_text: str,
     run_status: str,
     ok: bool,
+    metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if metrics:
+        _record_history(metrics)
     _set_job(
         job_id,
         progress=100,
@@ -732,6 +976,8 @@ def _finish_job(
         raw_response=raw_response,
         payload_text=payload_text,
         run_status=run_status,
+        metrics=metrics or {},
+        runner_state="done",
     )
 
 
@@ -765,77 +1011,105 @@ def _run_evaluator_job(
     control_url: str,
 ) -> None:
     started = time.time()
+    trace: List[Dict[str, Any]] = []
     try:
-        _track_job(job_id, 8, "Reading available evaluator targets.", "GET /runtime/vlm/endpoints", 5)
-        endpoints, _ = _runtime_endpoints(control_url)
-        nim_model = None
-        if _endpoint_is_local_nim(endpoint, endpoints):
-            _track_job(job_id, 18, "Checking local Cosmos3 NIM model.", "GET /v1/models", 8)
-            nim_model, _ = _detect_nim_model(nim_url)
+        _set_job(job_id, started_at=started, runner_state="waiting", api_trace=trace)
+        _track_job(job_id, 4, "Waiting for evaluator concurrency slot.", "scheduler", 10)
+        RUN_SEMAPHORE.acquire()
+        try:
+            _set_job(job_id, runner_state="running")
+            _track_job(job_id, 8, "Reading available evaluator targets.", "GET /runtime/vlm/endpoints", 5)
+            endpoints, _ = _runtime_endpoints(control_url, trace=trace)
+            _set_job(job_id, api_trace=list(trace))
+            nim_model = None
+            if _endpoint_is_local_nim(endpoint, endpoints):
+                _track_job(job_id, 18, "Checking local Cosmos3 NIM model.", "GET /v1/models", 8)
+                nim_model, _ = _detect_nim_model(nim_url, trace=trace)
+                _set_job(job_id, api_trace=list(trace))
 
-        mismatch = _mismatch_message(endpoint, endpoints, nim_model)
-        if mismatch and not allow_mismatch:
-            _finish_job(
-                job_id,
-                f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
-                _details_html([]),
-                _json({"blocked": True, "reason": mismatch}),
-                payload_text,
-                "Blocked before API request.",
-                False,
-            )
-            return
-
-        if endpoint:
-            _track_job(job_id, 28, f"Confirming active evaluator target {endpoint}.", "POST /runtime/vlm/switch", 6)
-            switched, switch_body = _service_post(control_url, "/runtime/vlm/switch", {"endpoint": endpoint}, timeout=HTTP_TIMEOUT_S)
-            if not switched:
+            mismatch = _mismatch_message(endpoint, endpoints, nim_model)
+            if mismatch and not allow_mismatch:
+                body = {"blocked": True, "reason": mismatch}
+                metrics = _metrics_from_run(False, body, trace, started, endpoint)
                 _finish_job(
                     job_id,
-                    '<div class="warning-box">Runtime switch failed.</div>',
+                    f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
                     _details_html([]),
-                    _json(switch_body),
+                    _json(body),
                     payload_text,
-                    "Runtime switch failed before preset request.",
+                    "Blocked before API request.",
                     False,
+                    metrics,
                 )
                 return
 
-        _track_job(job_id, 42, "Preparing evaluator payload.", "build preset payload", 4)
-        if use_edited_json:
-            payload = json.loads(payload_text)
-        else:
-            video_path = _video_api_path(source, upload, server_path)
-            payload = _build_payload(video_path, weather, time_of_day, geography, road_surface)
-            payload_text = _json(payload)
-            _set_job(job_id, payload_text=payload_text)
+            if endpoint:
+                _track_job(job_id, 28, f"Confirming active evaluator target {endpoint}.", "POST /runtime/vlm/switch", 6)
+                switched, switch_body = _service_post(
+                    control_url,
+                    "/runtime/vlm/switch",
+                    {"endpoint": endpoint},
+                    timeout=HTTP_TIMEOUT_S,
+                    trace=trace,
+                )
+                _set_job(job_id, api_trace=list(trace))
+                if not switched:
+                    metrics = _metrics_from_run(False, switch_body, trace, started, endpoint)
+                    _finish_job(
+                        job_id,
+                        '<div class="warning-box">Runtime switch failed.</div>',
+                        _details_html([]),
+                        _json(switch_body),
+                        payload_text,
+                        "Runtime switch failed before preset request.",
+                        False,
+                        metrics,
+                    )
+                    return
 
-        preset_eta = 30 if source == "Sample video" else min(120, max(30, RUN_REQUEST_TIMEOUT_S / 2))
-        _track_job(job_id, 60, "Posting preset request and waiting for evaluator response.", "POST /process/preset", preset_eta)
-        ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S)
+            _track_job(job_id, 42, "Preparing evaluator payload.", "build preset payload", 4)
+            if use_edited_json:
+                payload = json.loads(payload_text)
+            else:
+                video_path = _video_api_path(source, upload, server_path)
+                payload = _build_payload(video_path, weather, time_of_day, geography, road_surface)
+                payload_text = _json(payload)
+                _set_job(job_id, payload_text=payload_text)
 
-        _track_job(job_id, 92, "Rendering score summary and raw response.", "render response", 3)
-        summary, rows = _response_summary(body)
-        status = '<div class="ok-box">Preset evaluator completed.</div>' if ok else '<div class="warning-box">Preset evaluator returned an error.</div>'
-        elapsed = round(time.time() - started, 2)
-        _finish_job(
-            job_id,
-            status + "\n\n" + summary,
-            _details_html(rows),
-            _json(body),
-            _json(payload),
-            f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
-            ok,
-        )
+            preset_eta = 30 if source == "Sample video" else min(120, max(30, RUN_REQUEST_TIMEOUT_S / 2))
+            _track_job(job_id, 60, "Posting preset request and waiting for evaluator response.", "POST /process/preset", preset_eta)
+            ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S, trace=trace)
+            _set_job(job_id, api_trace=list(trace))
+
+            _track_job(job_id, 92, "Rendering score summary and raw response.", "render response", 3)
+            summary, rows = _response_summary(body)
+            status = '<div class="ok-box">Preset evaluator completed.</div>' if ok else '<div class="warning-box">Preset evaluator returned an error.</div>'
+            elapsed = round(time.time() - started, 2)
+            metrics = _metrics_from_run(ok, body, trace, started, endpoint)
+            _finish_job(
+                job_id,
+                status + "\n\n" + summary,
+                _details_html(rows),
+                _json(body),
+                _json(payload),
+                f"{'Success' if ok else 'Request failed'} in {elapsed}s.",
+                ok,
+                metrics,
+            )
+        finally:
+            RUN_SEMAPHORE.release()
     except Exception as exc:
+        body = {"error": str(exc)}
+        metrics = _metrics_from_run(False, body, trace, started, endpoint)
         _finish_job(
             job_id,
             f'<div class="warning-box">{html.escape(str(exc))}</div>',
             _details_html([]),
-            _json({"error": str(exc)}),
+            _json(body),
             payload_text,
             "Request failed before completion.",
             False,
+            metrics,
         )
 
 
@@ -854,7 +1128,7 @@ def start_evaluator_job(
     nim_url: str,
     vlm_url: str,
     control_url: str,
-) -> Tuple[str, str, str, str, str, str, str]:
+) -> Tuple[str, str, str, str, str, str, str, str]:
     job_id = uuid.uuid4().hex
     if source == "Uploaded video" and not use_edited_json:
         staged_path = _stage_upload(upload)
@@ -876,6 +1150,9 @@ def start_evaluator_job(
         raw_response="{}",
         payload_text=payload_text,
         run_status="Starting evaluator job.",
+        metrics={},
+        api_trace=[],
+        runner_state="queued",
     )
     thread = threading.Thread(
         target=_run_evaluator_job,
@@ -903,6 +1180,7 @@ def start_evaluator_job(
     return (
         job_id,
         _progress_html(job),
+        _telemetry_html(job),
         job["result_md"],
         job["details_html"],
         job["raw_response"],
@@ -911,18 +1189,19 @@ def start_evaluator_job(
     )
 
 
-def poll_evaluator_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any, Any]:
+def poll_evaluator_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     if not job_id:
-        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     job = _snapshot_job(job_id)
     if not job:
-        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     if job.get("done") and job.get("delivered"):
-        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+        return (gr.update(), _telemetry_html(job), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     if job.get("done"):
         _set_job(job_id, delivered=True)
     return (
         _progress_html(job),
+        _telemetry_html(job),
         job.get("result_md", gr.update()),
         job.get("details_html", _details_html([])),
         job.get("raw_response", "{}"),
@@ -1034,6 +1313,7 @@ def build_app() -> gr.Blocks:
                         run_btn = gr.Button("Run evaluator", variant="primary")
                         run_status = gr.Markdown("Ready.")
                         progress_status = gr.HTML(value=_progress_html())
+                        telemetry_panel = gr.HTML(value=_telemetry_html())
 
                 result_md = gr.Markdown("Run the evaluator to see the score summary.")
                 details_table = gr.HTML(value=_details_html([]))
@@ -1107,8 +1387,17 @@ def build_app() -> gr.Blocks:
         for component in command_inputs:
             component.change(refresh_commands, inputs=command_inputs, outputs=commands)
 
-        run_outputs = [evaluator_job_id, progress_status, result_md, details_table, raw_response, payload_preview, run_status]
-        poll_outputs = [progress_status, result_md, details_table, raw_response, payload_preview, run_status]
+        run_outputs = [
+            evaluator_job_id,
+            progress_status,
+            telemetry_panel,
+            result_md,
+            details_table,
+            raw_response,
+            payload_preview,
+            run_status,
+        ]
+        poll_outputs = [progress_status, telemetry_panel, result_md, details_table, raw_response, payload_preview, run_status]
         run_btn.click(
             start_evaluator_job,
             inputs=[
