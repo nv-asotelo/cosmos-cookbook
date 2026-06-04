@@ -17,6 +17,7 @@ const port = Number(process.env.PORT || 5175);
 (function forwardLegacyBaseUrl() {
   const backend = String(process.env.COSMOS3_BACKEND || process.env.PREDICT_BACKEND || process.env.INFERENCE_BACKEND || "").toLowerCase();
   if (backend.includes("nim")) return;
+  if (backend.includes("diffusers")) return;
   if (process.env.COSMOS3_BASE_URL || process.env.RAY_SERVE_BASE_URL) return;
   const legacy =
     process.env.PREDICT_BASE_URL ||
@@ -28,6 +29,7 @@ const port = Number(process.env.PORT || 5175);
 function activeBackend() {
   const explicit = String(process.env.COSMOS3_BACKEND || process.env.PREDICT_BACKEND || process.env.INFERENCE_BACKEND || "").toLowerCase();
   if (explicit.includes("nim")) return "nim_local";
+  if (explicit.includes("diffusers")) return "diffusers";
   if (explicit) return "cosmos3-generate";
   if (process.env.NIM_INFER_URL || process.env.COSMOS3_INFER_URL) return "nim_local";
   return "cosmos3-generate";
@@ -136,6 +138,45 @@ async function getModelInfo() {
         warning,
         capabilities: {
           text_to_video: false,
+          image_to_video: true,
+          action_policy: false
+        }
+      };
+    }
+  }
+
+  if (backend === "diffusers") {
+    const infoUrl = `${advertisedBaseUrl.replace(/\/$/, "")}/info`;
+    try {
+      const upstream = await fetch(infoUrl);
+      if (!upstream.ok) throw new Error(`Diffusers info probe failed with HTTP ${upstream.status}`);
+      const data = await upstream.json();
+      const models = Array.isArray(data?.models) ? data.models.filter(Boolean) : [];
+      return {
+        backend,
+        baseUrl: advertisedBaseUrl,
+        inferUrl: `${advertisedBaseUrl.replace(/\/$/, "")}/generate`,
+        models: models.length > 0 ? models : [defaultModel],
+        image: data?.image,
+        output_dir: data?.output_dir,
+        environment: data?.environment,
+        cosmos3_version: data?.environment?.cosmos3_version,
+        capabilities: {
+          text_to_video: Boolean(data?.capabilities?.text_to_video ?? true),
+          image_to_video: Boolean(data?.capabilities?.image_to_video ?? true),
+          action_policy: false
+        }
+      };
+    } catch (error) {
+      const warning = error instanceof Error ? error.message : "Unable to reach Diffusers backend";
+      return {
+        backend,
+        baseUrl: advertisedBaseUrl,
+        inferUrl: `${advertisedBaseUrl.replace(/\/$/, "")}/generate`,
+        models: [defaultModel],
+        warning,
+        capabilities: {
+          text_to_video: true,
           image_to_video: true,
           action_policy: false
         }

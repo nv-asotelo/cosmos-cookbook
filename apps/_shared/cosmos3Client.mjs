@@ -8,6 +8,12 @@
 //   NIM_BASE_URL/VLLM_BASE_URL at http://localhost:8000/v1. Requests are sent
 //   to POST /v1/infer using the staging Cosmos3 Generation NIM payload shape.
 //
+// Diffusers mode:
+//   Set COSMOS3_BACKEND=diffusers and point COSMOS3_BASE_URL at a local adapter
+//   that implements the Ray-compatible /info and /generate shape. The adapter is
+//   not subject to Ray Serve's hardcoded 300 s timeout, so the Ray-only budget
+//   guard is skipped for this backend.
+//
 // The Ray Serve endpoint is a single POST /generate that accepts the Pydantic
 // `OmniSampleOverrides` shape. `vision_path` may be a local filesystem path on
 // the Ray Serve host (preferred for uploads — we decode the dataURL and write
@@ -110,6 +116,7 @@ function resolveBackend() {
       ""
   ).toLowerCase();
   if (explicit.includes("nim")) return "nim";
+  if (explicit.includes("diffusers")) return "diffusers";
   if (process.env.NIM_INFER_URL || process.env.COSMOS3_INFER_URL) return "nim";
   return "ray";
 }
@@ -604,7 +611,8 @@ async function encodeOutputFile(filepath, { baseUrl, outputDir } = {}) {
 }
 
 export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath } = {}) {
-  if (resolveBackend() === "nim") {
+  const backend = resolveBackend();
+  if (backend === "nim") {
     return submitNimGeneration({ prompt, mediaDataUrl, mediaKind, params, model, visionPath });
   }
 
@@ -615,7 +623,7 @@ export async function submitGeneration({ prompt, mediaDataUrl, mediaKind, params
 
   // Ray Serve has a hardcoded 300 s asyncio timeout — reject up-front so the
   // user gets actionable guidance instead of a 5-minute wait + 500.
-  const budget = checkRayServeBudget(p);
+  const budget = backend === "diffusers" ? null : checkRayServeBudget(p);
   if (budget) {
     const suggestionLines = budget.suggestions.length
       ? budget.suggestions
