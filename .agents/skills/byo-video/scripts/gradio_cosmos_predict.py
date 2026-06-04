@@ -53,14 +53,17 @@ DEFAULT_MODEL_ID = (
     or "nvidia/cosmos-predict1-7b-video2world"
 )
 DEFAULT_SCHEMA = os.environ.get("COSMOS_PREDICT_BACKEND_SCHEMA", "local_nim")
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND") or os.environ.get("COSMOS3_BACKEND") or os.environ.get("PREDICT_BACKEND") or ""
 NIM_IMAGE = os.environ.get("NIM_IMAGE") or os.environ.get("IMAGE") or ""
 IS_COSMOS3_GENERATOR = "cosmos3" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower() and "gen" in f"{DEFAULT_MODEL_ID} {NIM_IMAGE}".lower()
+IS_DIFFUSERS_BACKEND = "diffusers" in INFERENCE_BACKEND.lower()
 DEFAULT_COLLECTION = os.environ.get("COSMOS_MODEL_COLLECTION") or ("cosmos3" if IS_COSMOS3_GENERATOR else "cosmos-predict1")
-DEFAULT_GUIDANCE = float(os.environ.get("COSMOS_GUIDANCE_SCALE", "6" if IS_COSMOS3_GENERATOR else "7"))
-DEFAULT_STEPS = int(os.environ.get("COSMOS_VIDEO_STEPS", "35"))
+DEFAULT_GUIDANCE = float(os.environ.get("COSMOS_GUIDANCE_SCALE", "10" if IS_DIFFUSERS_BACKEND else ("6" if IS_COSMOS3_GENERATOR else "7")))
+DEFAULT_STEPS = int(os.environ.get("COSMOS_VIDEO_STEPS", "50" if IS_DIFFUSERS_BACKEND else "35"))
 STAGED_CHECKPOINT_FILE = Path(os.environ.get("PREDICT_STAGED_MODEL_FILE", "/tmp/nvidia_build_predict_staged_model.json"))
 INFER_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1/infer"
 NIM_BASE_URL = f"http://{NIM_HOST}:{NIM_PORT}/v1"
+LOCAL_BACKEND_LABEL = f"Diffusers proxy: {NIM_BASE_URL}" if IS_DIFFUSERS_BACKEND else f"NIM local: {NIM_BASE_URL}"
 BUILD_MODEL_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b"
 
 COLLECTION_CHOICES = [
@@ -718,13 +721,13 @@ def generate(
     if backend_schema == "build_openapi":
         payload = build_openapi_payload(prompt, input_image_index, seed)
         # Hosted Build returns an asset_url and accepts no media bytes in the
-        # public OpenAPI schema. Route execution to the local NIM unless a future
-        # setup layer supplies a hosted transport.
+        # public OpenAPI schema. Route execution to the local backend unless a
+        # future setup layer supplies a hosted transport.
         preview = json.dumps({
             "collection": collection,
             "model": model_id,
             "hosted_schema_payload": payload,
-            "note": "Execution still uses local NIM base64 /v1/infer in this BYO-video app.",
+            "note": f"Execution still uses local {LOCAL_BACKEND_LABEL} base64 /v1/infer in this BYO-video app.",
         }, indent=2)
     else:
         preview = None
@@ -836,7 +839,7 @@ def hero_markup(model_id: str) -> str:
     <span class="nv-badge">robotics</span>
     <span class="nv-badge">text-to-video</span>
     <span class="nv-badge">image-to-video</span>
-    <span class="nv-badge">NIM local: {NIM_BASE_URL}</span>
+    <span class="nv-badge">{html.escape(LOCAL_BACKEND_LABEL)}</span>
     {image_badge}
   </div>
 </div>
@@ -852,8 +855,10 @@ def schema_note(backend_schema: str):
     if backend_schema == "build_openapi":
         return (
             "Build OpenAPI preview: prompt, input_image_index, seed; response asset_url. "
-            "Generation still posts local base64 media to the self-hosted NIM."
+            f"Generation still posts local base64 media to {LOCAL_BACKEND_LABEL}."
         )
+    if IS_DIFFUSERS_BACKEND:
+        return "Diffusers proxy: Gradio posts the /v1/infer compatibility payload locally, then the proxy forwards generation to the Cosmos3 Diffusers adapter."
     if _is_cosmos3_generator():
         return "Local Cosmos3 Generator NIM: prompt plus optional base64 image, guidance, steps, seed, resolution, num_output_frames, and fps."
     return "Local NIM: prompt plus optional base64 image/video, guidance, steps, seed, and video_params."
@@ -932,7 +937,7 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
             model_id = gr.Textbox(
                 label="Model",
                 value=DEFAULT_MODEL_ID,
-                info="Shown for routing/context; local NIM selection still happens in setup.",
+                info="Shown for routing/context; backend selection still happens in setup.",
             )
             world_mode = gr.Radio(
                 choices=["Text-to-Video", "Image-to-Video", "Video-to-World"],
@@ -964,7 +969,7 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
             with gr.Accordion("Request schema", open=True):
                 backend_schema = gr.Radio(
                     choices=[
-                        ("Local self-hosted NIM /v1/infer", "local_nim"),
+                        (("Diffusers proxy /v1/infer" if IS_DIFFUSERS_BACKEND else "Local self-hosted NIM /v1/infer"), "local_nim"),
                         ("NVIDIA Build OpenAPI preview", "build_openapi"),
                     ],
                     value=DEFAULT_SCHEMA if DEFAULT_SCHEMA in {"local_nim", "build_openapi"} else "local_nim",
@@ -981,15 +986,15 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                 )
             with gr.Accordion("Generation parameters", open=True):
                 guidance = gr.Slider(
-                    float(os.environ.get("COSMOS_GUIDANCE_MIN", "0")),
-                    float(os.environ.get("COSMOS_GUIDANCE_MAX", "20")),
+                    float(os.environ.get("COSMOS_GUIDANCE_MIN", "1")),
+                    float(os.environ.get("COSMOS_GUIDANCE_MAX", "10" if IS_DIFFUSERS_BACKEND else "20")),
                     value=DEFAULT_GUIDANCE,
                     step=0.5,
                     label="Guidance scale (CFG)",
                 )
                 steps = gr.Slider(
                     int(os.environ.get("COSMOS_STEPS_MIN", "1")),
-                    int(os.environ.get("COSMOS_STEPS_MAX", "200")),
+                    int(os.environ.get("COSMOS_STEPS_MAX", "50" if IS_DIFFUSERS_BACKEND else "200")),
                     value=DEFAULT_STEPS,
                     step=1,
                     label="Steps",
@@ -997,7 +1002,9 @@ GPU: {_gpu_name} | VRAM free: {_free_mib:,} MiB | Build page:
                 seed = gr.Number(label="Seed (-1 = random)", value=-1, precision=0)
                 gr.Markdown(
                     "Quick staging defaults are controlled by COSMOS_VIDEO_HEIGHT/WIDTH/FRAMES/FPS. "
-                    "For the Cosmos3 generator NIM, start with 256p, 25 frames, and 35 steps for quality previews."
+                    "This Cosmos3 Diffusers staging surface defaults to guidance 10 and 50 steps, the current allowed maximums."
+                    if IS_DIFFUSERS_BACKEND
+                    else "For the Cosmos3 generator NIM, start with 256p, 25 frames, and 35 steps for quality previews."
                 )
             submit = gr.Button("Generate New World", variant="primary")
         with gr.Column(scale=1):
