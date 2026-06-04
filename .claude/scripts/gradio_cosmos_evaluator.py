@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import concurrent.futures
 import json
 import os
 from pathlib import Path
@@ -183,6 +184,28 @@ body, .gradio-container {
 .score-table td + td, .score-table th + th { border-left: 1px solid #e4e7ec; }
 .score-table .score-cell { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; color: #2f6b00; }
 .score-table .empty-cell { color: #667085; text-align: center; }
+.batch-table-wrap {
+  border: 1px solid var(--nv-border); border-radius: 8px; overflow: hidden; background: #ffffff; margin: 10px 0 14px;
+}
+.batch-table-title { padding: 10px 12px; color: #344054; border-bottom: 1px solid var(--nv-border); font-weight: 700; }
+.batch-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; line-height: 1.4; }
+.batch-table col.video { width: 36%; }
+.batch-table col.status { width: 10%; }
+.batch-table col.score { width: 10%; }
+.batch-table col.frames { width: 10%; }
+.batch-table col.time { width: 12%; }
+.batch-table col.model { width: 22%; }
+.batch-table th {
+  text-align: left; background: #eef3f8; color: #1d2939; padding: 9px 10px; border-bottom: 1px solid var(--nv-border);
+}
+.batch-table td {
+  vertical-align: top; color: #1d2939; padding: 9px 10px; border-top: 1px solid #e4e7ec; overflow-wrap: anywhere;
+  word-break: normal; white-space: normal;
+}
+.batch-table td + td, .batch-table th + th { border-left: 1px solid #e4e7ec; }
+.batch-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.batch-table .ok { color: #2f6b00; font-weight: 800; }
+.batch-table .bad { color: #b42318; font-weight: 800; }
 """
 
 
@@ -338,6 +361,75 @@ def _metrics_from_run(
     }
 
 
+def _batch_metrics_from_results(
+    results: List[Dict[str, Any]],
+    setup_trace: List[Dict[str, Any]],
+    started: float,
+    endpoint: str,
+    total: Optional[int] = None,
+) -> Dict[str, Any]:
+    e2e_s = round(time.time() - started, 3)
+    all_trace = list(setup_trace)
+    for result in results:
+        all_trace.extend(result.get("api_trace") or [])
+    frontend_call_durations = [float(item.get("duration_ms", 0)) for item in all_trace]
+    completed = len(results)
+    ok_count = sum(1 for result in results if result.get("ok"))
+    frames_used = 0.0
+    total_tokens = 0.0
+    completion_tokens = 0.0
+    prompt_tokens = 0.0
+    token_count_seen = False
+    ttft_values: List[float] = []
+    preset_call_durations = []
+    for result in results:
+        metrics = result.get("metrics") or {}
+        frames = metrics.get("frames_used")
+        if isinstance(frames, (int, float)) and not isinstance(frames, bool):
+            frames_used += float(frames)
+        total = metrics.get("total_tokens")
+        completion = metrics.get("completion_tokens")
+        prompt = metrics.get("prompt_tokens")
+        if isinstance(total, (int, float)) and not isinstance(total, bool):
+            total_tokens += float(total)
+            token_count_seen = True
+        if isinstance(completion, (int, float)) and not isinstance(completion, bool):
+            completion_tokens += float(completion)
+            token_count_seen = True
+        if isinstance(prompt, (int, float)) and not isinstance(prompt, bool):
+            prompt_tokens += float(prompt)
+        ttft = metrics.get("ttft_ms")
+        if isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
+            ttft_values.append(float(ttft))
+        preset_s = metrics.get("preset_call_s")
+        if isinstance(preset_s, (int, float)) and not isinstance(preset_s, bool):
+            preset_call_durations.append(float(preset_s))
+    tokens_for_rate = total_tokens if total_tokens else completion_tokens
+    return {
+        "batch": True,
+        "ok": ok_count == completed and completed > 0,
+        "endpoint": endpoint,
+        "video_count": total if total is not None else completed,
+        "completed_count": completed,
+        "success_count": ok_count,
+        "e2e_s": e2e_s,
+        "frontend_api_calls": len(all_trace),
+        "frontend_api_calls_per_video": (len(all_trace) / completed) if completed else None,
+        "avg_frontend_call_ms": (sum(frontend_call_durations) / len(frontend_call_durations)) if frontend_call_durations else None,
+        "preset_call_s": (sum(preset_call_durations) / len(preset_call_durations)) if preset_call_durations else None,
+        "frames_used": frames_used if frames_used else None,
+        "frames_per_second": (frames_used / e2e_s) if frames_used and e2e_s > 0 else None,
+        "videos_per_minute": (completed * 60 / e2e_s) if completed and e2e_s > 0 else None,
+        "ttft_ms": (sum(ttft_values) / len(ttft_values)) if ttft_values else None,
+        "prompt_tokens": prompt_tokens if prompt_tokens else None,
+        "completion_tokens": completion_tokens if completion_tokens else None,
+        "total_tokens": total_tokens if total_tokens else None,
+        "tokens_per_second": (tokens_for_rate / e2e_s) if token_count_seen and tokens_for_rate and e2e_s > 0 else None,
+        "token_rate_basis": "total tokens" if total_tokens else ("completion tokens" if completion_tokens else None),
+        "api_trace": all_trace,
+    }
+
+
 def _metric_card(label: str, value: str) -> str:
     return (
         '<div class="metric-card">'
@@ -354,11 +446,18 @@ def _telemetry_html(job: Optional[Dict[str, Any]] = None) -> str:
     history = _history_summary()
     active = _active_job_count()
     running = _running_job_count()
+    is_batch = bool(metrics.get("batch") or job.get("kind") == "batch")
     cards = [
-        _metric_card("Frontend API calls/video", str(metrics.get("frontend_api_calls", len(trace) or "n/a"))),
+        _metric_card(
+            "Avg API calls/video" if is_batch else "Frontend API calls/video",
+            _fmt_num(metrics.get("frontend_api_calls_per_video"), "", 1)
+            if is_batch and metrics.get("frontend_api_calls_per_video") is not None
+            else str(metrics.get("frontend_api_calls", len(trace) or "n/a")),
+        ),
+        _metric_card("Videos", f"{metrics.get('success_count', 0)}/{metrics.get('video_count', job.get('batch_total', 'n/a'))}" if is_batch else "1"),
         _metric_card("Avg frontend call", _fmt_ms(metrics.get("avg_frontend_call_ms"))),
         _metric_card("E2E wall time", _fmt_num(metrics.get("e2e_s"), "s")),
-        _metric_card("Preset POST time", _fmt_num(metrics.get("preset_call_s"), "s")),
+        _metric_card("Avg preset POST" if is_batch else "Preset POST time", _fmt_num(metrics.get("preset_call_s"), "s")),
         _metric_card("Recent avg E2E", _fmt_num(history.get("avg_e2e_s"), "s")),
         _metric_card("E2E throughput", _fmt_num(metrics.get("videos_per_minute"), " videos/min")),
         _metric_card("Frame throughput", _fmt_num(metrics.get("frames_per_second"), " fps")),
@@ -608,6 +707,24 @@ def _uploaded_file_path(file_value: Any) -> Optional[str]:
     return str(path) if path.exists() else None
 
 
+def _uploaded_file_paths(file_value: Any) -> List[str]:
+    if file_value is None:
+        return []
+    if isinstance(file_value, (list, tuple)):
+        paths = [_uploaded_file_path(item) for item in file_value]
+        return [path for path in paths if path]
+    path = _uploaded_file_path(file_value)
+    return [path] if path else []
+
+
+def _container_path_for_local_path(local_path: Path) -> Optional[str]:
+    try:
+        relative = local_path.resolve().relative_to(DATA_DIR.resolve())
+    except Exception:
+        return None
+    return f"{CONTAINER_DATA_PREFIX}/{relative.as_posix()}"
+
+
 def _local_video_path_from_server_path(server_path: str) -> Optional[str]:
     path = (server_path or "").strip()
     if not path:
@@ -651,18 +768,86 @@ def _stage_upload(file_value: Any) -> str:
     src = _uploaded_file_path(file_value)
     if not src:
         raise ValueError("Uploaded file is no longer available.")
-    src_path = Path(src)
+    return _stage_upload_path(Path(src))
+
+
+def _stage_upload_path(src_path: Path) -> str:
     if not src_path.exists():
-        raise ValueError(f"Uploaded file is no longer available: {src}")
+        raise ValueError(f"Uploaded file is no longer available: {src_path}")
     if src_path.suffix.lower() != ".mp4":
         raise ValueError("Only MP4 uploads are supported for the evaluator preset API.")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     dest_name = _safe_filename(src_path.name)
     dest = DATA_DIR / dest_name
     if dest.exists():
-        dest = DATA_DIR / f"{src_path.stem}_{int(time.time())}{src_path.suffix}"
+        dest = DATA_DIR / f"{src_path.stem}_{uuid.uuid4().hex[:8]}{src_path.suffix}"
     shutil.copy2(src_path, dest)
     return f"{CONTAINER_DATA_PREFIX}/{dest.name}"
+
+
+def _stage_uploads(file_value: Any) -> List[str]:
+    paths = _uploaded_file_paths(file_value)
+    if not paths:
+        raise ValueError("Choose one or more uploaded MP4 files for batch staging.")
+    return [_stage_upload_path(Path(path)) for path in paths]
+
+
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    seen = set()
+    ordered = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _batch_text_lines(text: str) -> List[str]:
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _expand_batch_server_entry(entry: str) -> List[str]:
+    local = _local_video_path_from_server_path(entry)
+    if local:
+        local_path = Path(local)
+        if local_path.is_dir():
+            paths = sorted(path for path in local_path.rglob("*.mp4") if path.is_file())
+            return [_container_path_for_local_path(path) or str(path) for path in paths]
+        if local_path.is_file():
+            return [_container_path_for_local_path(local_path) or entry]
+    return [entry]
+
+
+def _batch_paths_from_text(text: str) -> List[str]:
+    paths: List[str] = []
+    for entry in _batch_text_lines(text):
+        paths.extend(_expand_batch_server_entry(entry))
+    paths = _dedupe_preserve_order(paths)
+    if not paths:
+        raise ValueError("Provide batch uploads or at least one server path.")
+    return paths
+
+
+def stage_batch_uploads(upload_files: Any, current_paths: str) -> Tuple[str, Optional[str], str]:
+    try:
+        staged = _stage_uploads(upload_files)
+        combined = _dedupe_preserve_order(_batch_text_lines(current_paths) + staged)
+        preview = _local_video_path_from_server_path(staged[0]) if staged else sample_video_value()
+        return (
+            "\n".join(combined),
+            preview,
+            f'<div class="ok-box">Staged {len(staged)} MP4 file(s) into {html.escape(str(DATA_DIR))}.</div>',
+        )
+    except Exception as exc:
+        return current_paths, gr.update(), f'<div class="warning-box">{html.escape(str(exc))}</div>'
 
 
 def _video_api_path(source: str, upload: Any, server_path: str) -> str:
@@ -823,6 +1008,40 @@ def _details_html(rows: List[List[Any]]) -> str:
         '<table class="score-table">'
         '<colgroup><col class="check"><col class="score"><col class="preset"><col class="explanation"></colgroup>'
         "<thead><tr><th>Check</th><th>Score</th><th>Preset</th><th>Explanation</th></tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
+
+
+def _batch_results_html(results: List[Dict[str, Any]]) -> str:
+    body_rows = []
+    for result in results:
+        environment = _extract_environment(result.get("body"))
+        status = "ok" if result.get("ok") else "error"
+        status_cls = "ok" if result.get("ok") else "bad"
+        score = environment.get("overall_score")
+        frames = environment.get("frames_used")
+        model = environment.get("model") or result.get("endpoint") or ""
+        elapsed = result.get("elapsed_s")
+        video_path = result.get("video_path") or ""
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(video_path))}</td>"
+            f'<td class="{status_cls}">{html.escape(status)}</td>'
+            f'<td class="num">{html.escape(_score_label(score))}</td>'
+            f'<td class="num">{html.escape(_score_label(frames))}</td>'
+            f'<td class="num">{html.escape(_fmt_num(elapsed, "s"))}</td>'
+            f"<td>{html.escape(str(model))}</td>"
+            "</tr>"
+        )
+    if not body_rows:
+        body_rows.append('<tr><td colspan="6">Stage uploads or add server paths, then run batch inference.</td></tr>')
+    return (
+        '<div class="batch-table-wrap">'
+        '<div class="batch-table-title">Batch inference results</div>'
+        '<table class="batch-table">'
+        '<colgroup><col class="video"><col class="status"><col class="score"><col class="frames"><col class="time"><col class="model"></colgroup>'
+        "<thead><tr><th>Video</th><th>Status</th><th>Score</th><th>Frames</th><th>E2E</th><th>Model</th></tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table></div>"
     )
@@ -1210,6 +1429,300 @@ def poll_evaluator_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
     )
 
 
+def _batch_video_request(
+    index: int,
+    video_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+    endpoint: str,
+    vlm_url: str,
+) -> Dict[str, Any]:
+    trace: List[Dict[str, Any]] = []
+    payload = _build_payload(video_path, weather, time_of_day, geography, road_surface)
+    RUN_SEMAPHORE.acquire()
+    started = time.time()
+    try:
+        ok, body = _service_post(vlm_url, "/process/preset", payload, timeout=RUN_REQUEST_TIMEOUT_S, trace=trace)
+    finally:
+        RUN_SEMAPHORE.release()
+    elapsed = round(time.time() - started, 3)
+    metrics = _metrics_from_run(ok, body, trace, started, endpoint)
+    summary, rows = _response_summary(body)
+    return {
+        "index": index,
+        "video_path": video_path,
+        "ok": ok,
+        "elapsed_s": elapsed,
+        "payload": payload,
+        "body": body,
+        "summary": summary,
+        "details": rows,
+        "metrics": metrics,
+        "api_trace": trace,
+        "endpoint": endpoint,
+    }
+
+
+def _batch_status_md(results: List[Dict[str, Any]], total: int, done: bool) -> str:
+    ok_count = sum(1 for result in results if result.get("ok"))
+    completed = len(results)
+    if done:
+        cls = "ok-box" if ok_count == total else "warning-box"
+        return f'<div class="{cls}">Batch complete: {ok_count}/{total} video(s) succeeded.</div>'
+    return f'<div class="ok-box">Batch running: {completed}/{total} video(s) complete, {ok_count} succeeded so far.</div>'
+
+
+def _run_batch_job(
+    job_id: str,
+    video_paths: List[str],
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+    endpoint: str,
+    allow_mismatch: bool,
+    nim_url: str,
+    vlm_url: str,
+    control_url: str,
+    batch_concurrency: int,
+) -> None:
+    started = time.time()
+    setup_trace: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
+    total = len(video_paths)
+    try:
+        _set_job(job_id, started_at=started, runner_state="running", api_trace=setup_trace, kind="batch")
+        _track_job(job_id, 6, "Reading available evaluator targets.", "GET /runtime/vlm/endpoints", 5)
+        endpoints, _ = _runtime_endpoints(control_url, trace=setup_trace)
+        _set_job(job_id, api_trace=list(setup_trace))
+
+        nim_model = None
+        if _endpoint_is_local_nim(endpoint, endpoints):
+            _track_job(job_id, 14, "Checking local Cosmos3 NIM model.", "GET /v1/models", 8)
+            nim_model, _ = _detect_nim_model(nim_url, trace=setup_trace)
+            _set_job(job_id, api_trace=list(setup_trace))
+
+        mismatch = _mismatch_message(endpoint, endpoints, nim_model)
+        if mismatch and not allow_mismatch:
+            body = {"blocked": True, "reason": mismatch}
+            metrics = _batch_metrics_from_results(results, setup_trace, started, endpoint, total)
+            _finish_job(
+                job_id,
+                f'<div class="warning-box">{html.escape(mismatch)} Enable "Allow endpoint/model mismatch" in Advanced View to run anyway.</div>',
+                _batch_results_html(results),
+                _json(body),
+                "\n".join(video_paths),
+                "Blocked before batch API requests.",
+                False,
+                metrics,
+            )
+            return
+
+        if endpoint:
+            _track_job(job_id, 22, f"Confirming active evaluator target {endpoint}.", "POST /runtime/vlm/switch", 6)
+            switched, switch_body = _service_post(
+                control_url,
+                "/runtime/vlm/switch",
+                {"endpoint": endpoint},
+                timeout=HTTP_TIMEOUT_S,
+                trace=setup_trace,
+            )
+            _set_job(job_id, api_trace=list(setup_trace))
+            if not switched:
+                metrics = _batch_metrics_from_results(results, setup_trace, started, endpoint, total)
+                _finish_job(
+                    job_id,
+                    '<div class="warning-box">Runtime switch failed before batch inference.</div>',
+                    _batch_results_html(results),
+                    _json({"switch": switch_body}),
+                    "\n".join(video_paths),
+                    "Runtime switch failed before batch preset requests.",
+                    False,
+                    metrics,
+                )
+                return
+
+        worker_count = max(1, min(int(batch_concurrency or 1), MAX_CONCURRENT_RUNS, total))
+        _track_job(
+            job_id,
+            30,
+            f"Submitting {total} preset request(s) with concurrency {worker_count}.",
+            "POST /process/preset",
+            max(20, (total * 30) / worker_count),
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(
+                    _batch_video_request,
+                    index,
+                    video_path,
+                    weather,
+                    time_of_day,
+                    geography,
+                    road_surface,
+                    endpoint,
+                    vlm_url,
+                ): video_path
+                for index, video_path in enumerate(video_paths)
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                result = future.result()
+                results.append(result)
+                ordered_results = sorted(results, key=lambda item: int(item.get("index", 0)))
+                completed = len(results)
+                progress = 30 + int(65 * (completed / total))
+                avg_elapsed = sum(float(item.get("elapsed_s", 0)) for item in results) / max(1, completed)
+                remaining = max(0, total - completed)
+                eta = (remaining * avg_elapsed) / worker_count if avg_elapsed else 10
+                partial_metrics = _batch_metrics_from_results(ordered_results, setup_trace, started, endpoint, total)
+                _set_job(
+                    job_id,
+                    progress=progress,
+                    status=f"Completed {completed}/{total} batch video(s).",
+                    api_call="POST /process/preset",
+                    eta_seconds=eta,
+                    eta_started_at=time.time(),
+                    run_status=f"Batch running: {completed}/{total} complete.",
+                    details_html=_batch_results_html(ordered_results),
+                    result_md=_batch_status_md(ordered_results, total, done=False),
+                    raw_response=_json({"videos": ordered_results}),
+                    metrics=partial_metrics,
+                    api_trace=partial_metrics.get("api_trace", []),
+                )
+
+        ordered_results = sorted(results, key=lambda item: int(item.get("index", 0)))
+        metrics = _batch_metrics_from_results(ordered_results, setup_trace, started, endpoint, total)
+        ok = bool(ordered_results) and all(result.get("ok") for result in ordered_results)
+        elapsed = round(time.time() - started, 2)
+        _finish_job(
+            job_id,
+            _batch_status_md(ordered_results, total, done=True),
+            _batch_results_html(ordered_results),
+            _json({"videos": ordered_results, "metrics": metrics}),
+            "\n".join(video_paths),
+            f"{'Batch success' if ok else 'Batch finished with errors'} in {elapsed}s.",
+            ok,
+            metrics,
+        )
+    except Exception as exc:
+        ordered_results = sorted(results, key=lambda item: int(item.get("index", 0)))
+        metrics = _batch_metrics_from_results(ordered_results, setup_trace, started, endpoint, total)
+        _finish_job(
+            job_id,
+            f'<div class="warning-box">{html.escape(str(exc))}</div>',
+            _batch_results_html(ordered_results),
+            _json({"error": str(exc), "videos": ordered_results}),
+            "\n".join(video_paths),
+            "Batch request failed before completion.",
+            False,
+            metrics,
+        )
+
+
+def start_batch_job(
+    upload_files: Any,
+    batch_paths_text: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+    endpoint: str,
+    allow_mismatch: bool,
+    nim_url: str,
+    vlm_url: str,
+    control_url: str,
+    batch_concurrency: int,
+) -> Tuple[str, str, str, str, str, str, str]:
+    try:
+        staged = _stage_uploads(upload_files) if _uploaded_file_paths(upload_files) else []
+        combined_paths_text = "\n".join(_dedupe_preserve_order(_batch_text_lines(batch_paths_text) + staged))
+        video_paths = _batch_paths_from_text(combined_paths_text)
+        job_id = uuid.uuid4().hex
+        worker_count = max(1, min(int(batch_concurrency or 1), MAX_CONCURRENT_RUNS, len(video_paths)))
+        _set_job(
+            job_id,
+            kind="batch",
+            progress=3,
+            status=f"Queued batch of {len(video_paths)} video(s).",
+            api_call="start background batch job",
+            eta_seconds=5,
+            eta_started_at=time.time(),
+            done=False,
+            delivered=False,
+            result_md=f'<div class="ok-box">Batch started with {len(video_paths)} video(s), concurrency {worker_count}.</div>',
+            details_html=_batch_results_html([]),
+            raw_response="{}",
+            payload_text=combined_paths_text,
+            run_status="Starting batch evaluator job.",
+            metrics={"batch": True, "video_count": len(video_paths), "success_count": 0},
+            api_trace=[],
+            runner_state="queued",
+            batch_total=len(video_paths),
+        )
+        thread = threading.Thread(
+            target=_run_batch_job,
+            args=(
+                job_id,
+                video_paths,
+                weather,
+                time_of_day,
+                geography,
+                road_surface,
+                endpoint,
+                allow_mismatch,
+                nim_url,
+                vlm_url,
+                control_url,
+                worker_count,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        job = _snapshot_job(job_id)
+        return (
+            job_id,
+            combined_paths_text,
+            _progress_html(job),
+            _telemetry_html(job),
+            job["result_md"],
+            job["details_html"],
+            job["raw_response"],
+        )
+    except Exception as exc:
+        warning = f'<div class="warning-box">{html.escape(str(exc))}</div>'
+        return (
+            "",
+            batch_paths_text,
+            _progress_html({"progress": 0, "status": "Batch could not start.", "api_call": "none", "done": True}),
+            _telemetry_html({"kind": "batch", "metrics": {"batch": True}}),
+            warning,
+            _batch_results_html([]),
+            _json({"error": str(exc)}),
+        )
+
+
+def poll_batch_job(job_id: str) -> Tuple[Any, Any, Any, Any, Any]:
+    if not job_id:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    job = _snapshot_job(job_id)
+    if not job:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    if job.get("done") and job.get("delivered"):
+        return (gr.update(), _telemetry_html(job), gr.update(), gr.update(), gr.update())
+    if job.get("done"):
+        _set_job(job_id, delivered=True)
+    return (
+        _progress_html(job),
+        _telemetry_html(job),
+        job.get("result_md", gr.update()),
+        job.get("details_html", _batch_results_html([])),
+        job.get("raw_response", "{}"),
+    )
+
+
 def refresh_commands(
     nim_url: str,
     vlm_url: str,
@@ -1276,6 +1789,7 @@ def build_app() -> gr.Blocks:
         status_html = gr.HTML(value="<div class=\"api-note\">Click Refresh status to query services.</div>")
         refresh_btn = gr.Button("Refresh status", variant="secondary")
         evaluator_job_id = gr.Textbox(label="Evaluator job id", value="", visible=False)
+        batch_job_id = gr.Textbox(label="Batch job id", value="", visible=False)
         evaluator_timer = gr.Timer(1.0, active=True)
 
         with gr.Tabs():
@@ -1294,6 +1808,34 @@ def build_app() -> gr.Blocks:
                             value=SAMPLE_API_PATH,
                             info="Path visible to evaluator containers, usually /data/<filename>.",
                         )
+                        with gr.Accordion("Batch upload and inference", open=False):
+                            batch_upload = gr.File(
+                                label="Batch upload MP4s",
+                                file_types=[".mp4"],
+                                file_count="multiple",
+                            )
+                            batch_paths = gr.Textbox(
+                                label="Batch server paths",
+                                lines=7,
+                                placeholder="/data/video_a.mp4\n/data/video_b.mp4\n/data/folder_with_mp4s",
+                                info="One /data path per line. A directory under the data mount expands to all MP4s inside it.",
+                            )
+                            with gr.Row():
+                                stage_batch_btn = gr.Button("Stage batch uploads", variant="secondary")
+                                run_batch_btn = gr.Button("Run batch evaluator", variant="primary")
+                            batch_concurrency = gr.Slider(
+                                label="Batch concurrency",
+                                minimum=1,
+                                maximum=MAX_CONCURRENT_RUNS,
+                                step=1,
+                                value=min(2, MAX_CONCURRENT_RUNS),
+                                info="Server-side evaluator jobs in flight. Hosted endpoints may still rate-limit.",
+                            )
+                            batch_status = gr.Markdown("Batch ready.")
+                            batch_progress = gr.HTML(value=_progress_html({"kind": "batch"}))
+                            batch_telemetry = gr.HTML(value=_telemetry_html({"kind": "batch", "metrics": {"batch": True}}))
+                            batch_results = gr.HTML(value=_batch_results_html([]))
+                            batch_raw = gr.Code(label="Raw batch response", language="json", lines=12)
                     with gr.Column(scale=4):
                         endpoint = gr.Dropdown(label="Active evaluator target", choices=DEFAULT_ENDPOINTS, value=DEFAULT_ENDPOINT)
                         confirm_endpoint_btn = gr.Button("Confirm endpoint change", variant="secondary")
@@ -1420,6 +1962,43 @@ def build_app() -> gr.Blocks:
             queue=False,
         )
         evaluator_timer.tick(poll_evaluator_job, inputs=[evaluator_job_id], outputs=poll_outputs, queue=False)
+
+        stage_batch_btn.click(
+            stage_batch_uploads,
+            inputs=[batch_upload, batch_paths],
+            outputs=[batch_paths, video_preview, batch_status],
+            queue=False,
+        )
+        batch_run_outputs = [
+            batch_job_id,
+            batch_paths,
+            batch_progress,
+            batch_telemetry,
+            batch_status,
+            batch_results,
+            batch_raw,
+        ]
+        batch_poll_outputs = [batch_progress, batch_telemetry, batch_status, batch_results, batch_raw]
+        run_batch_btn.click(
+            start_batch_job,
+            inputs=[
+                batch_upload,
+                batch_paths,
+                weather,
+                time_of_day,
+                geography,
+                road_surface,
+                endpoint,
+                allow_mismatch,
+                nim_url,
+                vlm_url,
+                control_url,
+                batch_concurrency,
+            ],
+            outputs=batch_run_outputs,
+            queue=False,
+        )
+        evaluator_timer.tick(poll_batch_job, inputs=[batch_job_id], outputs=batch_poll_outputs, queue=False)
         confirm_endpoint_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[endpoint_confirm_status, switch_raw])
         switch_btn.click(switch_endpoint, inputs=[control_url, endpoint], outputs=[switch_status, switch_raw])
         fetch_config_btn.click(
