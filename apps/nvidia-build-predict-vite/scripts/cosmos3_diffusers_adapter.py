@@ -3,7 +3,7 @@
 
 The Vite Generator already speaks a simple `/info` + `/generate` contract for
 Cosmos3 Ray Serve. This adapter keeps that surface while using Hugging Face
-Diffusers' `Cosmos3OmniPipeline` locally.
+Diffusers' `Cosmos3OmniDiffusersPipeline` locally.
 """
 
 from __future__ import annotations
@@ -21,8 +21,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 import torch
-from diffusers import Cosmos3OmniPipeline
-from diffusers.utils import export_to_video, load_image
+from diffusers.utils import load_image
+from diffusers_cosmos3 import Cosmos3OmniDiffusersPipeline
+import diffusers_cosmos3.pipeline as cosmos3_pipeline
+from diffusers_cosmos3.pipeline import save_img_or_video
 
 # The horde host currently exposes a cuDNN stack that fails on the VAE's 3D
 # convolutions. Native CUDA kernels pass the same ops, so keep cuDNN off here.
@@ -36,8 +38,9 @@ OUTPUT_DIR = Path(os.environ.get("DIFFUSERS_OUTPUT_DIR", "/tmp/cosmos3_diffusers
 UPLOAD_DIR = Path(os.environ.get("DIFFUSERS_UPLOAD_DIR", "/tmp/cosmos3_diffusers_uploads"))
 DTYPE = torch.bfloat16
 
-_PIPELINE: Cosmos3OmniPipeline | None = None
+_PIPELINE: Cosmos3OmniDiffusersPipeline | None = None
 _PIPELINE_LOCK = threading.Lock()
+_GENERATION_LOCK = threading.Lock()
 _LAST_ERROR: str | None = None
 
 
@@ -50,15 +53,18 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
-def _pipeline() -> Cosmos3OmniPipeline:
+def _pipeline() -> Cosmos3OmniDiffusersPipeline:
     global _PIPELINE, _LAST_ERROR
     with _PIPELINE_LOCK:
         if _PIPELINE is not None:
             return _PIPELINE
         try:
             torch.set_float32_matmul_precision("high")
-            pipe = Cosmos3OmniPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE)
-            pipe.to("cuda")
+            pipe = Cosmos3OmniDiffusersPipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=DTYPE,
+                device_map="cuda",
+            )
             _PIPELINE = pipe
             _LAST_ERROR = None
             return pipe
@@ -142,6 +148,55 @@ def _safe_float(value: Any, fallback: float, *, minimum: float | None = None, ma
     return number
 
 
+def _sample_args_defaults(mode: str) -> dict[str, Any]:
+    framework_root = Path(os.environ.get("COSMOS3_FRAMEWORK_ROOT", Path.cwd()))
+    default_path = framework_root / "cosmos_framework" / "inference" / "defaults" / mode / "sample_args.json"
+    if default_path.is_file():
+        try:
+            return json.loads(default_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "duration_template": "The video is {duration:.1f} seconds long and is of {fps:.0f} FPS.",
+        "resolution_template": "This video is of {height}x{width} resolution.",
+        "negative_metadata_mode": "none",
+        "inverse_duration_template": "The video is not {duration:.1f} seconds long and is not of {fps:.0f} FPS.",
+        "inverse_resolution_template": "This video is not of {height}x{width} resolution.",
+        "negative_prompt_keep_metadata": True,
+        "num_steps": 35,
+        "guidance": 6.0,
+        "guidance_interval": None,
+        "normalize_cfg": False,
+        "shift": 10.0,
+        "sigma_max": 80.0,
+    }
+
+
+def _write_pipeline_sample_args(payload: dict[str, Any], *, has_image: bool) -> None:
+    mode = "image2video" if has_image else "text2video"
+    sample_args_dir = Path(cosmos3_pipeline.__file__).parent / "sample_args"
+    sample_args_dir.mkdir(parents=True, exist_ok=True)
+
+    defaults = _sample_args_defaults(mode)
+    defaults["model_mode"] = mode
+    defaults["negative_prompt"] = str(payload.get("negative_prompt") or defaults.get("negative_prompt") or "")
+    defaults["num_steps"] = _safe_int(payload.get("num_steps"), int(defaults.get("num_steps") or 35), minimum=1, maximum=80)
+    defaults["guidance"] = _safe_float(payload.get("guidance"), float(defaults.get("guidance") or 6.0), minimum=0.0, maximum=20.0)
+    defaults["guidance_interval"] = payload.get("guidance_interval", defaults.get("guidance_interval"))
+    if payload.get("normalize_cfg") is not None:
+        defaults["normalize_cfg"] = bool(payload.get("normalize_cfg"))
+    defaults["shift"] = _safe_float(payload.get("shift"), float(defaults.get("shift") or 10.0), minimum=0.0)
+    defaults["sigma_max"] = _safe_float(payload.get("sigma_max"), float(defaults.get("sigma_max") or 80.0), minimum=0.0)
+
+    for required_mode in ("image2video", "text2video"):
+        output = sample_args_dir / f"{required_mode}.json"
+        data = defaults if required_mode == mode else _sample_args_defaults(required_mode)
+        data = dict(data)
+        data["model_mode"] = required_mode
+        data["negative_prompt"] = str(data.get("negative_prompt") or "")
+        output.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "cosmos3-diffusers-adapter/0.1"
 
@@ -196,9 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             height, width = _dimensions(payload.get("resolution"), payload.get("aspect_ratio"))
             num_frames = _safe_int(payload.get("num_frames"), 121, minimum=1, maximum=189)
-            num_steps = _safe_int(payload.get("num_steps"), 35, minimum=1, maximum=80)
             fps = _safe_float(payload.get("fps"), 24.0, minimum=1.0, maximum=60.0)
-            guidance = _safe_float(payload.get("guidance"), 6.0, minimum=0.0, maximum=20.0)
             seed = payload.get("seed")
             generator = None
             if seed is not None:
@@ -206,24 +259,25 @@ class Handler(BaseHTTPRequestHandler):
 
             image = _conditioning_image(payload)
             pipe = _pipeline()
-            result = pipe(
-                prompt=str(payload.get("prompt") or ""),
-                negative_prompt=payload.get("negative_prompt") or None,
-                image=image,
-                num_frames=num_frames,
-                height=height,
-                width=width,
-                fps=fps,
-                num_inference_steps=num_steps,
-                guidance_scale=guidance,
-                generator=generator,
-                output_type="pil",
-                enable_sound=False,
-                enable_safety_check=False,
-            )
+            with _GENERATION_LOCK:
+                _write_pipeline_sample_args(payload, has_image=image is not None)
+                result_frames = pipe(
+                    prompt=str(payload.get("prompt") or ""),
+                    negative_prompt=payload.get("negative_prompt") or None,
+                    image=image,
+                    num_frames=num_frames,
+                    height=height,
+                    width=width,
+                    fps=fps,
+                    condition_frame_indexes=payload.get("condition_frame_indexes_vision") or None,
+                    generator=generator,
+                    output_type="video",
+                )
 
             video_path = sample_dir / "vision.mp4"
-            export_to_video(result.video, str(video_path), fps=fps)
+            if not result_frames:
+                raise RuntimeError("Diffusers pipeline did not return frames")
+            save_img_or_video(result_frames[0], str(video_path.with_suffix("")), fps=fps)
             (sample_dir / "sample_outputs.json").write_text(
                 json.dumps({"status": "success", "files": [str(video_path)]}, indent=2),
                 encoding="utf-8",
