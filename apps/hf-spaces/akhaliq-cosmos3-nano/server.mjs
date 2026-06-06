@@ -72,12 +72,12 @@ function safeFloat(value, fallback, minimum, maximum) {
 }
 
 function generationPayload(mode, payload) {
+  const isTextToImage = mode === "text_to_image";
   const hasImage = mode === "image_to_video" && typeof payload.mediaDataUrl === "string" && payload.mediaDataUrl;
-  const height = safeInt(payload.height, mode === "text_to_image" ? 720 : 544, 16, 720);
-  const width = safeInt(payload.width, Math.round(height * 16 / 9), 16, 1280);
-  const framesFallback = mode === "text_to_image" ? 1 : 121;
-  const numFrames = safeInt(payload.num_frames, framesFallback, 1, 189);
-  const steps = safeInt(payload.num_inference_steps ?? payload.num_steps, 25, 1, 80);
+  const height = safeInt(payload.height, isTextToImage ? 512 : 544, 16, isTextToImage ? 512 : 720);
+  const width = safeInt(payload.width, isTextToImage ? height : Math.round(height * 16 / 9), 16, isTextToImage ? 512 : 1280);
+  const numFrames = isTextToImage ? 1 : safeInt(payload.num_frames, 121, 1, 189);
+  const steps = safeInt(payload.num_inference_steps ?? payload.num_steps, isTextToImage ? 8 : 25, 1, isTextToImage ? 8 : 80);
   const fps = safeFloat(payload.fps, 24, 1, 60);
   const guidance = safeFloat(payload.guidance ?? payload.guidance_scale, 6, 0, 20);
   const seed = payload.seed ?? 0;
@@ -95,7 +95,7 @@ function generationPayload(mode, payload) {
     num_steps: steps,
     guidance,
     seed,
-    model_mode: hasImage ? "image2video" : "text2video"
+    model_mode: hasImage ? "image2video" : isTextToImage ? "text2image" : "text2video"
   };
 
   if (hasImage) translated.mediaDataUrl = payload.mediaDataUrl;
@@ -198,7 +198,7 @@ async function handleGenerate(req, res) {
     sendJson(res, 200, {
       url: mediaUrlFor(resolved),
       path: resolved,
-      kind: "video",
+      kind: mode === "text_to_image" ? "image" : "video",
       hasSound: false,
       backend: "diffusers",
       request: translated,

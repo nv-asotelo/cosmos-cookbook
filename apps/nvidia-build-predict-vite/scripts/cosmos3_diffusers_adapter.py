@@ -172,12 +172,22 @@ def _sample_args_defaults(mode: str) -> dict[str, Any]:
     }
 
 
+def _is_text_to_image(payload: dict[str, Any], *, has_image: bool) -> bool:
+    if has_image:
+        return False
+    model_mode = str(payload.get("model_mode") or "").lower()
+    if model_mode == "text2image":
+        return True
+    return _safe_int(payload.get("num_frames"), 121, minimum=1, maximum=189) == 1
+
+
 def _write_pipeline_sample_args(payload: dict[str, Any], *, has_image: bool) -> None:
     mode = "image2video" if has_image else "text2video"
+    defaults_mode = "text2image" if _is_text_to_image(payload, has_image=has_image) else mode
     sample_args_dir = Path(cosmos3_pipeline.__file__).parent / "sample_args"
     sample_args_dir.mkdir(parents=True, exist_ok=True)
 
-    defaults = _sample_args_defaults(mode)
+    defaults = _sample_args_defaults(defaults_mode)
     defaults["model_mode"] = mode
     defaults["negative_prompt"] = str(payload.get("negative_prompt") or defaults.get("negative_prompt") or "")
     defaults["num_steps"] = _safe_int(payload.get("num_steps"), int(defaults.get("num_steps") or 35), minimum=1, maximum=80)
@@ -195,6 +205,14 @@ def _write_pipeline_sample_args(payload: dict[str, Any], *, has_image: bool) -> 
         data["model_mode"] = required_mode
         data["negative_prompt"] = str(data.get("negative_prompt") or "")
         output.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _saved_media_path(output_stem: Path) -> Path:
+    for suffix in (".mp4", ".jpg", ".jpeg", ".png"):
+        candidate = output_stem.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"Diffusers saver did not create an output next to {output_stem}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -274,12 +292,13 @@ class Handler(BaseHTTPRequestHandler):
                     output_type="video",
                 )
 
-            video_path = sample_dir / "vision.mp4"
+            output_stem = sample_dir / "vision"
             if not result_frames:
                 raise RuntimeError("Diffusers pipeline did not return frames")
-            save_img_or_video(result_frames[0], str(video_path.with_suffix("")), fps=fps)
+            save_img_or_video(result_frames[0], str(output_stem), fps=fps)
+            media_path = _saved_media_path(output_stem)
             (sample_dir / "sample_outputs.json").write_text(
-                json.dumps({"status": "success", "files": [str(video_path)]}, indent=2),
+                json.dumps({"status": "success", "files": [str(media_path)]}, indent=2),
                 encoding="utf-8",
             )
             _json_response(
@@ -288,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "status": "success",
                     "message": "",
-                    "outputs": [{"files": [str(video_path)], "content": None}],
+                    "outputs": [{"files": [str(media_path)], "content": None}],
                 },
             )
         except Exception as exc:  # pragma: no cover - operational diagnostic

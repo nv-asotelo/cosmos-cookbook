@@ -57,7 +57,7 @@ const MODE_COPY: Record<
     label: "Text -> Image",
     resultTitle: "Text to Image",
     loadingTitle: "Generating Image...",
-    loadingSubcopy: "Creating your image with Cosmos3 Nano...",
+    loadingSubcopy: "Creating a 512px image with Cosmos3 Nano...",
     endpoint: "text_to_image",
     mediaKind: "image"
   },
@@ -270,9 +270,9 @@ export default function App() {
       if (mode === "text_to_image") {
         payload = {
           prompt: trimmedPrompt,
-          height: 720,
-          width: 1280,
-          num_inference_steps: 25
+          height: 512,
+          width: 512,
+          num_inference_steps: 8
         };
       } else if (mode === "image_to_video") {
         const mediaDataUrl = await readFileAsDataUrl((uploadedAsset as UploadedAsset).file);
