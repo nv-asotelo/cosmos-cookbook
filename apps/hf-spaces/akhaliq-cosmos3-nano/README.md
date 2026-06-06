@@ -3,32 +3,44 @@ title: Cosmos3 Nano
 emoji: 🌌
 colorFrom: gray
 colorTo: green
-sdk: gradio
-sdk_version: 6.15.2
-python_version: '3.12'
-app_file: app.py
+sdk: static
+app_build_command: npm install && npm run build
+app_file: dist/index.html
+fullWidth: true
 pinned: false
-suggested_hardware: a100-large
 ---
 
-# Cosmos3 Nano — World Foundation Model
+# Cosmos3 Nano Vite View
 
-NVIDIA Cosmos 3 Nano: Generate physically plausible images and videos from text, images, and sound using a unified world foundation model.
+A Vite + React interface modeled after the public `akhaliq/Cosmos3-Nano`
+Hugging Face Space experience. The UI is full-screen and media-first: generated
+images or videos become the background, videos loop, and video-with-sound outputs
+can be muted or unmuted in place.
 
-## Features
+The horde staging view is served with `server.mjs`, a small same-origin Node
+proxy. The browser calls `/api/local-generate`, and the server forwards the
+request to the local Cosmos3 Diffusers adapter, normally
+`http://127.0.0.1:8010/generate`. This keeps the demo on the local GPU path and
+avoids Hugging Face ZeroGPU quota limits.
 
-- **Text → Image** — Single-frame generation from text prompts
-- **Text → Video** — Multi-frame video generation with quality-control negative prompts
-- **Image → Video** — Animate a conditioning image into video
-- **Video + Sound** — Generate video with synchronized audio
+## Local Development
 
-## Architecture
+```bash
+npm install
+npm run dev
+```
 
-Built with `gradio.Server` for a custom cinematic frontend with Gradio's queuing backend:
-- Full-screen media display with glassmorphism controls
-- `@app.api()` endpoints with GPU queuing and concurrency management
-- `@spaces.GPU` for ZeroGPU allocation on HF Spaces
+## Build
 
-## Model
+```bash
+npm run typecheck
+npm run build
+```
 
-Uses [nvidia/Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) via the `Cosmos3OmniPipeline` from 🤗 Diffusers.
+The static build is emitted to `dist/`.
+
+## Local GPU Server
+
+```bash
+PORT=5185 DIFFUSERS_BASE_URL=http://127.0.0.1:8010 npm run serve:local
+```
