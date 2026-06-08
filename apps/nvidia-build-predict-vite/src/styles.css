@@ -850,7 +850,6 @@ h2 {
   font-size: 12px;
   font-weight: 800;
   line-height: 18px;
-  text-transform: uppercase;
 }
 
 .promptSchemaTableWrap {
@@ -860,10 +859,10 @@ h2 {
 }
 
 .promptSchemaTable {
-  width: 100%;
-  min-width: 520px;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
   font-size: 12px;
   line-height: 18px;
 }
@@ -875,6 +874,8 @@ h2 {
   text-align: left;
   vertical-align: top;
   word-break: break-word;
+  min-width: 120px;
+  max-width: 280px;
 }
 
 .promptSchemaTable th {

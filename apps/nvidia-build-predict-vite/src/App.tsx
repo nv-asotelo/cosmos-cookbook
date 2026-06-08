@@ -1704,108 +1704,36 @@ function NumberControl({
 
 type PromptSchema = Record<string, unknown> & {
   subjects?: unknown;
-  actions?: unknown;
-  segments?: unknown;
-  background_setting?: unknown;
-  cinematography?: unknown;
-  context?: unknown;
-  lighting?: unknown;
-  temporal_caption?: unknown;
-  audio_description?: unknown;
-  resolution?: unknown;
-  aspect_ratio?: unknown;
-  duration?: unknown;
-  fps?: unknown;
 };
 
 function PromptSchemaPreview({ value }: { value: string }) {
   const schema = useMemo(() => parsePromptSchema(value), [value]);
   if (!schema) return null;
 
-  const subjects = recordArray(schema.subjects);
-  const actions = recordArray(schema.actions);
-  const segments = recordArray(schema.segments);
-  const summary = [
-    subjects.length ? `${subjects.length} subjects` : null,
-    actions.length ? `${actions.length} actions` : null,
-    segments.length ? `${segments.length} segments` : null
-  ]
-    .filter(Boolean)
-    .join(" / ");
-
-  const lighting = isRecord(schema.lighting) ? schema.lighting : null;
-  const cinematography = isRecord(schema.cinematography) ? schema.cinematography : null;
-  const resolution = isRecord(schema.resolution)
-    ? `${schemaValue(schema.resolution.W)} x ${schemaValue(schema.resolution.H)}`
-    : schemaValue(schema.resolution);
-  const sceneRows = [
-    ["Context", schema.context],
-    ["Background", schema.background_setting],
-    [
-      "Camera",
-      joinSchemaValues([
-        readSchemaValue(cinematography, "camera_motion"),
-        readSchemaValue(cinematography, "camera_angle"),
-        readSchemaValue(cinematography, "framing")
-      ])
-    ],
-    [
-      "Lighting",
-      joinSchemaValues([readSchemaValue(lighting, "conditions"), readSchemaValue(lighting, "direction")])
-    ],
-    ["Timing", joinSchemaValues([schema.duration, schema.fps ? `${schema.fps} fps` : null])],
-    ["Format", joinSchemaValues([schema.aspect_ratio, resolution])]
-  ].filter(([, rowValue]) => schemaValue(rowValue) !== "n/a");
+  const sections = buildPromptSchemaSections(schema);
+  if (!sections.length) return null;
 
   return (
     <details className="promptSchemaDetails">
       <summary className="promptSchemaSummary">
         <span>Structured prompt table</span>
-        {summary ? <small>{summary}</small> : null}
+        <small>{sections.length} schema sections</small>
         <ChevronDown size={16} aria-hidden />
       </summary>
       <div className="promptSchemaBody">
-        {subjects.length ? (
-          <PromptSchemaTable
-            title="Subjects"
-            columns={["#", "Description", "Role / Location", "Motion / State"]}
-            rows={subjects.map((subject, index) => [
-              String(index + 1),
-              schemaValue(subject.description),
-              joinSchemaValues([subject.relationship, subject.location]),
-              joinSchemaValues([subject.action, subject.state_changes])
-            ])}
-          />
-        ) : null}
-        {actions.length ? (
-          <PromptSchemaTable
-            title="Actions"
-            columns={["Time", "Description"]}
-            rows={actions.map((action) => [schemaValue(action.time), schemaValue(action.description)])}
-          />
-        ) : null}
-        {segments.length ? (
-          <PromptSchemaTable
-            title="Segments"
-            columns={["Time", "Description", "Key changes"]}
-            rows={segments.map((segment) => [
-              schemaValue(segment.time_range),
-              schemaValue(segment.description),
-              schemaValue(segment.key_changes)
-            ])}
-          />
-        ) : null}
-        {sceneRows.length ? (
-          <PromptSchemaTable
-            title="Scene"
-            columns={["Field", "Value"]}
-            rows={sceneRows.map(([label, rowValue]) => [schemaValue(label), schemaValue(rowValue)])}
-          />
-        ) : null}
+        {sections.map((section) => (
+          <PromptSchemaTable key={section.title} columns={section.columns} rows={section.rows} title={section.title} />
+        ))}
       </div>
     </details>
   );
 }
+
+type PromptSchemaSection = {
+  title: string;
+  columns: string[];
+  rows: string[][];
+};
 
 function PromptSchemaTable({ columns, rows, title }: { columns: string[]; rows: string[][]; title: string }) {
   return (
@@ -1846,39 +1774,79 @@ function parsePromptSchema(value: string): PromptSchema | null {
   }
 }
 
-function recordArray(value: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(value) ? value.filter(isRecord) : [];
+function buildPromptSchemaSections(schema: PromptSchema): PromptSchemaSection[] {
+  return Object.entries(schema).flatMap(([key, value]) => schemaSectionForValue(key, value));
+}
+
+function schemaSectionForValue(key: string, value: unknown): PromptSchemaSection[] {
+  if (!hasSchemaValue(value)) return [];
+
+  if (Array.isArray(value)) {
+    const records = value.filter(isRecord);
+    if (records.length === value.length && records.length > 0) {
+      const fields = collectRecordFields(records);
+      if (!fields.length) return [];
+      const rows = records
+        .map((record, index) => [String(index + 1), ...fields.map((field) => schemaValue(record[field]))])
+        .filter((row) => row.slice(1).some((cell) => cell));
+      return rows.length ? [{ title: key, columns: ["#", ...fields], rows }] : [];
+    }
+
+    const rows = value
+      .map((entry, index) => [String(index + 1), schemaValue(entry)])
+      .filter((row) => row[1]);
+    return rows.length ? [{ title: key, columns: ["#", "value"], rows }] : [];
+  }
+
+  if (isRecord(value)) {
+    const rows = Object.entries(value)
+      .filter(([, entryValue]) => hasSchemaValue(entryValue))
+      .map(([field, entryValue]) => [field, schemaValue(entryValue)]);
+    return rows.length ? [{ title: key, columns: ["field", "value"], rows }] : [];
+  }
+
+  const renderedValue = schemaValue(value);
+  return renderedValue ? [{ title: key, columns: ["value"], rows: [[renderedValue]] }] : [];
+}
+
+function collectRecordFields(records: Array<Record<string, unknown>>) {
+  const fields: string[] = [];
+  for (const record of records) {
+    for (const field of Object.keys(record)) {
+      if (!fields.includes(field) && records.some((row) => hasSchemaValue(row[field]))) {
+        fields.push(field);
+      }
+    }
+  }
+  return fields;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function readSchemaValue(record: Record<string, unknown> | null, key: string) {
-  return record ? record[key] : null;
+function hasSchemaValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  if (Array.isArray(value)) return value.some(hasSchemaValue);
+  if (isRecord(value)) return Object.values(value).some(hasSchemaValue);
+  return true;
 }
 
 function joinSchemaValues(values: unknown[]) {
-  const parts = values.map(schemaValue).filter((part) => part !== "n/a");
-  return parts.length ? parts.join("; ") : "n/a";
+  const parts = values.map(schemaValue).filter(Boolean);
+  return parts.join("; ");
 }
 
 function schemaValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "n/a";
+  if (value === null || value === undefined || value === "") return "";
   if (Array.isArray(value)) return joinSchemaValues(value);
   if (isRecord(value)) {
     const entries = Object.entries(value)
-      .map(([key, entryValue]) => [humanizeSchemaKey(key), schemaValue(entryValue)])
-      .filter(([, entryValue]) => entryValue !== "n/a");
-    return entries.length ? entries.map(([key, entryValue]) => `${key}: ${entryValue}`).join("; ") : "n/a";
+      .map(([key, entryValue]) => [key, schemaValue(entryValue)])
+      .filter(([, entryValue]) => entryValue);
+    return entries.length ? entries.map(([key, entryValue]) => `${key}: ${entryValue}`).join("; ") : "";
   }
   return String(value);
-}
-
-function humanizeSchemaKey(key: string) {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function PromptBox({
