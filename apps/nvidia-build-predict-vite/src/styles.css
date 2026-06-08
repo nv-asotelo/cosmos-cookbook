@@ -1944,16 +1944,14 @@ select {
 }
 
 .modalFooter {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  display: block;
   border-top: 1px solid var(--line-soft);
   padding: 18px 28px 24px;
 }
 
 .selectedExampleSummary {
   min-width: 0;
+  width: 100%;
 }
 
 .selectedExampleSummary span,
@@ -1978,7 +1976,7 @@ select {
 }
 
 .selectedExampleSummary p {
-  max-width: 620px;
+  max-width: none;
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
@@ -1987,30 +1985,31 @@ select {
 
 .selectedPromptPair {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
   margin-top: 10px;
 }
 
 .selectedPromptPair div {
   min-width: 0;
+  width: 100%;
   border: 1px solid var(--line-soft);
   border-radius: 6px;
-  padding: 9px 10px;
+  padding: 10px 12px;
 }
 
 .selectedPromptPair p {
-  display: -webkit-box;
+  display: block;
   max-width: none;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  overflow: visible;
 }
 
 .modalFooterActions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 18px;
+  margin-top: 18px;
 }
 
 .cancelButton,
@@ -2370,12 +2369,7 @@ select {
     aspect-ratio: 16 / 8.5;
   }
 
-  .modalFooter {
-    display: block;
-  }
-
   .modalFooterActions {
-    justify-content: flex-end;
     margin-top: 14px;
   }
 
