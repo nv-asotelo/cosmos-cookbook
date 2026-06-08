@@ -1954,6 +1954,26 @@ select {
   width: 100%;
 }
 
+.selectedExampleIntro {
+  display: grid;
+  grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.selectedExampleHero {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.selectedExampleCopy {
+  min-width: 0;
+}
+
 .selectedExampleSummary span,
 .selectedExampleSummary strong,
 .selectedExampleSummary p {
@@ -1987,21 +2007,32 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;
-  margin-top: 10px;
+  margin-top: 14px;
 }
 
-.selectedPromptPair div {
+.selectedPromptChoice {
   min-width: 0;
   width: 100%;
   border: 1px solid var(--line-soft);
   border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  cursor: pointer;
   padding: 10px 12px;
+  text-align: left;
+}
+
+.selectedPromptChoice:hover,
+.selectedPromptChoice.activePromptChoice {
+  border-color: var(--green);
+  box-shadow: inset 0 0 0 1px rgba(118, 185, 0, 0.18);
 }
 
 .selectedPromptPair p {
   display: block;
   max-width: none;
   overflow: visible;
+  user-select: text;
 }
 
 .modalFooterActions {
@@ -2367,6 +2398,14 @@ select {
 
   .exampleImageCard img {
     aspect-ratio: 16 / 8.5;
+  }
+
+  .selectedExampleIntro {
+    grid-template-columns: 1fr;
+  }
+
+  .selectedExampleHero {
+    max-height: 180px;
   }
 
   .modalFooterActions {

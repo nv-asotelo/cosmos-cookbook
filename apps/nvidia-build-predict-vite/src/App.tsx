@@ -121,6 +121,7 @@ type ContentSelectItem = {
   previewVideoName: string;
   params?: GenerationParams;
 };
+type PromptChoice = "short" | "long";
 type ContentSelectGroup = {
   title: string;
   summary: string;
@@ -554,6 +555,10 @@ function findContentItem(groups: ContentSelectGroup[], id: string) {
   return groups.flatMap((group) => group.items).find((item) => item.id === id) ?? groups[0].items[0];
 }
 
+function contentPromptForChoice(item: ContentSelectItem, choice: PromptChoice) {
+  return choice === "short" && item.shortPrompt ? item.shortPrompt : item.prompt;
+}
+
 function waitForContentLoad(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
@@ -623,6 +628,7 @@ export default function Page() {
   const [dragActive, setDragActive] = useState(false);
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [selectedContentItemId, setSelectedContentItemId] = useState(DEFAULT_CONTENT_ITEM.id);
+  const [selectedPromptChoice, setSelectedPromptChoice] = useState<PromptChoice>("long");
   const [selectedPreviewVideo, setSelectedPreviewVideo] = useState(() => ({
     url: DEFAULT_CONTENT_ITEM.previewVideoUrl,
     name: DEFAULT_CONTENT_ITEM.previewVideoName
@@ -645,6 +651,11 @@ export default function Page() {
     () => Boolean(backendInfo && String(backendInfo.backend || "").toLowerCase().includes("nim")),
     [backendInfo]
   );
+  const referencePrompt = activeContentItem?.shortPrompt
+    ? selectedPromptChoice === "short"
+      ? { label: "Long Prompt", text: activeContentItem.prompt }
+      : { label: "Short Prompt", text: activeContentItem.shortPrompt }
+    : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -742,6 +753,7 @@ export default function Page() {
     const advanced = advancedParams(example.params);
     setSelectedExampleId(example.id);
     setGeneratorMode(example.mode);
+    setSelectedPromptChoice("long");
     setPrompt(example.prompt);
     setResolution(params.resolution);
     setNumFrames(params.numFrames);
@@ -771,7 +783,7 @@ export default function Page() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  async function applyContentSelect(item: ContentSelectItem) {
+  async function applyContentSelect(item: ContentSelectItem, promptChoice: PromptChoice = "long") {
     const loadToken = contentLoadTokenRef.current + 1;
     contentLoadTokenRef.current = loadToken;
     setLoadingContentItemId(item.id);
@@ -792,8 +804,9 @@ export default function Page() {
       const params = visibleParams(item.params);
       const advanced = advancedParams(item.params);
       setSelectedContentItemId(item.id);
+      setSelectedPromptChoice(promptChoice);
       setGeneratorMode("Image-to-Video");
-      setPrompt(item.prompt);
+      setPrompt(contentPromptForChoice(item, promptChoice));
       setResolution(params.resolution);
       setNumFrames(params.numFrames);
       setFps(params.fps);
@@ -845,6 +858,7 @@ export default function Page() {
     setSigmaMax(advanced.sigmaMax);
     setSelectedExampleId(EXAMPLES[0].id);
     setSelectedContentItemId(DEFAULT_CONTENT_ITEM.id);
+    setSelectedPromptChoice("long");
     setSelectedPreviewVideo({ url: DEFAULT_CONTENT_ITEM.previewVideoUrl, name: DEFAULT_CONTENT_ITEM.previewVideoName });
     setStatus("Ready");
     setProgressPercent(0);
@@ -1161,13 +1175,11 @@ export default function Page() {
               </div>
             )}
 
-            {activeContentItem?.shortPrompt ? (
-              <PromptReference label="Short Prompt" text={activeContentItem.shortPrompt} />
-            ) : null}
+            {referencePrompt ? <PromptReference label={referencePrompt.label} text={referencePrompt.text} /> : null}
 
             <PromptBox
-              label="Long Prompt"
-              hint="Full generation prompt."
+              label={selectedPromptChoice === "short" ? "Short Prompt" : "Long Prompt"}
+              hint={selectedPromptChoice === "short" ? "Selected concise generation prompt." : "Full generation prompt."}
               max={12000}
               value={prompt}
               onChange={setPrompt}
@@ -1270,9 +1282,10 @@ export default function Page() {
         <ExampleModal
           groups={CONTENT_SELECT_GROUPS}
           selectedId={selectedContentItemId}
+          selectedPromptChoice={selectedPromptChoice}
           onClose={() => setExamplesOpen(false)}
-          onSelect={(item) => {
-            applyContentSelect(item);
+          onSelect={(item, promptChoice) => {
+            applyContentSelect(item, promptChoice);
             setExamplesOpen(false);
           }}
         />
@@ -1876,15 +1889,28 @@ function ExampleModal({
   groups,
   onClose,
   onSelect,
-  selectedId
+  selectedId,
+  selectedPromptChoice
 }: {
   groups: ContentSelectGroup[];
   onClose: () => void;
-  onSelect: (example: ContentSelectItem) => void;
+  onSelect: (example: ContentSelectItem, promptChoice: PromptChoice) => void;
   selectedId: string;
+  selectedPromptChoice: PromptChoice;
 }) {
   const [pendingId, setPendingId] = useState(selectedId);
+  const [pendingPromptChoice, setPendingPromptChoice] = useState<PromptChoice>(selectedPromptChoice);
   const pending = findContentItem(groups, pendingId);
+  const promptChoices = [
+    pending.shortPrompt ? { choice: "short" as const, label: "Short Prompt", text: pending.shortPrompt } : null,
+    { choice: "long" as const, label: "Long Prompt", text: pending.prompt }
+  ].filter((choice): choice is { choice: PromptChoice; label: string; text: string } => Boolean(choice));
+
+  useEffect(() => {
+    if (pendingPromptChoice === "short" && !pending.shortPrompt) {
+      setPendingPromptChoice("long");
+    }
+  }, [pending.shortPrompt, pendingPromptChoice]);
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
@@ -1930,27 +1956,38 @@ function ExampleModal({
         </div>
         <div className="modalFooter">
           <div className="selectedExampleSummary">
-            <span>{pending.domain}</span>
-            <strong>{pending.title}</strong>
-            <p>{pending.description}</p>
-            {pending.shortPrompt ? (
-              <div className="selectedPromptPair">
-                <div>
-                  <span>Short Prompt</span>
-                  <p>{pending.shortPrompt}</p>
-                </div>
-                <div>
-                  <span>Long Prompt</span>
-                  <p>{pending.prompt}</p>
-                </div>
+            <div className="selectedExampleIntro">
+              <img className="selectedExampleHero" src={pending.mediaUrl} alt="" />
+              <div className="selectedExampleCopy">
+                <span>{pending.domain}</span>
+                <strong>{pending.title}</strong>
+                <p>{pending.description}</p>
               </div>
-            ) : null}
+            </div>
+            <div className="selectedPromptPair" role="group" aria-label="Prompt choice">
+              {promptChoices.map((choice) => (
+                <button
+                  aria-pressed={pendingPromptChoice === choice.choice}
+                  className={
+                    pendingPromptChoice === choice.choice
+                      ? "selectedPromptChoice activePromptChoice"
+                      : "selectedPromptChoice"
+                  }
+                  key={choice.choice}
+                  onClick={() => setPendingPromptChoice(choice.choice)}
+                  type="button"
+                >
+                  <span>{choice.label}</span>
+                  <p>{choice.text}</p>
+                </button>
+              ))}
+            </div>
           </div>
           <div className="modalFooterActions">
             <button className="cancelButton" onClick={onClose} type="button">
               Cancel
             </button>
-            <button className="selectButton" onClick={() => onSelect(pending)} type="button">
+            <button className="selectButton" onClick={() => onSelect(pending, pendingPromptChoice)} type="button">
               Select
             </button>
           </div>
