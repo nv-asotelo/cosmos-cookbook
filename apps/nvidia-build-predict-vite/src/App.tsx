@@ -1161,13 +1161,14 @@ export default function Page() {
             )}
 
             <PromptBox
-              label={selectedPromptChoice === "short" ? "Short Prompt" : "Long Prompt"}
-              hint={selectedPromptChoice === "short" ? "Selected concise generation prompt." : "Full generation prompt."}
+              label="User Prompt"
+              hint="Edit the prompt sent on Generate."
               max={12000}
               value={prompt}
               onChange={setPrompt}
               rows={7}
             />
+            <PromptSchemaPreview value={prompt} />
 
             <ModelParameterControls
               fps={fps}
@@ -1632,35 +1633,38 @@ function ModelParameterControls({
   steps: number;
 }) {
   return (
-    <section className="parameterShell" aria-label="Model parameters">
-      <div className="parameterTopline">
-        <h3>Model Parameters</h3>
-        <span>Applied on Generate</span>
-      </div>
-      <div className="parameterGrid">
-        <label className="numberField">
-          <span>Resolution</span>
-          <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
-            <option value="480">480</option>
-            <option value="720">720</option>
-            <option value="256">256</option>
-          </select>
-        </label>
-        <NumberControl label="Frames" min={1} max={189} step={1} value={numFrames} onChange={setNumFrames} />
-        <NumberControl label="Steps" min={1} max={80} step={1} value={steps} onChange={setSteps} />
-        <NumberControl label="FPS" min={1} max={60} step={1} value={fps} onChange={setFps} />
-        <NumberControl label="Guidance" min={0} max={20} step={0.5} value={guidanceScale} onChange={setGuidanceScale} />
-        <NumberControl label="Seed" min={0} max={999999} step={1} value={seed} onChange={setSeed} />
-      </div>
-      <details className="advancedParameterDetails">
-        <summary>Advanced parameters</summary>
-        <div className="parameterGrid advancedParameterGrid">
-          <NumberControl label="Shift" min={0} max={20} step={0.5} value={shift} onChange={setShift} />
-          <NumberControl label="Sigma max" min={1} max={120} step={1} value={sigmaMax} onChange={setSigmaMax} />
-          <NumberControl label="Image size" min={128} max={1024} step={1} value={imageSize} onChange={setImageSize} />
+    <details className="parameterShell" aria-label="Model parameters">
+      <summary className="parameterSummary">
+        <span className="parameterSummaryTitle">Model Parameters</span>
+        <span className="parameterSummaryMeta">Applied on Generate</span>
+        <ChevronDown size={16} aria-hidden />
+      </summary>
+      <div className="parameterBody">
+        <div className="parameterGrid">
+          <label className="numberField">
+            <span>Resolution</span>
+            <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
+              <option value="480">480</option>
+              <option value="720">720</option>
+              <option value="256">256</option>
+            </select>
+          </label>
+          <NumberControl label="Frames" min={1} max={189} step={1} value={numFrames} onChange={setNumFrames} />
+          <NumberControl label="Steps" min={1} max={80} step={1} value={steps} onChange={setSteps} />
+          <NumberControl label="FPS" min={1} max={60} step={1} value={fps} onChange={setFps} />
+          <NumberControl label="Guidance" min={0} max={20} step={0.5} value={guidanceScale} onChange={setGuidanceScale} />
+          <NumberControl label="Seed" min={0} max={999999} step={1} value={seed} onChange={setSeed} />
         </div>
-      </details>
-    </section>
+        <details className="advancedParameterDetails">
+          <summary>Advanced parameters</summary>
+          <div className="parameterGrid advancedParameterGrid">
+            <NumberControl label="Shift" min={0} max={20} step={0.5} value={shift} onChange={setShift} />
+            <NumberControl label="Sigma max" min={1} max={120} step={1} value={sigmaMax} onChange={setSigmaMax} />
+            <NumberControl label="Image size" min={128} max={1024} step={1} value={imageSize} onChange={setImageSize} />
+          </div>
+        </details>
+      </div>
+    </details>
   );
 }
 
@@ -1696,6 +1700,185 @@ function NumberControl({
       />
     </label>
   );
+}
+
+type PromptSchema = Record<string, unknown> & {
+  subjects?: unknown;
+  actions?: unknown;
+  segments?: unknown;
+  background_setting?: unknown;
+  cinematography?: unknown;
+  context?: unknown;
+  lighting?: unknown;
+  temporal_caption?: unknown;
+  audio_description?: unknown;
+  resolution?: unknown;
+  aspect_ratio?: unknown;
+  duration?: unknown;
+  fps?: unknown;
+};
+
+function PromptSchemaPreview({ value }: { value: string }) {
+  const schema = useMemo(() => parsePromptSchema(value), [value]);
+  if (!schema) return null;
+
+  const subjects = recordArray(schema.subjects);
+  const actions = recordArray(schema.actions);
+  const segments = recordArray(schema.segments);
+  const summary = [
+    subjects.length ? `${subjects.length} subjects` : null,
+    actions.length ? `${actions.length} actions` : null,
+    segments.length ? `${segments.length} segments` : null
+  ]
+    .filter(Boolean)
+    .join(" / ");
+
+  const lighting = isRecord(schema.lighting) ? schema.lighting : null;
+  const cinematography = isRecord(schema.cinematography) ? schema.cinematography : null;
+  const resolution = isRecord(schema.resolution)
+    ? `${schemaValue(schema.resolution.W)} x ${schemaValue(schema.resolution.H)}`
+    : schemaValue(schema.resolution);
+  const sceneRows = [
+    ["Context", schema.context],
+    ["Background", schema.background_setting],
+    [
+      "Camera",
+      joinSchemaValues([
+        readSchemaValue(cinematography, "camera_motion"),
+        readSchemaValue(cinematography, "camera_angle"),
+        readSchemaValue(cinematography, "framing")
+      ])
+    ],
+    [
+      "Lighting",
+      joinSchemaValues([readSchemaValue(lighting, "conditions"), readSchemaValue(lighting, "direction")])
+    ],
+    ["Timing", joinSchemaValues([schema.duration, schema.fps ? `${schema.fps} fps` : null])],
+    ["Format", joinSchemaValues([schema.aspect_ratio, resolution])]
+  ].filter(([, rowValue]) => schemaValue(rowValue) !== "n/a");
+
+  return (
+    <details className="promptSchemaDetails">
+      <summary className="promptSchemaSummary">
+        <span>Structured prompt table</span>
+        {summary ? <small>{summary}</small> : null}
+        <ChevronDown size={16} aria-hidden />
+      </summary>
+      <div className="promptSchemaBody">
+        {subjects.length ? (
+          <PromptSchemaTable
+            title="Subjects"
+            columns={["#", "Description", "Role / Location", "Motion / State"]}
+            rows={subjects.map((subject, index) => [
+              String(index + 1),
+              schemaValue(subject.description),
+              joinSchemaValues([subject.relationship, subject.location]),
+              joinSchemaValues([subject.action, subject.state_changes])
+            ])}
+          />
+        ) : null}
+        {actions.length ? (
+          <PromptSchemaTable
+            title="Actions"
+            columns={["Time", "Description"]}
+            rows={actions.map((action) => [schemaValue(action.time), schemaValue(action.description)])}
+          />
+        ) : null}
+        {segments.length ? (
+          <PromptSchemaTable
+            title="Segments"
+            columns={["Time", "Description", "Key changes"]}
+            rows={segments.map((segment) => [
+              schemaValue(segment.time_range),
+              schemaValue(segment.description),
+              schemaValue(segment.key_changes)
+            ])}
+          />
+        ) : null}
+        {sceneRows.length ? (
+          <PromptSchemaTable
+            title="Scene"
+            columns={["Field", "Value"]}
+            rows={sceneRows.map(([label, rowValue]) => [schemaValue(label), schemaValue(rowValue)])}
+          />
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function PromptSchemaTable({ columns, rows, title }: { columns: string[]; rows: string[][]; title: string }) {
+  return (
+    <section className="promptSchemaSection">
+      <h3>{title}</h3>
+      <div className="promptSchemaTableWrap">
+        <table className="promptSchemaTable">
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={`${title}-${rowIndex}`}>
+                {row.map((cell, cellIndex) => (
+                  <td key={`${title}-${rowIndex}-${cellIndex}`}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function parsePromptSchema(value: string): PromptSchema | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isRecord(parsed) ? (parsed as PromptSchema) : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function readSchemaValue(record: Record<string, unknown> | null, key: string) {
+  return record ? record[key] : null;
+}
+
+function joinSchemaValues(values: unknown[]) {
+  const parts = values.map(schemaValue).filter((part) => part !== "n/a");
+  return parts.length ? parts.join("; ") : "n/a";
+}
+
+function schemaValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "n/a";
+  if (Array.isArray(value)) return joinSchemaValues(value);
+  if (isRecord(value)) {
+    const entries = Object.entries(value)
+      .map(([key, entryValue]) => [humanizeSchemaKey(key), schemaValue(entryValue)])
+      .filter(([, entryValue]) => entryValue !== "n/a");
+    return entries.length ? entries.map(([key, entryValue]) => `${key}: ${entryValue}`).join("; ") : "n/a";
+  }
+  return String(value);
+}
+
+function humanizeSchemaKey(key: string) {
+  return key
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function PromptBox({

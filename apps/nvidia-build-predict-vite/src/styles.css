@@ -785,6 +785,112 @@ h2 {
   margin-bottom: 6px;
 }
 
+.promptSchemaDetails {
+  margin-top: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.promptSchemaSummary {
+  display: grid;
+  min-height: 42px;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  list-style: none;
+  cursor: pointer;
+  padding: 0 12px;
+}
+
+.promptSchemaSummary::-webkit-details-marker,
+.parameterSummary::-webkit-details-marker {
+  display: none;
+}
+
+.promptSchemaSummary span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.promptSchemaSummary small {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.promptSchemaSummary svg,
+.parameterSummary svg {
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+
+.promptSchemaDetails[open] .promptSchemaSummary svg,
+.parameterShell[open] .parameterSummary svg {
+  transform: rotate(180deg);
+}
+
+.promptSchemaDetails[open] .promptSchemaSummary {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.promptSchemaBody {
+  padding: 12px;
+}
+
+.promptSchemaSection + .promptSchemaSection {
+  margin-top: 16px;
+}
+
+.promptSchemaSection h3 {
+  margin: 0 0 8px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-transform: uppercase;
+}
+
+.promptSchemaTableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.promptSchemaTable {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.promptSchemaTable th,
+.promptSchemaTable td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.promptSchemaTable th {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.promptSchemaTable td {
+  color: var(--muted);
+}
+
+.promptSchemaTable tr:last-child td {
+  border-bottom: 0;
+}
+
 .promptTopline label,
 .numberField span {
   color: var(--text);
@@ -883,26 +989,46 @@ select:focus,
 
 .parameterShell {
   margin-top: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
-.parameterTopline {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+.parameterSummary {
+  display: grid;
+  min-height: 42px;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
   gap: 12px;
+  list-style: none;
+  cursor: pointer;
+  padding: 0 12px;
 }
 
-.parameterTopline h3 {
-  margin: 0;
+.parameterShell[open] .parameterSummary {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.parameterSummaryTitle {
   color: var(--text);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
   line-height: 18px;
 }
 
-.parameterTopline span {
+.parameterSummaryMeta {
   color: var(--dim);
   font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.parameterBody {
+  padding: 0 12px 12px;
+}
+
+.parameterBody .parameterGrid {
+  margin-top: 12px;
 }
 
 .numberField {
