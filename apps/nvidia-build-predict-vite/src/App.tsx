@@ -113,6 +113,7 @@ type ContentSelectItem = {
   title: string;
   domain: string;
   description: string;
+  shortPrompt?: string;
   prompt: string;
   mediaUrl: string;
   mediaName: string;
@@ -210,12 +211,12 @@ const CANONICAL_SAMPLE_PARAMS: GenerationParams = {
   negativePrompt: CANONICAL_SAMPLE_NEGATIVE_PROMPT
 };
 const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" | "012" | "085", GenerationParams> = {
-  "001": { ...CANONICAL_SAMPLE_PARAMS, seed: 100 },
-  "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
-  "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 105 },
-  "009": { ...CANONICAL_SAMPLE_PARAMS, seed: 102 },
-  "021": { ...CANONICAL_SAMPLE_PARAMS, seed: 111 },
-  "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 },
+  "001": { ...CANONICAL_SAMPLE_PARAMS, seed: 400 },
+  "005": { ...CANONICAL_SAMPLE_PARAMS, seed: 403 },
+  "007": { ...CANONICAL_SAMPLE_PARAMS, seed: 202 },
+  "009": { ...CANONICAL_SAMPLE_PARAMS, seed: 201 },
+  "021": { ...CANONICAL_SAMPLE_PARAMS, seed: 301 },
+  "022": { ...CANONICAL_SAMPLE_PARAMS, seed: 200 },
   "012": {
     ...CANONICAL_SAMPLE_PARAMS,
     seed: 109,
@@ -234,6 +235,21 @@ const CANONICAL_PROMPTS = {
   "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`,
   "012": `A medium, locked-off shot of an automotive assembly display inside a clean exhibition area. A partially assembled car body remains stationary on its supports with the doors open and the interior framework visible. Two yellow industrial robot arms stand beside the car. During the video, the left robot arm makes a small, smooth adjustment near the side opening, and the right robot arm makes a short, controlled movement above the front cowl area, then both arms settle back into position. The car body, open doors, floor reflections, signs, background, and lighting remain stable. No new parts appear, no objects float in the air, and the camera does not move. The motion is subtle, realistic, and mechanically precise.`,
   "085": `The video opens with an aerial view of a vast industrial site, likely a quarry or gravel pit, dominated by expansive piles of gravel or crushed stone. A long, elevated industrial sand mining conveyor belt system, supported by a metal framework, stretches horizontally across the frame, casting distinct shadows on the uneven terrain below. The conveyor belt moves steadily, continuously dumping materials onto a massive pile. The scene is set under a bright, sunny sky, with the shadows indicating the time of day. Throughout the video, the camera maintains a steady focus on the conveyor belt, capturing the continuous flow of materials. The industrial setting remains static, emphasizing the mechanical nature of the operation. By the final frame, the conveyor belt continues its steady operation, with no new elements entering the scene, highlighting the relentless and unchanging nature of the industrial process.`
+};
+
+const CANONICAL_SHORT_PROMPTS: Partial<Record<keyof typeof CANONICAL_PROMPTS, string>> = {
+  "001":
+    "Static locked-off overhead camera looking down at a clean white laboratory workbench. A black robotic arm with a two-finger gripper descends to the yellow-green pear at center, closes around it, lifts it cleanly, translates laterally toward the dark bowl in the upper-left of the workspace, lowers, and releases the pear into the bowl. The arm retracts back to a neutral position. The pink object stays untouched. Bright even lab lighting; sharp soft-shadow under each object.\n\n(Camera motion is suppressed via the separate negative prompt.)",
+  "005":
+    "Static locked-off overhead camera looking down at a wooden workshop tabletop. The right humanoid robotic arm extends to the bok choy, the gripper closes firmly around the pale white stem at the base of the bok choy (gripping the stem, not the green leafy top), lifts it cleanly off the table holding it by its base stem, carries it left across the table directly over the white frying pan, and lowers and releases the bok choy down into the frying pan so it settles inside the pan with its leaves splaying upward. The left arm stays still throughout. Even workshop lighting.\n\n(Camera motion is suppressed via the separate negative prompt.)",
+  "007":
+    "A black robotic arm descends to the toy salmon sashimi at front-left of the cutting board, the gripper closes around it, lifts it slightly, moves it right toward the orange bowl, and releases it into the bowl. The toy tomato and toy carrot stay untouched throughout. Static medium shot; even, bright workshop lighting.",
+  "009":
+    "A dashcam view from an ego vehicle approaching a suburban residential intersection. The ego slows and comes to a stop, yielding to an oncoming vehicle while waiting to turn right. A white car finishes a right turn and exits the frame to the left. Calm, bright, late-winter daylight. The camera is a fixed dashcam; the scene stays calm and typical.",
+  "021":
+    "A dashcam view from an ego vehicle approaching a signalized intersection on a multi-lane suburban arterial. The traffic lights facing the ego are red for most of the video. The ego decelerates from a moderate forward pace, gradually slowing as it closes distance. At about 3/4 of the way through (around 0:06), the signals visibly change from red to green, and the ego accelerates again toward the intersection. A white van directly ahead mirrors the ego's slow-then-accelerate motion. Warm golden late-afternoon light throughout; long shadows. The camera is a fixed dashcam.",
+  "022":
+    "A dashcam view from an ego vehicle in a dedicated left-turn lane executing a continuous queued left turn through a multi-lane intersection. The traffic signals facing the ego stay green throughout. The white truck at the front of the queue arcs left into the cross-street, the grey sedan immediately ahead follows, and the ego follows the sedan around the turn in one continuous flowing motion. Bright midday daylight; soft short shadows. The camera is a fixed dashcam."
 };
 
 const EXAMPLES: ExampleItem[] = [
@@ -294,6 +310,7 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Robot Cutting Board Sorting",
         domain: "Robotics",
         description: "A tabletop robot scene with food items, a bowl, and a gripper in a workshop setting.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["007"],
         prompt: CANONICAL_PROMPTS["007"],
         mediaUrl: "/examples/canonical/007.png",
         mediaName: "Robot Cutting Board Sorting.png",
@@ -306,6 +323,7 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Robot Pear Bowl Placement",
         domain: "Robotics",
         description: "A robot manipulation setup with a pear and a dark bowl.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["001"],
         prompt: CANONICAL_PROMPTS["001"],
         mediaUrl: "/examples/canonical/001.png",
         mediaName: "Robot Pear Bowl Placement.png",
@@ -318,6 +336,7 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Robot Bok Choy Pan Placement",
         domain: "Robotics",
         description: "A gripper positions bok choy near a frying pan on a tabletop.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["005"],
         prompt: CANONICAL_PROMPTS["005"],
         mediaUrl: "/examples/canonical/005.png",
         mediaName: "Robot Bok Choy Pan Placement.png",
@@ -336,6 +355,7 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Suburban Intersection Yield",
         domain: "Autonomous Vehicles",
         description: "An ego-vehicle view approaching a residential intersection under clear daylight.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["009"],
         prompt: CANONICAL_PROMPTS["009"],
         mediaUrl: "/examples/canonical/009.png",
         mediaName: "Suburban Intersection Yield.png",
@@ -348,6 +368,7 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Urban Signal Approach",
         domain: "Autonomous Vehicles",
         description: "An ego-vehicle view following a minivan toward a signalized city intersection.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["021"],
         prompt: CANONICAL_PROMPTS["021"],
         mediaUrl: "/examples/canonical/021.png",
         mediaName: "Urban Signal Approach.png",
@@ -360,53 +381,13 @@ const CONTENT_SELECT_GROUPS: ContentSelectGroup[] = [
         title: "Signalized Left Turn Completion",
         domain: "Autonomous Vehicles",
         description: "An ego-vehicle view from a turn lane completing a left turn through an intersection.",
+        shortPrompt: CANONICAL_SHORT_PROMPTS["022"],
         prompt: CANONICAL_PROMPTS["022"],
         mediaUrl: "/examples/canonical/022.png",
         mediaName: "Signalized Left Turn Completion.png",
         previewVideoUrl: "/examples/canonical/022.mp4",
         previewVideoName: "Signalized Left Turn Completion.mp4",
         params: SAMPLE_PARAMS_BY_ID["022"]
-      }
-    ]
-  },
-  {
-    title: "Smart Spaces",
-    summary: "Facility and physical-process scenes for smart-space simulation and monitoring.",
-    items: [
-      {
-        id: "automotive-assembly-line",
-        title: "Automotive Assembly Line",
-        domain: "Smart Spaces",
-        description: "An exhibition-area assembly scene with yellow robot arms working on a car body.",
-        prompt: CANONICAL_PROMPTS["012"],
-        mediaUrl: "/examples/canonical/012.jpg",
-        mediaName: "Automotive Assembly Line.jpg",
-        previewVideoUrl: "/examples/canonical/012.mp4",
-        previewVideoName: "Automotive Assembly Line.mp4",
-        params: SAMPLE_PARAMS_BY_ID["012"]
-      },
-      {
-        id: "industrial-conveyor-material-flow",
-        title: "Industrial Conveyor Material Flow",
-        domain: "Smart Spaces",
-        description: "An aerial quarry scene with a conveyor steadily dumping gravel onto a large pile.",
-        prompt: CANONICAL_PROMPTS["085"],
-        mediaUrl: "/examples/canonical/085.jpg",
-        mediaName: "Industrial Conveyor Material Flow.jpg",
-        previewVideoUrl: "/examples/canonical/085.mp4",
-        previewVideoName: "Industrial Conveyor Material Flow.mp4",
-        params: SAMPLE_PARAMS_BY_ID["085"]
-      },
-      {
-        id: "industrial-metal-lathe",
-        title: "Industrial Metal Lathe",
-        domain: "Smart Spaces",
-        description: "A precision machining scene with a rotating workpiece and cutting tool.",
-        prompt: CANONICAL_PROMPTS["011"],
-        mediaUrl: "/examples/canonical/011.png",
-        mediaName: "Industrial Metal Lathe.png",
-        previewVideoUrl: "/examples/canonical/011.mp4",
-        previewVideoName: "Industrial Metal Lathe.mp4"
       }
     ]
   }
@@ -1180,13 +1161,17 @@ export default function Page() {
               </div>
             )}
 
+            {activeContentItem?.shortPrompt ? (
+              <PromptReference label="Short Prompt" text={activeContentItem.shortPrompt} />
+            ) : null}
+
             <PromptBox
-              label="Prompt"
-              hint="Describe the future world state to generate."
-              max={2400}
+              label="Long Prompt"
+              hint="Full generation prompt."
+              max={12000}
               value={prompt}
               onChange={setPrompt}
-              rows={4}
+              rows={7}
             />
 
             <ModelParameterControls
@@ -1344,14 +1329,12 @@ function StaticTab({
         </StaticSection>
 
         <StaticSection title="Content Selects">
-          <p>Domain order is Robotics, Autonomous Vehicles, then Smart Spaces.</p>
+          <p>Domain order is Robotics, then Autonomous Vehicles.</p>
           <dl>
             <dt>Robotics</dt>
             <dd>Robot Cutting Board Sorting, Robot Pear Bowl Placement, Robot Bok Choy Pan Placement</dd>
             <dt>Autonomous Vehicles</dt>
             <dd>Suburban Intersection Yield, Urban Signal Approach, Signalized Left Turn Completion</dd>
-            <dt>Smart Spaces</dt>
-            <dd>Automotive Assembly Line, Industrial Conveyor Material Flow, Industrial Metal Lathe</dd>
           </dl>
         </StaticSection>
 
@@ -1407,7 +1390,7 @@ function StaticTab({
       </StaticSection>
 
       <StaticSection title="Content Order">
-        <p>Robotics appears first, followed by Autonomous Vehicles, followed by Smart Spaces.</p>
+        <p>Robotics appears first, followed by Autonomous Vehicles.</p>
       </StaticSection>
 
       <a className="staticLink" href={BUILD_PREDICT_SYSTEM_CARD_URL} rel="noreferrer" target="_blank">
@@ -1770,6 +1753,18 @@ function PromptBox({
   );
 }
 
+function PromptReference({ label, text }: { label: string; text: string }) {
+  return (
+    <section className="promptReference" aria-label={label}>
+      <div className="promptTopline">
+        <label>{label}</label>
+        <span>{text.length}</span>
+      </div>
+      <p>{text}</p>
+    </section>
+  );
+}
+
 function RuntimeDetailsToggle({
   backendInfo,
   detailsUrl,
@@ -1938,6 +1933,18 @@ function ExampleModal({
             <span>{pending.domain}</span>
             <strong>{pending.title}</strong>
             <p>{pending.description}</p>
+            {pending.shortPrompt ? (
+              <div className="selectedPromptPair">
+                <div>
+                  <span>Short Prompt</span>
+                  <p>{pending.shortPrompt}</p>
+                </div>
+                <div>
+                  <span>Long Prompt</span>
+                  <p>{pending.prompt}</p>
+                </div>
+              </div>
+            ) : null}
           </div>
           <div className="modalFooterActions">
             <button className="cancelButton" onClick={onClose} type="button">
