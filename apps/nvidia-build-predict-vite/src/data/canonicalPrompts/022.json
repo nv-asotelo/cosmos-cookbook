@@ -1,0 +1,161 @@
+{
+  "subjects": [
+    {
+      "description": "Ego vehicle, captured from a dashboard-mounted forward-facing camera",
+      "appearance_details": "Vehicle body itself implied; hood, dashboard, and front windshield frame the lower portion of the view, with the dashboard partially reflecting the sky",
+      "relationship": "Camera platform; carries the perspective through the queued left turn",
+      "location": "occupies the camera position; hood and dash visible at the bottom of the frame",
+      "relative_size": "Large within frame",
+      "orientation": "Initially facing the intersection from a dedicated left-turn lane; rotates left through the turn",
+      "pose": "In steady forward motion at moderate pace, then curving left through the intersection",
+      "action": "advancing into the intersection on the heels of the lead vehicles and executing a continuous left turn",
+      "state_changes": "Maintains steady speed through the turn; never stops; the camera rotates left as the vehicle arcs through the intersection",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A grey sedan immediately ahead of the ego in the same left-turn lane",
+      "appearance_details": "Mid-size silver-grey sedan with a standard four-door profile, visible from rear three-quarters",
+      "relationship": "Lead vehicle directly ahead of the ego in the dedicated left-turn lane",
+      "location": "center of the frame, immediately ahead of the ego in the same lane",
+      "relative_size": "Medium within frame",
+      "orientation": "Facing the intersection and arcing left",
+      "pose": "In forward motion, then curving left",
+      "action": "executing the left turn at a steady matched pace, following the white truck",
+      "state_changes": "Arcs left into the cross-street, following the truck; never stops",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A white truck at the front of the queued left-turn lane",
+      "appearance_details": "Boxy white commercial truck or large van, taller than the surrounding cars, visible at the front of the queue",
+      "relationship": "Lead vehicle of the queue; sets the pace for the turn",
+      "location": "front of the queue, slightly ahead of the grey sedan and offset by the curve of the turn",
+      "relative_size": "Medium within frame",
+      "orientation": "Facing the intersection and beginning the left arc",
+      "pose": "In forward motion, then curving left",
+      "action": "moving smoothly into the intersection and arcing left into the cross-street",
+      "state_changes": "Continues into and through the intersection in a continuous flowing left turn",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "Cross-traffic vehicles stopped at red signals on the perpendicular street",
+      "appearance_details": "Mixed light-coloured cars waiting in stopped queues on the cross street to either side of the ego's path",
+      "relationship": "Cross-traffic; stationary, not interacting with the ego's queue",
+      "location": "left and right of the intersection along the perpendicular street",
+      "relative_size": "Small within frame",
+      "orientation": "Facing the cross-street axis",
+      "pose": "Stationary at their red signals",
+      "action": "stationary throughout, waiting at red",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 4,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A large multi-lane signalized intersection in a suburban commercial area under a clear blue daytime sky. Trees and low buildings border the intersection on both sides, and the road continues into the distance. Cross-street signals visible on the side poles face cross-traffic and display red. The traffic signals facing the ego's direction of travel are green and remain green throughout. The road is wide with painted lane markings, including a prominent white left-turn arrow on the ego's lane that is visible in the foreground.",
+  "lighting": {
+    "conditions": "Bright, natural midday daylight with mild haze",
+    "direction": "High sun, slightly to the upper-left, producing soft short shadows",
+    "shadows": "Soft, short shadows under vehicles and from buildings on either side",
+    "illumination_effect": "Bright, slightly hazy exposure with neutral color balance; the dashboard reflects a slice of bright sky"
+  },
+  "aesthetics": {
+    "composition": "Forward dashcam framing with a prominent white left-turn arrow painted on the ego's lane in the lower foreground, the queued vehicles ahead leading the eye toward the curve of the turn; traffic signals and cross-traffic frame the upper-left",
+    "color_scheme": "Cool sky-blue overhead, warm muted greens of trees, light grey asphalt, white pavement markings, white truck and grey sedan in the queue",
+    "mood_atmosphere": "Calm, ordinary, flowing urban traffic",
+    "patterns": "Repeating pavement markings and the regular spacing of lane lines through the intersection"
+  },
+  "cinematography": {
+    "camera_motion": "Static dashcam mount; apparent left rotation arises from the ego vehicle's continuous left turn through the intersection",
+    "framing": "Wide shot through the windshield",
+    "camera_angle": "Eye-level from the driver position",
+    "depth_of_field": "Deep",
+    "focus": "Lead vehicles and the curve of the left turn through the intersection",
+    "lens_focal_length": "Wide ~24mm equivalent typical of dashcams"
+  },
+  "style_medium": "Live-action video",
+  "artistic_style": "Documentary, in-cabin dashboard-camera autonomous-vehicle observation",
+  "context": "Suburban arterial autonomous-vehicle dashcam clip executing a continuous queued permissive left turn under green signals",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "The white truck at the front of the queue begins moving smoothly into the intersection and arcing left; the grey sedan immediately ahead of the ego follows; the ego advances behind the sedan; signals facing the ego are green"
+    },
+    {
+      "time": "0:02-0:04",
+      "description": "The truck continues its arc into the cross-street; the sedan follows at matched pace; the ego advances on the heels of the sedan; the painted white left-turn arrow on the ego's lane slides forward through the frame"
+    },
+    {
+      "time": "0:04-0:06",
+      "description": "The ego curves left, following the sedan around the turn; the truck has begun to exit the frame to the left as it completes its turn; trees and buildings to the left of the intersection slide into view"
+    },
+    {
+      "time": "0:06-0:08",
+      "description": "The ego continues curving left through the turn in a continuous flowing motion; the sedan remains directly ahead; signals remain green; the scene composition rotates as the ego completes the arc"
+    }
+  ],
+  "text_and_signage_elements": [
+    {
+      "text": "left-turn arrow",
+      "category": "physical_in_scene",
+      "appearance": "Large painted white left-pointing arrow on the asphalt of the ego's lane",
+      "spatial_temporal": "Foreground of the ego's lane, visible throughout the early seconds, slides forward as the ego advances",
+      "context": "Marks the lane as a dedicated left-turn lane"
+    }
+  ],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:04",
+      "description": "Queue begins flowing through the intersection: truck arcs left, sedan follows, ego advances",
+      "key_changes": "Truck and sedan enter the intersection and begin their arcs; ego closes on the sedan",
+      "camera": "Static dashcam, forward-facing; apparent motion from ego's advance"
+    },
+    {
+      "segment_index": 1,
+      "time_range": "0:04-0:08",
+      "description": "Ego curves left through the intersection following the sedan in continuous motion; truck has begun exiting frame to the left",
+      "key_changes": "Ego rotates through the turn; scene composition rotates left; signals remain green",
+      "camera": "Static dashcam, forward-facing; rotation from ego's left turn"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the queue is at the head of the dedicated left-turn lane with green signals facing the ego. At 0:01 the white truck begins moving forward and arcing left. At 0:02 the grey sedan follows at matched pace. At 0:03 the ego advances behind the sedan and the painted arrow slides forward in frame. At 0:04 the truck continues its arc into the cross-street. At 0:05 the ego begins curving left. At 0:06 the truck has begun exiting frame to the left; the sedan is mid-turn. At 0:07 the ego continues through the turn in continuous motion. At 0:08 the ego has rotated through the bulk of the turn, with the sedan still directly ahead and signals still green.",
+  "audio_description": "Steady road and tire noise from inside the cabin while in motion, faint wind, low ambient urban hum from the intersection; no speech, music, sirens, or notable effects.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}

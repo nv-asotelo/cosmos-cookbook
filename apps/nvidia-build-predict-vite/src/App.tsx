@@ -2,6 +2,7 @@
 
 import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileVideo, HelpCircle, Info, Menu, Play, RotateCcw, Search, Upload, X } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { CANONICAL_LONG_PROMPTS } from "./data/canonicalLongPrompts";
 
 const HERO_IMAGE = "https://assets.ngc.nvidia.com/products/api-catalog/images/cosmos-predict1-5b.jpg";
 const BUILD_PREDICT_MODEL_CARD_URL = "https://build.nvidia.com/nvidia/cosmos-predict1-5b/modelcard";
@@ -226,17 +227,7 @@ const SAMPLE_PARAMS_BY_ID: Record<"001" | "005" | "007" | "009" | "021" | "022" 
   "085": { ...CANONICAL_SAMPLE_PARAMS, seed: 109 }
 };
 
-const CANONICAL_PROMPTS = {
-  "001": `The video opens with a top-down medium shot of a clean white laboratory workbench. At the top of the frame, a black robotic arm with a metallic two-finger gripper hovers above the table. A small dark gray bowl sits in the upper-left of the workspace, a pink rounded object rests to its right, and a yellow-green pear sits front-and-center, slightly closer to the camera. The lighting is bright and even, with soft shadows cast directly beneath each object. As the video progresses, the robotic arm descends smoothly along a vertical axis toward the pear. The gripper opens, lowers around the pear, and closes gently to grasp it. The arm lifts the pear several centimeters above the workbench, then translates laterally toward the dark bowl in the upper left, keeping the pear level throughout the motion. Once positioned over the bowl, the arm pauses briefly, then descends and releases the pear, allowing it to settle into the bowl with a small natural roll. The arm retracts upward and slightly to the right, returning to a neutral position above the workspace. The pink object remains untouched throughout, and the lighting, background, and camera angle stay constant - the only motion in the scene is the controlled, deliberate manipulation of the pear by the robotic arm.`,
-  "005": `The video opens with a top-down medium shot of a wooden tabletop in a workshop setting. A large white frying pan with a brown handle is positioned in the left half of the table, oriented with its handle pointing toward the lower-left of the frame. To the right of the pan sits a single head of bok choy with a pale white stem and bright green leaves splaying outward. Two humanoid black robotic arms with dextrous grippers enter the scene from the left and right edges of the frame, suspended just above the work surface. Workshop equipment - tools, metal frames, and cables - is visible in the corners of the background, but the central tabletop is well-lit and uncluttered. As the video progresses, the right robotic arm extends toward the bok choy, its gripper opening as it approaches. The gripper closes around the white stem of the bok choy, secures it firmly, and lifts it cleanly off the tabletop. The arm moves smoothly to the left, carrying the bok choy across the table and over the frying pan, then continues past the pan and lowers the bok choy onto the table surface to the left of the pan. The gripper releases, and the arm retracts back toward the right side of the frame. The left robotic arm remains stationary throughout the sequence. The frying pan, the workshop background, the lighting, and the camera angle remain constant - the only motion is the right arm's pick-and-place action.`,
-  "007": `A robotic arm interacts with various toy food objects on a wooden cutting board placed within an open cardboard box. The cutting board contains a small orange bowl, a toy red tomato with green leaves, a toy piece of salmon sashimi with a pinkish-orange hue, and a toy small orange carrot. The robotic arm, black and metallic, is positioned above these items, seemingly preparing to pick up one of them. In subsequent frames, the robotic arm descends and uses its claw-like mechanism to grasp the toy salmon sashimi. It lifts the toy salmon sashimi slightly off the board, moves it towards the orange bowl, and releases it, causing the toy salmon sashimi to fall into the bowl. The background includes a tiled wall and a glimpse of a workshop setting. A medium shot captures the robotic arm's interaction with the objects.`,
-  "009": `The video begins with a view from inside a vehicle, approaching an intersection in a suburban neighborhood under a clear blue sky. The road is marked with double yellow lines and features a stop lane marker painted on the asphalt. To the right, there is a house with a well-maintained hedge, and a stop sign in front of it, with a parked car on the street. A white car is seen turning right at the intersection, heading down the street. On the left side of the road, there is a red brick wall and another parked car. The background shows overhead utility poles with wires crisscrossing the sky, and some bare trees line the streets, indicating it might be late fall or early spring. The scene is calm and typical of a residential area. As the video progresses, the white car exits the frame, revealing more of the intersection and the surrounding residential area. The ego vehicle comes to a stop, yielding to an oncoming vehicle while waiting to turn right. The background scenery of houses, trees, and utility poles remains consistent, with the lighting suggesting that the sun is still high, maintaining the bright and clear conditions observed in the initial frame. The overall atmosphere remains calm and typical of a suburban neighborhood.`,
-  "021": `The video begins with a forward-facing dash camera view from a vehicle traveling along a multi-lane urban street under clear daylight. A white minivan remains ahead as traffic approaches a signalized intersection, with dashed white lane markings, sidewalks, storefronts, parked cars, mature trees, and bright sunlight from the upper-right casting long shadows across the asphalt. As the video progresses, the ego vehicle continues forward at a controlled speed while staying aligned with the lane. A white vehicle in the left lane briefly moves into the foreground alongside the ego vehicle, then continues ahead as the intersection remains visible in the distance. The traffic lights, lane markings, sidewalks, trees, commercial buildings, parked cars, and sunlit shadows remain consistent, and the motion stays calm and realistic for everyday city driving.`,
-  "022": `The video begins with a view from inside a vehicle positioned in a dedicated left-turn lane at a wide signalized intersection under clear daylight. A large left-turn arrow is painted on the pavement in front of the ego vehicle, with crosswalk lines and lane boundaries clearly visible across the intersection. Overhead traffic lights, street-name signs, utility wires, and roadside buildings frame the scene, while several cars travel through the intersection and along the cross street. A small median island and roadside signs sit to the left, and trees and low commercial buildings line the far side of the road. As the video progresses, the ego vehicle moves forward from the turn lane and completes a smooth left turn through the intersection, following the curved path of the lane around the median. The vehicle enters the target roadway, straightens out into the appropriate lane, and continues forward at a controlled speed. Nearby vehicles maintain plausible motion and spacing, while the traffic lights, road markings, sidewalks, trees, and buildings remain consistent with the original daytime driving scene.`,
-  "011": `A close-up of a precision metalworking process in a controlled industrial setting. The first frame captures a cylindrical metal workpiece securely mounted on a lathe, rotating smoothly as a cutting machine, held by a black, angular fixture, approaches from above. The cutting machine, marked with numerical identifiers (5513 020-10), engages with the workpiece, shaving off thin metal shavings that are visibly ejected into the air, creating a fine mist around the machining area. The background is blurred, focusing attention on the interaction between the cutting machine and the workpiece, which reflects light, indicating its polished surface. As the video progresses, the cutting machine continues its linear motion along the length of the workpiece, maintaining a steady pace. The tool's engagement with the material results in consistent metal shaving, producing a continuous stream of shavings that are dispersed into the surrounding space. The workpiece remains stationary relative to the camera's perspective, ensuring a clear view of the cutting metal process. The environment suggests a well-lit workshop, emphasizing the precision and efficiency of the operation. By the final frame, the cutting machine has almost completed its pass along the workpiece, leaving behind a smooth, polished surface. The metal shavings continue to be ejected, and the overall scene maintains a focused and industrious atmosphere, underscoring the meticulous nature of the metalworking process.`,
-  "012": `A medium, locked-off shot of an automotive assembly display inside a clean exhibition area. A partially assembled car body remains stationary on its supports with the doors open and the interior framework visible. Two yellow industrial robot arms stand beside the car. During the video, the left robot arm makes a small, smooth adjustment near the side opening, and the right robot arm makes a short, controlled movement above the front cowl area, then both arms settle back into position. The car body, open doors, floor reflections, signs, background, and lighting remain stable. No new parts appear, no objects float in the air, and the camera does not move. The motion is subtle, realistic, and mechanically precise.`,
-  "085": `The video opens with an aerial view of a vast industrial site, likely a quarry or gravel pit, dominated by expansive piles of gravel or crushed stone. A long, elevated industrial sand mining conveyor belt system, supported by a metal framework, stretches horizontally across the frame, casting distinct shadows on the uneven terrain below. The conveyor belt moves steadily, continuously dumping materials onto a massive pile. The scene is set under a bright, sunny sky, with the shadows indicating the time of day. Throughout the video, the camera maintains a steady focus on the conveyor belt, capturing the continuous flow of materials. The industrial setting remains static, emphasizing the mechanical nature of the operation. By the final frame, the conveyor belt continues its steady operation, with no new elements entering the scene, highlighting the relentless and unchanging nature of the industrial process.`
-};
+const CANONICAL_PROMPTS = CANONICAL_LONG_PROMPTS;
 
 const CANONICAL_SHORT_PROMPTS: Partial<Record<keyof typeof CANONICAL_PROMPTS, string>> = {
   "001":
@@ -651,12 +642,6 @@ export default function Page() {
     () => Boolean(backendInfo && String(backendInfo.backend || "").toLowerCase().includes("nim")),
     [backendInfo]
   );
-  const referencePrompt = activeContentItem?.shortPrompt
-    ? selectedPromptChoice === "short"
-      ? { label: "Long Prompt", text: activeContentItem.prompt }
-      : { label: "Short Prompt", text: activeContentItem.shortPrompt }
-    : null;
-
   useEffect(() => {
     let cancelled = false;
     fetch(COSMOS3_INFO_URL, { cache: "no-store" })
@@ -1174,8 +1159,6 @@ export default function Page() {
                 </div>
               </div>
             )}
-
-            {referencePrompt ? <PromptReference label={referencePrompt.label} text={referencePrompt.text} /> : null}
 
             <PromptBox
               label={selectedPromptChoice === "short" ? "Short Prompt" : "Long Prompt"}
@@ -1763,18 +1746,6 @@ function PromptBox({
       />
       <small>{hint}</small>
     </div>
-  );
-}
-
-function PromptReference({ label, text }: { label: string; text: string }) {
-  return (
-    <section className="promptReference" aria-label={label}>
-      <div className="promptTopline">
-        <label>{label}</label>
-        <span>{text.length}</span>
-      </div>
-      <p>{text}</p>
-    </section>
   );
 }
 

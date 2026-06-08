@@ -780,26 +780,6 @@ h2 {
   margin-top: 18px;
 }
 
-.promptReference {
-  margin-top: 18px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 14px 16px;
-}
-
-.promptReference p {
-  margin: 0;
-  color: var(--muted);
-  font-family:
-    "NVIDIA Sans",
-    Arial,
-    sans-serif;
-  font-size: 13px;
-  line-height: 20px;
-  white-space: pre-wrap;
-}
-
 .promptTopline {
   justify-content: space-between;
   margin-bottom: 6px;

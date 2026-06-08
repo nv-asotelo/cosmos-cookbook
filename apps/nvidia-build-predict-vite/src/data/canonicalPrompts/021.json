@@ -1,0 +1,165 @@
+{
+  "subjects": [
+    {
+      "description": "Ego vehicle, captured from a dashboard-mounted forward-facing camera",
+      "appearance_details": "Vehicle body itself implied; hood, dashboard, and front windshield frame the lower portion of the view",
+      "relationship": "Camera platform; carries the perspective forward along the arterial",
+      "location": "occupies the camera position; hood and dash visible at the bottom of the frame",
+      "relative_size": "Large within frame",
+      "orientation": "Facing forward along the road",
+      "pose": "In moderate forward motion at the start, then decelerating, then accelerating again",
+      "action": "decelerating in response to the red signals ahead, then accelerating again once the signals turn green at 0:06",
+      "state_changes": "Begins at a moderate forward pace. Gradually slows from 0:00 to 0:06 as the red signals remain ahead. At 0:06 the signals turn green and the ego accelerates from its slowed pace, regaining forward velocity through 0:08. Never comes to a full stop.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A white delivery van directly ahead of the ego vehicle in the same lane",
+      "appearance_details": "Boxy white commercial van with a tall rectangular cargo area, twin rear doors, and a slight golden-hour sheen along its roof and right flank from the low sun",
+      "relationship": "Lead vehicle ahead of the ego in the same lane",
+      "location": "center of the frame in the middle distance",
+      "relative_size": "Medium within frame",
+      "orientation": "Facing forward along the road, parallel to the ego",
+      "pose": "In forward motion at moderate pace, then decelerating, then accelerating again in step with the ego",
+      "action": "decelerating in response to the red signals, then accelerating again once the signals turn green",
+      "state_changes": "Slows from 0:00 to 0:06 alongside the ego, brake lights visible during deceleration. At 0:06 the brake lights turn off and the van accelerates again as the signals turn green.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "Traffic signal heads mounted on a horizontal arm above the roadway facing the ego",
+      "appearance_details": "Standard three-bulb traffic signal heads in dark housings, mounted on a horizontal span wire or mast arm above the intersection. Two or three signal heads visible across the lanes facing the ego.",
+      "relationship": "Scene authority controlling the ego's deceleration and acceleration behavior",
+      "location": "middle distance, above the roadway at the intersection ahead",
+      "relative_size": "Small within frame",
+      "orientation": "Facing the ego, perpendicular to the direction of travel",
+      "pose": "Mounted overhead at the intersection",
+      "action": "Displaying solid red from 0:00 through 0:06, then transitioning to solid green from 0:06 through 0:08",
+      "state_changes": "Red illuminated bulb visible at the top of each signal head from 0:00 to 0:06. At approximately 0:06 the signals change state: the red bulb goes dark and the green bulb at the bottom of each head illuminates. Signals remain solid green through 0:08. No yellow transition phase visible \u2014 the change is a direct red-to-green swap.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 2,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "Additional vehicles in the adjacent left lane",
+      "appearance_details": "A small cluster of cars waiting or moving slowly in the left-adjacent lane, visible in side profile",
+      "relationship": "Adjacent-lane traffic; not interacting with the ego",
+      "location": "left of the ego's lane, in the middle distance",
+      "relative_size": "Small within frame",
+      "orientation": "Facing forward along the road",
+      "pose": "Stationary or slowly moving in their own lane",
+      "action": "queuing or moving slowly in the left-adjacent lane",
+      "state_changes": "Largely static relative to the ego, with small drift as the ego moves past",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 3,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A multi-lane suburban arterial in late afternoon. The road stretches ahead toward a signalized intersection in the middle distance, with traffic signal heads mounted on a horizontal arm visible above the roadway. The signals facing the ego display solid red for the majority of the clip and then change to solid green about three-quarters of the way through. The right side of the road is lined with mature trees that catch the warm golden light of the low sun, which sits high in the upper-right of the frame and casts long shadows across the asphalt. The road is divided by a yellow center line. Storefronts and signage are partially visible on the far right behind the trees. The atmosphere is calm and ordinary, with the rhythm of a vehicle slowing for a light and then resuming forward motion as the light turns green.",
+  "lighting": {
+    "conditions": "Warm, saturated late-afternoon golden-hour sunlight",
+    "direction": "Low sun from the upper-right of the frame",
+    "shadows": "Long, soft shadows of trees and vehicles stretching across the asphalt to the left",
+    "illumination_effect": "Warm amber cast on tree foliage and vehicle surfaces, slight haze in the air, lens flare from the bright sun in the upper-right; the red and green signal bulbs add small but distinct color accents in the middle distance"
+  },
+  "aesthetics": {
+    "composition": "Forward dashcam framing with the road receding into the distance, white van centered in the middle distance, traffic signals visible above the roadway, sun and tree-lined right edge providing strong golden-hour atmosphere",
+    "color_scheme": "Warm amber and gold tones from the low sun, deep greens of tree foliage, white of the lead van, muted greys of asphalt and adjacent vehicles, accents of red then green from the traffic signals",
+    "mood_atmosphere": "Calm, warm, ordinary, with a small rhythmic beat as the lights cycle",
+    "patterns": "Repeating rhythm of trees along the right side and the painted lane lines on the asphalt"
+  },
+  "cinematography": {
+    "camera_motion": "Static dashcam mount; the camera itself does not pan or tilt; apparent motion derives from the ego vehicle's forward travel as it decelerates then accelerates",
+    "framing": "Wide shot through the windshield",
+    "camera_angle": "Eye-level from the driver position",
+    "depth_of_field": "Deep",
+    "focus": "Road, the white van, the traffic signals, and the intersection in the middle distance",
+    "lens_focal_length": "Wide ~24mm equivalent typical of dashcams"
+  },
+  "style_medium": "Live-action video",
+  "artistic_style": "Documentary, in-cabin dashboard-camera autonomous-vehicle observation",
+  "context": "Suburban arterial autonomous-vehicle dashcam clip during golden hour, decelerating for red signals then accelerating again as they turn green",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "Ego is moving forward at moderate speed; traffic signals ahead display solid red; the white van directly ahead also has brake lights visible as it slows; trees on the right slide past"
+    },
+    {
+      "time": "0:02-0:04",
+      "description": "Ego continues decelerating; the gap to the white van narrows slightly as both vehicles slow together; signals remain red"
+    },
+    {
+      "time": "0:04-0:06",
+      "description": "Ego is at its slowest pace; van's brake lights still illuminated; signals still red; the warm light persists; the ego has not stopped fully"
+    },
+    {
+      "time": "0:06-0:07",
+      "description": "The signals change cleanly from red to green; the van's brake lights turn off; both vehicles begin to accelerate again"
+    },
+    {
+      "time": "0:07-0:08",
+      "description": "Ego continues accelerating, regaining forward velocity; signals remain green; the scene composition is otherwise unchanged"
+    }
+  ],
+  "text_and_signage_elements": [
+    {
+      "text": "traffic signal",
+      "category": "physical_in_scene",
+      "appearance": "Three-bulb traffic signal heads in dark housings mounted on a horizontal arm above the roadway",
+      "spatial_temporal": "Middle distance above the intersection ahead, visible throughout. Red bulb illuminated 0:00-0:06; green bulb illuminated 0:06-0:08.",
+      "context": "Controls the ego's approach to the intersection; state change drives the ego's deceleration-then-acceleration behavior"
+    }
+  ],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:06",
+      "description": "Decelerating approach under red signals: ego and lead van both slowing while the signals remain solid red",
+      "key_changes": "Ego speed decreases from moderate to slow; brake lights visible on the van; signals stay solid red; gap to van narrows",
+      "camera": "Static dashcam, forward-facing"
+    },
+    {
+      "segment_index": 1,
+      "time_range": "0:06-0:08",
+      "description": "Light change and acceleration: the signals switch from red to green and both vehicles resume forward acceleration",
+      "key_changes": "Signals transition red \u2192 green at the segment boundary; van brake lights turn off; ego accelerates; forward velocity rebuilds",
+      "camera": "Static dashcam, forward-facing"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the ego is driving forward at moderate speed with the white van directly ahead and red traffic signals visible above the intersection in the middle distance. At 0:01 the van's brake lights are illuminated; the ego begins to decelerate. At 0:02 both vehicles are clearly slowing. At 0:03 the ego is at a slower pace, still well short of the intersection. At 0:04 deceleration continues; signals still red. At 0:05 the ego is near its slowest, the van's brake lights bright in the middle distance. At 0:06 the signals change cleanly from red to green; the van's brake lights turn off. At 0:07 both vehicles begin to accelerate forward. At 0:08 the ego is regaining forward velocity, signals remain green, scene composition otherwise unchanged.",
+  "audio_description": "Steady road and tire noise from inside the cabin, soft wind, faint hum of the ego vehicle's drivetrain; subtle changes in pitch as the engine and tire noise reduce during deceleration and rise again during acceleration; no speech, music, or notable effects.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}

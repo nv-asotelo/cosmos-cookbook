@@ -1,0 +1,150 @@
+{
+  "subjects": [
+    {
+      "description": "Right humanoid black robotic arm with a dextrous multi-finger gripper, entering the frame from the right edge",
+      "appearance_details": "Glossy black powder-coated armature with anthropomorphic articulation, a multi-fingered metallic gripper with visible knuckle joints and tendon-like cabling",
+      "relationship": "Primary actor of the scene; picks the bok choy at its stem and places it into the pan",
+      "location": "right edge of frame, hovering above the wooden table",
+      "relative_size": "Medium within frame",
+      "orientation": "Approaching from the right, gripper oriented down toward the base of the bok choy",
+      "pose": "Extended over the workspace with the gripper aligned above the pale white stem at the base of the bok choy",
+      "action": "extending, grasping the bok choy at its pale white base stem, lifting, translating left across the table directly over the frying pan, lowering down into the pan, releasing, retracting",
+      "state_changes": "Gripper opens, descends to the bok choy and closes firmly around the pale white stem at the base. Arm lifts the bok choy cleanly off the table holding it by its base stem with the leaves splaying upward. Arm translates left across the table and positions the bok choy directly above the open frying pan. Arm lowers the bok choy down into the pan and the gripper opens, releasing the bok choy so it settles inside the pan with its base resting on the pan's interior surface and leaves splaying upward. Arm retracts up and to the right.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "Left humanoid black robotic arm with a dextrous multi-finger gripper, entering the frame from the left edge",
+      "appearance_details": "Identical in construction to the right arm: glossy black powder-coated armature with anthropomorphic articulation, multi-fingered metallic gripper",
+      "relationship": "Static observer; remains stationary throughout the sequence",
+      "location": "left edge of frame, hovering above the wooden table",
+      "relative_size": "Medium within frame",
+      "orientation": "Approaching from the left, gripper oriented down",
+      "pose": "Suspended in a neutral ready position above the table",
+      "action": "stationary throughout",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A single head of bok choy with a pale white stem and bright green leaves",
+      "appearance_details": "Compact base of overlapping white stalks splaying outward into vivid green leafy tops; the white stem at the base is the structural part where the leaves converge",
+      "relationship": "Object being manipulated by the right robotic arm; grasped at its white base stem",
+      "location": "right half of the wooden table, to the right of the frying pan",
+      "relative_size": "Small within frame",
+      "orientation": "Upright on its base, leaves splaying outward",
+      "pose": "Resting on the wooden tabletop",
+      "action": "being grasped at its pale white base stem, lifted upright with leaves splaying upward, carried left over the pan, lowered into the pan, and released to settle inside the pan",
+      "state_changes": "The pale white stem at the base of the bok choy is gripped firmly. The bok choy is lifted vertically off the table while remaining upright, with its green leaves splaying upward as it is held by the stem. It is carried laterally to the left until it is directly above the frying pan. It is then lowered straight down into the pan and released. It settles inside the pan with its white base resting against the pan's interior surface and its green leaves splaying upward.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A large white frying pan with a brown wooden handle",
+      "appearance_details": "Round white ceramic-coated cooking surface with a smooth shallow interior, riveted brown wooden handle extending to the lower-left",
+      "relationship": "Destination container for the bok choy; receives the bok choy at the end of the sequence",
+      "location": "left half of the wooden table, handle pointing toward the lower-left of the frame",
+      "relative_size": "Large within frame",
+      "orientation": "Cooking surface facing up, handle to lower-left",
+      "pose": "Resting flat on the wooden tabletop",
+      "action": "stationary; receives the bok choy inside its interior surface",
+      "state_changes": "No motion. At the end of the sequence, the bok choy is placed inside the pan, resting on the pan's interior cooking surface with its leaves splaying upward.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A wooden workshop tabletop fills the center of the frame, with workshop equipment, metal frames, cables, and tools visible in the upper-left and upper-right corners. The central work surface is well-lit and uncluttered, framed by the darker, busier workshop periphery, creating a controlled vignette around the active workspace.",
+  "lighting": {
+    "conditions": "Bright, even workshop lighting focused on the central tabletop",
+    "direction": "Top-lit broad overhead source",
+    "shadows": "Soft, short shadows directly beneath the pan, bok choy, and arms",
+    "illumination_effect": "Bright, neutral exposure on the central work surface with the surrounding workshop equipment falling into modest shadow"
+  },
+  "aesthetics": {
+    "composition": "Top-down medium shot with the table centered; the frying pan dominates the left half and the bok choy sits to its right initially, with the two robotic arms framing the workspace from left and right edges; the bok choy ends inside the pan",
+    "color_scheme": "Warm wooden tabletop tones, white pan with brown handle, green-and-white bok choy, matte black robotic arms, gray workshop equipment in the periphery",
+    "mood_atmosphere": "Industrial, controlled, deliberate",
+    "patterns": ""
+  },
+  "cinematography": {
+    "camera_motion": "Locked-off, tripod-fixed overhead camera; the viewpoint is identical in every frame of the video",
+    "framing": "Medium shot",
+    "camera_angle": "High angle, near top-down",
+    "depth_of_field": "Deep",
+    "focus": "Wooden tabletop and the central objects",
+    "lens_focal_length": "Standard ~28mm equivalent for wide top-down coverage"
+  },
+  "style_medium": "Live-action video filmed from a locked-off overhead camera",
+  "artistic_style": "Realistic, documentary, robotics-workshop",
+  "context": "Bimanual robotic pick-and-place demonstration with one arm placing a bok choy into a frying pan by grasping at its white stem base; left arm holds position; filmed from a locked-off overhead camera",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "Right robotic arm extends toward the bok choy, gripper opening; gripper descends specifically to the pale white stem at the base of the bok choy"
+    },
+    {
+      "time": "0:02-0:03",
+      "description": "Gripper closes firmly around the pale white base stem of the bok choy, securing it"
+    },
+    {
+      "time": "0:03-0:05",
+      "description": "Right arm lifts the bok choy cleanly off the table holding it upright by its base stem, with the leaves splaying upward; arm moves smoothly to the left, carrying the bok choy across the table directly over the frying pan"
+    },
+    {
+      "time": "0:05-0:07",
+      "description": "Right arm positions the bok choy directly above the open frying pan and lowers it straight down into the pan; gripper opens, releasing the bok choy inside the pan"
+    },
+    {
+      "time": "0:07-0:08",
+      "description": "Bok choy settles inside the pan with its base on the pan's interior cooking surface and leaves splaying upward; right arm retracts up and toward the right edge of the frame; left arm has remained stationary throughout"
+    }
+  ],
+  "text_and_signage_elements": [],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:08",
+      "description": "Continuous single-shot pick-and-place of the bok choy from the right side of the table into the frying pan, executed by the right arm while the left arm holds position; the right gripper specifically grasps the white base stem of the bok choy rather than the green leafy top; filmed from a locked-off overhead camera",
+      "key_changes": "Bok choy is grasped at its pale white base stem, lifted, carried left, lowered into the pan, and released to settle inside the pan; right arm retracts",
+      "camera": "Locked-off overhead view"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the wooden tabletop is shown with the frying pan on the left, the bok choy on the right, and both robotic arms at the edges of the frame. At 0:01 the right arm extends down toward the bok choy's white base stem. At 0:02 the gripper closes firmly around the pale white base stem. At 0:03 the right arm lifts the bok choy upright off the table, holding it by the stem with leaves splaying upward. At 0:04 the bok choy passes over the frying pan as the arm carries it left. At 0:05 the arm positions the bok choy directly above the pan's open interior. At 0:06 the arm lowers the bok choy down into the pan. At 0:07 the gripper opens and the bok choy is released inside the pan, settling onto the pan's cooking surface with its leaves splaying upward. At 0:08 the right arm has retracted toward the right edge of the frame and the bok choy rests inside the pan; the left arm has remained still throughout.",
+  "audio_description": "Quiet workshop ambient room tone, faint mechanical whir and articulation sounds from the robotic arm during motion, soft contact sound when the bok choy is set down inside the pan; no speech or music.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}

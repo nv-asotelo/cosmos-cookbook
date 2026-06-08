@@ -1,0 +1,150 @@
+{
+  "subjects": [
+    {
+      "description": "A black industrial robotic arm with a metallic two-finger parallel-jaw gripper mounted at its end, suspended from a base just outside the top of the frame",
+      "appearance_details": "Glossy black powder-coated armature with visible joint segments, a silver-aluminum gripper assembly with two parallel fingers",
+      "relationship": "Primary actor of the scene, manipulating the pear on the workbench",
+      "location": "upper-center of frame, hovering above the workspace",
+      "relative_size": "Medium within frame",
+      "orientation": "Vertically oriented, gripper facing downward toward the workbench",
+      "pose": "Suspended above the workspace with the gripper aligned over the pear",
+      "action": "descending, grasping, lifting, translating, releasing",
+      "state_changes": "Gripper opens and lowers around the pear, closes to grasp; arm lifts and translates left toward the bowl; arm descends and gripper opens to release; arm retracts upward and slightly right to a neutral position",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A yellow-green pear with smooth waxy skin",
+      "appearance_details": "Classic pear shape with a rounded base tapering to a narrower neck, a short brown stem at the top, faint pale-yellow speckling on the skin",
+      "relationship": "Object being manipulated by the robotic arm",
+      "location": "front-center of the workspace, slightly closer to the camera than the other objects",
+      "relative_size": "Small within frame",
+      "orientation": "Upright on its base",
+      "pose": "Resting on the workbench",
+      "action": "being grasped, lifted, translated, and released into the dark bowl",
+      "state_changes": "Lifted by the gripper, carried laterally to the upper-left, released and settles into the dark bowl with a small natural roll",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A small dark gray ceramic bowl",
+      "appearance_details": "Matte dark-gray exterior, shallow rounded shape, smooth even rim",
+      "relationship": "Destination container for the pear",
+      "location": "upper-left of the workspace",
+      "relative_size": "Small within frame",
+      "orientation": "Opening facing upward",
+      "pose": "Resting on the workbench",
+      "action": "stationary, receives the pear at the end of the sequence",
+      "state_changes": "No significant change until the pear is released into it",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A pink rounded distractor object resembling a small soft wedge or block",
+      "appearance_details": "Soft pink color, smooth rounded form, similar footprint to the bowl",
+      "relationship": "Distractor object adjacent to the pear; not manipulated",
+      "location": "center-left of the workspace, between the bowl and the pear",
+      "relative_size": "Small within frame",
+      "orientation": "Resting on its broader side",
+      "pose": "Static on the workbench",
+      "action": "stationary throughout",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A clean, white laboratory workbench surface fills the frame. The background beyond the workspace is a uniform pale wall, lightly shaded, lending the scene a controlled, neutral, lab-grade aesthetic. The workbench is uncluttered apart from the bowl, the pink object, and the pear.",
+  "lighting": {
+    "conditions": "Bright, even, diffuse studio-grade lab lighting",
+    "direction": "Top-lit, broad overhead source producing uniform illumination",
+    "shadows": "Soft, short shadows cast directly beneath each object on the workbench surface",
+    "illumination_effect": "Crisp, color-neutral exposure across the entire workspace with no hot spots or color casts"
+  },
+  "aesthetics": {
+    "composition": "Top-down medium shot with the workspace centered in the frame; the bowl, pink object, and pear arranged in a loose triangular composition from upper-left to front-center",
+    "color_scheme": "Predominantly white and pale gray workbench with accent colors of pink (distractor), dark gray (bowl), yellow-green (pear), and matte black (robotic arm)",
+    "mood_atmosphere": "Calm, clinical, deliberate",
+    "patterns": ""
+  },
+  "cinematography": {
+    "camera_motion": "Locked-off, tripod-fixed overhead camera; the viewpoint is identical in every frame of the video",
+    "framing": "Medium shot",
+    "camera_angle": "High angle, near top-down",
+    "depth_of_field": "Deep",
+    "focus": "Workbench surface and the three objects",
+    "lens_focal_length": "Standard ~35mm equivalent"
+  },
+  "style_medium": "Live-action video filmed from a locked-off overhead camera",
+  "artistic_style": "Realistic, documentary, robotics-laboratory",
+  "context": "Robotic pick-and-place demonstration on a laboratory workbench filmed from a locked-off overhead camera",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "Robotic arm descends along a vertical axis toward the pear, gripper opening as it approaches"
+    },
+    {
+      "time": "0:02-0:03",
+      "description": "Gripper closes gently around the pear, securing it"
+    },
+    {
+      "time": "0:03-0:05",
+      "description": "Arm lifts the pear several centimeters above the workbench, then translates laterally to the upper-left toward the dark bowl, keeping the pear level throughout"
+    },
+    {
+      "time": "0:05-0:06",
+      "description": "Arm positions the pear over the bowl, pauses briefly, then lowers and releases the pear, which settles into the bowl with a small natural roll"
+    },
+    {
+      "time": "0:06-0:08",
+      "description": "Arm retracts upward and slightly to the right, returning to a neutral position above the workspace"
+    }
+  ],
+  "text_and_signage_elements": [],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:08",
+      "description": "Continuous single-shot pick-and-place of the pear into the dark bowl by the robotic arm, filmed from a locked-off overhead camera",
+      "key_changes": "Pear is grasped, lifted, translated, released into the bowl; arm returns to a neutral position",
+      "camera": "Locked-off overhead view"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the workbench is shown with the robotic arm hovering above. At 0:01 the arm descends toward the pear. At 0:02 the gripper closes around the pear. At 0:03 the arm lifts the pear above the workbench. At 0:04 the arm carries the pear left toward the dark bowl. At 0:05 the arm pauses over the bowl, then begins to lower. At 0:06 the pear is released and settles into the bowl with a small natural roll. At 0:07 the arm retracts upward and slightly to the right. At 0:08 the arm has returned to a neutral position above the workspace.",
+  "audio_description": "Quiet laboratory ambient room tone, faint mechanical whir of the robotic arm during motion, soft thuds when the gripper engages and when the pear settles into the bowl; no speech or music.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}

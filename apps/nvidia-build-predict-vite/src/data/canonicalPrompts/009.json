@@ -1,0 +1,141 @@
+{
+  "subjects": [
+    {
+      "description": "Ego vehicle, captured from a dashboard-mounted forward-facing camera",
+      "appearance_details": "Vehicle body itself is implied; the hood, dashboard, and front windshield frame the lower portion of the view",
+      "relationship": "Camera platform; carries the perspective through the scene",
+      "location": "occupies the camera position; hood and dash visible at the bottom of the frame",
+      "relative_size": "Large within frame",
+      "orientation": "Facing forward along the road",
+      "pose": "Stationary at the start of motion and then decelerating to a full stop",
+      "action": "decelerating, stopping, and yielding at the intersection",
+      "state_changes": "Initially moving slowly forward, then decelerates to a full stop as it yields to oncoming traffic while waiting to turn right",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A white sedan exiting the intersection by completing a right turn",
+      "appearance_details": "Compact white sedan with standard four-door silhouette, visible in profile and rear three-quarters",
+      "relationship": "Cross-traffic vehicle that finishes its right turn and leaves the frame",
+      "location": "center of the intersection at the start, then exits to the right and out of frame",
+      "relative_size": "Small within frame",
+      "orientation": "Turning right, body angled away from the ego",
+      "pose": "In motion through the right turn",
+      "action": "completing a right turn and driving down the cross street out of frame",
+      "state_changes": "Begins in the intersection, completes the turn, and exits the frame to the right",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "Parked cars along the residential street",
+      "appearance_details": "Two visible parked vehicles in profile, a darker blue or grey sedan along the left curb and another along the right curb in front of a residential property",
+      "relationship": "Static street furniture establishing the residential context",
+      "location": "left and right curbs of the street ahead of the ego",
+      "relative_size": "Small within frame",
+      "orientation": "Parked parallel to the curb",
+      "pose": "Stationary",
+      "action": "stationary throughout",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 2,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A residential suburban neighborhood under a clear blue sky. The road is a quiet two-lane street with double yellow center lines and a painted stop-lane marker on the asphalt at the intersection ahead. Single-family houses with well-maintained hedges line the right side; on the left there is a red brick wall and additional parked vehicles. Overhead utility poles and crisscrossing wires are visible against the sky, and bare trees line the streets, suggesting late winter or early spring. A stop sign is visible to the right at the intersection.",
+  "lighting": {
+    "conditions": "Bright, clear midday natural daylight",
+    "direction": "High sun, generally front-and-top with subtle warm cast",
+    "shadows": "Sharp, short shadows from poles, trees, and parked vehicles on the asphalt",
+    "illumination_effect": "Strong directional sunlight, slight overexposure in the brightest patches of sky, vivid colors on hedges and house facades"
+  },
+  "aesthetics": {
+    "composition": "Forward dashcam framing with the road receding into the distance, dashboard and hood occupying the lower fifth of the frame, the intersection centered in the middle distance",
+    "color_scheme": "Pale-blue sky, warm beige and red house and brick tones on the right, muted grey-blue asphalt, leafless tree silhouettes",
+    "mood_atmosphere": "Calm, ordinary, typical residential",
+    "patterns": "Repeating vertical rhythm of utility poles along the right side of the street"
+  },
+  "cinematography": {
+    "camera_motion": "Static dashcam mount; the camera itself does not pan or tilt; apparent motion derives from the ego vehicle's forward travel and subsequent stop",
+    "framing": "Wide shot through the windshield",
+    "camera_angle": "Eye-level from the driver position",
+    "depth_of_field": "Deep",
+    "focus": "Road and intersection in the middle distance",
+    "lens_focal_length": "Wide ~24mm equivalent typical of dashcams"
+  },
+  "style_medium": "Live-action video",
+  "artistic_style": "Documentary, in-cabin dashboard-camera autonomous-vehicle observation",
+  "context": "Suburban residential autonomous-vehicle dashcam clip approaching and yielding at a low-traffic intersection",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "The ego vehicle is moving slowly forward toward the intersection; the white car is in the intersection completing a right turn"
+    },
+    {
+      "time": "0:02-0:04",
+      "description": "The white car finishes its right turn and exits the frame to the right; the ego continues decelerating"
+    },
+    {
+      "time": "0:04-0:06",
+      "description": "The ego comes to a full stop at the painted stop-lane marker, yielding to oncoming traffic while preparing to turn right"
+    },
+    {
+      "time": "0:06-0:08",
+      "description": "The ego remains stopped; the residential scene stays still, with the bright daylight and clear sky unchanged"
+    }
+  ],
+  "text_and_signage_elements": [
+    {
+      "text": "STOP",
+      "category": "scene_sign",
+      "appearance": "Standard red octagonal stop sign with white border and bold white sans-serif text",
+      "spatial_temporal": "Mounted on a pole on the right side of the intersection ahead, visible throughout",
+      "context": "Indicates the cross street's stop control"
+    }
+  ],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:04",
+      "description": "Approach to the intersection while a white car completes a right turn ahead",
+      "key_changes": "White car finishes its turn and exits the frame; the ego decelerates",
+      "camera": "Static dashcam, forward-facing"
+    },
+    {
+      "segment_index": 1,
+      "time_range": "0:04-0:08",
+      "description": "Ego comes to a full stop and yields, waiting to turn right",
+      "key_changes": "Ego transitions from rolling to fully stopped; scene is otherwise still",
+      "camera": "Static dashcam, forward-facing"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the ego rolls slowly forward toward the intersection while a white car turns right in the middle distance. At 0:01 the white car is mid-turn. At 0:02 the white car exits the frame to the right. At 0:03 the ego continues decelerating toward the stop-lane marker. At 0:04 the ego is nearly stopped at the marker. At 0:05 the ego is fully stopped, yielding. At 0:06 the scene is still and bright. At 0:07 no traffic crosses; the scene remains calm. At 0:08 the ego is still stopped at the intersection, waiting to turn right.",
+  "audio_description": "Quiet residential ambient hum, faint road and wind noise inside the cabin while moving, brief tire-on-asphalt sound as the ego decelerates and stops; no speech, music, or notable effects.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}

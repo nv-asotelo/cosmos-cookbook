@@ -1,0 +1,170 @@
+{
+  "subjects": [
+    {
+      "description": "A black metallic robotic arm with a claw-like multi-finger gripper, suspended from above the cutting board",
+      "appearance_details": "Glossy black armature with visible joint segments and dark metallic gripper fingers; mounted from a base outside the upper edge of the frame",
+      "relationship": "Primary actor of the scene; picks and places the toy salmon",
+      "location": "upper-center of frame, hovering above the cutting board inside the cardboard box",
+      "relative_size": "Medium within frame",
+      "orientation": "Vertically oriented, gripper facing downward",
+      "pose": "Suspended above the cutting board, gripper aligned over the toy salmon",
+      "action": "descending, grasping, lifting, translating, releasing",
+      "state_changes": "Gripper descends and closes around the toy salmon, lifts it slightly, moves it toward the orange bowl, opens to release the salmon into the bowl, then retracts upward",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A small toy piece of salmon sashimi with a pinkish-orange hue",
+      "appearance_details": "Rectangular plastic toy slab styled as salmon sashimi, with painted lighter pink striations across a deeper orange-pink base",
+      "relationship": "Object being manipulated by the robotic arm",
+      "location": "front-left area of the wooden cutting board",
+      "relative_size": "Small within frame",
+      "orientation": "Lying flat on its broader side",
+      "pose": "Resting on the cutting board",
+      "action": "being grasped, lifted slightly, moved right, and released into the orange bowl",
+      "state_changes": "Lifted off the cutting board by the gripper, carried laterally toward the orange bowl, dropped into the bowl",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A small translucent orange bowl",
+      "appearance_details": "Smooth, slightly translucent orange plastic with a shallow rounded shape and a clean rim",
+      "relationship": "Destination container for the toy salmon",
+      "location": "center-right of the cutting board",
+      "relative_size": "Small within frame",
+      "orientation": "Opening facing upward",
+      "pose": "Resting on the cutting board",
+      "action": "stationary, receives the toy salmon at the end of the sequence",
+      "state_changes": "No significant change until the toy salmon is released into it",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A toy red tomato with green leaves",
+      "appearance_details": "Glossy plastic toy with a deep red body and a green plastic leaf-and-stem cap on top",
+      "relationship": "Distractor object on the cutting board; not manipulated",
+      "location": "front-right of the cutting board, opposite the toy salmon",
+      "relative_size": "Small within frame",
+      "orientation": "Upright on its base",
+      "pose": "Resting on the cutting board",
+      "action": "stationary throughout",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    },
+    {
+      "description": "A toy small orange carrot",
+      "appearance_details": "Plastic toy carrot with a smooth orange body tapering to a point and a small green leafy top",
+      "relationship": "Distractor object on the cutting board; not manipulated",
+      "location": "front-bottom area of the cutting board",
+      "relative_size": "Small within frame",
+      "orientation": "Lying along its length",
+      "pose": "Resting on the cutting board",
+      "action": "stationary throughout",
+      "state_changes": "No significant change.",
+      "clothing": "",
+      "expression": "",
+      "gender": "",
+      "age": "",
+      "skin_tone_and_texture": "",
+      "facial_features": "",
+      "number_of_subjects": 1,
+      "number_of_arms": 0,
+      "number_of_legs": 0
+    }
+  ],
+  "background_setting": "A wooden cutting board sits inside an open cardboard box on a workbench. Beyond the box, a tiled wall is visible in the upper portion of the frame, with a glimpse of a workshop setting and dark structural elements bordering the cardboard box on its sides.",
+  "lighting": {
+    "conditions": "Bright, even workshop lighting",
+    "direction": "Top-lit, broad overhead source",
+    "shadows": "Soft, short shadows beneath the toys and the bowl on the wooden cutting board",
+    "illumination_effect": "Crisp, neutral exposure on the cutting board and its toy contents; the cardboard box sides and the tiled wall fall into modest shadow"
+  },
+  "aesthetics": {
+    "composition": "Three-quarter top-down medium shot with the cutting board angled within the cardboard box; the orange bowl sits center-right, the toy salmon front-left, the toy tomato front-right, and the toy carrot toward the front bottom",
+    "color_scheme": "Warm wood tones of the cutting board, kraft brown of the cardboard box, vivid orange of the bowl and carrot, pinkish-orange of the salmon, deep red of the tomato, matte black of the robotic arm",
+    "mood_atmosphere": "Industrial, controlled, deliberate",
+    "patterns": ""
+  },
+  "cinematography": {
+    "camera_motion": "Static",
+    "framing": "Medium shot",
+    "camera_angle": "Three-quarter high angle, slightly forward of top-down",
+    "depth_of_field": "Deep",
+    "focus": "Cutting board and the toy food objects",
+    "lens_focal_length": "Standard ~35mm equivalent"
+  },
+  "style_medium": "Live-action video",
+  "artistic_style": "Realistic, documentary, robotics-workshop",
+  "context": "Robotic pick-and-place demonstration using toy food objects on a wooden cutting board",
+  "actions": [
+    {
+      "time": "0:00-0:02",
+      "description": "Robotic arm descends from above toward the toy salmon at the front-left of the cutting board"
+    },
+    {
+      "time": "0:02-0:03",
+      "description": "Gripper closes around the toy salmon, securing it"
+    },
+    {
+      "time": "0:03-0:05",
+      "description": "Arm lifts the toy salmon slightly off the cutting board and moves it rightward toward the orange bowl"
+    },
+    {
+      "time": "0:05-0:06",
+      "description": "Arm positions the toy salmon over the bowl and opens the gripper, releasing the salmon so it falls into the bowl"
+    },
+    {
+      "time": "0:06-0:08",
+      "description": "Arm retracts upward to a neutral position above the cutting board; the toy tomato and toy carrot remain untouched"
+    }
+  ],
+  "text_and_signage_elements": [],
+  "segments": [
+    {
+      "segment_index": 0,
+      "time_range": "0:00-0:08",
+      "description": "Continuous single-shot pick-and-place of the toy salmon into the orange bowl by the robotic arm",
+      "key_changes": "Toy salmon is grasped, lifted, moved right, released into the orange bowl; arm retracts",
+      "camera": "Static three-quarter top-down view, no camera motion"
+    }
+  ],
+  "transitions": [],
+  "temporal_caption": "At 0:00 the cutting board is shown inside the cardboard box with the toy salmon, bowl, tomato, and carrot in place, and the robotic arm hovering above. At 0:01 the arm descends toward the toy salmon at the front-left. At 0:02 the gripper closes around the toy salmon. At 0:03 the arm lifts the toy salmon slightly off the board. At 0:04 the arm moves the toy salmon right toward the orange bowl. At 0:05 the arm positions the toy salmon over the bowl. At 0:06 the gripper opens and the toy salmon falls into the bowl. At 0:07 the arm begins retracting upward. At 0:08 the arm has returned to a neutral position; the toy tomato and toy carrot remain untouched.",
+  "audio_description": "Quiet workshop ambient room tone, faint mechanical whir and articulation sounds from the robotic arm during motion, a soft plastic contact sound when the toy salmon is dropped into the bowl; no speech or music.",
+  "resolution": {
+    "H": 720,
+    "W": 1280
+  },
+  "aspect_ratio": "16,9",
+  "duration": "8s",
+  "fps": 24
+}
