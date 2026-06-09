@@ -13,6 +13,7 @@
   --aqua: #00c9bb;
   --blue: #008dff;
   --danger: #f07178;
+  --content-width: min(1180px, calc(100% - 64px));
   color-scheme: dark;
 }
 
@@ -186,7 +187,7 @@ kbd {
 
 .hero {
   position: relative;
-  width: calc(100% - 64px);
+  width: var(--content-width);
   height: 172px;
   margin: 16px auto 0;
   overflow: hidden;
@@ -345,7 +346,7 @@ h1 {
 }
 
 .runtimeShell {
-  width: calc(100% - 64px);
+  width: var(--content-width);
   margin: 12px auto 0;
 }
 
@@ -450,7 +451,7 @@ h1 {
 
 .tabs {
   display: flex;
-  width: calc(100% - 64px);
+  width: var(--content-width);
   margin: 16px auto 0;
   overflow-x: auto;
   border-bottom: 1px solid var(--line);
@@ -492,7 +493,7 @@ h1 {
 
 .experience {
   display: block;
-  width: calc(100% - 64px);
+  width: var(--content-width);
   margin: 0 auto 64px;
   border-radius: 0 0 28px 28px;
   background: var(--shell);
@@ -523,7 +524,7 @@ h1 {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  column-gap: 64px;
+  column-gap: clamp(32px, 4vw, 56px);
   margin-top: 40px;
 }
 
@@ -1937,7 +1938,7 @@ select {
 
 .examplesModal {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(300px, 1fr) minmax(236px, 40vh);
   width: min(1180px, 100%);
   max-height: min(860px, calc(100vh - 36px));
   overflow: hidden;
@@ -1969,7 +1970,9 @@ select {
 }
 
 .exampleDomainList {
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 0 28px 22px;
 }
 
@@ -2051,14 +2054,19 @@ select {
 }
 
 .modalFooter {
-  display: block;
+  display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
   border-top: 1px solid var(--line-soft);
+  overflow: hidden;
   padding: 18px 28px 24px;
 }
 
 .selectedExampleSummary {
   min-width: 0;
   width: 100%;
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .selectedExampleIntro {
@@ -2120,6 +2128,8 @@ select {
 .selectedPromptChoice {
   min-width: 0;
   width: 100%;
+  max-height: 168px;
+  overflow: auto;
   border: 1px solid var(--line-soft);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.02);
@@ -2140,6 +2150,7 @@ select {
   max-width: none;
   overflow: visible;
   user-select: text;
+  white-space: pre-wrap;
 }
 
 .modalFooterActions {
@@ -2170,6 +2181,24 @@ select {
 
 .selectButton:hover {
   background: var(--green-hover);
+}
+
+@media (min-width: 821px) and (max-height: 900px) {
+  .examplesModal {
+    grid-template-rows: auto minmax(320px, 1fr) minmax(220px, 34vh);
+  }
+
+  .exampleGrid {
+    gap: 18px;
+  }
+
+  .exampleImageCard img {
+    aspect-ratio: 16 / 8.4;
+  }
+
+  .selectedPromptChoice {
+    max-height: 132px;
+  }
 }
 
 @media (max-width: 820px) {
@@ -2461,6 +2490,7 @@ select {
   }
 
   .examplesModal {
+    grid-template-rows: auto minmax(260px, 1fr) minmax(220px, 42vh);
     width: 100%;
     max-height: calc(100vh - 24px);
   }
@@ -2513,6 +2543,10 @@ select {
 
   .selectedExampleHero {
     max-height: 180px;
+  }
+
+  .selectedPromptChoice {
+    max-height: 150px;
   }
 
   .modalFooterActions {
