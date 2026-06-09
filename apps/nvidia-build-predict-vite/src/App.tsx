@@ -1786,10 +1786,11 @@ function schemaSectionForValue(key: string, value: unknown): PromptSchemaSection
     if (records.length === value.length && records.length > 0) {
       const fields = collectRecordFields(records);
       if (!fields.length) return [];
-      const rows = records
-        .map((record, index) => [String(index + 1), ...fields.map((field) => schemaValue(record[field]))])
+      const rows = fields
+        .map((field) => [field, ...records.map((record) => schemaValue(record[field]))])
         .filter((row) => row.slice(1).some((cell) => cell));
-      return rows.length ? [{ title: key, columns: ["#", ...fields], rows }] : [];
+      const columns = ["field", ...records.map((_, index) => String(index + 1))];
+      return rows.length ? [{ title: key, columns, rows }] : [];
     }
 
     const rows = value
