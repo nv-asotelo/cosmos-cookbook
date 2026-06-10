@@ -157,6 +157,11 @@ body, .gradio-container {
 .metric-label { color: #667085; font-size: 12px; margin-bottom: 3px; }
 .metric-value { color: #101828; font-size: 18px; font-weight: 800; line-height: 1.15; overflow-wrap: anywhere; }
 .metric-note { color: #667085; font-size: 12px; margin-top: 8px; line-height: 1.45; }
+.source-status {
+  border: 1px solid #c7e5a2; background: #f6fbea; color: #1f4d00; border-radius: 8px;
+  padding: 9px 11px; margin: 8px 0 10px; font-size: 13px; line-height: 1.4;
+}
+.source-status strong { color: #163b00; }
 .call-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 10px; font-size: 13px; }
 .call-table th {
   text-align: left; color: #344054; background: #eef3f8; padding: 8px; border: 1px solid #e4e7ec;
@@ -660,7 +665,15 @@ def _health_map(vlm_url: str, attribute_url: str, hallucination_url: str, obstac
         ok, body = _service_get(base, path)
         data = _unwrap_success(body)
         status = data.get("status") if isinstance(data, dict) else None
-        result[name] = {"ok": ok, "status": status or ("healthy" if ok else "error"), "body": body}
+        optional = name == "Obstacle"
+        if optional and not ok:
+            status = "not running (optional)"
+        result[name] = {
+            "ok": ok,
+            "optional": optional,
+            "status": status or ("healthy" if ok else "error"),
+            "body": body,
+        }
     return result
 
 
@@ -680,10 +693,13 @@ def _status_html(health: Dict[str, Any], runtime: Dict[str, Any], nim_model: Opt
     ]
     for name, data in health.items():
         ok = bool(data.get("ok"))
-        cards.append((name, str(data.get("status") or "unknown"), ok))
+        title = f"{name} (optional)" if data.get("optional") else name
+        cards.append((title, str(data.get("status") or "unknown"), ok, bool(data.get("optional"))))
     rendered = []
-    for title, value, ok in cards:
-        cls = "status-ok" if ok else "status-bad"
+    for item in cards:
+        title, value, ok = item[:3]
+        optional = bool(item[3]) if len(item) > 3 else False
+        cls = "status-ok" if ok else ("status-warn" if optional else "status-bad")
         rendered.append(
             f'<div class="status-card"><div class="status-title">{html.escape(title)}</div>'
             f'<div class="{cls}">{html.escape(value)}</div></div>'
@@ -772,6 +788,72 @@ def _video_preview_value(source: str, upload: Any, server_path: str) -> Optional
     return sample_video_value()
 
 
+def _source_status_html(source: str, upload: Any, server_path: str) -> str:
+    selected = source or "Sample video"
+    preview = _video_preview_value(selected, upload, server_path)
+    detail = "sample video"
+    if selected == "Uploaded video":
+        detail = Path(_uploaded_file_path(upload) or "no upload selected").name
+    elif selected == "Server path":
+        detail = (server_path or "no server path").strip()
+    if not preview and selected != "Sample video":
+        detail = f"{detail} (preview unavailable)"
+    return (
+        '<div class="source-status">'
+        f'Selected source: <strong>{html.escape(selected)}</strong><br>'
+        f'<span>{html.escape(detail)}</span>'
+        '</div>'
+    )
+
+
+def _select_video_source(
+    selected: str,
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+) -> Tuple[str, Optional[str], str, str]:
+    source = selected or "Sample video"
+    video_value = _video_preview_value(source, upload, server_path)
+    payload_text = _preview_payload(source, upload, server_path, weather, time_of_day, geography, road_surface)
+    return source, video_value, payload_text, _source_status_html(source, upload, server_path)
+
+
+def select_sample_source(
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+) -> Tuple[str, Optional[str], str, str]:
+    return _select_video_source("Sample video", upload, server_path, weather, time_of_day, geography, road_surface)
+
+
+def select_uploaded_source(
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+) -> Tuple[str, Optional[str], str, str]:
+    return _select_video_source("Uploaded video", upload, server_path, weather, time_of_day, geography, road_surface)
+
+
+def select_server_path_source(
+    upload: Any,
+    server_path: str,
+    weather: str,
+    time_of_day: str,
+    geography: str,
+    road_surface: str,
+) -> Tuple[str, Optional[str], str, str]:
+    return _select_video_source("Server path", upload, server_path, weather, time_of_day, geography, road_surface)
+
+
 def _upload_video_change(
     upload: Any,
     server_path: str,
@@ -779,11 +861,11 @@ def _upload_video_change(
     time_of_day: str,
     geography: str,
     road_surface: str,
-) -> Tuple[Any, Optional[str], str]:
+) -> Tuple[str, Optional[str], str, str]:
     source = "Uploaded video" if _uploaded_file_path(upload) else "Sample video"
     video_value = _video_preview_value(source, upload, server_path)
     payload_text = _preview_payload(source, upload, server_path, weather, time_of_day, geography, road_surface)
-    return gr.update(value=source), video_value, payload_text
+    return source, video_value, payload_text, _source_status_html(source, upload, server_path)
 
 
 def _stage_upload(file_value: Any) -> str:
@@ -1821,11 +1903,13 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     with gr.Column(scale=5):
                         video_preview = gr.Video(label="Video preview", value=sample_video_value(), height=260)
-                        source = gr.Radio(
-                            label="Video source",
-                            choices=["Sample video", "Uploaded video", "Server path"],
-                            value="Sample video",
-                        )
+                        source = gr.Textbox(label="Video source", value="Sample video", visible=False)
+                        gr.Markdown("Video source")
+                        with gr.Row():
+                            sample_source_btn = gr.Button("Sample video", variant="primary")
+                            uploaded_source_btn = gr.Button("Uploaded video", variant="secondary")
+                            server_source_btn = gr.Button("Server path", variant="secondary")
+                        source_status = gr.HTML(value=_source_status_html("Sample video", None, SAMPLE_API_PATH))
                         upload = gr.File(label="Upload MP4", file_types=[".mp4"], file_count="single")
                         server_path = gr.Textbox(
                             label="Server path",
@@ -1939,14 +2023,18 @@ def build_app() -> gr.Blocks:
             geography,
             road_surface,
         ]
-        for component in [source, server_path, weather, time_of_day, geography, road_surface]:
+        for component in [weather, time_of_day, geography, road_surface]:
             component.change(_preview_payload, inputs=preview_inputs, outputs=payload_preview)
-        source.change(_video_preview_value, inputs=[source, upload, server_path], outputs=video_preview)
-        server_path.change(_video_preview_value, inputs=[source, upload, server_path], outputs=video_preview)
+        source_select_inputs = [upload, server_path, weather, time_of_day, geography, road_surface]
+        source_select_outputs = [source, video_preview, payload_preview, source_status]
+        sample_source_btn.click(select_sample_source, inputs=source_select_inputs, outputs=source_select_outputs, queue=False)
+        uploaded_source_btn.click(select_uploaded_source, inputs=source_select_inputs, outputs=source_select_outputs, queue=False)
+        server_source_btn.click(select_server_path_source, inputs=source_select_inputs, outputs=source_select_outputs, queue=False)
+        server_path.change(_select_video_source, inputs=preview_inputs, outputs=source_select_outputs)
         upload.change(
             _upload_video_change,
             inputs=[upload, server_path, weather, time_of_day, geography, road_surface],
-            outputs=[source, video_preview, payload_preview],
+            outputs=source_select_outputs,
         )
 
         command_inputs = [nim_url, vlm_url, control_url, attribute_url, hallucination_url, obstacle_url, endpoint, payload_preview]
