@@ -2023,6 +2023,7 @@ function ExampleModal({
 }) {
   const [pendingId, setPendingId] = useState(selectedId);
   const [pendingPromptChoice, setPendingPromptChoice] = useState<PromptChoice>(selectedPromptChoice);
+  const [longPromptExpanded, setLongPromptExpanded] = useState(false);
   const pending = findContentItem(groups, pendingId);
   const promptChoices = [
     pending.shortPrompt ? { choice: "short" as const, label: "Short Prompt", text: pending.shortPrompt } : null,
@@ -2034,6 +2035,10 @@ function ExampleModal({
       setPendingPromptChoice("long");
     }
   }, [pending.shortPrompt, pendingPromptChoice]);
+
+  useEffect(() => {
+    setLongPromptExpanded(false);
+  }, [pendingId]);
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
@@ -2088,22 +2093,62 @@ function ExampleModal({
               </div>
             </div>
             <div className="selectedPromptPair" role="group" aria-label="Prompt choice">
-              {promptChoices.map((choice) => (
-                <button
-                  aria-pressed={pendingPromptChoice === choice.choice}
-                  className={
-                    pendingPromptChoice === choice.choice
-                      ? "selectedPromptChoice activePromptChoice"
-                      : "selectedPromptChoice"
-                  }
-                  key={choice.choice}
-                  onClick={() => setPendingPromptChoice(choice.choice)}
-                  type="button"
-                >
-                  <span>{choice.label}</span>
-                  <p>{choice.text}</p>
-                </button>
-              ))}
+              {promptChoices.map((choice) =>
+                choice.choice === "long" ? (
+                  <div
+                    className={
+                      pendingPromptChoice === choice.choice
+                        ? "selectedPromptChoice longPromptChoice activePromptChoice"
+                        : "selectedPromptChoice longPromptChoice"
+                    }
+                    key={choice.choice}
+                    onClick={() => setPendingPromptChoice(choice.choice)}
+                  >
+                    <div className="promptChoiceHeader">
+                      <button
+                        aria-pressed={pendingPromptChoice === choice.choice}
+                        className="promptChoiceSelectButton"
+                        onClick={() => setPendingPromptChoice(choice.choice)}
+                        type="button"
+                      >
+                        <span>{choice.label}</span>
+                      </button>
+                      <button
+                        aria-expanded={longPromptExpanded}
+                        className="promptExpandButton"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setLongPromptExpanded((expanded) => !expanded);
+                        }}
+                        type="button"
+                      >
+                        {longPromptExpanded ? "Collapse" : "Show full prompt"}
+                        <ChevronDown size={14} />
+                      </button>
+                    </div>
+                    <div className="longPromptPreview">
+                      <p className={longPromptExpanded ? "expandedPromptText" : "collapsedPromptText"}>
+                        {longPromptExpanded ? choice.text : choice.text.replace(/\s+/g, " ").trim()}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    aria-pressed={pendingPromptChoice === choice.choice}
+                    className={
+                      pendingPromptChoice === choice.choice
+                        ? "selectedPromptChoice activePromptChoice"
+                        : "selectedPromptChoice"
+                    }
+                    key={choice.choice}
+                    onClick={() => setPendingPromptChoice(choice.choice)}
+                    type="button"
+                  >
+                    <span>{choice.label}</span>
+                    <p>{choice.text}</p>
+                  </button>
+                )
+              )}
             </div>
           </div>
           <div className="modalFooterActions">
