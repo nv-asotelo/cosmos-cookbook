@@ -3441,15 +3441,7 @@ function ExperiencePanel({
 }) {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const vlaMode = isVlaMode(model, backendInfo);
-  const selectedExample = examples.find((example) => example.id === selectedExampleId);
-  const selectedExampleLoaded = Boolean(
-    selectedExample &&
-    media &&
-    media?.kind === selectedExample?.mediaKind &&
-    media.name === selectedExample.mediaName &&
-    (media.previewUrl === selectedExample.mediaUrl || Boolean(media.sourceUrl?.endsWith(selectedExample.mediaUrl)))
-  );
-  const showLongVideoUi = Boolean(selectedExample?.longVideoEnabled && selectedExampleLoaded) || runMode === "long";
+  const showLongVideoUi = media?.kind === "video" || runMode === "long";
 
   function chooseLongPreset(preset: LongPreset) {
     setLongPreset(preset);
