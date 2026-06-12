@@ -410,6 +410,8 @@ def command_report(args: argparse.Namespace) -> None:
     metadata = read_json(out_dir / "metadata.json", {})
     endpoint_status = read_json(out_dir / "endpoint_status.json", {})
     storage_plan = read_json(out_dir / "storage_plan.json", {})
+    schema_summary = build_schema_summary(rows)
+    write_json(out_dir / "schema_summary.json", schema_summary)
     report_html = render_report(rows, metadata, endpoint_status, storage_plan)
     (out_dir / "report.html").write_text(report_html, encoding="utf-8")
     (out_dir / "index.html").write_text(report_html, encoding="utf-8")
@@ -442,6 +444,128 @@ def top_counts(rows: list[dict[str, Any]], key: str, limit: int = 20) -> list[tu
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
 
+def row_count(rows: list[dict[str, Any]], **filters: str) -> int:
+    return sum(1 for row in rows if all(row.get(key) == value for key, value in filters.items()))
+
+
+def build_schema_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    kpi_groups = sorted({row["kpi_group"] for row in rows if row["source_dataset"] != "batch_root"})
+    prompt_trace_rows = row_count(rows, source_dataset="rgb", media_type="json")
+    video_rows = sum(1 for row in rows if row["media_type"] == "video")
+    schemas = [
+        {
+            "family": "RGB VLM traces",
+            "source_datasets": ["rgb"],
+            "rows": row_count(rows, source_dataset="rgb"),
+            "media": "60 videos plus 60 JSON prompt/output traces",
+            "observed_fields": [
+                "video_name",
+                "segments[].text[].text",
+                "segments[].environmental_conditions",
+                "vlm_instruction_prompt_raw",
+                "llm_instruction_prompt_raw",
+            ],
+            "qa_status": "Closest to plain QA, but still prompt/output traces rather than per-KPI ground-truth QA pairs.",
+            "prompt_plan": "Ask every model for a strict JSON scene summary: caption, time_of_day, weather, setting, road_surface, notable_objects, and events.",
+            "evaluation_plan": "Use exact checks for environmental condition fields, text-similarity or VLM preset scoring for caption fidelity, and hallucination checks against clipGT/road labels where aligned.",
+        },
+        {
+            "family": "Road-scene 3D labels",
+            "source_datasets": ["rds_hq", "rds_hq_flat"],
+            "rows": row_count(rows, source_dataset="rds_hq") + row_count(rows, source_dataset="rds_hq_flat"),
+            "media": "Nested tar bundles plus sampled camera-frame PNGs",
+            "observed_fields": [
+                "labels[].labelData.shape3d.surface.vertices",
+                "labels[].labelData.shape3d.polyline3d.vertices",
+                "labels[].labelData.shape3d.cuboid3d.vertices",
+                "traffic_light_states",
+                "object_type / object_lwh / object_to_world",
+            ],
+            "qa_status": "Structured ground truth, not natural-language QA.",
+            "prompt_plan": "Generate deterministic questions from labels: presence, count, class/state, and short evidence summary for lanes, signs, traffic lights, objects, road markings, crosswalks, wait lines, poles, and boundaries.",
+            "evaluation_plan": "Score structured fields directly. Use geometry only after projecting 3D/world coordinates into the camera frame with pose/intrinsics; otherwise evaluate semantic presence/count/attribute correctness.",
+        },
+        {
+            "family": "ClipGT canonical packages",
+            "source_datasets": ["clipGT"],
+            "rows": row_count(rows, source_dataset="clipGT"),
+            "media": "Zip packages containing clipgt parquet tables and recordings",
+            "observed_fields": [
+                "object_fused.parquet",
+                "cf_traffic_light.parquet",
+                "cf_crosswalks.parquet",
+                "cf_road_boundary.parquet",
+                "dw_lane_line.parquet",
+                "recordings/*/camera_front_*.mp4",
+            ],
+            "qa_status": "Canonical ground truth source, but requires selective extraction and table decoding.",
+            "prompt_plan": "Use clipGT to derive clip-time questions and reference answers before model inference.",
+            "evaluation_plan": "Use as source of truth for temporal/object/lane/traffic-light checks and as alignment data for autograder routes beyond VLM preset.",
+        },
+        {
+            "family": "World-model and HD-map videos",
+            "source_datasets": ["wm_v1", "wm_v1_flat", "wm_v3", "wm_v3_flat"],
+            "rows": (
+                row_count(rows, source_dataset="wm_v1")
+                + row_count(rows, source_dataset="wm_v1_flat")
+                + row_count(rows, source_dataset="wm_v3")
+                + row_count(rows, source_dataset="wm_v3_flat")
+            ),
+            "media": "HD-map and world-scenario video variants",
+            "observed_fields": ["hdmap video variants", "world_scenario video variants"],
+            "qa_status": "Video evidence only in this batch; no direct answer key in the file itself.",
+            "prompt_plan": "Ask temporal scene-understanding questions tied to the clip window, then attach reference labels from clipGT/rds where the clip and timestamp align.",
+            "evaluation_plan": "Use VLM preset for semantic quality and derived GT checks for objects, map elements, and temporal consistency.",
+        },
+    ]
+    prompt_eval_matrix = [
+        {
+            "kpi_surface": "Scene caption and environment",
+            "source": "rgb JSON + rgb video",
+            "prompt": "Return JSON with caption, time_of_day, weather, setting, road_surface, visible objects, and events.",
+            "ground_truth": "segments[].environmental_conditions plus curated/previous caption text.",
+            "score": "Exact structured-field agreement plus VLM preset semantic score and hallucination review.",
+        },
+        {
+            "kpi_surface": "Road geometry and map elements",
+            "source": "rds_hq/rds_hq_flat 3D label bundles",
+            "prompt": "Ask for presence/count/location summary of lanes, crosswalks, road boundaries, markings, wait lines, poles, and signs.",
+            "ground_truth": "shape3d surfaces, polylines, and cuboids from nested tar JSON.",
+            "score": "Direct semantic/count metrics now; pixel/geometry metrics only after camera projection is implemented.",
+        },
+        {
+            "kpi_surface": "Objects and traffic lights",
+            "source": "all_object_info, traffic_lights, traffic_lights_status, clipGT parquet",
+            "prompt": "Return JSON objects and traffic-light states with confidence and short evidence.",
+            "ground_truth": "object type/motion/pose and traffic-light state timelines.",
+            "score": "Class/state/count accuracy, temporal alignment, and attribute-verification route where available.",
+        },
+        {
+            "kpi_surface": "World-model / scenario understanding",
+            "source": "wm_v1/wm_v3 video variants plus aligned clipGT/rds rows",
+            "prompt": "Ask for scenario, planned ego interaction, map constraints, and likely near-term changes.",
+            "ground_truth": "Aligned clipGT, hdmap, and road-scene labels.",
+            "score": "VLM preset for narrative quality plus structured checks for any derived fields.",
+        },
+    ]
+    return {
+        "question_answer_coverage": {
+            "plain_qa_pairs_for_every_kpi_group": False,
+            "unique_kpi_groups_excluding_batch_root": len(kpi_groups),
+            "direct_prompt_trace_groups": ["rgb"] if prompt_trace_rows else [],
+            "direct_prompt_trace_rows": prompt_trace_rows,
+            "video_rows": video_rows,
+            "conclusion": (
+                "No. The batch has prompt/output traces for rgb rows only. Most KPI groups contain "
+                "ground-truth geometry, object, map, or video packages that must be converted into "
+                "deterministic questions and reference answers before model comparison."
+            ),
+        },
+        "schemas": schemas,
+        "prompt_eval_matrix": prompt_eval_matrix,
+    }
+
+
 def render_report(
     rows: list[dict[str, Any]],
     metadata: dict[str, Any],
@@ -449,6 +573,8 @@ def render_report(
     storage_plan: dict[str, Any],
 ) -> str:
     summary = metadata.get("summary", summarize_rows(rows))
+    schema_summary = build_schema_summary(rows)
+    qa = schema_summary["question_answer_coverage"]
     endpoint_rows = []
     for name, probe in endpoint_status.get("endpoints", {}).items():
         endpoint_rows.append(
@@ -464,6 +590,29 @@ def render_report(
         group_rows.append(
             f"<tr><td>{html.escape(group)}</td><td>{fmt_num(count)}</td><td>{html.escape(', '.join(media))}</td>"
             f"<td>{html.escape(', '.join(routes))}</td></tr>"
+        )
+    schema_rows = []
+    for schema in schema_summary["schemas"]:
+        observed_fields = "; ".join(schema["observed_fields"])
+        schema_rows.append(
+            "<tr>"
+            f"<td><strong>{html.escape(schema['family'])}</strong><br><span class='subtle'>{html.escape(', '.join(schema['source_datasets']))}</span></td>"
+            f"<td>{fmt_num(schema['rows'])}</td>"
+            f"<td>{html.escape(schema['media'])}</td>"
+            f"<td><code>{html.escape(observed_fields)}</code></td>"
+            f"<td>{html.escape(schema['qa_status'])}</td>"
+            f"<td>{html.escape(schema['evaluation_plan'])}</td>"
+            "</tr>"
+        )
+    matrix_rows = []
+    for item in schema_summary["prompt_eval_matrix"]:
+        matrix_rows.append(
+            "<tr>"
+            f"<td><strong>{html.escape(item['kpi_surface'])}</strong><br><span class='subtle'>{html.escape(item['source'])}</span></td>"
+            f"<td>{html.escape(item['prompt'])}</td>"
+            f"<td>{html.escape(item['ground_truth'])}</td>"
+            f"<td>{html.escape(item['score'])}</td>"
+            "</tr>"
         )
     trace_rows = []
     for row in rows[:300]:
@@ -521,9 +670,15 @@ def render_report(
     <div class="card"><div class="label">Video rows</div><div class="value">{fmt_num(summary.get('video_rows', 0))}</div></div>
     <div class="card"><div class="label">Selective rows</div><div class="value">{fmt_num(summary.get('selective_download_rows', 0))}</div></div>
   </div>
-  <p class="links"><a href="manifest.jsonl">manifest.jsonl</a><a href="manifest.sqlite">manifest.sqlite</a><a href="endpoint_status.json">endpoint_status.json</a><a href="storage_plan.json">storage_plan.json</a><a href="artifacts/inference_kpi_audit_overview.pptx">PowerPoint</a></p>
+  <p class="links"><a href="manifest.jsonl">manifest.jsonl</a><a href="manifest.sqlite">manifest.sqlite</a><a href="endpoint_status.json">endpoint_status.json</a><a href="storage_plan.json">storage_plan.json</a><a href="schema_summary.json">schema_summary.json</a><a href="artifacts/inference_kpi_audit_overview.pptx">PowerPoint</a></p>
   <h2>Storage Strategy</h2>
   <p>Default policy: <strong>{html.escape(storage_plan.get('policy', 'remote_first_manifest_selective_download'))}</strong>. Bulk copy allowed: <strong>{html.escape(str(storage_plan.get('bulk_copy_allowed', False)))}</strong>. Remote source preferred; local archive fallback is used for this audit.</p>
+  <h2>QA Coverage Answer</h2>
+  <div class="guardrail"><strong>Are there plain question-answer pairs for every KPI group?</strong> No. The audit found <strong>{fmt_num(qa['direct_prompt_trace_rows'])}</strong> direct prompt/output JSON traces in the <code>rgb</code> family, across <strong>{fmt_num(qa['unique_kpi_groups_excluding_batch_root'])}</strong> non-batch KPI group names. Most groups are structured ground truth or media packages, so the next gate must synthesize deterministic prompts and reference answers from labels before comparing Super, Nano, and the autograder.</div>
+  <h2>Data Schema And Evaluation Map</h2>
+  <div class="table-wrap"><table><thead><tr><th>Data family</th><th>Rows</th><th>Observed media</th><th>Observed fields</th><th>QA status</th><th>Evaluation implication</th></tr></thead><tbody>{''.join(schema_rows)}</tbody></table></div>
+  <h2>Prompt And Scoring Defaults</h2>
+  <div class="table-wrap"><table><thead><tr><th>KPI surface</th><th>Prompt shape</th><th>Ground truth source</th><th>Recommended score</th></tr></thead><tbody>{''.join(matrix_rows)}</tbody></table></div>
   <h2>Endpoint Readiness</h2>
   <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Status</th><th>Health</th><th>Seconds</th><th>URL</th></tr></thead><tbody>{''.join(endpoint_rows)}</tbody></table></div>
   <h2>KPI Group Inventory</h2>
@@ -574,7 +729,7 @@ def build_powerpoint(
         "--contact-sheet",
         str(qa_dir / "contact-sheet.png"),
         "--slide-count",
-        "5",
+        "6",
         "--scale",
         "1",
     ]
@@ -600,6 +755,8 @@ def write_deck_modules(
     storage_plan: dict[str, Any],
 ) -> None:
     summary = metadata.get("summary", summarize_rows(rows))
+    schema_summary = build_schema_summary(rows)
+    qa = schema_summary["question_answer_coverage"]
     endpoint_ok = sum(1 for p in endpoint_status.get("endpoints", {}).values() if p.get("ok"))
     endpoint_total = len(endpoint_status.get("endpoints", {}))
     top_groups = top_counts(rows, "kpi_group", 8)
@@ -631,7 +788,7 @@ export function metric(ctx, slide, x, y, label, value, color = GREEN) {
 }
 export function footer(ctx, slide, n) {
   ctx.addText(slide, { x: 38, y: 690, w: 560, h: 12, text: "Inference KPI audit | data-audit-first gate", fontSize: 7, color: MID, typeface: "Arial" });
-  ctx.addText(slide, { x: 1160, y: 690, w: 60, h: 12, text: `${n} / 5`, fontSize: 7, color: MID, align: "right", typeface: "Arial" });
+  ctx.addText(slide, { x: 1160, y: 690, w: 60, h: 12, text: `${n} / 6`, fontSize: 7, color: MID, align: "right", typeface: "Arial" });
 }
 '''
     (slides_dir / "common.mjs").write_text(common, encoding="utf-8")
@@ -640,7 +797,7 @@ export function footer(ctx, slide, n) {
             "slide-01.mjs",
             "slide01",
             "GATE 1 AUDIT",
-            "Inference KPI: what we can safely evaluate first",
+            "Inference KPI: schema first, inference second",
             "No model inference in this gate",
             [
                 ("Manifest", f"{fmt_num(len(rows))} source rows indexed without extraction", "GREEN"),
@@ -652,51 +809,64 @@ export function footer(ctx, slide, n) {
         (
             "slide-02.mjs",
             "slide02",
-            "SOURCE INVENTORY",
-            "The batch is structured, but should not be bulk copied",
-            "Local archive plus GitLab source",
+            "DATA SCHEMA",
+            "The batch is not one uniform QA dataset",
+            "Four evaluation families",
             [
-                ("Archive", f"{fmt_num(len(rows))} entries from batch_1.tar.gz", "GREEN"),
-                ("Video rows", f"{fmt_num(summary.get('video_rows', 0))} videos; {fmt_num(summary.get('unique_clips', 0))} unique clips", "BLUE"),
-                ("Top groups", top_group_text, "PURPLE"),
+                ("RGB VLM traces", f"{row_count(rows, source_dataset='rgb', media_type='json')} prompt/output JSON files plus matching videos", "GREEN"),
+                ("Road and ClipGT", "3D labels, object state, traffic-light state, parquet tables, and recordings", "BLUE"),
+                ("World-model videos", "HD-map and world-scenario video variants need aligned GT before scoring", "PURPLE"),
             ],
-            "The runner records archive member paths so later gates can extract only the selected clip or JSON trace.",
+            "The right next step is prompt synthesis from ground truth, not blanket inference over every archive member.",
         ),
         (
             "slide-03.mjs",
             "slide03",
-            "ENDPOINT TOPOLOGY",
-            "Autograder, Super, and Nano are separate trace columns",
-            "Probe-only in Gate 1",
+            "QA COVERAGE",
+            "Plain question-answer pairs are not present for every KPI",
+            "Direct QA coverage is limited",
             [
-                ("Super Reasoner", "10.57.233.243:8000/v1/models", "GREEN"),
-                ("Nano Reasoner", "10.57.232.110:8000/v1/models", "BLUE"),
-                ("Autograder", "10.63.158.169:8083/process/preset first; 8082/8085/8086 future", "PURPLE"),
+                ("Direct traces", f"{fmt_num(qa['direct_prompt_trace_rows'])} rgb JSON traces include instruction prompts and prior outputs", "GREEN"),
+                ("KPI groups", f"{fmt_num(qa['unique_kpi_groups_excluding_batch_root'])} non-batch KPI group names; most are structured labels or media", "BLUE"),
+                ("Conclusion", "Generate deterministic questions and reference answers from GT before comparing models", "PURPLE"),
             ],
-            "The first inference gate should compare identical prompts/media across these columns and keep raw payloads.",
+            "This prevents us from grading open-ended captions against geometry labels without an explicit rubric.",
         ),
         (
             "slide-04.mjs",
             "slide04",
-            "TRACE CONTRACT",
-            "Every row gets a stable key before scoring",
-            "Decision-complete audit schema",
+            "PROMPT + SCORE",
+            "Each KPI surface needs a task-specific prompt and judge",
+            "Autograder plus exact checks",
             [
-                ("Stable key", "source_dataset + batch_id + kpi_group + clip_id + asset_id + preset", "GREEN"),
-                ("Media provenance", "source URI, local archive member, media variant, expected route", "BLUE"),
-                ("No secrets", "Only credential presence booleans are recorded", "PURPLE"),
+                ("Caption/env", "Ask for JSON scene summary; exact-check weather/time/setting and VLM-score caption fidelity", "GREEN"),
+                ("Road geometry", "Ask presence/count/state first; pixel geometry waits for camera projection from GT", "BLUE"),
+                ("Objects/states", "Compare class, count, motion, traffic-light state, and temporal alignment", "PURPLE"),
             ],
-            "This preserves RF100-style traceability while allowing multiple sources and future competitor endpoints.",
+            "Cosmos-evaluator should receive the same media, prompt, model output, and reference answer per stable key.",
         ),
         (
             "slide-05.mjs",
             "slide05",
+            "TRACE CONTRACT",
+            "Every comparison row is reproducible",
+            "Decision-complete audit schema",
+            [
+                ("Stable key", "source_dataset + batch_id + kpi_group + clip_id + asset_id + preset", "GREEN"),
+                ("Media provenance", "source URI, archive member, media variant, expected route, endpoint payload shape", "BLUE"),
+                ("No secrets", "Only credential presence booleans are recorded", "PURPLE"),
+            ],
+            "This preserves RF100-style traceability while adding multiple sources, models, and autograder routes.",
+        ),
+        (
+            "slide-06.mjs",
+            "slide06",
             "NEXT GATE",
             "Run a small micro-benchmark before scaling",
             "Recommended execution order",
             [
-                ("1. Select slice", "Choose 20-100 clips across KPI groups from the manifest.", "GREEN"),
-                ("2. Fetch selectively", "Extract or download only the chosen videos and prompt JSON.", "BLUE"),
+                ("1. Select slice", "Choose 20-100 clips across rgb, road labels, ClipGT, and world-model videos.", "GREEN"),
+                ("2. Fetch selectively", "Extract only chosen videos, GT bundles, and prompt JSON into horde.", "BLUE"),
                 ("3. Score and compare", "Run autograder, Super, and Nano with full payload/response trace.", "PURPLE"),
             ],
             "Only after row-level trace passes should we add Enterprise Inference Hub competitors or broader batches.",
