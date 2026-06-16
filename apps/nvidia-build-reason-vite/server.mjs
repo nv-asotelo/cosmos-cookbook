@@ -1,5 +1,6 @@
 import express from "express";
 import { execFile, spawn } from "node:child_process";
+import { setMaxListeners } from "node:events";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -504,6 +505,15 @@ function formatTimestamp(seconds) {
   const minutes = Math.floor(value / 60);
   const remainder = value - minutes * 60;
   return `${String(minutes).padStart(2, "0")}:${remainder.toFixed(2).padStart(5, "0")}`;
+}
+
+function formatShortDuration(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 1) return "<1s";
+  if (value < 60) return `${Math.round(value)}s`;
+  const minutes = Math.floor(value / 60);
+  const remainder = Math.round(value - minutes * 60);
+  return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
 }
 
 function positiveNumber(value, fallback = null) {
@@ -1141,11 +1151,8 @@ Use only visible evidence from these frames. Do not invent events between frames
 function reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset, warnings }) {
   const task = stripReasoningFormatInstruction(prompt) || "Summarize the full video.";
   const chunkText = chunks
-    .map((chunk) => {
-      const parsed = chunk.parsed ? JSON.stringify(chunk.parsed) : chunk.content;
-      return `Chunk ${chunk.index + 1} (${chunk.timeRange}, ${chunk.status}): ${parsed || chunk.error || "No output"}`;
-    })
-    .join("\n\n");
+    .map((chunk) => JSON.stringify(compactChunkForReducer(chunk)))
+    .join("\n");
   const failures = failedChunks.length
     ? `\nFailed chunks: ${failedChunks.map((chunk) => `${chunk.index + 1} ${chunk.timeRange}: ${chunk.error}`).join("; ")}`
     : "";
@@ -1169,6 +1176,83 @@ Instructions:
 - Do not include <think> tags.`;
 }
 
+function compactChunkForReducer(chunk) {
+  const parsed = chunk?.parsed && typeof chunk.parsed === "object" ? chunk.parsed : {};
+  const events = Array.isArray(parsed.events) ? parsed.events : [];
+  const uncertainEvents = Array.isArray(parsed.uncertain_events) ? parsed.uncertain_events : [];
+  const summary = chunk.summary || compactChunkSummary(parsed, chunk.content);
+  return {
+    chunk: Number(chunk.index) + 1,
+    status: chunk.status,
+    time_range: chunk.timeRange,
+    summary: summary || "",
+    events: events.slice(0, 24),
+    uncertain_events: uncertainEvents.slice(0, 12),
+    error: chunk.error || undefined
+  };
+}
+
+function stitchReducerMode(config) {
+  const value = String(process.env.REASONER_LONG_USE_MODEL_REDUCER || "").trim().toLowerCase();
+  if (["1", "true", "yes", "always"].includes(value)) return "model";
+  if (value === "detailed" && config?.preset === "detailed") return "model";
+  return "local";
+}
+
+function stitchSubstepDefinitions(mode = "local") {
+  const common = [
+    { key: "collect_outputs", label: "Collect outputs" },
+    { key: "normalize_events", label: "Normalize JSON/events" },
+    { key: "dedupe_timeline", label: "Deduplicate timeline" },
+    { key: "build_final", label: "Build final response" }
+  ];
+  if (mode === "model") {
+    return [
+      common[0],
+      common[1],
+      { key: "compact_prompt", label: "Compact reducer prompt" },
+      { key: "model_reducer", label: "Call reducer NIM" },
+      common[3]
+    ];
+  }
+  return common;
+}
+
+function makeStitchSubsteps(mode = "local") {
+  return stitchSubstepDefinitions(mode).map((step) => ({
+    ...step,
+    status: "pending",
+    progress: 0,
+    detail: ""
+  }));
+}
+
+function estimateStitchSeconds({ chunks = [], mode = "local", promptChars = 0 }) {
+  const count = Math.max(1, chunks.length || 1);
+  if (mode === "model") {
+    return Math.max(20, Math.min(180, Math.round(12 + count * 0.35 + promptChars / 800)));
+  }
+  return Math.max(1.5, Math.min(12, Math.round((0.6 + count * 0.018) * 10) / 10));
+}
+
+function buildTimelineSummary(chunkSummaries) {
+  const summaries = [];
+  for (const item of chunkSummaries) {
+    const summary = String(item.summary || "").trim();
+    if (!summary) continue;
+    const duplicate = summaries.some((existing) => existing.summary.toLowerCase() === summary.toLowerCase());
+    if (duplicate) continue;
+    const [start = "", end = start] = String(item.time_range || "").split(/\s+-\s+/);
+    summaries.push({
+      start,
+      end,
+      summary,
+      source_chunk: item.index
+    });
+  }
+  return summaries;
+}
+
 function timestampSeconds(value) {
   const text = String(value || "");
   const match = text.match(/^(\d+):(\d+(?:\.\d+)?)$/);
@@ -1176,11 +1260,16 @@ function timestampSeconds(value) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
-function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, preset, warnings }) {
+function localLongVideoStitch({ chunks, durationSeconds, failedChunks, onProgress, prompt, preset, warnings }) {
   const wantsJson = /\bjson\b/i.test(String(prompt || ""));
   const events = [];
   const chunkSummaries = [];
-  for (const chunk of chunks) {
+  onProgress?.("collect_outputs", {
+    status: "running",
+    progress: 20,
+    detail: `Reading ${chunks.length} chunk outputs`
+  });
+  for (const [position, chunk] of chunks.entries()) {
     const summary = chunk.summary || compactChunkSummary(chunk.parsed, chunk.content);
     if (summary) {
       chunkSummaries.push({
@@ -1189,6 +1278,26 @@ function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, p
         summary: String(summary).replace(/```(?:json)?|```/gi, "").trim()
       });
     }
+    if (position % 40 === 0 || position === chunks.length - 1) {
+      onProgress?.("collect_outputs", {
+        status: "running",
+        progress: ((position + 1) / Math.max(1, chunks.length)) * 100,
+        detail: `${position + 1}/${chunks.length} chunks scanned`
+      });
+    }
+  }
+  onProgress?.("collect_outputs", {
+    status: "done",
+    progress: 100,
+    detail: `${chunkSummaries.length} summaries collected`
+  });
+  onProgress?.("normalize_events", {
+    status: "running",
+    progress: 15,
+    detail: "Flattening parsed events"
+  });
+  for (const [position, chunk] of chunks.entries()) {
+    const summary = chunk.summary || compactChunkSummary(chunk.parsed, chunk.content);
     const parsedEvents = Array.isArray(chunk.parsed?.events) ? chunk.parsed.events : [];
     for (const event of parsedEvents) {
       const start = String(event.start || chunk.timeRange?.split(" - ")[0] || "");
@@ -1209,8 +1318,30 @@ function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, p
         source_chunk: chunk.index + 1
       });
     }
+    if (position % 40 === 0 || position === chunks.length - 1) {
+      onProgress?.("normalize_events", {
+        status: "running",
+        progress: ((position + 1) / Math.max(1, chunks.length)) * 100,
+        detail: `${events.length} candidate events`
+      });
+    }
   }
+  onProgress?.("normalize_events", {
+    status: "done",
+    progress: 100,
+    detail: `${events.length} candidate events`
+  });
+  onProgress?.("dedupe_timeline", {
+    status: "running",
+    progress: 50,
+    detail: "Sorting by timestamp and removing overlaps"
+  });
   events.sort((left, right) => timestampSeconds(left.start) - timestampSeconds(right.start));
+  onProgress?.("dedupe_timeline", {
+    status: "done",
+    progress: 100,
+    detail: `${events.length} stitched events`
+  });
   const failed = failedChunks.map((chunk) => ({
     index: chunk.index + 1,
     time_range: chunk.timeRange,
@@ -1224,16 +1355,24 @@ function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, p
     failed_chunks: failed
   };
 
+  onProgress?.("build_final", {
+    status: "running",
+    progress: 40,
+    detail: wantsJson ? "Rendering final JSON" : "Rendering final timeline"
+  });
   if (wantsJson) {
-    return JSON.stringify(
+    const content = JSON.stringify(
       {
         events,
+        timeline_summary: buildTimelineSummary(chunkSummaries),
         chunk_summaries: chunkSummaries,
         sampling_limits: samplingLimits
       },
       null,
       2
     );
+    onProgress?.("build_final", { status: "done", progress: 100, detail: "Final JSON ready" });
+    return content;
   }
 
   const timeline =
@@ -1244,7 +1383,7 @@ function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, p
   if (failed.length > 0) {
     limitLines.push(`- Failed chunks: ${failed.map((chunk) => `${chunk.index} (${chunk.time_range})`).join(", ")}`);
   }
-  return [
+  const content = [
     `Long video analysis (${preset})`,
     "",
     `Coverage: ${chunks.length - failed.length}/${chunks.length} chunks across ${formatTimestamp(durationSeconds)}.`,
@@ -1255,6 +1394,8 @@ function localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, p
     "Sampling limits",
     ...limitLines
   ].join("\n");
+  onProgress?.("build_final", { status: "done", progress: 100, detail: "Final timeline ready" });
+  return content;
 }
 
 function longVideoWarnings(durationSeconds, frameCount, preset, config = {}) {
@@ -2060,9 +2201,18 @@ async function submitLongChunk({ chunk, config, durationSeconds, endpoints, mode
   };
 }
 
-async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, failedChunks, model, params, prompt, signal, warnings }) {
-  if (config.preset !== "detailed" && process.env.REASONER_LONG_USE_MODEL_REDUCER !== "1") {
-    const content = localLongVideoStitch({ chunks, durationSeconds, failedChunks, prompt, preset: config.preset, warnings });
+async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, failedChunks, model, onProgress, params, prompt, signal, warnings }) {
+  const reducerMode = stitchReducerMode(config);
+  if (reducerMode !== "model") {
+    const content = localLongVideoStitch({
+      chunks,
+      durationSeconds,
+      failedChunks,
+      onProgress,
+      prompt,
+      preset: config.preset,
+      warnings
+    });
     return {
       status: "success",
       content,
@@ -2086,7 +2236,13 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
     };
   }
 
+  onProgress?.("collect_outputs", { status: "running", progress: 50, detail: `Reading ${chunks.length} chunk outputs` });
+  const compactChunks = chunks.map((chunk) => compactChunkForReducer(chunk));
+  onProgress?.("collect_outputs", { status: "done", progress: 100, detail: `${compactChunks.length} chunks collected` });
+  onProgress?.("normalize_events", { status: "running", progress: 60, detail: "Flattening summaries and events" });
   const text = reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset: config.preset, warnings });
+  onProgress?.("normalize_events", { status: "done", progress: 100, detail: "Chunk JSON normalized" });
+  onProgress?.("compact_prompt", { status: "done", progress: 100, detail: `${text.length.toLocaleString()} reducer prompt chars` });
   const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
     model,
     prompt: text,
@@ -2100,9 +2256,28 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
   delete payload.mm_processor_kwargs;
   payload.max_tokens = config.finalMaxTokens;
   const endpoint = endpoints[0] || baseUrl;
+  const modelReducerStartedAt = Date.now();
+  const estimateSeconds = estimateStitchSeconds({ chunks, mode: "model", promptChars: text.length });
+  let reducerProgressTimer = null;
   try {
+    onProgress?.("model_reducer", {
+      status: "running",
+      progress: 5,
+      detail: `Waiting on reducer NIM; estimate ~${formatShortDuration(estimateSeconds)}`
+    });
+    reducerProgressTimer = setInterval(() => {
+      const elapsed = (Date.now() - modelReducerStartedAt) / 1000;
+      onProgress?.("model_reducer", {
+        status: "running",
+        progress: Math.min(95, 5 + (elapsed / Math.max(1, estimateSeconds)) * 90),
+        detail: `Reducer NIM elapsed ${formatShortDuration(elapsed)}; estimate ~${formatShortDuration(Math.max(0, estimateSeconds - elapsed))}`
+      });
+    }, 2500);
     const data = await postOpenAiJson(endpoint, payload, Math.max(config.chunkTimeoutMs, 90000), signal);
+    if (reducerProgressTimer) clearInterval(reducerProgressTimer);
+    onProgress?.("model_reducer", { status: "done", progress: 100, detail: "Reducer NIM returned" });
     const normalized = normalizeReasonerMessage(data);
+    onProgress?.("build_final", { status: "done", progress: 100, detail: "Final reducer response ready" });
     return {
       status: "success",
       content: normalized.answer || normalized.combined,
@@ -2114,6 +2289,13 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
       payload: redactedPayload
     };
   } catch (error) {
+    if (reducerProgressTimer) clearInterval(reducerProgressTimer);
+    onProgress?.("model_reducer", {
+      status: "error",
+      progress: 100,
+      detail: error instanceof Error ? error.message : "Reducer NIM failed"
+    });
+    onProgress?.("build_final", { status: "running", progress: 45, detail: "Rendering local fallback" });
     const fallback = [
       "Long video analysis completed, but the final stitching pass failed.",
       "",
@@ -2122,6 +2304,7 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
         .map((chunk) => `- ${chunk.timeRange}: ${chunk.parsed?.summary || chunk.content || "No summary"}`),
       ...failedChunks.map((chunk) => `- ${chunk.timeRange}: failed (${chunk.error})`)
     ].join("\n");
+    onProgress?.("build_final", { status: "done", progress: 100, detail: "Local fallback ready" });
     return {
       status: "success",
       content: fallback,
@@ -2131,6 +2314,8 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
       message: error instanceof Error ? `Reducer failed: ${error.message}` : "Reducer failed",
       payload: redactedPayload
     };
+  } finally {
+    if (reducerProgressTimer) clearInterval(reducerProgressTimer);
   }
 }
 
@@ -2401,7 +2586,20 @@ app.post("/api/reason/long/stream", async (request, response) => {
         label: value.label,
         status: value.status,
         progress: Math.max(0, Math.min(100, Math.round(Number(value.progress) || 0))),
-        detail: value.detail || ""
+        detail: value.detail || "",
+        etaSeconds: Number.isFinite(Number(value.etaSeconds)) ? Number(value.etaSeconds) : undefined,
+        elapsedSeconds: Number.isFinite(Number(value.elapsedSeconds)) ? Number(value.elapsedSeconds) : undefined,
+        substeps: Array.isArray(value.substeps)
+          ? value.substeps.map((step) => ({
+              key: step.key,
+              label: step.label,
+              status: step.status,
+              progress: Math.max(0, Math.min(100, Math.round(Number(step.progress) || 0))),
+              detail: step.detail || "",
+              etaSeconds: Number.isFinite(Number(step.etaSeconds)) ? Number(step.etaSeconds) : undefined,
+              elapsedSeconds: Number.isFinite(Number(step.elapsedSeconds)) ? Number(step.elapsedSeconds) : undefined
+            }))
+          : undefined
       }));
     const updateStep = (key, patch) => {
       stepState[key] = { ...stepState[key], ...patch };
@@ -2497,6 +2695,11 @@ app.post("/api/reason/long/stream", async (request, response) => {
         ? Number((extracted.frames.length / extracted.durationSeconds).toFixed(2))
         : extracted.sampleFps;
     const chunks = chunkLongFrames(extracted.frames, config);
+    try {
+      setMaxListeners(Math.max(32, chunks.length + config.concurrency + 8), upstreamAbort.signal);
+    } catch {
+      // Best-effort only; older runtimes still work without raising the listener ceiling.
+    }
     updateStep("plan_chunks", { status: "done", progress: 100, detail: `${chunks.length} chunks planned` });
     updateStep("run_chunks", { status: "pending", progress: 0, detail: `${config.concurrency} concurrent requests` });
     const warnings = longVideoWarnings(extracted.durationSeconds, extracted.frames.length, config.preset, config);
@@ -2629,7 +2832,64 @@ app.post("/api/reason/long/stream", async (request, response) => {
       progress: 100,
       detail: `${doneChunks.length}/${chunks.length} chunks succeeded`
     });
-    updateStep("stitch_timeline", { status: "running", progress: 20, detail: "Combining chunk results" });
+    const reducerMode = stitchReducerMode(config);
+    const stitchStartedAt = Date.now();
+    const stitchEtaSeconds = estimateStitchSeconds({ chunks: results, mode: reducerMode });
+    const stitchSubsteps = makeStitchSubsteps(reducerMode);
+    const stitchWeights = reducerMode === "model" ? [15, 15, 15, 45, 10] : [25, 35, 20, 20];
+    const stitchProgress = () => {
+      const totalWeight = stitchWeights.reduce((sum, weight) => sum + weight, 0) || 1;
+      return stitchSubsteps.reduce((sum, step, index) => {
+        const weight = stitchWeights[index] || 0;
+        return sum + weight * (Math.max(0, Math.min(100, Number(step.progress) || 0)) / 100);
+      }, 0) / totalWeight * 100;
+    };
+    const emitStitchProgress = (message = "Stitching timeline") => {
+      const elapsed = (Date.now() - stitchStartedAt) / 1000;
+      const progressPercent = stitchProgress();
+      const etaSeconds =
+        progressPercent > 4
+          ? Math.max(0, (elapsed / progressPercent) * (100 - progressPercent))
+          : Math.max(0, stitchEtaSeconds - elapsed);
+      updateStep("stitch_timeline", {
+        status: "running",
+        progress: progressPercent,
+        detail:
+          reducerMode === "model"
+            ? "Compacting chunks and waiting for reducer NIM"
+            : "Building stitched timeline locally",
+        elapsedSeconds: elapsed,
+        etaSeconds,
+        substeps: stitchSubsteps
+      });
+      emitLongState({
+        phase: "stitching",
+        message,
+        completedChunks: completed,
+        failedChunks: failed,
+        totalChunks: chunks.length,
+        percent: Math.min(99, Math.round(95 + progressPercent * 0.04)),
+        elapsedSeconds: elapsedSeconds(),
+        etaSeconds
+      });
+    };
+    const updateStitchSubstep = (key, patch) => {
+      const index = stitchSubsteps.findIndex((step) => step.key === key);
+      if (index === -1) return;
+      stitchSubsteps[index] = { ...stitchSubsteps[index], ...patch };
+      emitStitchProgress(stitchSubsteps[index].label);
+    };
+    updateStep("stitch_timeline", {
+      status: "running",
+      progress: 1,
+      detail:
+        reducerMode === "model"
+          ? `Model reducer enabled; estimate ~${formatShortDuration(stitchEtaSeconds)}`
+          : `Local stitcher; estimate ~${formatShortDuration(stitchEtaSeconds)}`,
+      elapsedSeconds: 0,
+      etaSeconds: stitchEtaSeconds,
+      substeps: stitchSubsteps
+    });
     emitLongState({
       phase: "stitching",
       message: "Stitching timeline",
@@ -2637,7 +2897,8 @@ app.post("/api/reason/long/stream", async (request, response) => {
       failedChunks: failed,
       totalChunks: chunks.length,
       percent: 96,
-      elapsedSeconds: elapsedSeconds()
+      elapsedSeconds: elapsedSeconds(),
+      etaSeconds: stitchEtaSeconds
     });
 
     const stitched = await stitchLongVideo({
@@ -2647,6 +2908,7 @@ app.post("/api/reason/long/stream", async (request, response) => {
       endpoints,
       failedChunks,
       model: selectedModel,
+      onProgress: updateStitchSubstep,
       params,
       prompt: body.prompt || body.userPrompt || "",
       signal: upstreamAbort.signal,
@@ -2688,7 +2950,18 @@ app.post("/api/reason/long/stream", async (request, response) => {
     };
 
     sse(response, "raw", result);
-    updateStep("stitch_timeline", { status: "done", progress: 100, detail: "Final response ready" });
+    updateStep("stitch_timeline", {
+      status: "done",
+      progress: 100,
+      detail: `Final response ready in ${formatShortDuration((Date.now() - stitchStartedAt) / 1000)}`,
+      elapsedSeconds: (Date.now() - stitchStartedAt) / 1000,
+      etaSeconds: 0,
+      substeps: stitchSubsteps.map((step) => ({
+        ...step,
+        status: step.status === "error" ? "error" : "done",
+        progress: 100
+      }))
+    });
     emitLongState({
       phase: "complete",
       message: "Complete",

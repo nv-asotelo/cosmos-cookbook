@@ -385,6 +385,31 @@ type TimelineItem = {
   title: string;
   caption: string;
   meta?: string;
+  event?: TimelineEvent;
+};
+
+type SceneObjectGroupId =
+  | "traffic_controls"
+  | "cyclists_vrus"
+  | "pedestrians"
+  | "vehicles"
+  | "ego_policy"
+  | "road_context"
+  | "other_dynamic";
+
+type SceneObjectGroup = {
+  id: SceneObjectGroupId;
+  label: string;
+  shortLabel: string;
+};
+
+type TimelineGroup = {
+  id: string;
+  range: string;
+  items: TimelineItem[];
+  sceneGroupIds: SceneObjectGroupId[];
+  counts: Record<SceneObjectGroupId, number>;
+  isStatic: boolean;
 };
 
 type LongStepProgress = {
@@ -2024,7 +2049,8 @@ function timelineItemsFromEvents(events: TimelineEvent[], fallbackRange = "", fa
       range: rangeFromEvent(event, fallbackRange),
       title: typeFromEvent(event),
       caption: captionFromEvent(event, fallbackCaption),
-      meta: [player, confidence].filter(Boolean).join(" · ")
+      meta: [player, confidence].filter(Boolean).join(" · "),
+      event
     };
   });
 }
@@ -2076,7 +2102,10 @@ function isStaticTimelineItem(item: TimelineItem) {
   const caption = item.caption.trim().toLowerCase();
   return (
     title === "static" ||
+    title === "static observation" ||
+    title === "static context" ||
     title === "static scene" ||
+    title.startsWith("static ") ||
     title === "stationary" ||
     title === "none" ||
     title === "no change" ||
@@ -2100,6 +2129,250 @@ function rangeParts(range: string) {
     start: start || range || "unknown",
     end: end || start || range || "unknown"
   };
+}
+
+const SCENE_OBJECT_GROUPS: SceneObjectGroup[] = [
+  { id: "traffic_controls", label: "Traffic controls", shortLabel: "Traffic" },
+  { id: "cyclists_vrus", label: "Cyclists/VRUs", shortLabel: "VRUs" },
+  { id: "pedestrians", label: "Pedestrians", shortLabel: "Pedestrians" },
+  { id: "vehicles", label: "Vehicles", shortLabel: "Vehicles" },
+  { id: "ego_policy", label: "Ego policy", shortLabel: "Ego" },
+  { id: "road_context", label: "Road context", shortLabel: "Road" },
+  { id: "other_dynamic", label: "Other dynamic", shortLabel: "Other" }
+];
+
+const SCENE_OBJECT_GROUP_ORDER = SCENE_OBJECT_GROUPS.map((group) => group.id);
+
+function defaultSceneObjectFilters(): Record<SceneObjectGroupId, boolean> {
+  return {
+    traffic_controls: true,
+    cyclists_vrus: true,
+    pedestrians: true,
+    vehicles: true,
+    ego_policy: true,
+    road_context: true,
+    other_dynamic: true
+  };
+}
+
+function emptySceneObjectCounts(): Record<SceneObjectGroupId, number> {
+  return {
+    traffic_controls: 0,
+    cyclists_vrus: 0,
+    pedestrians: 0,
+    vehicles: 0,
+    ego_policy: 0,
+    road_context: 0,
+    other_dynamic: 0
+  };
+}
+
+function sceneObjectGroupMeta(id: SceneObjectGroupId) {
+  return SCENE_OBJECT_GROUPS.find((group) => group.id === id) || SCENE_OBJECT_GROUPS[SCENE_OBJECT_GROUPS.length - 1];
+}
+
+function normalizeTimelineText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textHasAny(text: string, terms: string[]) {
+  return terms.some((term) => text.includes(term));
+}
+
+function isGenericSceneType(title: string) {
+  return (
+    title === "event" ||
+    title === "crossing" ||
+    title === "road user" ||
+    title === "vulnerable road user" ||
+    title === "v2x interaction" ||
+    title === "static observation" ||
+    title === "static context" ||
+    title === "waiting" ||
+    title === "wait" ||
+    title === "summary"
+  );
+}
+
+function sceneObjectGroupForItem(item: TimelineItem): SceneObjectGroupId {
+  const title = normalizeTimelineText(item.title || "event");
+  const caption = normalizeTimelineText(item.caption || "");
+  const generic = isGenericSceneType(title);
+
+  if (
+    textHasAny(title, [
+      "traffic signal",
+      "traffic light",
+      "traffic control",
+      "traffic signal state",
+      "traffic light state",
+      "v2i"
+    ])
+  ) {
+    return "traffic_controls";
+  }
+  if (
+    textHasAny(title, [
+      "ego",
+      "yield",
+      "vehicle control",
+      "ego action",
+      "ego policy",
+      "brake",
+      "proceed",
+      "slow",
+      "stop"
+    ]) ||
+    title === "wait" ||
+    (title.includes("waiting") && caption.includes("ego"))
+  ) {
+    return "ego_policy";
+  }
+  if (
+    textHasAny(title, ["pedestrian", "sidewalk", "person walking"]) ||
+    (generic && textHasAny(caption, ["pedestrian", "sidewalk", "person crossing", "people crossing"]))
+  ) {
+    return "pedestrians";
+  }
+  if (
+    textHasAny(title, ["cyclist", "cycling", "bicycle", "bike", "vru", "vulnerable road user"]) ||
+    (generic && textHasAny(caption, ["cyclist", "cycling", "bicycle", "bike", "vulnerable road user"]))
+  ) {
+    return "cyclists_vrus";
+  }
+  if (
+    textHasAny(title, [
+      "vehicle",
+      "suv",
+      "car",
+      "truck",
+      "bus",
+      "van",
+      "motorcycle",
+      "v2v",
+      "oncoming",
+      "turning vehicle"
+    ]) ||
+    (generic && textHasAny(caption, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle"]))
+  ) {
+    return "vehicles";
+  }
+  if (
+    textHasAny(title, ["intersection", "lane", "crosswalk", "right of way", "right-of-way", "road context", "v2x"]) ||
+    (generic && textHasAny(caption, ["crosswalk", "lane marking", "right of way", "right-of-way"]))
+  ) {
+    return "road_context";
+  }
+  if (generic && textHasAny(caption, ["red light", "green light", "traffic light", "traffic signal"])) {
+    return "traffic_controls";
+  }
+  if (isStaticTimelineItem(item)) return "road_context";
+  return "other_dynamic";
+}
+
+function addSceneGroup(groups: SceneObjectGroupId[], id: SceneObjectGroupId) {
+  if (!groups.includes(id)) groups.push(id);
+}
+
+function sceneObjectGroupsForItem(item: TimelineItem): SceneObjectGroupId[] {
+  const title = normalizeTimelineText(item.title || "event");
+  const caption = normalizeTimelineText(item.caption || "");
+  const groups: SceneObjectGroupId[] = [];
+  addSceneGroup(groups, sceneObjectGroupForItem(item));
+
+  if (isStaticTimelineItem(item)) return groups;
+
+  if (
+    textHasAny(title, ["vru", "vulnerable road user", "cyclist", "cycling", "bicycle", "bike", "road user crossing"]) ||
+    textHasAny(caption, ["cyclist", "cycling", "bicycle", "bike", "vulnerable road user"])
+  ) {
+    addSceneGroup(groups, "cyclists_vrus");
+  }
+  if (textHasAny(title, ["pedestrian", "person walking", "sidewalk"]) || textHasAny(caption, ["pedestrian", "sidewalk"])) {
+    addSceneGroup(groups, "pedestrians");
+  }
+  if (
+    textHasAny(title, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle", "oncoming", "turning"]) ||
+    textHasAny(caption, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle"])
+  ) {
+    addSceneGroup(groups, "vehicles");
+  }
+  if (
+    textHasAny(title, ["traffic signal", "traffic light", "traffic control", "v2i"]) ||
+    textHasAny(caption, ["traffic signal", "traffic light", "red light", "green light"])
+  ) {
+    addSceneGroup(groups, "traffic_controls");
+  }
+  if (
+    textHasAny(title, ["ego", "yield", "wait", "stop", "brake", "proceed", "slow", "vehicle control", "ego action", "ego policy"])
+  ) {
+    addSceneGroup(groups, "ego_policy");
+  }
+
+  return groups.sort((left, right) => SCENE_OBJECT_GROUP_ORDER.indexOf(left) - SCENE_OBJECT_GROUP_ORDER.indexOf(right));
+}
+
+function sceneObjectCountsForItems(items: TimelineItem[]) {
+  const counts = emptySceneObjectCounts();
+  for (const item of items) {
+    if (isSummaryTimelineItem(item)) continue;
+    for (const id of sceneObjectGroupsForItem(item)) {
+      counts[id] += 1;
+    }
+  }
+  return counts;
+}
+
+function itemMatchesSceneFilters(item: TimelineItem, filters: Record<SceneObjectGroupId, boolean>) {
+  if (isSummaryTimelineItem(item)) return true;
+  return sceneObjectGroupsForItem(item).some((id) => filters[id]);
+}
+
+function groupTimelineItems(items: TimelineItem[]): TimelineGroup[] {
+  const groups: TimelineGroup[] = [];
+  const byRange = new Map<string, TimelineGroup>();
+  for (const item of items) {
+    const range = item.range || "timestamp unknown";
+    let group = byRange.get(range);
+    if (!group) {
+      group = {
+        id: `group-${groups.length}-${range}`,
+        range,
+        items: [],
+        sceneGroupIds: [],
+        counts: emptySceneObjectCounts(),
+        isStatic: true
+      };
+      byRange.set(range, group);
+      groups.push(group);
+    }
+    const sceneIds = sceneObjectGroupsForItem(item);
+    group.items.push(item);
+    for (const sceneId of sceneIds) {
+      group.counts[sceneId] += 1;
+      if (!group.sceneGroupIds.includes(sceneId)) group.sceneGroupIds.push(sceneId);
+    }
+    group.isStatic = group.items.every(isStaticTimelineItem);
+  }
+  return groups.map((group) => ({
+    ...group,
+    sceneGroupIds: group.sceneGroupIds.sort(
+      (left, right) => SCENE_OBJECT_GROUP_ORDER.indexOf(left) - SCENE_OBJECT_GROUP_ORDER.indexOf(right)
+    )
+  }));
+}
+
+function groupCaption(group: TimelineGroup) {
+  const captions = group.items
+    .map((item) => item.caption.trim())
+    .filter(Boolean)
+    .filter((caption, index, list) => list.indexOf(caption) === index);
+  if (captions.length === 0) return "No caption returned for this time range.";
+  return captions.slice(0, 2).join(" ");
 }
 
 function looksLikeJsonResponse(text: string) {
@@ -4872,33 +5145,127 @@ function SummaryTimelineList({ empty, items }: { empty: string; items: TimelineI
   );
 }
 
-function TimelineOverviewStrip({ items }: { items: TimelineItem[] }) {
-  if (items.length === 0) return null;
-  const firstRange = rangeParts(items[0].range);
-  const lastRange = rangeParts(items[items.length - 1].range);
+function SceneObjectFilterBar({
+  counts,
+  filters,
+  setFilters
+}: {
+  counts: Record<SceneObjectGroupId, number>;
+  filters: Record<SceneObjectGroupId, boolean>;
+  setFilters: (value: Record<SceneObjectGroupId, boolean> | ((current: Record<SceneObjectGroupId, boolean>) => Record<SceneObjectGroupId, boolean>)) => void;
+}) {
+  const activeGroups = SCENE_OBJECT_GROUPS.filter((group) => counts[group.id] > 0);
+  if (activeGroups.length === 0) return null;
+  return (
+    <div className="sceneObjectFilterBar" aria-label="Scene object filters">
+      {activeGroups.map((group) => (
+        <button
+          aria-pressed={filters[group.id]}
+          className="sceneObjectToggle"
+          key={group.id}
+          onClick={() => setFilters((current) => ({ ...current, [group.id]: !current[group.id] }))}
+          type="button"
+        >
+          {group.label} <small>{counts[group.id]}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function GroupedTimelineList({ empty, groups }: { empty: string; groups: TimelineGroup[] }) {
+  if (groups.length === 0) return <p className="timelineEmpty">{empty}</p>;
+  return (
+    <ol className="groupedTimelineList">
+      {groups.map((group, index) => {
+        const isEndpoint = index === 0 || index === groups.length - 1;
+        return (
+          <li className={isEndpoint ? "endpoint" : "middle"} key={group.id}>
+            <span className="dynamicTimelineRail" aria-hidden="true">
+              <span className={isEndpoint ? "dynamicTimelineDot" : "dynamicTimelineTick"} />
+            </span>
+            <article className="timelineGroupCard">
+              <header className="timelineGroupHeader">
+                <div>
+                  <strong>{group.range}</strong>
+                  <p>{groupCaption(group)}</p>
+                </div>
+                <div className="timelineGroupChips" aria-label="Scene objects in this time range">
+                  {group.sceneGroupIds.map((id) => {
+                    const meta = sceneObjectGroupMeta(id);
+                    return (
+                      <span className={`sceneObjectChip sceneObject-${id}`} key={id}>
+                        {meta.shortLabel} <small>{group.counts[id]}</small>
+                      </span>
+                    );
+                  })}
+                </div>
+              </header>
+              <details className="timelineGroupDetails">
+                <summary>{group.items.length === 1 ? "Show event" : `Show ${group.items.length} events`}</summary>
+                <ul>
+                  {group.items.map((item) => {
+                    const metas = sceneObjectGroupsForItem(item).map(sceneObjectGroupMeta);
+                    return (
+                      <li key={item.id}>
+                        <span className="timelineGroupEventChips">
+                          {metas.map((meta) => (
+                            <span className={`sceneObjectChip sceneObject-${meta.id}`} key={meta.id}>
+                              {meta.shortLabel}
+                            </span>
+                          ))}
+                        </span>
+                        <div>
+                          <strong>{item.title || "event"}</strong>
+                          <p>{item.caption || "No caption returned."}</p>
+                          {item.meta ? <small>{item.meta}</small> : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </details>
+            </article>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function TimelineOverviewStrip({ groups }: { groups: TimelineGroup[] }) {
+  if (groups.length === 0) return null;
+  const firstRange = rangeParts(groups[0].range);
+  const lastRange = rangeParts(groups[groups.length - 1].range);
   return (
     <section className="timelineOverviewStrip" aria-label="Stitched timeline overview">
       <div className="timelineOverviewHeader">
         <span>Timeline overview</span>
         <small>
-          {firstRange.start} - {lastRange.end} · {items.length} shown
+          {firstRange.start} - {lastRange.end} · {groups.length} stops
         </small>
       </div>
       <div className="timelineOverviewRail">
-        {items.map((item, index) => {
-          const isEndpoint = index === 0 || index === items.length - 1;
-          const range = rangeParts(item.range);
+        {groups.map((group, index) => {
+          const isEndpoint = index === 0 || index === groups.length - 1;
+          const range = rangeParts(group.range);
+          const title = group.sceneGroupIds
+            .map((id) => `${sceneObjectGroupMeta(id).label} ${group.counts[id]}`)
+            .join(", ");
           return (
             <div
-              className={`timelineOverviewEvent${isStaticTimelineItem(item) ? " static" : " dynamic"}${
-                isEndpoint ? " endpoint" : ""
-              }`}
-              key={item.id || index}
-              title={`${item.range} ${item.title} ${item.caption}`}
+              className={`timelineOverviewEvent${group.isStatic ? " static" : " dynamic"}${isEndpoint ? " endpoint" : ""}`}
+              key={group.id || index}
+              title={`${group.range} ${title}`}
             >
               <span className="timelineOverviewMarker" />
               <strong>{range.start}</strong>
-              <em>{item.title || "event"}</em>
+              <span className="timelineOverviewTags" aria-hidden="true">
+                {group.sceneGroupIds.map((id) => (
+                  <i className={`timelineOverviewTagDot sceneObject-${id}`} key={id} />
+                ))}
+              </span>
+              <em>{group.sceneGroupIds.map((id) => sceneObjectGroupMeta(id).shortLabel).join(" · ")}</em>
             </div>
           );
         })}
@@ -4917,25 +5284,40 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
   const [showDynamic, setShowDynamic] = useState(true);
   const [showStatic, setShowStatic] = useState(false);
   const [showDynamicDetails, setShowDynamicDetails] = useState(false);
+  const [showFlatEvents, setShowFlatEvents] = useState(false);
+  const [sceneFilters, setSceneFilters] = useState<Record<SceneObjectGroupId, boolean>>(defaultSceneObjectFilters);
   useEffect(() => {
     setShowDynamic(true);
     setShowStatic(false);
     setShowDynamicDetails(false);
+    setShowFlatEvents(false);
+    setSceneFilters(defaultSceneObjectFilters());
   }, [timelineSignature]);
-  const visibleItems = items.filter((item) => (isStaticTimelineItem(item) ? showStatic : showDynamic));
   const summaryItems = dynamicItems.filter(isSummaryTimelineItem);
   const dynamicEventItems = dynamicItems.filter((item) => !isSummaryTimelineItem(item));
+  const sceneCounts = sceneObjectCountsForItems(dynamicEventItems);
+  const visibleItems = items
+    .filter((item) => (isStaticTimelineItem(item) ? showStatic : showDynamic))
+    .filter((item) => itemMatchesSceneFilters(item, sceneFilters));
+  const filteredDynamicEventItems = dynamicEventItems.filter((item) => itemMatchesSceneFilters(item, sceneFilters));
   const summaryFirst = showDynamic && !showStatic && summaryItems.length > 0;
-  const overviewItems = summaryFirst ? summaryItems : visibleItems;
+  const overviewItems = summaryFirst ? summaryItems : visibleItems.filter((item) => !isSummaryTimelineItem(item));
+  const overviewGroups = groupTimelineItems(overviewItems);
+  const visibleGroups = groupTimelineItems(visibleItems.filter((item) => !isSummaryTimelineItem(item)));
+  const filteredDynamicGroups = groupTimelineItems(filteredDynamicEventItems);
   const title =
     summaryFirst
       ? "Summary timeline"
       : showDynamic && showStatic
-        ? "Filtered timeline"
+        ? showFlatEvents
+          ? "Flat filtered timeline"
+          : "Grouped scene timeline"
         : showStatic
           ? "Static timeline"
           : showDynamic
-            ? "Dynamic timeline"
+            ? showFlatEvents
+              ? "Flat event timeline"
+              : "Grouped scene timeline"
             : "Timeline filters";
   return (
     <article className="stitchedTimelineCard">
@@ -4946,6 +5328,15 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
         </div>
         <div className="stitchedTimelineActions">
           <span>{visibleItems.length}/{items.length} shown</span>
+          <button
+            aria-pressed={showFlatEvents}
+            className="stitchedTimelineToggle"
+            disabled={dynamicEventItems.length === 0}
+            onClick={() => setShowFlatEvents((value) => !value)}
+            type="button"
+          >
+            {showFlatEvents ? "Flat" : "Grouped"} <small>{showFlatEvents ? dynamicEventItems.length : overviewGroups.length}</small>
+          </button>
           <button
             aria-pressed={showDynamic}
             className="stitchedTimelineToggle"
@@ -4966,7 +5357,8 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
           </button>
         </div>
       </div>
-      {overviewItems.length > 0 ? <TimelineOverviewStrip items={overviewItems} /> : null}
+      <SceneObjectFilterBar counts={sceneCounts} filters={sceneFilters} setFilters={setSceneFilters} />
+      {overviewGroups.length > 0 ? <TimelineOverviewStrip groups={overviewGroups} /> : null}
       {summaryFirst ? (
         <>
           <SummaryTimelineList empty="No summary events were returned." items={summaryItems} />
@@ -4977,15 +5369,21 @@ function StitchedTimeline({ items }: { items: TimelineItem[] }) {
               onClick={() => setShowDynamicDetails((value) => !value)}
               type="button"
             >
-              {showDynamicDetails ? "Hide dynamic events" : `Show ${dynamicEventItems.length} dynamic events`}
+              {showDynamicDetails ? "Hide scene events" : `Show ${filteredDynamicEventItems.length} grouped scene events`}
             </button>
           ) : null}
-          {showDynamicDetails ? (
-            <DynamicTimelineList empty="No dynamic events were returned." items={dynamicEventItems} />
+          {showDynamicDetails && showFlatEvents ? (
+            <DynamicTimelineList empty="No dynamic events match the current scene-object filters." items={filteredDynamicEventItems} />
+          ) : showDynamicDetails ? (
+            <GroupedTimelineList empty="No dynamic groups match the current scene-object filters." groups={filteredDynamicGroups} />
           ) : null}
         </>
       ) : visibleItems.length > 0 ? (
-        <DynamicTimelineList empty="No events match the current timeline filters." items={visibleItems} />
+        showFlatEvents ? (
+          <DynamicTimelineList empty="No events match the current timeline filters." items={visibleItems} />
+        ) : (
+          <GroupedTimelineList empty="No time groups match the current timeline filters." groups={visibleGroups} />
+        )
       ) : (
         <TimelineList empty="Turn on Dynamic or Static to show stitched events." items={visibleItems} />
       )}

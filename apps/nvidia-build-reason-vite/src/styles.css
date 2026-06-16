@@ -2628,6 +2628,176 @@ select {
   color: var(--green);
 }
 
+.sceneObjectFilterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid #20390a;
+  border-radius: 8px;
+  background: #070d04;
+  padding: 10px;
+}
+
+.sceneObjectToggle,
+.sceneObjectChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 27px;
+  border: 1px solid #31530b;
+  border-radius: 999px;
+  background: #111a0b;
+  color: #dcebc8;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.sceneObjectToggle small,
+.sceneObjectChip small {
+  display: inline-grid;
+  min-width: 20px;
+  min-height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  background: #292929;
+  color: #dcebc8;
+  font-size: 10px;
+}
+
+.sceneObjectToggle:hover,
+.sceneObjectToggle[aria-pressed="true"] {
+  border-color: var(--green);
+  background: #1d2a08;
+  color: var(--green);
+}
+
+.sceneObjectToggle[aria-pressed="true"] small {
+  background: var(--green);
+  color: #081103;
+}
+
+.sceneObjectToggle[aria-pressed="false"] {
+  opacity: 0.48;
+}
+
+.groupedTimelineList {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.groupedTimelineList > li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  color: #d6dfcd;
+}
+
+.groupedTimelineList > li:first-child .dynamicTimelineRail::before {
+  top: 11px;
+}
+
+.groupedTimelineList > li:last-child .dynamicTimelineRail::before {
+  bottom: calc(100% - 11px);
+}
+
+.timelineGroupCard {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px 8px;
+  border: 1px solid #31530b;
+  border-radius: 8px;
+  background: #0b1307;
+  padding: 12px;
+}
+
+.timelineGroupHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.timelineGroupHeader strong {
+  color: var(--green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+
+.timelineGroupHeader p {
+  margin: 4px 0 0;
+  color: #e7efe0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.timelineGroupChips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 320px;
+}
+
+.timelineGroupDetails {
+  border-top: 1px solid #20390a;
+  padding-top: 8px;
+}
+
+.timelineGroupDetails summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.timelineGroupDetails ul {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timelineGroupDetails li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid #20390a;
+  border-radius: 8px;
+  background: #070d04;
+  padding: 9px;
+}
+
+.timelineGroupEventChips {
+  display: grid;
+  gap: 5px;
+  justify-items: start;
+}
+
+.timelineGroupEventChips .sceneObjectChip {
+  min-height: 22px;
+}
+
+.timelineGroupDetails strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.timelineGroupDetails p {
+  margin: 3px 0 0;
+  color: #d6dfcd;
+  font-size: 12px;
+}
+
+.timelineGroupDetails small {
+  color: #8f9d83;
+}
+
 .timelineOverviewStrip {
   display: grid;
   gap: 10px;
@@ -2727,6 +2897,76 @@ select {
   font-weight: 900;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.timelineOverviewTags {
+  display: flex;
+  gap: 3px;
+  min-height: 8px;
+}
+
+.timelineOverviewTagDot {
+  display: block;
+  width: 16px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--green);
+}
+
+.sceneObject-traffic_controls {
+  border-color: #9fcc2e;
+}
+
+.sceneObject-cyclists_vrus {
+  border-color: #27d5a4;
+}
+
+.sceneObject-pedestrians {
+  border-color: #55b9ff;
+}
+
+.sceneObject-vehicles {
+  border-color: #f0c85a;
+}
+
+.sceneObject-ego_policy {
+  border-color: #ff8a3d;
+}
+
+.sceneObject-road_context {
+  border-color: #b38cff;
+}
+
+.sceneObject-other_dynamic {
+  border-color: #8f9d83;
+}
+
+.timelineOverviewTagDot.sceneObject-traffic_controls {
+  background: #9fcc2e;
+}
+
+.timelineOverviewTagDot.sceneObject-cyclists_vrus {
+  background: #27d5a4;
+}
+
+.timelineOverviewTagDot.sceneObject-pedestrians {
+  background: #55b9ff;
+}
+
+.timelineOverviewTagDot.sceneObject-vehicles {
+  background: #f0c85a;
+}
+
+.timelineOverviewTagDot.sceneObject-ego_policy {
+  background: #ff8a3d;
+}
+
+.timelineOverviewTagDot.sceneObject-road_context {
+  background: #b38cff;
+}
+
+.timelineOverviewTagDot.sceneObject-other_dynamic {
+  background: #8f9d83;
 }
 
 .rawResponseDetails {
