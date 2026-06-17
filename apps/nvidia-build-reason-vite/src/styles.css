@@ -2917,12 +2917,20 @@ select {
   border-color: #9fcc2e;
 }
 
-.sceneObject-cyclists_vrus {
+.sceneObject-cyclists {
   border-color: #27d5a4;
 }
 
-.sceneObject-pedestrians {
+.sceneObject-vulnerable_road_users {
   border-color: #55b9ff;
+}
+
+.sceneObject-pedestrian_crossings {
+  border-color: #ff6bb5;
+}
+
+.sceneObject-pedestrians {
+  border-color: #50c7ff;
 }
 
 .sceneObject-vehicles {
@@ -2945,12 +2953,20 @@ select {
   background: #9fcc2e;
 }
 
-.timelineOverviewTagDot.sceneObject-cyclists_vrus {
+.timelineOverviewTagDot.sceneObject-cyclists {
   background: #27d5a4;
 }
 
-.timelineOverviewTagDot.sceneObject-pedestrians {
+.timelineOverviewTagDot.sceneObject-vulnerable_road_users {
   background: #55b9ff;
+}
+
+.timelineOverviewTagDot.sceneObject-pedestrian_crossings {
+  background: #ff6bb5;
+}
+
+.timelineOverviewTagDot.sceneObject-pedestrians {
+  background: #50c7ff;
 }
 
 .timelineOverviewTagDot.sceneObject-vehicles {

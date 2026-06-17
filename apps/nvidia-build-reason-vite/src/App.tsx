@@ -390,7 +390,9 @@ type TimelineItem = {
 
 type SceneObjectGroupId =
   | "traffic_controls"
-  | "cyclists_vrus"
+  | "cyclists"
+  | "vulnerable_road_users"
+  | "pedestrian_crossings"
   | "pedestrians"
   | "vehicles"
   | "ego_policy"
@@ -2133,7 +2135,9 @@ function rangeParts(range: string) {
 
 const SCENE_OBJECT_GROUPS: SceneObjectGroup[] = [
   { id: "traffic_controls", label: "Traffic controls", shortLabel: "Traffic" },
-  { id: "cyclists_vrus", label: "Cyclists/VRUs", shortLabel: "VRUs" },
+  { id: "cyclists", label: "Cyclists", shortLabel: "Cyclists" },
+  { id: "vulnerable_road_users", label: "VRUs", shortLabel: "VRUs" },
+  { id: "pedestrian_crossings", label: "Pedestrian crossings", shortLabel: "Crossing" },
   { id: "pedestrians", label: "Pedestrians", shortLabel: "Pedestrians" },
   { id: "vehicles", label: "Vehicles", shortLabel: "Vehicles" },
   { id: "ego_policy", label: "Ego policy", shortLabel: "Ego" },
@@ -2146,7 +2150,9 @@ const SCENE_OBJECT_GROUP_ORDER = SCENE_OBJECT_GROUPS.map((group) => group.id);
 function defaultSceneObjectFilters(): Record<SceneObjectGroupId, boolean> {
   return {
     traffic_controls: true,
-    cyclists_vrus: true,
+    cyclists: true,
+    vulnerable_road_users: true,
+    pedestrian_crossings: true,
     pedestrians: true,
     vehicles: true,
     ego_policy: true,
@@ -2158,7 +2164,9 @@ function defaultSceneObjectFilters(): Record<SceneObjectGroupId, boolean> {
 function emptySceneObjectCounts(): Record<SceneObjectGroupId, number> {
   return {
     traffic_controls: 0,
-    cyclists_vrus: 0,
+    cyclists: 0,
+    vulnerable_road_users: 0,
+    pedestrian_crossings: 0,
     pedestrians: 0,
     vehicles: 0,
     ego_policy: 0,
@@ -2181,6 +2189,67 @@ function normalizeTimelineText(value: string) {
 
 function textHasAny(text: string, terms: string[]) {
   return terms.some((term) => text.includes(term));
+}
+
+function removeEgoVehicleMentions(text: string) {
+  return text
+    .replace(/\bego[-\s]?(?:vehicle|car)\b/g, "")
+    .replace(/\bthe ego\b/g, "")
+    .replace(/\bego\b/g, "");
+}
+
+function captionHasEgoVehicleSubject(caption: string) {
+  return /^(?:the\s+)?ego[-\s]?(?:vehicle|car)\b/.test(caption) || /\bego[-\s]?(?:vehicle|car)\b/.test(caption);
+}
+
+function titleHasNonEgoVehicle(title: string) {
+  if (title.includes("ego")) return false;
+  return textHasAny(title, [
+    "vehicle crossing",
+    "vehicle interaction",
+    "vehicle behavior",
+    "vehicle waiting",
+    "vehicle starts moving",
+    "vehicle movement",
+    "vehicle driving",
+    "turning vehicle",
+    "oncoming vehicle",
+    "parked vehicle",
+    "car approaching",
+    "suv",
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "motorcycle",
+    "v2v",
+    "oncoming"
+  ]);
+}
+
+function captionHasNonEgoVehicle(caption: string) {
+  return textHasAny(removeEgoVehicleMentions(caption), [
+    "vehicle",
+    "suv",
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "motorcycle",
+    "hatchback",
+    "sedan"
+  ]);
+}
+
+function hasCyclistSignal(title: string, caption: string) {
+  return textHasAny(title, ["cyclist", "cycling", "bicycle", "bike"]) || textHasAny(caption, ["cyclist", "cycling", "bicycle", "bike"]);
+}
+
+function hasPedestrianCrossingSignal(title: string, caption: string) {
+  return (
+    textHasAny(title, ["pedestrian crossing", "crossing pedestrian", "person crossing", "people crossing", "pedestrian movement"]) ||
+    textHasAny(caption, ["pedestrian crossing", "pedestrians crossing", "person crossing", "people crossing", "crossing the road", "crossing the intersection"])
+  );
 }
 
 function isGenericSceneType(title: string) {
@@ -2232,32 +2301,30 @@ function sceneObjectGroupForItem(item: TimelineItem): SceneObjectGroupId {
   ) {
     return "ego_policy";
   }
+  if (captionHasEgoVehicleSubject(caption) && !titleHasNonEgoVehicle(title)) {
+    return "ego_policy";
+  }
+  if (hasPedestrianCrossingSignal(title, caption)) {
+    return "pedestrian_crossings";
+  }
+  if (hasCyclistSignal(title, caption)) {
+    return "cyclists";
+  }
   if (
-    textHasAny(title, ["pedestrian", "sidewalk", "person walking"]) ||
-    (generic && textHasAny(caption, ["pedestrian", "sidewalk", "person crossing", "people crossing"]))
+    textHasAny(title, ["vru", "vulnerable road user", "road user crossing"]) ||
+    (generic && textHasAny(caption, ["vulnerable road user", "road user"]))
+  ) {
+    return "vulnerable_road_users";
+  }
+  if (
+    textHasAny(title, ["pedestrian", "sidewalk", "person walking", "pedestrian presence"]) ||
+    (generic && textHasAny(caption, ["pedestrian", "sidewalk"]))
   ) {
     return "pedestrians";
   }
   if (
-    textHasAny(title, ["cyclist", "cycling", "bicycle", "bike", "vru", "vulnerable road user"]) ||
-    (generic && textHasAny(caption, ["cyclist", "cycling", "bicycle", "bike", "vulnerable road user"]))
-  ) {
-    return "cyclists_vrus";
-  }
-  if (
-    textHasAny(title, [
-      "vehicle",
-      "suv",
-      "car",
-      "truck",
-      "bus",
-      "van",
-      "motorcycle",
-      "v2v",
-      "oncoming",
-      "turning vehicle"
-    ]) ||
-    (generic && textHasAny(caption, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle"]))
+    titleHasNonEgoVehicle(title) ||
+    (generic && captionHasNonEgoVehicle(caption))
   ) {
     return "vehicles";
   }
@@ -2286,18 +2353,24 @@ function sceneObjectGroupsForItem(item: TimelineItem): SceneObjectGroupId[] {
 
   if (isStaticTimelineItem(item)) return groups;
 
-  if (
-    textHasAny(title, ["vru", "vulnerable road user", "cyclist", "cycling", "bicycle", "bike", "road user crossing"]) ||
-    textHasAny(caption, ["cyclist", "cycling", "bicycle", "bike", "vulnerable road user"])
-  ) {
-    addSceneGroup(groups, "cyclists_vrus");
+  const hasCyclist = hasCyclistSignal(title, caption);
+  const hasPedestrianCrossing = hasPedestrianCrossingSignal(title, caption);
+
+  if (hasCyclist) {
+    addSceneGroup(groups, "cyclists");
   }
-  if (textHasAny(title, ["pedestrian", "person walking", "sidewalk"]) || textHasAny(caption, ["pedestrian", "sidewalk"])) {
+  if (!hasCyclist && (textHasAny(title, ["vru", "vulnerable road user", "road user crossing"]) || textHasAny(caption, ["vulnerable road user"]))) {
+    addSceneGroup(groups, "vulnerable_road_users");
+  }
+  if (hasPedestrianCrossing) {
+    addSceneGroup(groups, "pedestrian_crossings");
+  }
+  if (!hasPedestrianCrossing && (textHasAny(title, ["pedestrian", "person walking", "sidewalk", "pedestrian presence"]) || textHasAny(caption, ["pedestrian", "sidewalk"]))) {
     addSceneGroup(groups, "pedestrians");
   }
   if (
-    textHasAny(title, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle", "oncoming", "turning"]) ||
-    textHasAny(caption, ["vehicle", "suv", "car", "truck", "bus", "van", "motorcycle"])
+    titleHasNonEgoVehicle(title) ||
+    captionHasNonEgoVehicle(caption)
   ) {
     addSceneGroup(groups, "vehicles");
   }
@@ -2307,9 +2380,7 @@ function sceneObjectGroupsForItem(item: TimelineItem): SceneObjectGroupId[] {
   ) {
     addSceneGroup(groups, "traffic_controls");
   }
-  if (
-    textHasAny(title, ["ego", "yield", "wait", "stop", "brake", "proceed", "slow", "vehicle control", "ego action", "ego policy"])
-  ) {
+  if (textHasAny(title, ["ego", "yield", "wait", "stop", "brake", "proceed", "slow", "vehicle control", "ego action", "ego policy"]) || captionHasEgoVehicleSubject(caption)) {
     addSceneGroup(groups, "ego_policy");
   }
 
