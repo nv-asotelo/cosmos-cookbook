@@ -2090,9 +2090,15 @@ def _iter_server_examples(raw=None, limit=40):
 
 
 def _default_sample_video():
-    sample_video = f"{HOME}/cosmos-reason2/assets/sample.mp4"
-    if os.path.exists(sample_video):
-        return sample_video
+    sample_candidates = [
+        os.environ.get("BYO_VIDEO_SAMPLE_VIDEO", ""),
+        f"{HOME}/cosmos-reason2/assets/sample.mp4",
+        "/home/horde/cosmos-reason2/assets/sample.mp4",
+        "/var/local/home/horde/cosmos-reason2/assets/sample.mp4",
+    ]
+    for sample_video in sample_candidates:
+        if sample_video and os.path.exists(sample_video):
+            return sample_video
 
     examples = list(_iter_server_examples(limit=80))
     videos = [
@@ -2104,6 +2110,7 @@ def _default_sample_video():
         return ""
 
     preferred_names = (
+        "sample.mp4",
         "agibot.mp4",
         "embodied-ego-drill.mp4",
         "lingoqa-red-light-slowdown.mp4",
