@@ -1429,6 +1429,533 @@ def _reasoning_button_label(reasoning_on):
 def _reasoning_button_update(reasoning_on):
     return gr.update(value=_reasoning_button_label(reasoning_on))
 
+
+_VITE_EXAMPLE_GROUPS = [
+    ("build", "build.nvidia.com"),
+    ("vss", "VSS"),
+    ("av-dense-captioning", "AV"),
+    ("embodied-reasoning", "Embodied"),
+]
+_VITE_STANDARD_DEFAULTS = {
+    "topP": 0.8,
+    "topK": 20,
+    "repetitionPenalty": 1.0,
+    "presencePenalty": 1.5,
+    "temperature": 0.7,
+}
+_VITE_REASONING_DEFAULTS = {
+    "topP": 0.95,
+    "topK": 20,
+    "repetitionPenalty": 1.0,
+    "presencePenalty": 0.0,
+    "temperature": 0.6,
+}
+
+
+def _vite_examples():
+    robot_arm_trajectory_prompt = (
+        'You are given the task "Move the tape into the basket". Specify the 2D trajectory your end '
+        'effector should follow in pixel space. Return the trajectory coordinates in JSON format like '
+        'this: {"point_2d": [x, y], "label": "gripper trajectory"}.\n\n'
+        "Prompt format:\n"
+        "Answer the question using the following format:\n"
+        "<think>\n"
+        "Your reasoning.\n"
+        "</think>\n"
+        "Write your final answer immediately after the </think> tag."
+    )
+    robot_ego_drill_prompt = (
+        'You are given the task "Pick up the Black+Decker drill and place it into the yellow box". '
+        "Specify the 2D trajectory your end effector should follow in pixel space. Return the trajectory "
+        'coordinates in JSON format like this: {"point_2d": [x, y], "label": "gripper trajectory"}.'
+    )
+    alpamayo_lingoqa_system = "Answer the user's driving-scene question from visible evidence in the sampled frames."
+    av_ego_action_prompt = (
+        "Analyze this rapid ego-vehicle driving scene at high temporal resolution. Focus on what the ego "
+        "car should do, not generic scene captioning.\n\n"
+        'Use only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. '
+        "Mention road actors, traffic controls, lane markings, obstacles, and right-of-way cues only when "
+        "they affect risk or ego action.\n\n"
+        "Use concrete ego actions such as maintain lane, maintain speed, slow, brake, yield, stop, wait, "
+        "creep forward, steer left/right within lane, proceed, or accelerate. Do not infer hidden actors "
+        "or between-sample events. If the scene is static and does not change the ego action, omit it from "
+        "the event list.\n\n"
+        'Return the final answer as valid JSON with this shape: {"events":[{"start":"mm:ss.ff",'
+        '"end":"mm:ss.ff","risk":"","ego_action":"","confidence":0.0,"caption":""}],'
+        '"timeline_summary":[{"start":"mm:ss.ff","end":"mm:ss.ff","ego_policy":"","key_reason":""}],'
+        '"uncertain_events":[],"sampling_limits":{"rapid_motion":"","occlusion":"","would_higher_fps_help":true}}.'
+        "\n\nAnswer the question using the following format:\n\n"
+        "<think>\n"
+        "Your reasoning.\n"
+        "</think>\n\n"
+        "Write your final answer immediately after the </think> tag."
+    )
+    lingoqa_prompt = 'What is the current action and its justification? Answer in the form "action, justification".'
+
+    examples = [
+        {
+            "id": "robotics-next-action",
+            "title": "Robotics Next Action Prediction",
+            "group": "build",
+            "mediaUrl": "/examples/agibot.mp4",
+            "mediaName": "agibot.mp4",
+            "mediaKind": "video",
+            "userPrompt": "What can be the next immediate action?",
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "parameters": {"framesPerSecond": 4, "maxTokens": 4096},
+        },
+        {
+            "id": "robot-arm",
+            "title": "robot arm pick up stuff",
+            "group": "build",
+            "mediaUrl": "/examples/robot_tape.png",
+            "mediaName": "robot_tape.png",
+            "mediaKind": "image",
+            "userPrompt": robot_arm_trajectory_prompt,
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "parameters": {
+                "framesPerSecond": 2,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "sdg-critic",
+            "title": "SDG critic",
+            "group": "build",
+            "mediaUrl": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_rejection_sampling.mp4",
+            "mediaName": "sdg-critic.mp4",
+            "mediaKind": "video",
+            "userPrompt": (
+                "Approve or reject this generated video for inclusion in a dataset for physical world model "
+                "ai training. It must perfectly adhere to physics, object permanence, and have no anomalies. "
+                "Any issue or concern causes rejection. Answer with Approve or Reject only."
+            ),
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "warehouse",
+            "title": "warehouse",
+            "group": "build",
+            "mediaUrl": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_warehouse.mp4",
+            "mediaName": "warehouse.mp4",
+            "mediaKind": "video",
+            "userPrompt": "Which worker picked up the dropped box?",
+            "systemPrompt": "You are a helpful warehouse monitoring system.",
+            "reasoning": True,
+            "parameters": {
+                "framesPerSecond": 2,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "forklift",
+            "title": "forklift load weight evaluation",
+            "group": "build",
+            "mediaUrl": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_forklift.jpg",
+            "mediaName": "forklift-load.jpg",
+            "mediaKind": "image",
+            "userPrompt": (
+                "Locate the bounding box of the load and determine if its size and weight of load within the "
+                "forklift's limits. Estimate weights. Return all as json. Include json location, estimated "
+                "weight of the load, and if it's in the limit."
+            ),
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": False,
+            "parameters": {
+                "framesPerSecond": 2,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "mail-package",
+            "title": "mail package",
+            "group": "build",
+            "mediaUrl": "https://assets.ngc.nvidia.com/products/api-catalog/cosmos-reason2/cr2_mail_package.mp4",
+            "mediaName": "mail-package.mp4",
+            "mediaKind": "video",
+            "userPrompt": "Is the person allowed to pick up the packages?",
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "parameters": {
+                "framesPerSecond": 2,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.8,
+            },
+        },
+        {
+            "id": "warehouse-row-d-box",
+            "title": "Warehouse row D shelf placement",
+            "group": "vss",
+            "mediaUrl": "/examples/warehouse_7min.mp4",
+            "mediaName": "warehouse_7min.mp4",
+            "mediaKind": "video",
+            "userPrompt": (
+                "In the first two minutes of the video, who put the box on the shelves on row D?\n\n"
+                "Use only visible evidence from the video. Identify the person by stable visual details such as "
+                "clothing color, position, or direction of travel, and cite the timestamp range where the box is "
+                "placed on row D. If the person cannot be determined from visible evidence, say so and explain "
+                "what is ambiguous."
+            ),
+            "systemPrompt": (
+                "You are a helpful video security analyst. Use only visible evidence, preserve timestamps, "
+                "and do not infer actions that are not visible."
+            ),
+            "reasoning": True,
+            "longVideoEnabled": True,
+            "parameters": {
+                "framesPerSecond": 6,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "tennis-temporal-events",
+            "title": "Tennis temporal events",
+            "group": "vss",
+            "mediaUrl": "/examples/tennis_nim_safe.mp4",
+            "mediaName": "tennis_nim_safe.mp4",
+            "mediaKind": "video",
+            "userPrompt": (
+                "Analyze this tennis clip for sports analytics. Identify every visible serve, racquet-ball "
+                "hit/contact, and point-scoring or end-of-point moment. Use the video timeline, not frame "
+                'numbers. Return only events that are visible in the clip; do not infer hidden, blurred, or '
+                "between-sample events.\n\n"
+                'Use timestamps in "mm:ss.ff" format. For each event, include "start", "end", "event_type" '
+                '("serve", "hit", "score", or "uncertain"), "player" ("near", "far", "left", "right", or '
+                '"unknown"), "confidence" from 0 to 1, and "caption". A "score" event requires visible evidence '
+                "that the point ended, such as a ball landing out, a winner, a net error, a double bounce, a "
+                'clear player reaction, or a scoreboard change. If that evidence is not visible, put it in '
+                '"uncertain_events" rather than "events".\n\n'
+                'Return the final answer as valid JSON with this shape: {"events": [], "uncertain_events": [], '
+                '"sampling_limits": {"motion_blur": "", "occlusion": "", "camera_or_sampling_limits": "", '
+                '"would_higher_fps_help": true}}.'
+            ),
+            "systemPrompt": "You are a sports video analyst. Use only visible evidence and preserve timestamps.",
+            "reasoning": True,
+            "longVideoEnabled": True,
+            "parameters": {
+                "framesPerSecond": 6,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "av-ego-rapid-action-plan",
+            "title": "AV: rapid ego-car action plan",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/av-ego-rapid-scene.mp4",
+            "mediaName": "av-ego-rapid-scene.mp4",
+            "mediaKind": "video",
+            "userPrompt": av_ego_action_prompt,
+            "systemPrompt": (
+                "You are an autonomous-driving video analyst. Use only visible evidence, preserve exact "
+                "timestamps, separate static context from dynamic actors, and give conservative concrete "
+                "ego-car actions."
+            ),
+            "reasoning": True,
+            "longVideoEnabled": True,
+            "parameters": {
+                "framesPerSecond": 8,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "lingoqa-red-light-slowdown",
+            "title": "AV LingoQA: slow for red light",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/lingoqa-red-light-slowdown.mp4",
+            "mediaName": "lingoqa-red-light-slowdown.mp4",
+            "mediaKind": "video",
+            "userPrompt": lingoqa_prompt,
+            "systemPrompt": alpamayo_lingoqa_system,
+            "reasoning": True,
+            "judgeNote": "Lingo-Judge: Cosmos3 0.854, Cosmos Reason 2 0.198, Cosmos Reason 1 0.199.",
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "lingoqa-return-left-after-truck",
+            "title": "AV LingoQA: return left after truck",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/lingoqa-return-left-after-truck.mp4",
+            "mediaName": "lingoqa-return-left-after-truck.mp4",
+            "mediaKind": "video",
+            "userPrompt": lingoqa_prompt,
+            "systemPrompt": alpamayo_lingoqa_system,
+            "reasoning": True,
+            "judgeNote": "Lingo-Judge: Cosmos3 0.870, Cosmos Reason 2 0.231, Cosmos Reason 1 0.316.",
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "lingoqa-green-light-accelerate",
+            "title": "AV LingoQA: accelerate on green",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/lingoqa-green-light-accelerate.mp4",
+            "mediaName": "lingoqa-green-light-accelerate.mp4",
+            "mediaKind": "video",
+            "userPrompt": lingoqa_prompt,
+            "systemPrompt": alpamayo_lingoqa_system,
+            "reasoning": True,
+            "judgeNote": "Lingo-Judge: Cosmos3 0.781, Cosmos Reason 2 0.277, Cosmos Reason 1 0.263.",
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "lingoqa-no-cycle-lane",
+            "title": "AV LingoQA: no dedicated cycle lane",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/lingoqa-no-cycle-lane.mp4",
+            "mediaName": "lingoqa-no-cycle-lane.mp4",
+            "mediaKind": "video",
+            "userPrompt": "Is there a designated cycle lane on this road? If yes, where is it?",
+            "systemPrompt": alpamayo_lingoqa_system,
+            "reasoning": True,
+            "judgeNote": "Lingo-Judge: Cosmos3 0.799, Cosmos Reason 2 0.094, Cosmos Reason 1 0.086.",
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "lingoqa-no-traffic-lights",
+            "title": "AV LingoQA: no traffic lights",
+            "group": "av-dense-captioning",
+            "mediaUrl": "/examples/lingoqa-no-traffic-lights.mp4",
+            "mediaName": "lingoqa-no-traffic-lights.mp4",
+            "mediaKind": "video",
+            "userPrompt": "Are there any traffic lights? What color are they showing?",
+            "systemPrompt": alpamayo_lingoqa_system,
+            "reasoning": True,
+            "judgeNote": "Lingo-Judge: Cosmos3 0.576, Cosmos Reason 2 0.037, Cosmos Reason 1 0.078.",
+            "parameters": {
+                "framesPerSecond": 4,
+                "maxTokens": 4096,
+                "presencePenalty": 0,
+                "repetitionPenalty": 1.0,
+                "temperature": 0.6,
+                "topK": 20,
+                "topP": 0.95,
+            },
+        },
+        {
+            "id": "robot-ego-drill-planning",
+            "title": "Robot ego planning: drill to yellow box",
+            "group": "embodied-reasoning",
+            "mediaUrl": "/examples/embodied-ego-drill.mp4",
+            "mediaName": "embodied-ego-drill.mp4",
+            "mediaKind": "video",
+            "userPrompt": robot_ego_drill_prompt,
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "longVideoEnabled": False,
+            "parameters": {
+                "framesPerSecond": 6,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+        {
+            "id": "robot-arm-embodied",
+            "title": "robot arm pick up stuff",
+            "group": "embodied-reasoning",
+            "mediaUrl": "/examples/robot_tape.png",
+            "mediaName": "robot_tape.png",
+            "mediaKind": "image",
+            "userPrompt": robot_arm_trajectory_prompt,
+            "systemPrompt": "You are a helpful assistant.",
+            "reasoning": True,
+            "parameters": {
+                "framesPerSecond": 2,
+                "maxTokens": 4096,
+                "repetitionPenalty": 1.2,
+                "temperature": 0.3,
+                "topP": 0.3,
+            },
+        },
+    ]
+    return examples
+
+
+def _vite_example_media_source(media_url):
+    media_url = str(media_url or "")
+    if media_url.startswith("/examples/"):
+        wanted = os.path.basename(media_url)
+        for _label, path in _iter_server_examples(limit=200):
+            if os.path.basename(path) == wanted:
+                return path
+    return media_url
+
+
+def _vite_example_effective_params(example):
+    params = dict(_VITE_REASONING_DEFAULTS if example.get("reasoning") else _VITE_STANDARD_DEFAULTS)
+    params.update(example.get("parameters") or {})
+    return {
+        "framesPerSecond": params.get("framesPerSecond", DEFAULT_FRAMES_PER_SECOND if "DEFAULT_FRAMES_PER_SECOND" in globals() else 2),
+        "maxPixels": params.get("maxPixels", DEFAULT_MAX_PIXELS),
+        "maxTokens": params.get("maxTokens", DEFAULT_MAX_TOKENS),
+        "temperature": params.get("temperature"),
+        "topP": params.get("topP"),
+        "topK": params.get("topK"),
+        "repetitionPenalty": params.get("repetitionPenalty"),
+        "presencePenalty": params.get("presencePenalty"),
+    }
+
+
+def _vite_example_prompt(example):
+    prompt = example.get("userPrompt") or ""
+    if example.get("reasoning"):
+        return _append_reasoning_instruction(prompt)
+    return _remove_reasoning_instruction(prompt)
+
+
+def _fmt_param(value):
+    if value is None:
+        return "-"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _vite_examples_catalog_html():
+    examples = _vite_examples()
+    if not examples:
+        return ""
+
+    model_id = _SERVER_MODEL_ID or MODEL_NAME or "Detecting model..."
+    rows = []
+    for group_id, group_label in _VITE_EXAMPLE_GROUPS:
+        group_examples = [example for example in examples if example.get("group", "build") == group_id]
+        if not group_examples:
+            continue
+        rows.append(
+            f'<tr class="vite-example-subhead"><th colspan="15">'
+            f'{_html.escape(group_label)} ({len(group_examples)})</th></tr>'
+        )
+        for example in group_examples:
+            params = _vite_example_effective_params(example)
+            media_source = _vite_example_media_source(example.get("mediaUrl", ""))
+            if _is_url_source(media_source):
+                media_html = (
+                    f'<a href="{_html.escape(media_source)}" target="_blank" rel="noreferrer">'
+                    f'{_html.escape(example.get("mediaName") or media_source)}</a>'
+                )
+            else:
+                media_html = (
+                    f'<code title="{_html.escape(media_source)}">'
+                    f'{_html.escape(example.get("mediaName") or os.path.basename(media_source) or media_source)}</code>'
+                )
+            prompt = _vite_example_prompt(example)
+            system_prompt = example.get("systemPrompt") or ""
+            notes = example.get("judgeNote") or ""
+            prompt_html = (
+                "<details><summary>User</summary>"
+                f"<pre>{_html.escape(prompt)}</pre></details>"
+                "<details><summary>System</summary>"
+                f"<pre>{_html.escape(system_prompt)}</pre></details>"
+            )
+            if notes:
+                prompt_html += f'<div class="vite-example-note">{_html.escape(notes)}</div>'
+            rows.append(
+                "<tr>"
+                f"<td>{_html.escape(example.get('title') or example.get('id') or '')}</td>"
+                f"<td>{media_html}</td>"
+                f"<td>{_html.escape(example.get('mediaKind') or '')}</td>"
+                f"<td><code>{_html.escape(model_id)}</code></td>"
+                f"<td>{'on' if example.get('reasoning') else 'off'}</td>"
+                f"<td>{'long' if example.get('longVideoEnabled') else 'single'}</td>"
+                f"<td>{_fmt_param(params['framesPerSecond'])}</td>"
+                f"<td>{_fmt_param(params['maxPixels'])}</td>"
+                f"<td>{_fmt_param(params['maxTokens'])}</td>"
+                f"<td>{_fmt_param(params['temperature'])}</td>"
+                f"<td>{_fmt_param(params['topP'])}</td>"
+                f"<td>{_fmt_param(params['topK'])}</td>"
+                f"<td>{_fmt_param(params['repetitionPenalty'])}</td>"
+                f"<td>{_fmt_param(params['presencePenalty'])}</td>"
+                f"<td>{prompt_html}</td>"
+                "</tr>"
+            )
+
+    return (
+        '<details class="vite-example-catalog" open>'
+        '<summary>Build script examples</summary>'
+        '<div class="vite-example-caption">'
+        'Imported from the Vite Build example set. Local /examples media is resolved from the staged server example dirs; '
+        'external build.nvidia.com assets remain linked by URL.'
+        '</div>'
+        '<div class="vite-example-table-wrap">'
+        '<table class="vite-example-table">'
+        '<thead><tr>'
+        '<th>Example</th><th>Media</th><th>Kind</th><th>Model</th><th>Reasoning</th><th>Mode</th>'
+        '<th>FPS</th><th>Max px/frame</th><th>Max tokens</th><th>Temp</th><th>Top P</th><th>Top K</th>'
+        '<th>Rep</th><th>Presence</th><th>Prompts</th>'
+        '</tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table></div></details>"
+    )
+
 HF_STEPS = [
     "Resolve checkpoint & GPU",
     "Load model weights",
@@ -2460,6 +2987,111 @@ _REASONING_PANEL_CSS = """
 .active-model-link:hover {
   color: #8ed600;
   text-decoration: underline;
+}
+.vite-example-catalog {
+  margin-top: 14px;
+}
+.vite-example-catalog > summary {
+  cursor: pointer;
+  color: #76b900;
+  font-weight: 800;
+  line-height: 1.4;
+  list-style: none;
+}
+.vite-example-catalog > summary::-webkit-details-marker {
+  display: none;
+}
+.vite-example-catalog > summary::before {
+  content: '▸ ';
+  color: #76b900;
+}
+.vite-example-catalog[open] > summary::before {
+  content: '▾ ';
+}
+.vite-example-caption {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 6px 0 8px;
+}
+.vite-example-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #111827;
+}
+.vite-example-table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+  color: #e5e7eb;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.vite-example-table th,
+.vite-example-table td {
+  border: 1px solid #263244;
+  padding: 8px 9px;
+  vertical-align: top;
+}
+.vite-example-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #0b1220;
+  color: #7dd3fc;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.vite-example-table tbody tr {
+  background: #111827;
+}
+.vite-example-table tbody tr:nth-child(even):not(.vite-example-subhead) {
+  background: #0f172a;
+}
+.vite-example-table .vite-example-subhead th {
+  background: #1f2937;
+  color: #a3e635;
+  font-size: 13px;
+  text-align: left;
+}
+.vite-example-table code {
+  color: #dbeafe;
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+.vite-example-table a {
+  color: #7dd3fc;
+}
+.vite-example-table details {
+  margin: 0 0 6px;
+}
+.vite-example-table details summary {
+  cursor: pointer;
+  color: #bfdbfe;
+  font-weight: 800;
+}
+.vite-example-table pre {
+  max-width: 460px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+  padding: 8px;
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #e5e7eb;
+}
+.vite-example-note {
+  color: #c4b5fd;
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 5px;
 }
 @media (max-width: 900px) {
   .active-model-box {
@@ -5813,6 +6445,7 @@ with gr.Blocks(
             inputs=[video_input, user_box, system_box, fps_slider, maxpx_slider, maxtok_slider],
             label="Sample video",
         )
+    gr.HTML(_vite_examples_catalog_html(), label="Build script examples")
 
 _app, _local_url, _share_url = demo.launch(
     server_name="0.0.0.0", server_port=PORT, share=SHARE, prevent_thread_lock=True,
