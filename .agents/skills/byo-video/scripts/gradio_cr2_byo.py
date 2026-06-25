@@ -14,6 +14,9 @@ New in this version:
 import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup, html as _html
 warnings.filterwarnings("ignore")
 
+_EARLY_INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf").lower()
+_OPENAI_COMPAT_MODE = _EARLY_INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo")
+
 def _kill_frpc():
     """BUG-005: kill orphaned frpc tunnel processes when Gradio exits."""
     try:
@@ -30,7 +33,39 @@ except Exception:
 try:
     import torch
 except ImportError:
-    print("[ERROR] torch not installed."); sys.exit(1)
+    if not _OPENAI_COMPAT_MODE:
+        print("[ERROR] torch not installed."); sys.exit(1)
+
+    class _NoCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def get_device_name(_index=0):
+            return "OpenAI-compatible backend"
+
+        @staticmethod
+        def mem_get_info():
+            return (0, 0)
+
+        @staticmethod
+        def empty_cache():
+            return None
+
+        @staticmethod
+        def get_device_properties(_index=0):
+            class _Props:
+                total_memory = 0
+            return _Props()
+
+    class _TorchShim:
+        cuda = _NoCuda()
+        bfloat16 = "bfloat16"
+        float16 = "float16"
+        __version__ = "unavailable-openai-compatible-mode"
+
+    torch = _TorchShim()
 
 try:
     import gradio as gr
@@ -40,7 +75,15 @@ except ImportError:
 try:
     import qwen_vl_utils
 except ImportError:
-    print("[ERROR] qwen_vl_utils not installed (should be in cosmos-reason2 venv)."); sys.exit(1)
+    if not _OPENAI_COMPAT_MODE:
+        print("[ERROR] qwen_vl_utils not installed (should be in cosmos-reason2 venv)."); sys.exit(1)
+
+    class _QwenVlUtilsShim:
+        @staticmethod
+        def process_vision_info(_conversation):
+            raise RuntimeError("qwen_vl_utils is unavailable in OpenAI-compatible mode")
+
+    qwen_vl_utils = _QwenVlUtilsShim()
 
 try:
     from transformers import (
@@ -50,7 +93,12 @@ try:
         TextIteratorStreamer,
     )
 except ImportError as e:
-    print(f"[ERROR] transformers not installed: {e}"); sys.exit(1)
+    if not _OPENAI_COMPAT_MODE:
+        print(f"[ERROR] transformers not installed: {e}"); sys.exit(1)
+    Qwen3VLForConditionalGeneration = None
+    AutoModelForCausalLM = None
+    AutoProcessor = None
+    TextIteratorStreamer = None
 
 try:
     import av as _av_module
@@ -227,7 +275,7 @@ MODEL_CONFIGS = {
         "variants": [
             ("C3R-Nano BF16", "Cosmos3-Nano-Reasoner", "nvidia/Cosmos3-Nano-Reasoner", "bf16"),
         ],
-        "nim": None,
+        "nim": "nvidia/cosmos3-nano-reasoner",
     },
     "C3-32B": {
         "variants": [
@@ -242,7 +290,7 @@ MODEL_CONFIGS = {
         "variants": [
             ("C3-Super BF16", "Cosmos3-Super-Reasoner", "nvidia/Cosmos3-Super-Reasoner", "bf16"),
         ],
-        "nim": None,
+        "nim": "nvidia/cosmos3-super-reasoner",
         # 32B model on H200 SXM 141GB (confirmed 2026-05-05 live deployment).
         # Architecture: NemotronVLForConditionCausalLM. vLLM may raise "Unsupported architecture"
         # if arch is not registered. Use INFERENCE_BACKEND=hf as fallback (confirmed working).
@@ -350,6 +398,11 @@ _LABEL_TO_MODEL_SIZE = {
     for size_key, cfg in MODEL_CONFIGS.items()
     for label, _, _, _ in cfg.get("variants", [])
 }
+_LABEL_TO_MODEL_SIZE.update({
+    "Cosmos3-Nano-Reasoner (NIM)": "C3-8B",
+    "Cosmos3-Super-Reasoner (NIM)": "C3-super",
+    "NIM 8B": "8B",
+})
 
 MODEL_SIZE   = os.environ.get("MODEL_SIZE", "ALPAMAYO" if INFERENCE_BACKEND == "alpamayo" else "2B").upper()
 # .upper() normalises input but breaks mixed-case keys. Remap known exceptions.
@@ -638,6 +691,8 @@ elif INFERENCE_BACKEND == "vllm":
         for label, dirname, hf_id, _ in _ALL_VARIANTS_DD_RAW
     ]
     CHECKPOINT_PRESETS.append(("NIM 8B", "nim://nvidia/cosmos-reason2-8b"))
+    CHECKPOINT_PRESETS.append(("Cosmos3-Nano-Reasoner (NIM)", "nim://nvidia/cosmos3-nano-reasoner"))
+    CHECKPOINT_PRESETS.append(("Cosmos3-Super-Reasoner (NIM)", "nim://nvidia/cosmos3-super-reasoner"))
     # Auto-select the checkpoint that matches the loaded model so no swap fires on first use.
     _VLLM_DD_MAP = {
         "NEM-12B":  "Nem-12B BF16",
@@ -1977,6 +2032,11 @@ def get_free_vram_mib():
 
 def _is_nim(model_id):
     return model_id.startswith("nim://")
+
+def _selected_nim_model_api(model_id):
+    if _is_nim(model_id or ""):
+        return (model_id or "").replace("nim://", "", 1).strip()
+    return NIM_MODEL_API
 
 def _is_vllm(model_id):
     return INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") and not _is_nim(model_id)
@@ -3482,6 +3542,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
 def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_run_start=None, display_label=None, is_image=False):
     """Generator: (response_text, status_html, table_html) via NVCF streaming API."""
     steps = NIM_STEPS
+    nim_model_api = _selected_nim_model_api(model_id)
     if t_run_start is None:
         t_run_start = time.time()
 
@@ -3501,7 +3562,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         ), _table_html()
         return
 
-    if not NIM_MODEL_API:
+    if not nim_model_api:
         msg = (f"[NIM] Skipped — {MODEL_SIZE} not in public NVCF catalog. "
                f"Ask DLAlgo team for internal NIM access.")
         _log_run(model_id, total_s=_elapsed(), status="skipped-no-catalog", display_label=display_label)
@@ -3592,7 +3653,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             NIM_ENDPOINT,
             headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": NIM_MODEL_API,
+                "model": nim_model_api,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user",   "content": content},
@@ -3629,7 +3690,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                     NIM_ENDPOINT,
                     headers={"Authorization": f"Bearer {NGC_API_KEY}", "Content-Type": "application/json"},
                     json={
-                        "model": NIM_MODEL_API,
+                        "model": nim_model_api,
                         "messages": [
                             {"role": "system", "content": system},
                             {"role": "user",   "content": content},
@@ -4712,13 +4773,13 @@ with gr.Blocks(
                 custom_nim_served = gr.Textbox(
                     label="Served model id",
                     value="",
-                    placeholder="nvidia/Cosmos3-Super-Reasoner",
+                    placeholder="nvidia/cosmos3-super-reasoner",
                     info="The model id returned by /v1/models after this image starts.",
                 )
                 custom_nim_label = gr.Textbox(
                     label="Dropdown label",
                     value="",
-                    placeholder="Recent custom: nvidia/Cosmos3-Super-Reasoner",
+                    placeholder="Recent custom: nvidia/cosmos3-super-reasoner",
                 )
                 custom_nim_register_btn = gr.Button("Add custom NIM to dropdown", variant="secondary")
             nim_switch_refresh_timer = gr.Timer(value=2.0, active=True)

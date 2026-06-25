@@ -87,24 +87,24 @@ KNOWN_VLM_NIMS = [
     NimImage("cosmos3-reasoner-nano",
              "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
              "Cosmos3 Reasoner",
-             "Cosmos3 Nano Reasoner (NIM)",
-             "nvidia/Cosmos3-Nano-Reasoner",
+             "Cosmos3-Nano-Reasoner (NIM)",
+             "nvidia/cosmos3-nano-reasoner",
              min_vram_mb=40000, supports_video=True,
              env={
                  "NIM_MODEL_SIZE": "nano",
-                 "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Nano-Reasoner",
+                 "NIM_SERVED_MODEL_NAME": "nvidia/cosmos3-nano-reasoner",
              },
              notes="Official 1.7.0 shared Cosmos3 Reasoner NIM. "
                    "NIM_MODEL_SIZE=nano selects the Nano reasoner."),
     NimImage("cosmos3-reasoner-super",
              "nvcr.io/nim/nvidia/cosmos3-reasoner:1.7.0",
              "Cosmos3 Reasoner",
-             "Cosmos3 Super Reasoner (NIM)",
-             "nvidia/Cosmos3-Super-Reasoner",
+             "Cosmos3-Super-Reasoner (NIM)",
+             "nvidia/cosmos3-super-reasoner",
              min_vram_mb=96000, supports_video=True,
              env={
                  "NIM_MODEL_SIZE": "super",
-                 "NIM_SERVED_MODEL_NAME": "nvidia/Cosmos3-Super-Reasoner",
+                 "NIM_SERVED_MODEL_NAME": "nvidia/cosmos3-super-reasoner",
              },
              notes="Official 1.7.0 shared Cosmos3 Reasoner NIM. "
                    "NIM_MODEL_SIZE=super selects the Super reasoner; "
