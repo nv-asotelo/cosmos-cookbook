@@ -2154,6 +2154,9 @@ def _selected_nim_model_api(model_id):
         return (model_id or "").replace("nim://", "", 1).strip()
     return NIM_MODEL_API
 
+def _model_ids_match(left, right):
+    return str(left or "").strip().lower() == str(right or "").strip().lower()
+
 def _is_vllm(model_id):
     return INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo") and not _is_nim(model_id)
 
@@ -3379,12 +3382,14 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
             {"type": "text", "text": prompt},
         ]
 
-    def _build_frame_content_for_video(reason="fallback"):
+    def _build_frame_content_for_video(reason="fallback", default_max_frames=None):
         # Frame extraction fallback — known for Cosmos Reason1 7B, rejected
         # NVDEC/video_url uploads, and OSS image-frame vLLM paths. By default
         # this follows the visible FPS slider; admins can still opt into a
         # hard cap with REASONER_FRAME_FALLBACK_MAX_IMAGES.
         _max_frames = _nim_frame_fallback_limit() if INFERENCE_BACKEND == "nim_local" else None
+        if _max_frames is None and default_max_frames and INFERENCE_BACKEND == "nim_local":
+            _max_frames = int(default_max_frames)
         _cap_note = f"admin max_frames={_max_frames}" if _max_frames else "no client frame cap"
         _px_note = f"max_pixels={max_pixels}" if max_pixels else "native resolution"
         _t_extract = time.time()
@@ -3565,9 +3570,28 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
                 except Exception: pass
                 print(f"[NIM] video_url transcode retry still rejected ({_reason}): {_last_preview}", flush=True)
                 resp = None
+            if resp is None and _is_frames_fallback_nim(model_id):
+                try:
+                    content = _build_frame_content_for_video("video_url rejected fallback", default_max_frames=5)
+                except Exception as _frame_err:
+                    raise RuntimeError(
+                        "NIM rejected video_url and MP4 transcode retries did not recover; "
+                        f"frame fallback preparation failed: {_frame_err}. Last error: {_last_preview}"
+                    ) from _frame_err
+                print("[NIM] retrying as JPEG frame fallback after video_url rejection", flush=True)
+                resp = _post_chat(model_id)
+                if resp.status_code in (400, 422):
+                    try:
+                        _last_preview = resp.text[:500]
+                    except Exception:
+                        _last_preview = ""
+                    try: resp.close()
+                    except Exception: pass
+                    resp = None
+                    print(f"[NIM] frame fallback still rejected: {_last_preview}", flush=True)
             if resp is None:
                 raise RuntimeError(
-                    "NIM rejected video_url and MP4 transcode retries did not recover. "
+                    "NIM rejected video_url, MP4 transcode retries, and frame fallback. "
                     f"Last error: {_last_preview}"
                 )
         resp.raise_for_status()
@@ -3937,6 +3961,29 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
     # frame clamping is applied below at extraction time when INFERENCE_BACKEND=nim_local.
 
     if _is_nim(model_id):
+        _nim_mid = _selected_nim_model_api(model_id)
+        _served_mid = _SERVER_MODEL_ID or _refresh_server_model_id()
+        _local_nim = INFERENCE_BACKEND == "nim_local" or (
+            INFERENCE_BACKEND in ("vllm", "alpamayo")
+            and _served_mid
+            and _model_ids_match(_served_mid, _nim_mid)
+        )
+        if _local_nim:
+            _effective_mid = _served_mid or _nim_mid
+            _req_short = _nim_mid.split("/")[-1] if "/" in _nim_mid else _nim_mid
+            _srv_short = _effective_mid.split("/")[-1] if "/" in _effective_mid else _effective_mid
+            _extra_note = f"local NIM serves {_srv_short}" if _srv_short != _req_short else None
+            yield from _run_vllm_inference(
+                video_path, user_prompt, system_prompt, fps, max_pixels, max_new_tokens, _effective_mid,
+                t_run_start=t_run_start,
+                display_label=display_label,
+                extra_note=_extra_note,
+                is_image=is_image,
+                temperature=temperature,
+                top_p=top_p,
+                rep_penalty=rep_penalty,
+            )
+            return
         yield from _run_nim_inference(
             video_path, user_prompt, system_prompt, fps, max_new_tokens, model_id,
             t_run_start=t_run_start,
