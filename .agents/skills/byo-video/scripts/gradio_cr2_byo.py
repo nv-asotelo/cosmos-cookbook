@@ -120,16 +120,38 @@ try:
 except Exception:
     _VLLM_VERSION = None
 
+
+def _read_env_file_value(name, path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == name:
+                    return value.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 HOME        = os.path.expanduser("~")
 MODEL_DIR   = os.environ.get("MODEL_DIR",  f"{HOME}/cosmos-reason2/models/Cosmos-Reason2-2B")
 MODEL_NAME  = os.environ.get("MODEL_NAME", os.environ.get("ALPAMAYO_MODEL_ID", "nvidia/Cosmos-Reason2-2B"))
 OUT_FILE    = os.environ.get("OUT_FILE",   "/tmp/byo_video_reason2_results.json")
+RUN_LOG_FILE = os.environ.get("GRADIO_RUN_LOG_FILE", "/tmp/byo_video_reason2_runs.jsonl")
 PORT        = int(os.environ.get("GRADIO_PORT", "7860"))
 SHARE       = os.environ.get("GRADIO_SHARE", "true").lower() != "false"
 LOW_VRAM    = os.environ.get("LOW_VRAM", "false").lower() == "true"
 HF_TOKEN    = os.environ.get("HF_TOKEN", "")
-NGC_API_KEY = os.environ.get("NGC_API_KEY", "")
+NGC_API_KEY = (
+    os.environ.get("NGC_API_KEY", "")
+    or _read_env_file_value("NGC_API_KEY", os.environ.get("NIM_CREDENTIAL_FILE", "/tmp/byo_video_nim_credentials.env"))
+)
 
 DEFAULT_FPS        = int(os.environ.get("GRADIO_FPS", "4" if LOW_VRAM else "8"))
 DEFAULT_MAX_PIXELS = int(os.environ.get("GRADIO_MAX_PIXELS",
@@ -1442,8 +1464,37 @@ _loaded = {
 }
 
 # ── Run log (persists across Gradio calls) ─────────────────────────────────────
-_run_log: list = []
 _log_lock = threading.Lock()
+
+
+def _load_run_log():
+    rows = []
+    try:
+        with open(RUN_LOG_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        pass
+    return rows[-500:]
+
+
+def _persist_run_record(row):
+    try:
+        parent = os.path.dirname(RUN_LOG_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(RUN_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(f"[run-log] Could not persist {RUN_LOG_FILE}: {exc}", flush=True)
+
+
+_run_log: list = _load_run_log()
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
@@ -2999,12 +3050,16 @@ def _log_run(model_id, load_s=None, ttft_s=None, infer_s=None,
         short = f"NIM-{MODEL_SIZE}"
     else:
         short = model_id.split("/")[-1] if "/" in model_id else model_id
+    row = {
+        "ts": time.time(),
+        "model": short, "load_s": load_s, "ttft_s": ttft_s,
+        "infer_s": infer_s, "tokens_out": tokens_out,
+        "total_s": total_s, "status": status, "notes": notes or "",
+    }
     with _log_lock:
-        _run_log.append({
-            "model": short, "load_s": load_s, "ttft_s": ttft_s,
-            "infer_s": infer_s, "tokens_out": tokens_out,
-            "total_s": total_s, "status": status, "notes": notes or "",
-        })
+        _run_log.append(row)
+        del _run_log[:-500]
+        _persist_run_record(row)
 
 
 # ── Model load / unload ────────────────────────────────────────────────────────

@@ -1711,6 +1711,7 @@ launch_env = {
     "GRADIO_FPS":         str(gradio_fps),
     "GRADIO_MAX_PIXELS":  str(max_pixels),
     "GRADIO_PREFILL_TPS": str(prefill_tps),
+    "GRADIO_RUN_LOG_FILE": os.environ.get("GRADIO_RUN_LOG_FILE", "/tmp/byo_video_reason2_runs.jsonl"),
     "INFERENCE_BACKEND":  INFERENCE_BACKEND,
     "VLLM_BASE_URL":      os.environ.get("VLLM_BASE_URL", os.environ.get("ALPAMAYO_BASE_URL", "http://localhost:8000/v1")),
     "NIM_BASE_URL":       os.environ.get("NIM_BASE_URL", os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")),
