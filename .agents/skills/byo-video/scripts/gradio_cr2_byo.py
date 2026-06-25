@@ -11,7 +11,7 @@ New in this version:
   - Right-side status panel: Step N/5 WIP + live token metrics (replaces grey loading box)
   - NIM mode: NVCF API via NGC_API_KEY (no local weights needed)
 """
-import os, sys, gc, json, time, threading, warnings, base64, io, atexit, signal, subprocess as _sp_cleanup, html as _html
+import os, sys, gc, json, time, threading, warnings, base64, io, re, atexit, signal, subprocess as _sp_cleanup, html as _html
 warnings.filterwarnings("ignore")
 
 _EARLY_INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "hf").lower()
@@ -2501,15 +2501,27 @@ _REASONING_PANEL_CSS = """
 """
 
 
-def _extract_streaming_delta(data_str):
+def _extract_streaming_event(data_str):
     """Pull both `content` and `reasoning_content` from one OpenAI SSE chunk.
-    Returns (content_delta, reasoning_delta). Either may be empty string. On
-    parse error returns (None, None) — caller skips the chunk."""
+    Returns (content_delta, reasoning_delta, usage). Either text delta may be
+    empty string. On parse error returns (None, None, None) — caller skips the
+    chunk. Usage appears on OpenAI-compatible final chunks when
+    stream_options.include_usage is supported."""
     try:
-        d = json.loads(data_str)["choices"][0]["delta"]
-        return d.get("content", "") or "", d.get("reasoning_content", "") or ""
+        d = json.loads(data_str)
+        usage = d.get("usage")
+        choices = d.get("choices") or []
+        if not choices:
+            return "", "", usage
+        delta = choices[0].get("delta") or {}
+        return delta.get("content", "") or "", delta.get("reasoning_content", "") or "", usage
     except (json.JSONDecodeError, KeyError, IndexError):
-        return None, None
+        return None, None, None
+
+
+def _extract_streaming_delta(data_str):
+    content_delta, reasoning_delta, _usage = _extract_streaming_event(data_str)
+    return content_delta, reasoning_delta
 
 
 def _compose_thinking_text(content_parts, reasoning_parts):
@@ -2531,6 +2543,91 @@ def _compose_thinking_text(content_parts, reasoning_parts):
     if cnt:
         return f"<think>\n{rsn}\n</think>\n\n{cnt}"
     return f"<think>\n{rsn}"
+
+
+def _split_thinking_text_for_counts(text):
+    """Return (reasoning_text, answer_text) from text containing optional
+    <think>...</think>. This mirrors _render_with_think but keeps raw text for
+    token accounting."""
+    text = text or ""
+    open_tag, close_tag = "<think>", "</think>"
+    i_open = text.find(open_tag)
+    if i_open < 0:
+        return "", text
+    body_start = i_open + len(open_tag)
+    i_close = text.find(close_tag, body_start)
+    if i_close < 0:
+        return text[body_start:], ""
+    return text[body_start:i_close], text[i_close + len(close_tag):].lstrip("\n")
+
+
+_TOKEN_ESTIMATE_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+
+def _estimate_text_tokens(text):
+    """Lightweight tokenizer fallback for UI accounting.
+
+    Exact model tokenization is not available from the local NIM image via
+    /tokenize, so we use this only for live estimates and for splitting a final
+    server-reported completion total into reasoning/answer proportions.
+    """
+    text = text or ""
+    if not text.strip():
+        return 0
+    lexical = len(_TOKEN_ESTIMATE_RE.findall(text))
+    char_est = max(1, int((len(text) + 3) / 4))
+    return max(lexical, char_est)
+
+
+def _output_token_metrics(content_parts, reasoning_parts, usage=None, tokenizer=None):
+    content = "".join(content_parts or [])
+    if reasoning_parts:
+        reasoning = "".join(reasoning_parts)
+        answer = content
+    else:
+        reasoning, answer = _split_thinking_text_for_counts(content)
+
+    if tokenizer is not None:
+        reasoning_est = len(tokenizer.encode(reasoning, add_special_tokens=False)) if reasoning else 0
+        answer_est = len(tokenizer.encode(answer, add_special_tokens=False)) if answer else 0
+    else:
+        reasoning_est = _estimate_text_tokens(reasoning)
+        answer_est = _estimate_text_tokens(answer)
+
+    est_total = reasoning_est + answer_est
+    completion_tokens = None
+    if isinstance(usage, dict):
+        try:
+            completion_tokens = int(usage.get("completion_tokens"))
+        except Exception:
+            completion_tokens = None
+
+    if completion_tokens is not None and completion_tokens >= 0:
+        if est_total > 0:
+            reasoning_tokens = int(round(completion_tokens * (reasoning_est / est_total)))
+            reasoning_tokens = max(0, min(completion_tokens, reasoning_tokens))
+            answer_tokens = completion_tokens - reasoning_tokens
+        else:
+            reasoning_tokens = 0
+            answer_tokens = completion_tokens
+        total_tokens = completion_tokens
+        exact = True
+        split_exact = tokenizer is not None
+    else:
+        reasoning_tokens = reasoning_est
+        answer_tokens = answer_est
+        total_tokens = est_total
+        exact = tokenizer is not None
+        split_exact = tokenizer is not None
+
+    return {
+        "tokens_out": total_tokens,
+        "tokens_total": total_tokens,
+        "tokens_reasoning": reasoning_tokens,
+        "tokens_answer": answer_tokens,
+        "tokens_exact": exact,
+        "tokens_split_exact": split_exact,
+    }
 
 
 # ── Action-policy style mode (Cosmos3 silent overlay) ────────────────────────
@@ -2945,8 +3042,9 @@ def _active_model_details_html(details_url):
 def _status_html(statuses, metrics=None, steps=None):
     """
     statuses : list of 5 strings — "ok" | "run" | "wait"
-    metrics  : optional dict with keys: model_id, load_s, tokens_in, tokens_out,
-               ttft_s, infer_s, elapsed_s
+    metrics  : optional dict with keys: model_id, load_s, tokens_in,
+               tokens_total/tokens_out, tokens_reasoning, tokens_answer,
+               tokens_exact, tokens_split_exact, ttft_s, infer_s, elapsed_s
     steps    : optional list of 5 step label strings (defaults to HF_STEPS)
     """
     if steps is None:
@@ -2987,8 +3085,18 @@ def _status_html(statuses, metrics=None, steps=None):
             mhtml += f'<div style="margin:2px 0;color:#fff">🔄 <b>Load:</b> {metrics["load_s"]:.1f}s</div>'
         if metrics.get("tokens_in"):
             mhtml += f'<div style="margin:2px 0;color:#fff">📥 <b>Prefill:</b> {metrics["tokens_in"]:,} tokens</div>'
-        if metrics.get("tokens_out") is not None:
-            mhtml += f'<div style="margin:2px 0;color:#fff">📤 <b>Generated:</b> {metrics["tokens_out"]:,} tokens</div>'
+        _tok_total = metrics.get("tokens_total", metrics.get("tokens_out"))
+        if _tok_total is not None:
+            _tok_suffix = "" if metrics.get("tokens_exact") else " (est.)"
+            mhtml += f'<div style="margin:2px 0;color:#fff">📤 <b>Output tokens{_tok_suffix}:</b> {_tok_total:,} total</div>'
+            if metrics.get("tokens_reasoning") is not None or metrics.get("tokens_answer") is not None:
+                _rsn = int(metrics.get("tokens_reasoning") or 0)
+                _ans = int(metrics.get("tokens_answer") or 0)
+                _split_suffix = "" if metrics.get("tokens_split_exact") else " (est.)"
+                mhtml += (
+                    '<div style="margin:2px 0 2px 16px;color:#dbeafe;font-size:12px">'
+                    f'Reasoning {_rsn:,} · Response {_ans:,}{_split_suffix}</div>'
+                )
         if metrics.get("ttft_s") is not None:
             mhtml += f'<div style="margin:2px 0;color:#fff">⚡ <b>TTFT:</b> {metrics["ttft_s"]:.2f}s</div>'
         if metrics.get("infer_s") is not None:
@@ -3023,12 +3131,25 @@ def _table_html():
             f'<span style="color:#fbbf24;font-size:11px">⚠ {notes_val}</span>'
             if notes_val else "—"
         )
+        tokens_total = r.get("tokens_total", r.get("tokens_out"))
+        if tokens_total is None:
+            tokens_html = "—"
+        elif r.get("tokens_reasoning") is not None or r.get("tokens_answer") is not None:
+            exact_suffix = "" if r.get("tokens_exact") else " est."
+            split_suffix = "" if r.get("tokens_split_exact") else " est."
+            tokens_html = (
+                f'{tokens_total}{exact_suffix}<br>'
+                f'<span style="color:#bfdbfe;font-size:11px">'
+                f'R {int(r.get("tokens_reasoning") or 0)} · A {int(r.get("tokens_answer") or 0)}{split_suffix}</span>'
+            )
+        else:
+            tokens_html = str(tokens_total or "—")
         cells = [
             r.get("model", "—"),
             _f(r.get("load_s")),
             _f(r.get("ttft_s"), ".2f"),
             _f(r.get("infer_s")),
-            str(r.get("tokens_out") or "—"),
+            tokens_html,
             _f(r.get("total_s")),
             r.get("status", "—"),
             notes_html,
@@ -3046,7 +3167,9 @@ def _table_html():
 
 
 def _log_run(model_id, load_s=None, ttft_s=None, infer_s=None,
-             tokens_out=None, total_s=None, status="ok", notes=None, display_label=None):
+             tokens_out=None, total_s=None, status="ok", notes=None, display_label=None,
+             tokens_total=None, tokens_reasoning=None, tokens_answer=None, tokens_exact=None,
+             tokens_split_exact=None):
     if display_label:
         short = display_label
     elif model_id.startswith("nim://"):
@@ -3056,7 +3179,12 @@ def _log_run(model_id, load_s=None, ttft_s=None, infer_s=None,
     row = {
         "ts": time.time(),
         "model": short, "load_s": load_s, "ttft_s": ttft_s,
-        "infer_s": infer_s, "tokens_out": tokens_out,
+        "infer_s": infer_s, "tokens_out": tokens_total if tokens_total is not None else tokens_out,
+        "tokens_total": tokens_total if tokens_total is not None else tokens_out,
+        "tokens_reasoning": tokens_reasoning,
+        "tokens_answer": tokens_answer,
+        "tokens_exact": tokens_exact,
+        "tokens_split_exact": tokens_split_exact,
         "total_s": total_s, "status": status, "notes": notes or "",
     }
     with _log_lock:
@@ -3496,6 +3624,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
             "temperature": temperature,
             "top_p": top_p,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         # Standing rule (Alex 2026-05-08, all NIMs forever): no max_tokens cap.
         # The server's max_model_len governs. The slider exists for UI honesty;
@@ -3636,7 +3765,7 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
     parts           = []
     reasoning_parts = []  # separate buffer for server-parsed reasoning_content
     ttft_s          = None
-    tokens_decoded  = 0
+    usage           = None
 
     for line in resp.iter_lines():
         if not line:
@@ -3648,7 +3777,9 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
         data = line[6:]
         if data == "[DONE]":
             break
-        content_d, reasoning_d = _extract_streaming_delta(data)
+        content_d, reasoning_d, usage_d = _extract_streaming_event(data)
+        if usage_d:
+            usage = usage_d
         if content_d is None:
             continue
         if not content_d and not reasoning_d:
@@ -3659,10 +3790,10 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
             parts.append(content_d)
         if reasoning_d:
             reasoning_parts.append(reasoning_d)
-        tokens_decoded += 1
+        token_metrics = _output_token_metrics(parts, reasoning_parts, usage)
         yield _compose_thinking_text(parts, reasoning_parts), _status_html(
             ["ok", "ok", "ok", "ok", "run"],
-            {"model_id": model_id, "tokens_out": tokens_decoded,
+            {"model_id": model_id, **token_metrics,
              "ttft_s": ttft_s, "elapsed_s": _elapsed(), "backend": _be_label},
             steps=steps,
         ), gr.update()
@@ -3670,13 +3801,24 @@ def _run_vllm_inference(video_path, prompt, system, fps, max_pixels, max_tokens,
     infer_time = time.time() - t_start
     response   = _compose_thinking_text(parts, reasoning_parts)
     total_s    = _elapsed()
-    print(f"[vllm done] {infer_time:.1f}s · {tokens_decoded} tok out", flush=True)
+    token_metrics = _output_token_metrics(parts, reasoning_parts, usage)
+    print(
+        f"[vllm done] {infer_time:.1f}s · {token_metrics['tokens_total']} tok out "
+        f"(reasoning={token_metrics['tokens_reasoning']}, answer={token_metrics['tokens_answer']}, "
+        f"exact={token_metrics['tokens_exact']})",
+        flush=True,
+    )
     _log_run(model_id, ttft_s=ttft_s, infer_s=infer_time,
-             tokens_out=tokens_decoded, total_s=total_s, status="ok",
-             display_label=display_label, notes=extra_note or "")
+             total_s=total_s, status="ok",
+             display_label=display_label, notes=extra_note or "",
+             tokens_total=token_metrics["tokens_total"],
+             tokens_reasoning=token_metrics["tokens_reasoning"],
+             tokens_answer=token_metrics["tokens_answer"],
+             tokens_exact=token_metrics["tokens_exact"],
+             tokens_split_exact=token_metrics["tokens_split_exact"])
     yield response, _status_html(
         ["ok", "ok", "ok", "ok", "ok"],
-        {"model_id": model_id, "tokens_out": tokens_decoded, "ttft_s": ttft_s,
+        {"model_id": model_id, **token_metrics, "ttft_s": ttft_s,
          "infer_s": infer_time, "elapsed_s": total_s, "backend": _be_label},
         steps=steps,
     ), _table_html()
@@ -3803,6 +3945,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                     {"role": "user",   "content": content},
                 ],
                 "stream": True,
+                "stream_options": {"include_usage": True},
             },
             stream=True,
             timeout=120,
@@ -3840,6 +3983,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
                             {"role": "user",   "content": content},
                         ],
                         "stream": True,
+                        "stream_options": {"include_usage": True},
                     },
                     stream=True,
                     timeout=120,
@@ -3873,7 +4017,7 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
     parts           = []
     reasoning_parts = []  # separate buffer for server-parsed reasoning_content
     ttft_s          = None
-    tokens_decoded  = 0
+    usage           = None
 
     for line in resp.iter_lines():
         if not line:
@@ -3885,7 +4029,9 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
         data = line[6:]
         if data == "[DONE]":
             break
-        content_d, reasoning_d = _extract_streaming_delta(data)
+        content_d, reasoning_d, usage_d = _extract_streaming_event(data)
+        if usage_d:
+            usage = usage_d
         if content_d is None:
             continue
         if not content_d and not reasoning_d:
@@ -3896,13 +4042,8 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
             parts.append(content_d)
         if reasoning_d:
             reasoning_parts.append(reasoning_d)
-        tokens_decoded += 1
-        cur_metrics = {
-            "model_id": model_id,
-            "tokens_out": tokens_decoded,
-            "ttft_s": ttft_s,
-            "elapsed_s": _elapsed(),
-        }
+        cur_metrics = {"model_id": model_id, **_output_token_metrics(parts, reasoning_parts, usage),
+                       "ttft_s": ttft_s, "elapsed_s": _elapsed()}
         yield _compose_thinking_text(parts, reasoning_parts), _status_html(
             ["ok", "ok", "ok", "ok", "run"], cur_metrics, steps=steps
         ), gr.update()
@@ -3910,13 +4051,19 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
     infer_time = time.time() - t_start
     response   = _compose_thinking_text(parts, reasoning_parts)
     total_s    = _elapsed()
+    token_metrics = _output_token_metrics(parts, reasoning_parts, usage)
 
     result = {
         "model": model_id, "prompt": prompt, "response": response,
         "infer_time_s": round(infer_time, 1),
         "ttft_s": round(ttft_s, 2) if ttft_s else None,
-        "tokens_out": tokens_decoded,
-        "frames_sent": len(frames_b64), "fps": fps, "status": "success",
+        "tokens_out": token_metrics["tokens_total"],
+        "tokens_total": token_metrics["tokens_total"],
+        "tokens_reasoning": token_metrics["tokens_reasoning"],
+        "tokens_answer": token_metrics["tokens_answer"],
+        "tokens_exact": token_metrics["tokens_exact"],
+        "tokens_split_exact": token_metrics["tokens_split_exact"],
+        "fps": fps, "status": "success",
     }
     try:
         with open(OUT_FILE, "w") as f:
@@ -3924,12 +4071,22 @@ def _run_nim_inference(video_path, prompt, system, fps, max_tokens, model_id, t_
     except Exception:
         pass
 
-    print(f"[nim done] {infer_time:.1f}s · {tokens_decoded} tok out", flush=True)
+    print(
+        f"[nim done] {infer_time:.1f}s · {token_metrics['tokens_total']} tok out "
+        f"(reasoning={token_metrics['tokens_reasoning']}, answer={token_metrics['tokens_answer']}, "
+        f"exact={token_metrics['tokens_exact']})",
+        flush=True,
+    )
     _log_run(model_id, ttft_s=ttft_s, infer_s=infer_time,
-             tokens_out=tokens_decoded, total_s=total_s, status="ok", display_label=display_label)
+             total_s=total_s, status="ok", display_label=display_label,
+             tokens_total=token_metrics["tokens_total"],
+             tokens_reasoning=token_metrics["tokens_reasoning"],
+             tokens_answer=token_metrics["tokens_answer"],
+             tokens_exact=token_metrics["tokens_exact"],
+             tokens_split_exact=token_metrics["tokens_split_exact"])
     yield response, _status_html(
         ["ok", "ok", "ok", "ok", "ok"],
-        {"model_id": model_id, "tokens_out": tokens_decoded,
+        {"model_id": model_id, **token_metrics,
          "ttft_s": ttft_s, "infer_s": infer_time, "elapsed_s": total_s},
         steps=steps,
     ), _table_html()
@@ -4138,11 +4295,12 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
                 ttft_s = time.time() - t_gen
             parts.append(chunk)
             tokens_decoded += 1  # TextIteratorStreamer emits ~1 token per chunk
+            token_metrics = _output_token_metrics(parts, [], tokenizer=None)
             cur_metrics = {
                 "model_id":       model_id,
                 "load_s":         load_t,
                 "tokens_in":      tokens_in,
-                "tokens_out":     tokens_decoded,
+                **token_metrics,
                 "ttft_s":         ttft_s,
                 "elapsed_s":      _elapsed(),
                 "upcast_warning": _upcast,
@@ -4155,7 +4313,8 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
     gen_thread.join(timeout=10)
     infer_time = time.time() - t1
     response   = "".join(parts)
-    tokens_out = len(processor.tokenizer.encode(response, add_special_tokens=False))
+    token_metrics = _output_token_metrics(parts, [], tokenizer=processor.tokenizer)
+    tokens_out = token_metrics["tokens_total"]
 
     result = {
         "model":        model_id,
@@ -4165,7 +4324,12 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
         "infer_time_s": round(infer_time, 1),
         "ttft_s":       round(ttft_s, 2) if ttft_s else None,
         "tokens_in":    tokens_in,
-        "tokens_out":   tokens_out,
+        "tokens_out":   token_metrics["tokens_total"],
+        "tokens_total": token_metrics["tokens_total"],
+        "tokens_reasoning": token_metrics["tokens_reasoning"],
+        "tokens_answer": token_metrics["tokens_answer"],
+        "tokens_exact": token_metrics["tokens_exact"],
+        "tokens_split_exact": token_metrics["tokens_split_exact"],
         "fps":          fps,
         "status":       "success",
     }
@@ -4176,14 +4340,24 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
         pass
 
     total_s = _elapsed()
-    print(f"[done] {infer_time:.1f}s · {tokens_out} tok · ttft={ttft_s:.2f}s", flush=True)
+    print(
+        f"[done] {infer_time:.1f}s · {tokens_out} tok "
+        f"(reasoning={token_metrics['tokens_reasoning']}, answer={token_metrics['tokens_answer']}) "
+        f"· ttft={ttft_s:.2f}s",
+        flush=True,
+    )
     _log_run(model_id, load_s=load_t, ttft_s=ttft_s, infer_s=infer_time,
-             tokens_out=tokens_out, total_s=total_s, status="ok",
-             notes=_upcast or "", display_label=display_label)
+             total_s=total_s, status="ok",
+             notes=_upcast or "", display_label=display_label,
+             tokens_total=token_metrics["tokens_total"],
+             tokens_reasoning=token_metrics["tokens_reasoning"],
+             tokens_answer=token_metrics["tokens_answer"],
+             tokens_exact=token_metrics["tokens_exact"],
+             tokens_split_exact=token_metrics["tokens_split_exact"])
     yield response, _status_html(
         ["ok", "ok", "ok", "ok", "ok"],
         {"model_id": model_id, "load_s": load_t,
-         "tokens_in": tokens_in, "tokens_out": tokens_out,
+         "tokens_in": tokens_in, **token_metrics,
          "ttft_s": ttft_s, "infer_s": infer_time, "elapsed_s": total_s,
          "upcast_warning": _upcast, "backend": "HF"},
     ), _table_html()
