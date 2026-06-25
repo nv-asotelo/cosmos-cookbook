@@ -122,6 +122,13 @@ export function normalizeReasonerMessage(data) {
   const reasoning = explicitReasoning || inline.reasoning;
   const answer = explicitReasoning ? splitAnswerAfterCloseTag(rawContent) : inline.answer;
   const combined = reasoning ? `<think>\n${reasoning}\n</think>\n\n${answer}`.trim() : answer;
+  const normalizedMessage = {
+    role: message.role || "assistant",
+    content: answer
+  };
+  if (reasoning) {
+    normalizedMessage.reasoning_content = reasoning;
+  }
 
   const normalized = {
     id: data?.id || `chatcmpl-byo-${Date.now()}`,
@@ -131,10 +138,7 @@ export function normalizeReasonerMessage(data) {
     choices: [
       {
         index: choice.index ?? 0,
-        message: {
-          role: message.role || "assistant",
-          content: combined
-        },
+        message: normalizedMessage,
         finish_reason: choice.finish_reason || null
       }
     ],
@@ -372,6 +376,15 @@ export function createReasoningStreamNormalizer() {
   };
 }
 
+function backendFetchFailureMessage(baseUrl, error) {
+  const raw = error instanceof Error ? error.message : String(error || "unknown error");
+  const endpoint = `${baseUrl}/chat/completions`;
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|connect|connection/i.test(raw)) {
+    return `Backend unavailable at ${endpoint}. The Vite UI is up, but the OpenAI-compatible model server on 127.0.0.1:8000 is not responding. Check logs/vllm.log on the target for the model-load failure. Underlying error: ${raw}`;
+  }
+  return raw;
+}
+
 export async function submitReasoning(options = {}) {
   const { baseUrl, payload, redactedPayload } = buildReasoningPayload(options);
 
@@ -388,7 +401,7 @@ export async function submitReasoning(options = {}) {
   } catch (error) {
     return {
       status: "error",
-      message: error instanceof Error ? error.message : "Reasoner request failed",
+      message: backendFetchFailureMessage(baseUrl, error),
       content: "",
       payload: redactedPayload
     };

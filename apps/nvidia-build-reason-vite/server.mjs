@@ -852,21 +852,35 @@ function reasonerEndpointPool(defaultBaseUrl) {
   return (values.length ? values : [defaultBaseUrl]).map(normalizeBaseUrl);
 }
 
+function backendFetchFailureMessage(baseUrl, error) {
+  const raw = error instanceof Error ? error.message : String(error || "unknown error");
+  const endpoint = `${baseUrl}/chat/completions`;
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|connect|connection/i.test(raw)) {
+    return `Backend unavailable at ${endpoint}. The Vite UI is up, but the OpenAI-compatible model server on 127.0.0.1:8000 is not responding. Check logs/vllm.log on the target for the model-load failure. Underlying error: ${raw}`;
+  }
+  return raw;
+}
+
 async function postOpenAiJson(baseUrl, payload, timeoutMs, parentSignal) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const abort = () => controller.abort();
   parentSignal?.addEventListener?.("abort", abort, { once: true });
   try {
-    const upstream = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}`
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
+    let upstream;
+    try {
+      upstream = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}`
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } catch (error) {
+      throw new Error(backendFetchFailureMessage(baseUrl, error));
+    }
     let data = null;
     try {
       data = await upstream.json();
@@ -2036,6 +2050,13 @@ function combinedContent(reasoning, answer) {
 }
 
 function streamingOpenAiResult({ answer, created, finishReason, id, model, object, reasoning, schema, usage }) {
+  const message = {
+    role: "assistant",
+    content: answer || ""
+  };
+  if (reasoning) {
+    message.reasoning_content = reasoning;
+  }
   return {
     status: "success",
     message: usage ? `prompt ${usage.prompt_tokens || 0} / completion ${usage.completion_tokens || 0}` : "",
@@ -2045,16 +2066,13 @@ function streamingOpenAiResult({ answer, created, finishReason, id, model, objec
     schema,
     openai: {
       id: id || `chatcmpl-byo-stream-${Date.now()}`,
-      object: object || "chat.completion",
+      object: "chat.completion",
       created: created || Math.floor(Date.now() / 1000),
       model: model || defaultModel,
       choices: [
         {
           index: 0,
-          message: {
-            role: "assistant",
-            content: combinedContent(reasoning, answer)
-          },
+          message,
           finish_reason: finishReason || "stop"
         }
       ],
@@ -2065,15 +2083,20 @@ function streamingOpenAiResult({ answer, created, finishReason, id, model, objec
 
 async function readOpenAiStream({ baseUrl, payload, signal, onChunk }) {
   const streamPayload = { ...payload, stream: true };
-  const upstream = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}`
-    },
-    body: JSON.stringify(streamPayload),
-    signal
-  });
+  let upstream;
+  try {
+    upstream = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.VLLM_API_KEY || process.env.NIM_API_KEY || "EMPTY"}`
+      },
+      body: JSON.stringify(streamPayload),
+      signal
+    });
+  } catch (error) {
+    throw new Error(backendFetchFailureMessage(baseUrl, error));
+  }
 
   if (!upstream.ok) {
     let detail = "";
