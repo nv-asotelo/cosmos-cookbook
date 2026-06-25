@@ -2088,6 +2088,13 @@ def _header_memory_status():
     return gpu, "VRAM free", "n/a"
 
 
+def _display_model_name(model_id):
+    name = str(model_id or "").strip()
+    if not name:
+        return f"Cosmos Reason ({MODEL_SIZE})"
+    return name.split("/")[-1]
+
+
 def _is_nim(model_id):
     return model_id.startswith("nim://")
 
@@ -4245,7 +4252,12 @@ else:
 gpu_name, memory_label, memory_free_label = _header_memory_status()
 load_time = _loaded["load_time"]
 
-_header_model = _loaded["model_id"] or MODEL_NAME
+_header_model = (
+    _refresh_server_model_id(timeout=1.5)
+    if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo")
+    else None
+) or _SERVER_MODEL_ID or _loaded["model_id"] or MODEL_NAME
+_header_model_name = _display_model_name(_header_model)
 _load_note    = f"Load: {load_time:.1f}s" if _preloaded_ok else "Load: on demand"
 
 
@@ -4584,7 +4596,11 @@ with gr.Blocks(
         if INFERENCE_BACKEND == "vllm"
         else "**Backend:** HF transformers *(quantized models upcast to BF16)*"
     )
-    _title = "Alpamayo VLA — BYO Video Demo" if _is_alpamayo_mode() else f"Cosmos Reason — BYO Video Demo ({MODEL_SIZE})"
+    _title = (
+        "Alpamayo VLA — BYO Video Demo"
+        if _is_alpamayo_mode()
+        else f"{_header_model_name} — BYO Video Demo"
+    )
     _intro = (
         "Upload a short, front-loaded MP4 or image and ask a captioning/VQA prompt. "
         "The adapter owns Alpamayo frame sampling; use the clip info panel to verify the event is early."
@@ -4595,7 +4611,8 @@ with gr.Blocks(
     gr.Markdown(
         f"# 🌌 {_title}\n"
         f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
-        f"**{memory_label}:** {memory_free_label} &nbsp;·&nbsp; {_backend_note}\n\n"
+        f"**{memory_label}:** {memory_free_label} &nbsp;·&nbsp; "
+        f"**Model:** `{_header_model}` &nbsp;·&nbsp; {_backend_note}\n\n"
         f"{_intro}"
     )
     gr.HTML(_alpamayo_mode_html())
