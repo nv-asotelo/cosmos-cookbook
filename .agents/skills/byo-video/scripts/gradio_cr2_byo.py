@@ -2025,9 +2025,67 @@ def _server_example_choices(limit=40):
 
 def get_free_vram_mib():
     try:
-        return torch.cuda.mem_get_info()[0] // (1024 * 1024)
+        if torch.cuda.is_available():
+            return torch.cuda.mem_get_info()[0] // (1024 * 1024)
     except Exception:
-        return 0
+        pass
+    return _nvidia_smi_gpu_info()[1]
+
+
+def _nvidia_smi_gpu_info():
+    try:
+        out = _sp_cleanup.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.free", "--format=csv,noheader,nounits"],
+            stderr=_sp_cleanup.DEVNULL,
+            timeout=3,
+        ).decode().splitlines()
+    except Exception:
+        return None, None
+    if not out:
+        return None, None
+    name, _, free_raw = out[0].partition(",")
+    free_raw = free_raw.strip()
+    try:
+        free_mib = int(float(free_raw)) if free_raw and free_raw.upper() != "[N/A]" else None
+    except Exception:
+        free_mib = None
+    return name.strip() or None, free_mib
+
+
+def get_gpu_name():
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    name, _free = _nvidia_smi_gpu_info()
+    return name or "CPU"
+
+
+def get_unified_ram_free_mib():
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+
+def _format_mib(value):
+    return f"{value:,} MiB" if isinstance(value, int) else "n/a"
+
+
+def _header_memory_status():
+    gpu = get_gpu_name()
+    vram = get_free_vram_mib()
+    if vram is not None:
+        return gpu, "VRAM free", _format_mib(vram)
+    unified = get_unified_ram_free_mib() if gpu != "CPU" else None
+    if unified is not None:
+        return gpu, "Unified RAM free", _format_mib(unified)
+    return gpu, "VRAM free", "n/a"
 
 
 def _is_nim(model_id):
@@ -2960,7 +3018,7 @@ def _unload():
         gc.collect()
         torch.cuda.empty_cache()
         free = get_free_vram_mib()
-        print(f"[model] Unloaded. VRAM free: {free:,} MiB", flush=True)
+        print(f"[model] Unloaded. VRAM free: {_format_mib(free)}", flush=True)
 
 
 def _load(model_id):
@@ -3038,7 +3096,7 @@ def _load(model_id):
 
         print(
             f"[model] Ready in {load_time:.1f}s | dtype={dtype_str} | "
-            f"VRAM free: {get_free_vram_mib():,} MiB",
+            f"VRAM free: {_format_mib(get_free_vram_mib())}",
             flush=True,
         )
         return model, processor, load_time
@@ -3845,7 +3903,7 @@ def run_inference(video_path, user_prompt, system_prompt, fps, max_pixels, max_n
         )
         return
 
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    gpu_name = get_gpu_name()
     print(f"[infer] model={model_id} gpu={gpu_name}", flush=True)
 
     # Step 2: load model
@@ -4184,8 +4242,7 @@ elif _SKIP_PRELOAD and INFERENCE_BACKEND in ("vllm", "alpamayo"):
 else:
     print(f"[demo] MODEL_DIR not found — model loads on first inference", flush=True)
 
-gpu_name  = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-free_vram = get_free_vram_mib()
+gpu_name, memory_label, memory_free_label = _header_memory_status()
 load_time = _loaded["load_time"]
 
 _header_model = _loaded["model_id"] or MODEL_NAME
@@ -4538,7 +4595,7 @@ with gr.Blocks(
     gr.Markdown(
         f"# 🌌 {_title}\n"
         f"**{_load_note}** &nbsp;·&nbsp; **GPU:** {gpu_name} &nbsp;·&nbsp; "
-        f"**VRAM free:** {free_vram:,} MiB &nbsp;·&nbsp; {_backend_note}\n\n"
+        f"**{memory_label}:** {memory_free_label} &nbsp;·&nbsp; {_backend_note}\n\n"
         f"{_intro}"
     )
     gr.HTML(_alpamayo_mode_html())
