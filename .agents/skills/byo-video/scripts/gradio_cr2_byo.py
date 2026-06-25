@@ -1781,6 +1781,7 @@ def get_video_meta(path):
 
 
 _SERVER_MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp"}
+_SERVER_VIDEO_EXTS = {".mp4"}
 
 
 def _server_media_roots():
@@ -2057,6 +2058,22 @@ def _server_example_choices(limit=40):
     )
     choices = [("None", "")]
     seen = set()
+    for label, path in _iter_server_examples(raw=raw, limit=limit):
+        if path in seen:
+            continue
+        choices.append((label, path))
+        seen.add(path)
+        if len(choices) >= limit:
+            return choices
+    return choices
+
+
+def _iter_server_examples(raw=None, limit=40):
+    raw = raw if raw is not None else os.environ.get(
+        "BYO_VIDEO_SERVER_EXAMPLE_DIRS",
+        "/tmp/nvidia-build-reason-vite/public/examples:/tmp/examples:/home/horde/examples",
+    )
+    count = 0
     for directory in [part for part in raw.split(":") if part.strip()]:
         root = os.path.abspath(os.path.expanduser(directory))
         if not os.path.isdir(root):
@@ -2064,14 +2081,38 @@ def _server_example_choices(limit=40):
         for name in sorted(os.listdir(root)):
             path = os.path.join(root, name)
             ext = os.path.splitext(path)[1].lower()
-            if ext not in _SERVER_MEDIA_EXTS or not os.path.isfile(path) or path in seen:
+            if ext not in _SERVER_MEDIA_EXTS or not os.path.isfile(path):
                 continue
-            label = f"{os.path.basename(root)}/{name}"
-            choices.append((label, path))
-            seen.add(path)
-            if len(choices) >= limit:
-                return choices
-    return choices
+            yield f"{os.path.basename(root)}/{name}", path
+            count += 1
+            if count >= limit:
+                return
+
+
+def _default_sample_video():
+    sample_video = f"{HOME}/cosmos-reason2/assets/sample.mp4"
+    if os.path.exists(sample_video):
+        return sample_video
+
+    examples = list(_iter_server_examples(limit=80))
+    videos = [
+        (label, path)
+        for label, path in examples
+        if os.path.splitext(path)[1].lower() in _SERVER_VIDEO_EXTS
+    ]
+    if not videos:
+        return ""
+
+    preferred_names = (
+        "agibot.mp4",
+        "embodied-ego-drill.mp4",
+        "lingoqa-red-light-slowdown.mp4",
+    )
+    for preferred in preferred_names:
+        for _label, path in videos:
+            if os.path.basename(path) == preferred:
+                return path
+    return videos[0][1]
 
 
 def get_free_vram_mib():
@@ -5757,7 +5798,7 @@ with gr.Blocks(
         outputs=[response_out, status_panel, results_table],
     )
 
-    SAMPLE_VIDEO = f"{HOME}/cosmos-reason2/assets/sample.mp4"
+    SAMPLE_VIDEO = _default_sample_video()
     if os.path.exists(SAMPLE_VIDEO):
         gr.Examples(
             examples=[[SAMPLE_VIDEO, DEFAULT_PROMPT, DEFAULT_SYSTEM,
