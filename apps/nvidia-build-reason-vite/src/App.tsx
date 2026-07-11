@@ -194,6 +194,7 @@ type SectionTab = "Experience" | "Model Card" | "System Card" | "Deploy";
 type OutputTab = "preview" | "json";
 type MobilePanel = "input" | "output";
 type LongPreset = "fast" | "balanced" | "detailed";
+type LongReducerMode = "local" | "model";
 type RunMode = "standard" | "long" | null;
 type ExampleGroupId = "build" | "vss" | "av-dense-captioning" | "embodied-reasoning";
 
@@ -203,6 +204,13 @@ const LONG_VIDEO_PRESET_FPS: Record<LongPreset, number> = {
   detailed: 10
 };
 const LONG_VIDEO_DEFAULT_CONCURRENCY = 16;
+const LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK = 5;
+const LONG_VIDEO_DEFAULT_FRAME_BUDGET = 720;
+const LONG_VIDEO_PRESET_OVERLAP: Record<LongPreset, number> = {
+  fast: 0,
+  balanced: 1,
+  detailed: 1
+};
 
 type MediaState = {
   name: string;
@@ -446,6 +454,13 @@ type LongProgressState = {
   requestedFps?: number | null;
   extractionFps?: number;
   frameLimit?: number;
+  frameBudget?: number;
+  chunkSize?: number;
+  chunkOverlap?: number;
+  maxImagesPerChunk?: number;
+  reducerMode?: "local" | "model" | string;
+  chunkPromptTemplateEnabled?: boolean;
+  reducerPromptTemplateEnabled?: boolean;
   totalChunks?: number;
   completedChunks?: number;
   failedChunks?: number;
@@ -2630,6 +2645,12 @@ export default function App() {
   const [runMode, setRunMode] = useState<RunMode>(null);
   const [longPreset, setLongPreset] = useState<LongPreset>("balanced");
   const [longConcurrency, setLongConcurrency] = useState(LONG_VIDEO_DEFAULT_CONCURRENCY);
+  const [longFramesPerChunk, setLongFramesPerChunk] = useState(LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK);
+  const [longChunkOverlap, setLongChunkOverlap] = useState(LONG_VIDEO_PRESET_OVERLAP.balanced);
+  const [longFrameBudget, setLongFrameBudget] = useState(LONG_VIDEO_DEFAULT_FRAME_BUDGET);
+  const [longReducerMode, setLongReducerMode] = useState<LongReducerMode>("local");
+  const [longChunkPrompt, setLongChunkPrompt] = useState("");
+  const [longReducerPrompt, setLongReducerPrompt] = useState("");
   const [exampleLoad, setExampleLoad] = useState<ExampleLoadState | null>(null);
   const [longProgress, setLongProgress] = useState<LongProgressState | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
@@ -3025,7 +3046,12 @@ export default function App() {
     setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
     if (!manualLongVideoTuningRef.current) {
       setFramesPerSecond(params.framesPerSecond ?? (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : mediaDefaults.fps));
-      if (example.longVideoEnabled) setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+      if (example.longVideoEnabled) {
+        setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+        setLongFramesPerChunk(LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK);
+        setLongChunkOverlap(LONG_VIDEO_PRESET_OVERLAP[longPreset]);
+        setLongFrameBudget(LONG_VIDEO_DEFAULT_FRAME_BUDGET);
+      }
     }
     setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
   }
@@ -3045,6 +3071,12 @@ export default function App() {
     setFramesPerSecond(DEFAULT_FRAMES_PER_SECOND);
     setLongPreset("balanced");
     setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+    setLongFramesPerChunk(LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK);
+    setLongChunkOverlap(LONG_VIDEO_PRESET_OVERLAP.balanced);
+    setLongFrameBudget(LONG_VIDEO_DEFAULT_FRAME_BUDGET);
+    setLongReducerMode("local");
+    setLongChunkPrompt("");
+    setLongReducerPrompt("");
     setRepetitionPenalty(DEFAULT_REPETITION_PENALTY);
     setPresencePenalty(DEFAULT_PRESENCE_PENALTY);
     setSeed(DEFAULT_SEED);
@@ -3265,6 +3297,16 @@ export default function App() {
           model,
           preset: longPreset,
           concurrency: longConcurrency,
+          chunking: {
+            framesPerChunk: longFramesPerChunk,
+            overlapFrames: longChunkOverlap,
+            frameBudget: longFrameBudget
+          },
+          reducer: {
+            mode: longReducerMode,
+            chunkPrompt: longChunkPrompt.trim() || undefined,
+            reducerPrompt: longReducerPrompt.trim() || undefined
+          },
           video: media.sourceUrl || media.dataUrl,
           params: {
             temperature,
@@ -3529,9 +3571,15 @@ export default function App() {
             inputRef={inputRef}
             isRunning={isRunning}
             jsonOutput={jsonOutput}
+            longChunkOverlap={longChunkOverlap}
+            longChunkPrompt={longChunkPrompt}
             longConcurrency={longConcurrency}
+            longFrameBudget={longFrameBudget}
+            longFramesPerChunk={longFramesPerChunk}
             longPreset={longPreset}
             longProgress={longProgress}
+            longReducerMode={longReducerMode}
+            longReducerPrompt={longReducerPrompt}
             maxTokens={maxTokens}
             media={media}
             model={model}
@@ -3553,8 +3601,14 @@ export default function App() {
             selectedExampleId={selectedExampleId}
             setExamplesOpen={setExamplesOpen}
             setFramesPerSecond={setManualFramesPerSecond}
+            setLongChunkOverlap={setLongChunkOverlap}
+            setLongChunkPrompt={setLongChunkPrompt}
             setLongConcurrency={setLongConcurrency}
+            setLongFrameBudget={setLongFrameBudget}
+            setLongFramesPerChunk={setLongFramesPerChunk}
             setLongPreset={setLongPreset}
+            setLongReducerMode={setLongReducerMode}
+            setLongReducerPrompt={setLongReducerPrompt}
             setMaxTokens={setMaxTokens}
             setModel={setModel}
             setOutputTab={setOutputTab}
@@ -3670,9 +3724,15 @@ function ExperiencePanel({
   inputRef,
   isRunning,
   jsonOutput,
+  longChunkOverlap,
+  longChunkPrompt,
   longConcurrency,
+  longFrameBudget,
+  longFramesPerChunk,
   longPreset,
   longProgress,
+  longReducerMode,
+  longReducerPrompt,
   maxTokens,
   media,
   model,
@@ -3694,8 +3754,14 @@ function ExperiencePanel({
   selectedExampleId,
   setExamplesOpen,
   setFramesPerSecond,
+  setLongChunkOverlap,
+  setLongChunkPrompt,
   setLongConcurrency,
+  setLongFrameBudget,
+  setLongFramesPerChunk,
   setLongPreset,
+  setLongReducerMode,
+  setLongReducerPrompt,
   setMaxTokens,
   setModel,
   setOutputTab,
@@ -3736,9 +3802,15 @@ function ExperiencePanel({
   inputRef: RefObject<HTMLInputElement | null>;
   isRunning: boolean;
   jsonOutput: unknown;
+  longChunkOverlap: number;
+  longChunkPrompt: string;
   longConcurrency: number;
+  longFrameBudget: number;
+  longFramesPerChunk: number;
   longPreset: LongPreset;
   longProgress: LongProgressState | null;
+  longReducerMode: LongReducerMode;
+  longReducerPrompt: string;
   maxTokens: number;
   media: MediaState | null;
   model: string;
@@ -3760,8 +3832,14 @@ function ExperiencePanel({
   selectedExampleId: string;
   setExamplesOpen: (open: boolean) => void;
   setFramesPerSecond: (value: number) => void;
+  setLongChunkOverlap: (value: number) => void;
+  setLongChunkPrompt: (value: string) => void;
   setLongConcurrency: (value: number) => void;
+  setLongFrameBudget: (value: number) => void;
+  setLongFramesPerChunk: (value: number) => void;
   setLongPreset: (value: LongPreset) => void;
+  setLongReducerMode: (value: LongReducerMode) => void;
+  setLongReducerPrompt: (value: string) => void;
   setMaxTokens: (value: number) => void;
   setModel: (value: string) => void;
   setOutputTab: (tab: OutputTab) => void;
@@ -3790,11 +3868,29 @@ function ExperiencePanel({
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("input");
   const vlaMode = isVlaMode(model, backendInfo);
   const showLongVideoUi = media?.kind === "video" || runMode === "long";
+  const maxChunkOverlap = Math.max(0, longFramesPerChunk - 1);
+
+  function clampInteger(value: number, min: number, max: number, fallback: number) {
+    const parsed = Math.round(Number(value));
+    const base = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(max, base));
+  }
+
+  function setLongFramesPerChunkClamped(value: number) {
+    const next = clampInteger(value, 1, 5, LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK);
+    setLongFramesPerChunk(next);
+    if (longChunkOverlap >= next) setLongChunkOverlap(Math.max(0, next - 1));
+  }
+
+  function setLongChunkOverlapClamped(value: number) {
+    setLongChunkOverlap(clampInteger(value, 0, Math.max(0, longFramesPerChunk - 1), LONG_VIDEO_PRESET_OVERLAP[longPreset]));
+  }
 
   function chooseLongPreset(preset: LongPreset) {
     setLongPreset(preset);
     setFramesPerSecond(LONG_VIDEO_PRESET_FPS[preset]);
     setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
+    setLongChunkOverlap(Math.min(LONG_VIDEO_PRESET_OVERLAP[preset], Math.max(0, longFramesPerChunk - 1)));
   }
 
   async function runWithOutputVisible() {
@@ -4018,6 +4114,114 @@ function ExperiencePanel({
                   />
                 </div>
               </label>
+              <div className="longAdvancedGrid">
+                <label className="longFpsControl" htmlFor="long-video-frames-per-chunk">
+                  <span>Frames per NIM call</span>
+                  <div className="longFpsInputs">
+                    <input
+                      id="long-video-frames-per-chunk"
+                      max={5}
+                      min={1}
+                      onChange={(event) => setLongFramesPerChunkClamped(Number(event.target.value))}
+                      step={1}
+                      type="range"
+                      value={longFramesPerChunk}
+                    />
+                    <input
+                      aria-label="Long video frames per chunk"
+                      max={5}
+                      min={1}
+                      onChange={(event) => setLongFramesPerChunkClamped(Number(event.target.value))}
+                      step={1}
+                      type="number"
+                      value={longFramesPerChunk}
+                    />
+                  </div>
+                </label>
+                <label className="longFpsControl" htmlFor="long-video-chunk-overlap">
+                  <span>Chunk overlap</span>
+                  <div className="longFpsInputs">
+                    <input
+                      id="long-video-chunk-overlap"
+                      max={maxChunkOverlap}
+                      min={0}
+                      onChange={(event) => setLongChunkOverlapClamped(Number(event.target.value))}
+                      step={1}
+                      type="range"
+                      value={longChunkOverlap}
+                    />
+                    <input
+                      aria-label="Long video chunk overlap"
+                      max={maxChunkOverlap}
+                      min={0}
+                      onChange={(event) => setLongChunkOverlapClamped(Number(event.target.value))}
+                      step={1}
+                      type="number"
+                      value={longChunkOverlap}
+                    />
+                  </div>
+                </label>
+                <label className="longFpsControl" htmlFor="long-video-frame-budget">
+                  <span>Frame budget</span>
+                  <div className="longFpsInputs">
+                    <input
+                      id="long-video-frame-budget"
+                      max={2400}
+                      min={1}
+                      onChange={(event) => setLongFrameBudget(Math.max(1, Math.min(2400, Math.round(Number(event.target.value) || LONG_VIDEO_DEFAULT_FRAME_BUDGET))))}
+                      step={1}
+                      type="number"
+                      value={longFrameBudget}
+                    />
+                  </div>
+                </label>
+                <div className="longReducerMode" role="radiogroup" aria-label="Timeline stitching mode">
+                  <span>Stitching</span>
+                  <button
+                    aria-checked={longReducerMode === "local"}
+                    className={longReducerMode === "local" ? "active" : ""}
+                    onClick={() => setLongReducerMode("local")}
+                    role="radio"
+                    type="button"
+                  >
+                    Local
+                  </button>
+                  <button
+                    aria-checked={longReducerMode === "model"}
+                    className={longReducerMode === "model" ? "active" : ""}
+                    onClick={() => setLongReducerMode("model")}
+                    role="radio"
+                    type="button"
+                  >
+                    Super NIM reducer
+                  </button>
+                </div>
+              </div>
+              <details className="longPromptTemplates">
+                <summary>Chunk and reducer prompts</summary>
+                <p>
+                  Optional templates. Use placeholders like <code>{"{original_task}"}</code>,{" "}
+                  <code>{"{frame_map}"}</code>, <code>{"{chunk_jsonl}"}</code>, and <code>{"{duration}"}</code>.
+                </p>
+                <label className="longPromptTemplateBox">
+                  <span>Chunk extraction prompt</span>
+                  <textarea
+                    onChange={(event) => setLongChunkPrompt(event.target.value)}
+                    placeholder="Leave empty for the default chunk JSON extractor."
+                    rows={5}
+                    value={longChunkPrompt}
+                  />
+                </label>
+                <label className="longPromptTemplateBox">
+                  <span>Second-stage reducer prompt</span>
+                  <textarea
+                    onChange={(event) => setLongReducerPrompt(event.target.value)}
+                    placeholder="Leave empty for the default stitcher. Enable Super NIM reducer above to call the model after chunking."
+                    rows={5}
+                    value={longReducerPrompt}
+                  />
+                </label>
+              </details>
               <p>
                 Long Video sends timestamped frame chunks to the current NIM, max 5 images per request, with live ETA and
                 a stitched timeline.
@@ -5650,8 +5854,25 @@ function LongVideoProgress({ progress }: { progress: LongProgressState }) {
             <span>Frames: {progress.frameCount ?? "scanning"}</span>
             <span>Coverage: {progress.sampleFps ? `${progress.sampleFps} fps` : "planning"}</span>
             <span>Requested FPS: {progress.requestedFps ? progress.requestedFps : "preset"}</span>
-            {progress.frameLimit ? <span>Frame budget: {progress.frameLimit}</span> : null}
+            {progress.frameBudget ? (
+              <span>
+                Frame budget: {progress.frameBudget}
+                {progress.frameLimit && progress.frameLimit !== progress.frameBudget ? ` / ${progress.frameLimit} max` : ""}
+              </span>
+            ) : progress.frameLimit ? (
+              <span>Frame limit: {progress.frameLimit}</span>
+            ) : null}
+            {progress.chunkSize ? (
+              <span>
+                Chunk: {progress.chunkSize} frame{progress.chunkSize === 1 ? "" : "s"}
+                {progress.chunkOverlap ? `, ${progress.chunkOverlap} overlap` : ""}
+              </span>
+            ) : null}
             <span>Concurrency: {progress.concurrency || 4}</span>
+            {progress.reducerMode ? (
+              <span>Stitching: {progress.reducerMode === "model" ? "Super NIM reducer" : "local"}</span>
+            ) : null}
+            {progress.chunkPromptTemplateEnabled || progress.reducerPromptTemplateEnabled ? <span>Custom prompts enabled</span> : null}
           </div>
         ) : null}
         {!compact ? (

@@ -946,6 +946,80 @@ select:focus,
   font: inherit;
 }
 
+.longAdvancedGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 10px;
+}
+
+.longAdvancedGrid .longFpsControl:nth-child(3),
+.longReducerMode {
+  grid-column: 1 / -1;
+}
+
+.longReducerMode {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.longReducerMode button {
+  min-height: 34px;
+  border: 1px solid #383838;
+  border-radius: 6px;
+  background: #1d1d1d;
+  color: #d8d8d8;
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.longReducerMode button.active {
+  border-color: var(--green);
+  background: #263b05;
+  color: var(--text);
+}
+
+.longPromptTemplates {
+  border-top: 1px solid #2a2a2a;
+  padding-top: 10px;
+}
+
+.longPromptTemplates summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.longPromptTemplates code {
+  color: #bce681;
+}
+
+.longPromptTemplateBox {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.longPromptTemplateBox textarea {
+  min-height: 104px;
+  border: 1px solid #354864;
+  border-radius: 6px;
+  background: #080c10;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .resetButton {
   min-width: 76px;
   border: 0;

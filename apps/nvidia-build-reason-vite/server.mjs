@@ -523,6 +523,17 @@ function positiveNumber(value, fallback = null) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function boundedInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  const base = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(min, Math.min(max, base));
+}
+
+function optionalPromptText(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || null;
+}
+
 function longVideoFrameLimit() {
   const parsed = Number.parseInt(process.env.REASONER_LONG_MAX_FRAMES || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 720;
@@ -533,7 +544,65 @@ function longVideoMaxConcurrency() {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(32, parsed) : 16;
 }
 
-function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurrency, requestedFramesPerSecond) {
+function longVideoRequestOptions(body = {}) {
+  const chunking = body.chunking && typeof body.chunking === "object" ? body.chunking : {};
+  const reducer = body.reducer && typeof body.reducer === "object" ? body.reducer : {};
+  return {
+    chunkSize:
+      chunking.framesPerChunk ??
+      chunking.chunkSize ??
+      body.framesPerChunk ??
+      body.chunkSize,
+    overlap:
+      chunking.overlapFrames ??
+      chunking.overlap ??
+      body.chunkOverlap ??
+      body.overlap,
+    frameBudget:
+      chunking.frameBudget ??
+      chunking.maxFrames ??
+      body.frameBudget ??
+      body.maxFrames,
+    reducerMode:
+      reducer.mode ??
+      reducer.reducerMode ??
+      body.reducerMode,
+    chunkPromptTemplate:
+      reducer.chunkPrompt ??
+      reducer.chunkPromptTemplate ??
+      body.chunkPrompt ??
+      body.chunkPromptTemplate,
+    reducerPromptTemplate:
+      reducer.reducerPrompt ??
+      reducer.reducerPromptTemplate ??
+      reducer.prompt ??
+      body.reducerPrompt ??
+      body.reducerPromptTemplate,
+    chunkMaxTokens:
+      reducer.chunkMaxTokens ??
+      body.chunkMaxTokens,
+    finalMaxTokens:
+      reducer.finalMaxTokens ??
+      reducer.reducerMaxTokens ??
+      body.finalMaxTokens ??
+      body.reducerMaxTokens
+  };
+}
+
+function normalizeReducerMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (["model", "nim", "super", "second-stage", "two-step", "2step", "2-step"].includes(mode)) return "model";
+  if (["local", "client", "off", "none"].includes(mode)) return "local";
+  return null;
+}
+
+function longVideoPresetConfig(
+  presetRaw,
+  durationSeconds = 0,
+  requestedConcurrency,
+  requestedFramesPerSecond,
+  options = {}
+) {
   const preset = String(presetRaw || "balanced").toLowerCase();
   const duration = Number(durationSeconds) || 0;
   const requestedFps = positiveNumber(requestedFramesPerSecond);
@@ -582,17 +651,32 @@ function longVideoPresetConfig(presetRaw, durationSeconds = 0, requestedConcurre
     duration > 0
       ? Math.ceil(duration * sampleFps)
       : Math.ceil(sampleFps * 120);
-  const maxFrames = Math.min(maxFrameLimit, Math.max(defaults.maxFrames, requestedFrameBudget));
+  const explicitFrameBudget = boundedInteger(options.frameBudget, 0, 0, maxFrameLimit);
+  const maxFrames =
+    explicitFrameBudget > 0
+      ? explicitFrameBudget
+      : Math.min(maxFrameLimit, Math.max(defaults.maxFrames, requestedFrameBudget));
   const concurrency = Number.parseInt(String(requestedConcurrency || ""), 10);
+  const chunkSize = boundedInteger(options.chunkSize, defaults.chunkSize, 1, LONG_VIDEO_MAX_IMAGES_PER_CHUNK);
+  const overlap = boundedInteger(options.overlap, defaults.overlap, 0, Math.max(0, chunkSize - 1));
+  const reducerMode = normalizeReducerMode(options.reducerMode);
   return {
     ...defaults,
     sampleFps,
     maxFrames,
+    requestedFrameBudget: explicitFrameBudget || null,
     requestedFps,
+    chunkSize,
+    overlap,
     frameLimit: maxFrameLimit,
     maxConcurrency: longVideoMaxConcurrency(),
     concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.min(longVideoMaxConcurrency(), concurrency) : defaults.concurrency,
-    maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK
+    maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
+    reducerMode,
+    chunkPromptTemplate: optionalPromptText(options.chunkPromptTemplate),
+    reducerPromptTemplate: optionalPromptText(options.reducerPromptTemplate),
+    chunkMaxTokens: boundedInteger(options.chunkMaxTokens, defaults.chunkMaxTokens, 128, 4096),
+    finalMaxTokens: boundedInteger(options.finalMaxTokens, defaults.finalMaxTokens, 256, 8192)
   };
 }
 
@@ -1133,11 +1217,54 @@ async function runConcurrent(items, concurrency, worker) {
   return results;
 }
 
-function chunkPrompt({ chunk, durationSeconds, prompt, preset }) {
+function fillLongVideoTemplate(template, values) {
+  if (!template) return null;
+  let replaced = false;
+  const rendered = template.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}|\{\s*([A-Za-z0-9_.-]+)\s*\}/g, (match, doubleKey, singleKey) => {
+    const key = doubleKey || singleKey;
+    if (!Object.prototype.hasOwnProperty.call(values, key)) return match;
+    replaced = true;
+    return String(values[key] ?? "");
+  });
+  return { rendered, replaced };
+}
+
+function chunkPrompt({ chunk, durationSeconds, prompt, preset, template }) {
   const task = stripReasoningFormatInstruction(prompt) || "Summarize what happens in this video segment.";
   const frames = chunk.frames
     .map((frame, index) => `Frame ${index + 1}: ${frame.timestamp_text} (${frame.timestamp.toFixed(2)}s)`)
     .join("\n");
+  const baseContext = `You are analyzing one timestamped window from a longer video.
+
+Full clip duration: ${formatTimestamp(durationSeconds)}.
+Window: ${chunk.timeRange}.
+Preset: ${preset}.
+
+Frame timestamp map:
+${frames}
+
+Original user task:
+${task}`;
+  const templateResult = fillLongVideoTemplate(template, {
+    original_task: task,
+    original_prompt: task,
+    duration: formatTimestamp(durationSeconds),
+    preset,
+    window: chunk.timeRange,
+    start: chunk.frames[0]?.timestamp_text || "00:00.00",
+    end: chunk.frames.at(-1)?.timestamp_text || "00:00.00",
+    frame_map: frames,
+    frame_count: chunk.frames.length
+  });
+  if (templateResult?.replaced) return templateResult.rendered;
+  if (templateResult?.rendered) {
+    return `${baseContext}
+
+Custom chunk extraction instructions:
+${templateResult.rendered}
+
+Return concise valid JSON only. Use only visible evidence from these frames. Do not invent events between frames.`;
+  }
   return `You are analyzing one timestamped window from a longer video.
 
 Full clip duration: ${formatTimestamp(durationSeconds)}.
@@ -1164,7 +1291,7 @@ Return concise valid JSON only with this shape:
 Use only visible evidence from these frames. Do not invent events between frames. Keep output short.`;
 }
 
-function reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset, warnings }) {
+function reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset, warnings, template }) {
   const task = stripReasoningFormatInstruction(prompt) || "Summarize the full video.";
   const chunkText = chunks
     .map((chunk) => JSON.stringify(compactChunkForReducer(chunk)))
@@ -1172,6 +1299,35 @@ function reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset, 
   const failures = failedChunks.length
     ? `\nFailed chunks: ${failedChunks.map((chunk) => `${chunk.index + 1} ${chunk.timeRange}: ${chunk.error}`).join("; ")}`
     : "";
+  const templateResult = fillLongVideoTemplate(template, {
+    original_task: task,
+    original_prompt: task,
+    duration: formatTimestamp(durationSeconds),
+    preset,
+    warnings: warnings.join("; ") || "none",
+    failed_chunks: failures.trim() || "none",
+    chunk_jsonl: chunkText,
+    chunk_count: chunks.length
+  });
+  if (templateResult?.replaced) return templateResult.rendered;
+  if (templateResult?.rendered) {
+    return `Stitch these timestamped chunk analyses into one answer for the original user task.
+
+Original user task:
+${task}
+
+Clip duration: ${formatTimestamp(durationSeconds)}
+Analysis preset: ${preset}
+Warnings: ${warnings.join("; ") || "none"}${failures}
+
+Reducer instructions:
+${templateResult.rendered}
+
+Chunk analyses:
+${chunkText}
+
+Return the final answer only. Do not include <think> tags.`;
+  }
   return `Stitch these timestamped chunk analyses into one answer for the original user task.
 
 Original user task:
@@ -1209,6 +1365,8 @@ function compactChunkForReducer(chunk) {
 }
 
 function stitchReducerMode(config) {
+  if (config?.reducerMode === "model") return "model";
+  if (config?.reducerMode === "local") return "local";
   const value = String(process.env.REASONER_LONG_USE_MODEL_REDUCER || "").trim().toLowerCase();
   if (["1", "true", "yes", "always"].includes(value)) return "model";
   if (value === "detailed" && config?.preset === "detailed") return "model";
@@ -1425,10 +1583,26 @@ function longVideoWarnings(durationSeconds, frameCount, preset, config = {}) {
       `Long Video is using the FPS slider at ${config.requestedFps} fps. Higher FPS creates more chunks because each NIM request can include only ${LONG_VIDEO_MAX_IMAGES_PER_CHUNK} frames.`
     );
   }
+  if (config.chunkSize && config.chunkSize !== LONG_VIDEO_MAX_IMAGES_PER_CHUNK) {
+    warnings.push(
+      `Chunks are using ${config.chunkSize} frame${config.chunkSize === 1 ? "" : "s"} per NIM call; smaller chunks give finer control but create more requests.`
+    );
+  }
+  if (config.overlap > 0) {
+    warnings.push(
+      `Each chunk overlaps by ${config.overlap} frame${config.overlap === 1 ? "" : "s"} so boundary events can be seen by adjacent requests.`
+    );
+  }
   if (config.requestedFps && coverage > 0 && coverage + 0.01 < config.requestedFps) {
     warnings.push(
       `Requested ${config.requestedFps} fps was capped to ${coverage.toFixed(2)} fps effective coverage by the ${config.frameLimit} frame budget.`
     );
+  }
+  if (config.requestedFrameBudget) {
+    warnings.push(`Frame budget override is ${config.maxFrames} frames for this run.`);
+  }
+  if (stitchReducerMode(config) === "model") {
+    warnings.push("Second-stage stitching is enabled; after chunking, Vite calls the Super NIM again to reduce chunk JSON into the final answer.");
   }
   if (config.concurrency > 8) {
     warnings.push(
@@ -2164,7 +2338,13 @@ function emitFallback(response, result) {
 }
 
 async function submitLongChunk({ chunk, config, durationSeconds, endpoints, model, params, prompt, signal, systemPrompt }) {
-  const text = chunkPrompt({ chunk, durationSeconds, prompt, preset: config.preset });
+  const text = chunkPrompt({
+    chunk,
+    durationSeconds,
+    prompt,
+    preset: config.preset,
+    template: config.chunkPromptTemplate
+  });
   const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
     model,
     prompt: text,
@@ -2268,7 +2448,15 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
   const compactChunks = chunks.map((chunk) => compactChunkForReducer(chunk));
   onProgress?.("collect_outputs", { status: "done", progress: 100, detail: `${compactChunks.length} chunks collected` });
   onProgress?.("normalize_events", { status: "running", progress: 60, detail: "Flattening summaries and events" });
-  const text = reducerPrompt({ chunks, durationSeconds, failedChunks, prompt, preset: config.preset, warnings });
+  const text = reducerPrompt({
+    chunks,
+    durationSeconds,
+    failedChunks,
+    prompt,
+    preset: config.preset,
+    warnings,
+    template: config.reducerPromptTemplate
+  });
   onProgress?.("normalize_events", { status: "done", progress: 100, detail: "Chunk JSON normalized" });
   onProgress?.("compact_prompt", { status: "done", progress: 100, detail: `${text.length.toLocaleString()} reducer prompt chars` });
   const { baseUrl, payload, redactedPayload } = buildReasoningPayload({
@@ -2645,7 +2833,8 @@ app.post("/api/reason/long/stream", async (request, response) => {
     if (!mediaSource) throw new Error("Long Video Analysis requires an MP4/video input.");
 
     const requestedLongFps = params.frames_per_second ?? body.framesPerSecond ?? body.longVideoFps;
-    let config = longVideoPresetConfig(body.preset, 0, body.concurrency, requestedLongFps);
+    const longVideoOptions = longVideoRequestOptions(body);
+    let config = longVideoPresetConfig(body.preset, 0, body.concurrency, requestedLongFps, longVideoOptions);
     updateStep("read_video", { status: "running", progress: 10, detail: "Opening media" });
     emitLongState({
       phase: "media_scan",
@@ -2700,7 +2889,13 @@ app.post("/api/reason/long/stream", async (request, response) => {
       }
     };
     extracted = await extractLongVideoFrames(mediaSource, config, handleDecodeProgress);
-    config = longVideoPresetConfig(body.preset, extracted.durationSeconds, body.concurrency, requestedLongFps);
+    config = longVideoPresetConfig(
+      body.preset,
+      extracted.durationSeconds,
+      body.concurrency,
+      requestedLongFps,
+      longVideoOptions
+    );
 
     if (Math.abs((extracted.sampleFps || 0) - config.sampleFps) > 0.01 || extracted.frames.length > config.maxFrames) {
       await fs.rm(extracted.tempDir, { recursive: true, force: true });
@@ -2752,11 +2947,17 @@ app.post("/api/reason/long/stream", async (request, response) => {
       sampleFps: effectiveSampleFps,
       extractionFps: extracted.sampleFps,
       frameLimit: config.frameLimit,
+      frameBudget: config.maxFrames,
+      requestedFrameBudget: config.requestedFrameBudget,
       chunkSize: config.chunkSize,
+      chunkOverlap: config.overlap,
       maxImagesPerChunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
       totalChunks: chunks.length,
       concurrency: config.concurrency,
       maxConcurrency: config.maxConcurrency,
+      reducerMode: stitchReducerMode(config),
+      chunkPromptTemplateEnabled: Boolean(config.chunkPromptTemplate),
+      reducerPromptTemplateEnabled: Boolean(config.reducerPromptTemplate),
       endpoints,
       warnings,
       steps: stepPayload(),
@@ -2953,10 +3154,16 @@ app.post("/api/reason/long/stream", async (request, response) => {
         sample_fps: effectiveSampleFps,
         extraction_fps: extracted.sampleFps,
         frame_limit: config.frameLimit,
+        frame_budget: config.maxFrames,
         chunk_count: chunks.length,
+        chunk_size: config.chunkSize,
+        chunk_overlap: config.overlap,
         concurrency: config.concurrency,
         max_concurrency: config.maxConcurrency,
         max_images_per_chunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
+        reducer_mode: reducerMode,
+        chunk_prompt_template_enabled: Boolean(config.chunkPromptTemplate),
+        reducer_prompt_template_enabled: Boolean(config.reducerPromptTemplate),
         completed_chunks: doneChunks.length,
         failed_chunks: failedChunks.length,
         warnings
