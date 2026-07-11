@@ -61,6 +61,9 @@ function reasonSchemaHints(prompt = "", systemPrompt = "") {
   if (/\b(window_start|window_end|phase_observations|no_count_reason)\b/.test(text)) {
     hints.push("assembly_window_schema");
   }
+  if (/\b(step_count|assemblies|phase_timeline|uncertain_assemblies|phase_evidence)\b/.test(text)) {
+    hints.push("assembly_reducer_schema");
+  }
   if (/\b(assembly|insert|insertion|part|component|fastener|screw|count)\b/.test(text)) {
     hints.push("assembly_or_counting");
   }

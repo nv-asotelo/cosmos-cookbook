@@ -133,6 +133,7 @@ const EMBODIED_EGO_DRILL_POSTER = "/examples/embodied-ego-drill-poster.jpg";
 const TENNIS_TEMPORAL_EXAMPLE_ID = "tennis-temporal-events";
 const TENNIS_TEMPORAL_VIDEO = "/examples/tennis_nim_safe.mp4";
 const WAREHOUSE_ROW_D_VIDEO = "/examples/warehouse_7min.mp4";
+const ASSEMBLY_THREE_STEP_VIDEO = "/examples/assembly_3step.mp4";
 const AV_EGO_RAPID_SCENE_VIDEO = "/examples/av-ego-rapid-scene.mp4";
 const ACCEPTED_MEDIA_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "avi", "jpg", "jpeg", "png", "webp"];
 const ACCEPTED_MEDIA_ACCEPT = [
@@ -654,47 +655,44 @@ const ROBOT_EGO_DRILL_TRACE: PlanningTrace = {
   ]
 };
 
-const ASSEMBLY_VERIFICATION_USER_PROMPT = `Verify the assembly process in this video. Identify every visible phase where a worker, tool, fixture, or part aligns, inserts, fastens, releases, or inspects a part.
+const ASSEMBLY_VERIFICATION_USER_PROMPT = `Verify this manual automotive-parts assembly video. The goal is to audit completed part insertion cycles, not generic activity.
 
-Use only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. Count only actions that are directly visible. Do not infer hidden hands, hidden parts, or between-sample actions. If no assembly action is visible in a sampled window, explain why using "no_count_reason".
+Use only visible evidence from the video and preserve approximate timestamps in "mm:ss.ff" format. Count a completed assembly only when the sampled evidence shows a part was inserted and then seated, released, or visibly stayed in place. Do not infer hidden hands, hidden parts, or between-sample actions.
 
 Return the final answer as valid JSON with this shape:
 {
-  "assembly_summary": "",
-  "phase_observations": [
+  "step_count": 0,
+  "assemblies": [
     {
+      "step_number": 1,
       "start": "mm:ss.ff",
       "end": "mm:ss.ff",
-      "phase": "align|insert|fasten|release|inspect|other_visible_action",
-      "part_or_tool": "",
-      "evidence": "",
-      "count": 1,
+      "result": "completed",
+      "phase_evidence": [
+        {"phase": "picked_up", "time": "mm:ss.ff", "evidence": ""},
+        {"phase": "aligned", "time": "mm:ss.ff", "evidence": ""},
+        {"phase": "inserted_into_fixture", "time": "mm:ss.ff", "evidence": ""},
+        {"phase": "seated_released", "time": "mm:ss.ff", "evidence": ""}
+      ],
+      "caption": "",
       "confidence": 0.0
     }
   ],
-  "counts": {
-    "align": 0,
-    "insert": 0,
-    "fasten": 0,
-    "release": 0,
-    "inspect": 0
-  },
-  "uncertain_observations": [],
-  "sampling_limits": {
-    "occlusion": "",
-    "motion_blur": "",
-    "would_higher_fps_help": true
-  }
+  "phase_timeline": [
+    {"start": "mm:ss.ff", "end": "mm:ss.ff", "step_number": 1, "phase": "picked_up|aligned|inserted_into_fixture|seated_released|uncertain", "caption": "", "confidence": 0.0}
+  ],
+  "uncertain_assemblies": [],
+  "audit_notes": {"counting_rule": "", "sampling_limits": ""}
 }.`;
 
 const ASSEMBLY_VERIFICATION_SYSTEM_PROMPT =
-  "You are an assembly verification video analyst. Use only visible evidence from sampled frames. Preserve timestamps exactly. Count only visible part alignment, insertion, fastening, release, and inspection actions. Do not infer hidden hands, hidden parts, or between-frame actions.";
+  "You are a precise industrial assembly video auditor. Use only visible evidence. Distinguish phase observations from completed assemblies. Return valid JSON only.";
 
-const ASSEMBLY_VERIFICATION_CHUNK_PROMPT = `You are analyzing one sampled assembly-verification window from a longer video.
+const ASSEMBLY_VERIFICATION_CHUNK_PROMPT = `You are an industrial assembly auditor reviewing timestamped frames from one short video window.
+This is a manual automotive-parts assembly task, not a robot operation. Use only visible evidence in this window.
 
 Full clip duration: {duration}
 Window: {window}
-Preset: {preset}
 
 Frame timestamp map:
 {frame_map}
@@ -702,29 +700,34 @@ Frame timestamp map:
 Original assembly task:
 {original_task}
 
-Use only visible evidence in the attached frames. Do not infer actions between frames. Identify visible assembly phases only when a hand, tool, fixture, or part movement is visible enough to support the observation. Count only completed visible actions in this window. If a phase spans the window boundary, mark it uncertain rather than double-counting.
+Definitions:
+- picked_up: a part is visibly lifted or held as a candidate part for insertion.
+- aligned: the held part is positioned/oriented relative to the fixture, slot, receiver, or already-installed structure.
+- inserted_into_fixture: the part is visibly moved into the fixture/receiver/slot or lowered onto the assembly location.
+- seated_released: the part visibly remains seated/in place after the person's hand no longer supports, positions, or presses that piece.
+- uncertain: evidence is occluded, between frames, or does not prove that the part stayed in place after release.
 
-Return valid JSON only with this shape:
+Counting rule: do not count a completed assembly until seated_released is visible. Hand motion, pointing, measuring, hovering, regripping, or pressing without visible insertion/release is not a completed assembly.
+
+Return compact valid JSON only, no markdown:
 {
   "window_start": "{start}",
   "window_end": "{end}",
   "phase_observations": [
     {
-      "start": "mm:ss.ff",
-      "end": "mm:ss.ff",
-      "phase": "align|insert|fasten|release|inspect|other_visible_action",
-      "part_or_tool": "",
-      "evidence": "",
-      "count": 1,
+      "time": "mm:ss.ff",
+      "part_ref": "part_1|part_2|part_3|unknown",
+      "phase": "picked_up|aligned|inserted_into_fixture|seated_released|uncertain",
+      "evidence": "short visible evidence",
       "confidence": 0.0
     }
   ],
-  "no_count_reason": "",
-  "uncertain_observations": [],
-  "evidence_frames": ["Frame 1"]
-}`;
+  "no_count_reason": "short reason if this window has no completed insertion evidence"
+}
+Only include phase_observations that are related to part insertion.`;
 
-const ASSEMBLY_VERIFICATION_REDUCER_PROMPT = `You are the second-stage reducer for assembly verification.
+const ASSEMBLY_VERIFICATION_REDUCER_PROMPT = `You are the final reducer for a chunked industrial assembly audit.
+Merge all chunk observations into completed assembly insertions.
 
 Original assembly task:
 {original_task}
@@ -734,38 +737,43 @@ Analysis preset: {preset}
 Warnings: {warnings}
 Failed chunks: {failed_chunks}
 
+Known process expectation: the source video contains three successful part insertions. Use this as an audit expectation, but still require visible evidence before counting each assembly.
+
 Chunk analyses, one JSON object per line:
 {chunk_jsonl}
 
-Combine the chunk analyses into one final valid JSON answer. Preserve timestamps and visible evidence. Deduplicate observations that overlap by time, phase, and part/tool. Do not create actions absent from chunk evidence. Keep "no_count_reason" only when no phase observations exist across the whole clip.
+Reducer rules:
+1. Count one completed assembly per physical part insertion cycle, not per phase.
+2. A counted assembly must include evidence that a part was inserted and then seated/released/stayed in place.
+3. Merge repeated observations and overlaps across adjacent chunks.
+4. Preserve approximate timestamps in mm:ss.ff.
+5. If a phase is visible but release/stay evidence is not visible, put it under uncertain_assemblies and do not count it.
+6. Do not emit caption-only timeline events as completed assemblies.
 
 Return valid JSON only with this shape:
 {
-  "assembly_summary": "",
-  "phase_observations": [
+  "step_count": 0,
+  "assemblies": [
     {
+      "step_number": 1,
       "start": "mm:ss.ff",
       "end": "mm:ss.ff",
-      "phase": "align|insert|fasten|release|inspect|other_visible_action",
-      "part_or_tool": "",
-      "evidence": "",
-      "count": 1,
+      "result": "completed",
+      "phase_evidence": [
+        {"phase": "picked_up", "time": "mm:ss.ff", "evidence": "..."},
+        {"phase": "aligned", "time": "mm:ss.ff", "evidence": "..."},
+        {"phase": "inserted_into_fixture", "time": "mm:ss.ff", "evidence": "..."},
+        {"phase": "seated_released", "time": "mm:ss.ff", "evidence": "..."}
+      ],
+      "caption": "short completed assembly caption",
       "confidence": 0.0
     }
   ],
-  "counts": {
-    "align": 0,
-    "insert": 0,
-    "fasten": 0,
-    "release": 0,
-    "inspect": 0
-  },
-  "uncertain_observations": [],
-  "sampling_limits": {
-    "occlusion": "",
-    "motion_blur": "",
-    "would_higher_fps_help": true
-  }
+  "phase_timeline": [
+    {"start": "mm:ss.ff", "end": "mm:ss.ff", "step_number": 1, "phase": "picked_up|aligned|inserted_into_fixture|seated_released|uncertain", "caption": "...", "confidence": 0.0}
+  ],
+  "uncertain_assemblies": [],
+  "audit_notes": {"counting_rule": "string", "sampling_limits": "string"}
 }`;
 
 const EXAMPLES: ExampleItem[] = [
@@ -912,8 +920,8 @@ const EXAMPLES: ExampleItem[] = [
     id: "assembly-verification",
     title: "Assembly verification",
     group: "vss",
-    mediaUrl: WAREHOUSE_ROW_D_VIDEO,
-    mediaName: "warehouse_7min.mp4",
+    mediaUrl: ASSEMBLY_THREE_STEP_VIDEO,
+    mediaName: "assembly_3step.mp4",
     mediaKind: "video",
     userPrompt: ASSEMBLY_VERIFICATION_USER_PROMPT,
     systemPrompt: ASSEMBLY_VERIFICATION_SYSTEM_PROMPT,
@@ -2199,6 +2207,11 @@ function asTimelineEvents(value: unknown): TimelineEvent[] {
   return value.filter((item): item is TimelineEvent => Boolean(asRecord(item)));
 }
 
+function asRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)));
+}
+
 function eventsFromChunk(chunk: LongChunkProgress): TimelineEvent[] {
   if (Array.isArray(chunk.events) && chunk.events.length > 0) return asTimelineEvents(chunk.events);
   const parsed = asRecord(chunk.parsed) || asRecord(parseJsonFromText(chunk.content));
@@ -2234,6 +2247,127 @@ function timelineItemsFromEvents(events: TimelineEvent[], fallbackRange = "", fa
       event
     };
   });
+}
+
+function confidenceText(value: unknown) {
+  return value === undefined || value === null || value === "" ? "" : `confidence ${value}`;
+}
+
+function stepText(value: unknown) {
+  return value === undefined || value === null || value === "" ? "" : `step ${value}`;
+}
+
+function recordRange(record: Record<string, unknown>, fallback = "") {
+  const start = String(record.start || record.time || record.window_start || "").trim();
+  const end = String(record.end || record.window_end || "").trim();
+  if (start && end && end !== start) return `${start} - ${end}`;
+  if (start) return start;
+  return fallback || "timestamp unknown";
+}
+
+function phaseEvidenceCaption(assembly: Record<string, unknown>) {
+  const caption = String(assembly.caption || "").trim();
+  if (caption) return caption;
+  const phases = asRecordArray(assembly.phase_evidence)
+    .map((phase) => {
+      const label = String(phase.phase || "").replace(/[_-]+/g, " ");
+      const evidence = String(phase.evidence || "").trim();
+      return [label, evidence].filter(Boolean).join(": ");
+    })
+    .filter(Boolean);
+  return phases.join(" ");
+}
+
+function timelineItemsFromAssemblyResult(parsed: Record<string, unknown> | null): TimelineItem[] {
+  if (!parsed) return [];
+
+  const assemblies = asRecordArray(parsed.assemblies);
+  if (assemblies.length > 0) {
+    return assemblies.map((assembly, index) => {
+      const meta = [
+        stepText(assembly.step_number),
+        String(assembly.result || "").trim(),
+        confidenceText(assembly.confidence)
+      ].filter(Boolean).join(" · ");
+      return {
+        id: `assembly-${assembly.step_number || index}-${assembly.start || ""}-${assembly.end || ""}`,
+        range: recordRange(assembly),
+        title: "completed assembly",
+        caption: phaseEvidenceCaption(assembly) || "Completed assembly insertion.",
+        meta,
+        event: {
+          start: String(assembly.start || ""),
+          end: String(assembly.end || ""),
+          event_type: "completed assembly",
+          caption: phaseEvidenceCaption(assembly),
+          confidence: assembly.confidence as TimelineEvent["confidence"],
+          step_number: assembly.step_number
+        }
+      };
+    });
+  }
+
+  const phaseTimeline = asRecordArray(parsed.phase_timeline);
+  if (phaseTimeline.length > 0) {
+    return phaseTimeline.map((phase, index) => {
+      const title = String(phase.phase || "assembly phase").replace(/[_-]+/g, " ");
+      return {
+        id: `phase-${phase.step_number || "unknown"}-${index}-${phase.start || phase.time || ""}`,
+        range: recordRange(phase),
+        title,
+        caption: String(phase.caption || phase.evidence || "").trim(),
+        meta: [stepText(phase.step_number), confidenceText(phase.confidence)].filter(Boolean).join(" · "),
+        event: {
+          start: String(phase.start || phase.time || ""),
+          end: String(phase.end || phase.time || ""),
+          event_type: title,
+          caption: String(phase.caption || phase.evidence || "").trim(),
+          confidence: phase.confidence as TimelineEvent["confidence"],
+          step_number: phase.step_number
+        }
+      };
+    });
+  }
+
+  const phaseObservations = asRecordArray(parsed.phase_observations);
+  if (phaseObservations.length > 0) {
+    return phaseObservations.map((observation, index) => {
+      const title = String(observation.phase || "assembly observation").replace(/[_-]+/g, " ");
+      return {
+        id: `phase-observation-${index}-${observation.time || ""}`,
+        range: recordRange(observation),
+        title,
+        caption: String(observation.evidence || "").trim(),
+        meta: [
+          observation.part_ref ? `part ${observation.part_ref}` : "",
+          confidenceText(observation.confidence)
+        ].filter(Boolean).join(" · "),
+        event: {
+          start: String(observation.time || ""),
+          end: String(observation.time || ""),
+          event_type: title,
+          caption: String(observation.evidence || "").trim(),
+          confidence: observation.confidence as TimelineEvent["confidence"],
+          part_ref: observation.part_ref
+        }
+      };
+    });
+  }
+
+  const noCountReason = String(parsed.no_count_reason || "").trim();
+  if (noCountReason) {
+    return [
+      {
+        id: `no-count-${parsed.window_start || ""}-${parsed.window_end || ""}`,
+        range: recordRange(parsed),
+        title: "no count",
+        caption: noCountReason,
+        meta: "assembly reducer"
+      }
+    ];
+  }
+
+  return [];
 }
 
 function timelineItemsFromChunks(chunks: LongChunkProgress[], mode: "events" | "summaries") {
@@ -2272,6 +2406,8 @@ function timelineItemsFromChunks(chunks: LongChunkProgress[], mode: "events" | "
 function stitchedTimelineItems(result: ApiResult | null): TimelineItem[] {
   if (!result) return [];
   const parsed = asRecord(parseJsonFromText(result.content));
+  const assemblyItems = timelineItemsFromAssemblyResult(parsed);
+  if (assemblyItems.length > 0) return assemblyItems;
   const finalEvents = timelineItemsFromEvents(asTimelineEvents(parsed?.events));
   if (finalEvents.length > 0) return finalEvents;
   const chunks = result.long_video?.chunks || [];
@@ -2289,6 +2425,7 @@ function isStaticTimelineItem(item: TimelineItem) {
     title.startsWith("static ") ||
     title === "stationary" ||
     title === "none" ||
+    title === "no count" ||
     title === "no change" ||
     title.includes("stationary") ||
     caption.startsWith("the scene remains static") ||
