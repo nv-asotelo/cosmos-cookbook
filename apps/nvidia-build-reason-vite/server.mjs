@@ -40,6 +40,108 @@ app.use(express.json({ limit: "512mb" }));
 const EXAMPLE_MEDIA_HOSTS = new Set(["assets.ngc.nvidia.com"]);
 const DEFAULT_NIM_FRAME_FALLBACK_IMAGES = 5;
 const LONG_VIDEO_MAX_IMAGES_PER_CHUNK = 5;
+const REQUEST_LOG_PREFIX = "[vite-build-reason]";
+const REQUEST_DIAGNOSTICS_ENABLED = String(process.env.REASONER_REQUEST_LOG || "1").toLowerCase() !== "0";
+
+function requestLogId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function elapsedMs(startedAt) {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function definedValues(object) {
+  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined && value !== null));
+}
+
+function reasonSchemaHints(prompt = "", systemPrompt = "") {
+  const text = `${prompt}\n${systemPrompt}`.toLowerCase();
+  const hints = [];
+  if (/\b(window_start|window_end|phase_observations|no_count_reason)\b/.test(text)) {
+    hints.push("assembly_window_schema");
+  }
+  if (/\b(assembly|insert|insertion|part|component|fastener|screw|count)\b/.test(text)) {
+    hints.push("assembly_or_counting");
+  }
+  if (/\b(events|event_type|timeline_summary|uncertain_events)\b/.test(text)) {
+    hints.push("event_timeline_schema");
+  }
+  if (/\b(ego|vehicle|traffic|lane|cyclist|pedestrian|right-of-way)\b/.test(text)) {
+    hints.push("av_scene");
+  }
+  if (/\b(robot|gripper|trajectory|bbox_2d|point_2d)\b/.test(text)) {
+    hints.push("robot_spatial");
+  }
+  if (/\bjson\b/.test(text)) hints.push("json_requested");
+  return hints;
+}
+
+function summarizeReasonParams(params = {}) {
+  return definedValues({
+    frames_per_second: params.frames_per_second,
+    temperature: params.temperature,
+    top_p: params.top_p,
+    top_k: params.top_k,
+    repetition_penalty: params.repetition_penalty,
+    max_tokens: params.max_tokens,
+    seed: params.seed
+  });
+}
+
+function summarizePreparedReasonRequest(prepared) {
+  return {
+    model: prepared.selectedModel,
+    prompt_chars: String(prepared.prompt || "").length,
+    system_prompt_chars: String(prepared.systemPrompt || "").length,
+    schema_hints: reasonSchemaHints(prepared.prompt, prepared.systemPrompt),
+    media: prepared.media,
+    media_kind: prepared.mediaKind,
+    params: summarizeReasonParams(prepared.params)
+  };
+}
+
+function responseContent(result) {
+  return (
+    result?.content ||
+    result?.combined_content ||
+    result?.openai?.choices?.[0]?.message?.content ||
+    result?.message ||
+    ""
+  );
+}
+
+function summarizeReasoningResult(result) {
+  const choice = result?.openai?.choices?.[0] || {};
+  const message = choice.message || {};
+  const content = responseContent(result);
+  const reasoning = result?.reasoning || message.reasoning_content || "";
+  return {
+    status: result?.status,
+    schema: result?.schema,
+    model: result?.openai?.model,
+    finish_reason: choice.finish_reason,
+    usage: result?.openai?.usage || result?.usage,
+    content_chars: String(content || "").length,
+    reasoning_chars: String(reasoning || "").length,
+    media: result?.media
+  };
+}
+
+function logReasonRequest(requestId, event, fields = {}) {
+  if (!REQUEST_DIAGNOSTICS_ENABLED) return;
+  console.log(`${REQUEST_LOG_PREFIX} request ${requestId} ${event} ${JSON.stringify(fields)}`);
+}
+
+function logReasonError(requestId, event, error, fields = {}) {
+  if (!REQUEST_DIAGNOSTICS_ENABLED) return;
+  console.warn(
+    `${REQUEST_LOG_PREFIX} request ${requestId} ${event} ${JSON.stringify({
+      ...fields,
+      error: error instanceof Error ? error.message : String(error || "unknown error")
+    })}`
+  );
+}
 const FRAME_EXTRACTOR_PY = String.raw`
 import json
 import os
@@ -2538,22 +2640,39 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
 app.post("/api/reason", async (request, response) => {
   let prepared;
   let fallbackPrepared;
+  const requestId = requestLogId("reason");
+  const startedAt = Date.now();
   try {
     prepared = await prepareReasonRequest(request.body || {});
+    logReasonRequest(requestId, "prepared", {
+      route: "/api/reason",
+      ...summarizePreparedReasonRequest(prepared)
+    });
     let result = await submitPreparedReasoning(prepared);
     if (result.status === "error" && shouldRetryWithFrameFallback(prepared, result)) {
       console.warn(
         `[vite-build-reason] native video_url rejected by NIM; retrying with ${frameFallbackLimit()} image frames`
       );
+      logReasonRequest(requestId, "fallback-start", {
+        reason: result.message,
+        frame_limit: frameFallbackLimit()
+      });
       fallbackPrepared = await prepareReasonRequest(request.body || {}, {
         forceFrameFallback: true,
         fallbackError: result.message
       });
+      logReasonRequest(requestId, "fallback-prepared", summarizePreparedReasonRequest(fallbackPrepared));
       result = await submitPreparedReasoning(fallbackPrepared);
     }
+    logReasonRequest(requestId, "complete", {
+      elapsed_ms: elapsedMs(startedAt),
+      used_fallback: Boolean(fallbackPrepared),
+      ...summarizeReasoningResult(result)
+    });
     const httpStatus = result.status === "error" ? 502 : 200;
     response.status(httpStatus).json(result);
   } catch (error) {
+    logReasonError(requestId, "error", error, { elapsed_ms: elapsedMs(startedAt) });
     response.status(502).json({
       status: "error",
       message: error instanceof Error ? error.message : "Backend request failed",
@@ -2767,6 +2886,7 @@ app.post("/api/reason/long/stream", async (request, response) => {
   let clientClosed = false;
   let extracted = null;
   const startedAt = Date.now();
+  const requestId = requestLogId("long");
 
   const abortForClosedClient = () => {
     if (response.writableEnded) return;
@@ -2835,6 +2955,18 @@ app.post("/api/reason/long/stream", async (request, response) => {
     const requestedLongFps = params.frames_per_second ?? body.framesPerSecond ?? body.longVideoFps;
     const longVideoOptions = longVideoRequestOptions(body);
     let config = longVideoPresetConfig(body.preset, 0, body.concurrency, requestedLongFps, longVideoOptions);
+    logReasonRequest(requestId, "start", {
+      route: "/api/reason/long/stream",
+      model: selectedModel,
+      preset: body.preset || config.preset,
+      prompt_chars: String(body.prompt || body.userPrompt || "").length,
+      system_prompt_chars: String(body.systemPrompt || body.system_prompt || "").length,
+      schema_hints: reasonSchemaHints(body.prompt || body.userPrompt || "", body.systemPrompt || body.system_prompt || ""),
+      requested_fps: requestedLongFps,
+      requested_concurrency: body.concurrency,
+      media_mode: "long-video-image-chunks",
+      params: summarizeReasonParams(params)
+    });
     updateStep("read_video", { status: "running", progress: 10, detail: "Opening media" });
     emitLongState({
       phase: "media_scan",
@@ -2919,7 +3051,7 @@ app.post("/api/reason/long/stream", async (request, response) => {
         : extracted.sampleFps;
     const chunks = chunkLongFrames(extracted.frames, config);
     try {
-      setMaxListeners(Math.max(32, chunks.length + config.concurrency + 8), upstreamAbort.signal);
+      setMaxListeners(Math.max(64, chunks.length * 2 + config.concurrency + 16), upstreamAbort.signal);
     } catch {
       // Best-effort only; older runtimes still work without raising the listener ceiling.
     }
@@ -2928,6 +3060,27 @@ app.post("/api/reason/long/stream", async (request, response) => {
     const warnings = longVideoWarnings(extracted.durationSeconds, extracted.frames.length, config.preset, config);
     const { baseUrl } = buildReasoningPayload({ model: selectedModel, prompt: "probe", params: {} });
     const endpoints = reasonerEndpointPool(baseUrl);
+    logReasonRequest(requestId, "plan", {
+      duration_seconds: extracted.durationSeconds,
+      source_fps: extracted.sourceFps,
+      source_width: extracted.sourceWidth,
+      source_height: extracted.sourceHeight,
+      extracted_frames: extracted.frames.length,
+      requested_fps: config.requestedFps || null,
+      sample_fps: effectiveSampleFps,
+      extraction_fps: extracted.sampleFps,
+      frame_budget: config.maxFrames,
+      chunk_count: chunks.length,
+      chunk_size: config.chunkSize,
+      chunk_overlap: config.overlap,
+      max_images_per_chunk: LONG_VIDEO_MAX_IMAGES_PER_CHUNK,
+      concurrency: config.concurrency,
+      reducer_mode: stitchReducerMode(config),
+      endpoint_count: endpoints.length,
+      first_range: chunks[0]?.timeRange,
+      last_range: chunks.at(-1)?.timeRange,
+      warnings
+    });
     const progress = new Map();
     let completed = 0;
     let failed = 0;
@@ -3056,6 +3209,12 @@ app.post("/api/reason/long/stream", async (request, response) => {
     if (clientClosed || upstreamAbort.signal.aborted) return;
     const doneChunks = results.filter((item) => item?.status === "done");
     const failedChunks = results.filter((item) => item?.status === "error");
+    logReasonRequest(requestId, "chunks-complete", {
+      elapsed_ms: elapsedMs(startedAt),
+      completed_chunks: doneChunks.length,
+      failed_chunks: failedChunks.length,
+      average_chunk_seconds: latencyCount > 0 ? Number((latencyTotal / latencyCount).toFixed(2)) : null
+    });
     updateStep("run_chunks", {
       status: failedChunks.length > 0 ? "error" : "done",
       progress: 100,
@@ -3064,6 +3223,13 @@ app.post("/api/reason/long/stream", async (request, response) => {
     const reducerMode = stitchReducerMode(config);
     const stitchStartedAt = Date.now();
     const stitchEtaSeconds = estimateStitchSeconds({ chunks: results, mode: reducerMode });
+    logReasonRequest(requestId, "stitch-start", {
+      reducer_mode: reducerMode,
+      estimated_seconds: stitchEtaSeconds,
+      chunk_count: results.length,
+      done_chunks: doneChunks.length,
+      failed_chunks: failedChunks.length
+    });
     const stitchSubsteps = makeStitchSubsteps(reducerMode);
     const stitchWeights = reducerMode === "model" ? [15, 15, 15, 45, 10] : [25, 35, 20, 20];
     const stitchProgress = () => {
@@ -3183,6 +3349,15 @@ app.post("/api/reason/long/stream", async (request, response) => {
         }))
       }
     };
+    logReasonRequest(requestId, "complete", {
+      elapsed_ms: elapsedMs(startedAt),
+      stitch_elapsed_ms: elapsedMs(stitchStartedAt),
+      content_chars: String(result.content || result.combined_content || "").length,
+      media: result.media,
+      chunk_count: results.length,
+      completed_chunks: doneChunks.length,
+      failed_chunks: failedChunks.length
+    });
 
     sse(response, "raw", result);
     updateStep("stitch_timeline", {
@@ -3209,6 +3384,7 @@ app.post("/api/reason/long/stream", async (request, response) => {
     });
     sse(response, "state", { phase: "complete" });
   } catch (error) {
+    logReasonError(requestId, "error", error, { elapsed_ms: elapsedMs(startedAt) });
     if (!clientClosed && !response.writableEnded) {
       sse(response, "error", { message: error instanceof Error ? error.message : "Long video analysis failed" });
       sse(response, "state", { phase: "error" });
@@ -3225,6 +3401,8 @@ app.post("/api/reason/stream", async (request, response) => {
   const upstreamAbort = new AbortController();
   let clientClosed = false;
   let startedStreaming = false;
+  const requestId = requestLogId("stream");
+  const startedAt = Date.now();
 
   const abortForClosedClient = () => {
     if (response.writableEnded) return;
@@ -3246,6 +3424,10 @@ app.post("/api/reason/stream", async (request, response) => {
   try {
     if (isAlpamayoBackend) sse(response, "state", { phase: "preparing_media" });
     prepared = await prepareReasonRequest(request.body || {});
+    logReasonRequest(requestId, "prepared", {
+      route: "/api/reason/stream",
+      ...summarizePreparedReasonRequest(prepared)
+    });
     if (isAlpamayoBackend) {
       sse(response, "state", {
         phase: "alpamayo_generating",
@@ -3253,6 +3435,11 @@ app.post("/api/reason/stream", async (request, response) => {
           "Alpamayo generate_text returns a complete answer rather than token callbacks; Vite uses a non-streaming adapter request for this backend."
       });
       const fallback = await submitPreparedReasoning(prepared);
+      logReasonRequest(requestId, "complete", {
+        elapsed_ms: elapsedMs(startedAt),
+        adapter: "alpamayo_non_streaming",
+        ...summarizeReasoningResult(fallback)
+      });
       emitFallback(response, fallback);
       return;
     }
@@ -3339,6 +3526,17 @@ app.post("/api/reason/stream", async (request, response) => {
         payload: redactedPayload
       }
     );
+    logReasonRequest(requestId, "complete", {
+      elapsed_ms: elapsedMs(startedAt),
+      status: "success",
+      schema,
+      model: meta.model || prepared.selectedModel,
+      finish_reason: finishReason,
+      usage,
+      content_chars: String(answer || "").length,
+      reasoning_chars: String(reasoning || "").length,
+      media: prepared.media
+    });
     sse(response, "state", { phase: "complete" });
   } catch (error) {
     if (clientClosed || response.writableEnded) return;
@@ -3347,14 +3545,26 @@ app.post("/api/reason/stream", async (request, response) => {
         console.warn(
           `[vite-build-reason] native video_url stream rejected by NIM; retrying with ${frameFallbackLimit()} image frames`
         );
+        logReasonRequest(requestId, "fallback-start", {
+          reason: error instanceof Error ? error.message : "Native video_url rejected",
+          frame_limit: frameFallbackLimit()
+        });
         fallbackPrepared = await prepareReasonRequest(request.body || {}, {
           forceFrameFallback: true,
           fallbackError: error instanceof Error ? error.message : "Native video_url rejected"
         });
+        logReasonRequest(requestId, "fallback-prepared", summarizePreparedReasonRequest(fallbackPrepared));
       }
       const fallback = await submitPreparedReasoning(fallbackPrepared || prepared);
+      logReasonRequest(requestId, "complete", {
+        elapsed_ms: elapsedMs(startedAt),
+        used_fallback: Boolean(fallbackPrepared),
+        stream_fallback: true,
+        ...summarizeReasoningResult(fallback)
+      });
       emitFallback(response, fallback);
     } else {
+      logReasonError(requestId, "error", error, { elapsed_ms: elapsedMs(startedAt), started_streaming: startedStreaming });
       sse(response, "error", { message: error instanceof Error ? error.message : "Backend stream failed" });
     }
   } finally {
