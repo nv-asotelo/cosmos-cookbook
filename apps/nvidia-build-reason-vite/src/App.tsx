@@ -473,6 +473,9 @@ type BackendInfo = {
   display_name?: string;
   cosmos3_version?: string;
   backend?: string;
+  backend_display_name?: string;
+  backend_transport?: string;
+  backend_implementation?: string | null;
   gpu_name?: string;
   vram_free_gib?: number;
   vram_total_gib?: number;
@@ -2498,7 +2501,8 @@ function quantizationLabel(backendInfo: BackendInfo | null) {
 
 function isVlaMode(modelName: string, backendInfo?: BackendInfo | null) {
   const lower = `${modelName} ${backendInfo?.display_name || ""} ${backendInfo?.checkpoint || ""}`.toLowerCase();
-  return Boolean(backendInfo?.vla) || String(backendInfo?.backend || "").toLowerCase() === "alpamayo" || lower.includes("alpamayo");
+  const backendTransport = backendInfo?.backend_transport || backendInfo?.backend;
+  return Boolean(backendInfo?.vla) || String(backendTransport || "").toLowerCase() === "alpamayo" || lower.includes("alpamayo");
 }
 
 function vlaFrameSummary(backendInfo?: BackendInfo | null) {
@@ -2718,12 +2722,12 @@ export default function App() {
 	              ? [
 	                  media.kind === "image"
 	                    ? { type: "image_url", image_url: { url: "data:image/<type>;base64,<payload>" } }
-	                    : usesFrameFallback(model, backendInfo?.backend)
+	                    : usesFrameFallback(model, backendInfo?.backend_transport || backendInfo?.backend)
 	                      ? { type: "text", text: `[Video — sampled frames at ${framesPerSecond}fps]\n${effectivePrompt}` }
 	                      : { type: "video_url", video_url: { url: "data:video/mp4;base64,<payload>" } }
 	                ]
 	              : []),
-	            ...(media?.kind === "video" && usesFrameFallback(model, backendInfo?.backend)
+	            ...(media?.kind === "video" && usesFrameFallback(model, backendInfo?.backend_transport || backendInfo?.backend)
 	              ? [{ type: "image_url", image_url: { url: "data:image/jpeg;base64,<sampled-frame>" } }]
 	              : [{ type: "text", text: effectivePrompt }])
 	          ]
@@ -2742,7 +2746,7 @@ export default function App() {
 	          ? {
 	              mode: isVlaMode(model, backendInfo)
 	                ? "alpamayo_adapter_video_url"
-	                : usesFrameFallback(model, backendInfo?.backend)
+	                : usesFrameFallback(model, backendInfo?.backend_transport || backendInfo?.backend)
 	                  ? "image-frame-fallback"
 	                  : "video_url",
 	              fps: isVlaMode(model, backendInfo) ? undefined : framesPerSecond,
@@ -4102,7 +4106,7 @@ function ExperiencePanel({
 
       <aside className="apiPanel">
         <div className="apiTopline">
-          Backend: <strong>{vlaMode ? "Alpamayo VLA adapter" : backendInfo?.backend || "vLLM / OpenAI-compatible"}</strong>
+          Backend: <strong>{vlaMode ? "Alpamayo VLA adapter" : backendInfo?.backend_display_name || backendInfo?.backend || "OpenAI-compatible"}</strong>
         </div>
         <div className="apiButtons">
           <button>Upgrade</button>
@@ -6365,6 +6369,7 @@ function RuntimeBar({
   const source = backendInfo?.source;
   const vlaMode = isVlaMode(model, backendInfo);
 
+  const backendDisplayName = backendInfo?.backend_display_name || backendInfo?.backend || "OpenAI-compatible";
   return (
     <div className="runtimeBar" id="active-model-runtime-details">
       <div className="runtimeMetric">
@@ -6374,7 +6379,7 @@ function RuntimeBar({
       <div className="runtimeMetric">
         <span className="runtimeLabel">Backend</span>
         <span className="runtimeValue">
-          {displayValue(backendInfo?.backend || "vLLM")} at {displayValue(backendInfo?.vllm?.base_url || backendInfo?.base_url)}
+          {displayValue(backendDisplayName)} at {displayValue(backendInfo?.vllm?.base_url || backendInfo?.base_url)}
         </span>
       </div>
       <div className="runtimeMetric">
@@ -6395,7 +6400,7 @@ function RuntimeBar({
         </span>
       </div>
       <div className="runtimeMetric">
-        <span className="runtimeLabel">{vlaMode ? "Adapter Sampling" : "vLLM Details"}</span>
+        <span className="runtimeLabel">{vlaMode ? "Adapter Sampling" : "Backend Details"}</span>
         <span className="runtimeValue">
           {vlaMode ? (
             vlaFrameSummary(backendInfo)
@@ -6423,7 +6428,13 @@ function RuntimeDetails({ backendInfo, model }: { backendInfo: BackendInfo | nul
       <dt>Loaded model</dt>
       <dd>{model}</dd>
       <dt>Backend</dt>
-      <dd>{backendInfo?.backend || "vLLM / OpenAI-compatible"}</dd>
+      <dd>{backendInfo?.backend_display_name || backendInfo?.backend || "OpenAI-compatible"}</dd>
+      {backendInfo?.backend_transport ? (
+        <>
+          <dt>Backend transport</dt>
+          <dd>{backendInfo.backend_transport}</dd>
+        </>
+      ) : null}
       <dt>Backend endpoint</dt>
       <dd>{backendInfo?.vllm?.base_url || backendInfo?.base_url || "http://localhost:8000/v1"}</dd>
       {vlaMode ? (

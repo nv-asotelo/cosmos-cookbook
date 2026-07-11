@@ -21,6 +21,8 @@ const port = Number(process.env.PORT || 5173);
 const backend =
   process.env.INFERENCE_BACKEND ||
   (process.env.ALPAMAYO_BASE_URL ? "alpamayo" : process.env.NIM_BASE_URL ? "nim_local" : "vllm");
+const backendImplementation = process.env.BACKEND_IMPLEMENTATION || process.env.BACKEND_IMPL || "";
+const backendDisplayName = process.env.BACKEND_DISPLAY_NAME || backendImplementation || backend;
 const isAlpamayoBackend = String(backend || "").toLowerCase() === "alpamayo";
 const defaultModel =
   process.env.NIM_SERVED_MODEL_NAME ||
@@ -1898,7 +1900,10 @@ app.get("/api/active-model", async (_request, response) => {
   response.json({
     checkpoint: info.models?.[0] || defaultModel,
     display_name: info.models?.[0] || defaultModel,
-    backend,
+    backend: backendDisplayName,
+    backend_display_name: backendDisplayName,
+    backend_transport: backend,
+    backend_implementation: backendImplementation || null,
     base_url: info.baseUrl,
     source: runtime.source,
     app_source: runtime.app_source,
