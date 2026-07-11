@@ -266,6 +266,18 @@ type SpatialMark = {
   sequence: number;
 };
 
+type ExampleLongVideoDefaults = {
+  preset?: LongPreset;
+  framesPerSecond?: number;
+  concurrency?: number;
+  framesPerChunk?: number;
+  chunkOverlap?: number;
+  frameBudget?: number;
+  reducerMode?: LongReducerMode;
+  chunkPrompt?: string;
+  reducerPrompt?: string;
+};
+
 type ExampleItem = {
   id: string;
   title: string;
@@ -278,6 +290,7 @@ type ExampleItem = {
   group?: ExampleGroupId;
   judgeNote?: string;
   longVideoEnabled?: boolean;
+  longVideo?: ExampleLongVideoDefaults;
   posterUrl?: string;
   planningTrace?: PlanningTrace;
   parameters?: Partial<{
@@ -641,6 +654,120 @@ const ROBOT_EGO_DRILL_TRACE: PlanningTrace = {
   ]
 };
 
+const ASSEMBLY_VERIFICATION_USER_PROMPT = `Verify the assembly process in this video. Identify every visible phase where a worker, tool, fixture, or part aligns, inserts, fastens, releases, or inspects a part.
+
+Use only visible evidence from the video and preserve exact timestamps in "mm:ss.ff" format. Count only actions that are directly visible. Do not infer hidden hands, hidden parts, or between-sample actions. If no assembly action is visible in a sampled window, explain why using "no_count_reason".
+
+Return the final answer as valid JSON with this shape:
+{
+  "assembly_summary": "",
+  "phase_observations": [
+    {
+      "start": "mm:ss.ff",
+      "end": "mm:ss.ff",
+      "phase": "align|insert|fasten|release|inspect|other_visible_action",
+      "part_or_tool": "",
+      "evidence": "",
+      "count": 1,
+      "confidence": 0.0
+    }
+  ],
+  "counts": {
+    "align": 0,
+    "insert": 0,
+    "fasten": 0,
+    "release": 0,
+    "inspect": 0
+  },
+  "uncertain_observations": [],
+  "sampling_limits": {
+    "occlusion": "",
+    "motion_blur": "",
+    "would_higher_fps_help": true
+  }
+}.`;
+
+const ASSEMBLY_VERIFICATION_SYSTEM_PROMPT =
+  "You are an assembly verification video analyst. Use only visible evidence from sampled frames. Preserve timestamps exactly. Count only visible part alignment, insertion, fastening, release, and inspection actions. Do not infer hidden hands, hidden parts, or between-frame actions.";
+
+const ASSEMBLY_VERIFICATION_CHUNK_PROMPT = `You are analyzing one sampled assembly-verification window from a longer video.
+
+Full clip duration: {duration}
+Window: {window}
+Preset: {preset}
+
+Frame timestamp map:
+{frame_map}
+
+Original assembly task:
+{original_task}
+
+Use only visible evidence in the attached frames. Do not infer actions between frames. Identify visible assembly phases only when a hand, tool, fixture, or part movement is visible enough to support the observation. Count only completed visible actions in this window. If a phase spans the window boundary, mark it uncertain rather than double-counting.
+
+Return valid JSON only with this shape:
+{
+  "window_start": "{start}",
+  "window_end": "{end}",
+  "phase_observations": [
+    {
+      "start": "mm:ss.ff",
+      "end": "mm:ss.ff",
+      "phase": "align|insert|fasten|release|inspect|other_visible_action",
+      "part_or_tool": "",
+      "evidence": "",
+      "count": 1,
+      "confidence": 0.0
+    }
+  ],
+  "no_count_reason": "",
+  "uncertain_observations": [],
+  "evidence_frames": ["Frame 1"]
+}`;
+
+const ASSEMBLY_VERIFICATION_REDUCER_PROMPT = `You are the second-stage reducer for assembly verification.
+
+Original assembly task:
+{original_task}
+
+Clip duration: {duration}
+Analysis preset: {preset}
+Warnings: {warnings}
+Failed chunks: {failed_chunks}
+
+Chunk analyses, one JSON object per line:
+{chunk_jsonl}
+
+Combine the chunk analyses into one final valid JSON answer. Preserve timestamps and visible evidence. Deduplicate observations that overlap by time, phase, and part/tool. Do not create actions absent from chunk evidence. Keep "no_count_reason" only when no phase observations exist across the whole clip.
+
+Return valid JSON only with this shape:
+{
+  "assembly_summary": "",
+  "phase_observations": [
+    {
+      "start": "mm:ss.ff",
+      "end": "mm:ss.ff",
+      "phase": "align|insert|fasten|release|inspect|other_visible_action",
+      "part_or_tool": "",
+      "evidence": "",
+      "count": 1,
+      "confidence": 0.0
+    }
+  ],
+  "counts": {
+    "align": 0,
+    "insert": 0,
+    "fasten": 0,
+    "release": 0,
+    "inspect": 0
+  },
+  "uncertain_observations": [],
+  "sampling_limits": {
+    "occlusion": "",
+    "motion_blur": "",
+    "would_higher_fps_help": true
+  }
+}`;
+
 const EXAMPLES: ExampleItem[] = [
   {
     id: "robotics-next-action",
@@ -779,6 +906,40 @@ const EXAMPLES: ExampleItem[] = [
       repetitionPenalty: 1.2,
       temperature: 0.3,
       topP: 0.8
+    }
+  },
+  {
+    id: "assembly-verification",
+    title: "Assembly verification",
+    group: "vss",
+    mediaUrl: WAREHOUSE_ROW_D_VIDEO,
+    mediaName: "warehouse_7min.mp4",
+    mediaKind: "video",
+    userPrompt: ASSEMBLY_VERIFICATION_USER_PROMPT,
+    systemPrompt: ASSEMBLY_VERIFICATION_SYSTEM_PROMPT,
+    reasoning: true,
+    longVideoEnabled: true,
+    judgeNote:
+      "Prompt preset for assembly clips. Recommended Long Video settings: Detailed, 6 fps, 5 frames per NIM request, 2-frame overlap, 720-frame budget, concurrency 16, model reducer.",
+    longVideo: {
+      preset: "detailed",
+      framesPerSecond: 6,
+      concurrency: 16,
+      framesPerChunk: 5,
+      chunkOverlap: 2,
+      frameBudget: 720,
+      reducerMode: "model",
+      chunkPrompt: ASSEMBLY_VERIFICATION_CHUNK_PROMPT,
+      reducerPrompt: ASSEMBLY_VERIFICATION_REDUCER_PROMPT
+    },
+    parameters: {
+      framesPerSecond: 6,
+      maxTokens: 4096,
+      presencePenalty: 0,
+      repetitionPenalty: 1.0,
+      temperature: 0.3,
+      topK: 20,
+      topP: 0.3
     }
   },
   {
@@ -3039,18 +3200,38 @@ export default function App() {
     const samplingDefaults = example.reasoning ? SAMPLING_DEFAULTS.reasoning : SAMPLING_DEFAULTS.standard;
     const mediaDefaults = modelDefaults(model, backendInfo);
     const params = example.parameters || {};
+    const longVideoDefaults = example.longVideo || {};
+    const nextLongPreset = longVideoDefaults.preset || longPreset;
     setTemperature(params.temperature ?? samplingDefaults.temperature);
     setTopP(params.topP ?? samplingDefaults.topP);
     setTopK(params.topK ?? samplingDefaults.topK);
     setRepetitionPenalty(params.repetitionPenalty ?? samplingDefaults.repetitionPenalty);
     setPresencePenalty(params.presencePenalty ?? samplingDefaults.presencePenalty);
     if (!manualLongVideoTuningRef.current) {
-      setFramesPerSecond(params.framesPerSecond ?? (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[longPreset] : mediaDefaults.fps));
+      setFramesPerSecond(
+        longVideoDefaults.framesPerSecond ??
+          params.framesPerSecond ??
+          (example.longVideoEnabled ? LONG_VIDEO_PRESET_FPS[nextLongPreset] : mediaDefaults.fps)
+      );
       if (example.longVideoEnabled) {
-        setLongConcurrency(LONG_VIDEO_DEFAULT_CONCURRENCY);
-        setLongFramesPerChunk(LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK);
-        setLongChunkOverlap(LONG_VIDEO_PRESET_OVERLAP[longPreset]);
-        setLongFrameBudget(LONG_VIDEO_DEFAULT_FRAME_BUDGET);
+        const nextFramesPerChunk = longVideoDefaults.framesPerChunk ?? LONG_VIDEO_DEFAULT_FRAMES_PER_CHUNK;
+        setLongPreset(nextLongPreset);
+        setLongConcurrency(longVideoDefaults.concurrency ?? LONG_VIDEO_DEFAULT_CONCURRENCY);
+        setLongFramesPerChunk(nextFramesPerChunk);
+        setLongChunkOverlap(
+          Math.min(
+            longVideoDefaults.chunkOverlap ?? LONG_VIDEO_PRESET_OVERLAP[nextLongPreset],
+            Math.max(0, nextFramesPerChunk - 1)
+          )
+        );
+        setLongFrameBudget(longVideoDefaults.frameBudget ?? LONG_VIDEO_DEFAULT_FRAME_BUDGET);
+        setLongReducerMode(longVideoDefaults.reducerMode ?? "local");
+        setLongChunkPrompt(longVideoDefaults.chunkPrompt ?? "");
+        setLongReducerPrompt(longVideoDefaults.reducerPrompt ?? "");
+      } else {
+        setLongReducerMode("local");
+        setLongChunkPrompt("");
+        setLongReducerPrompt("");
       }
     }
     setMaxTokens(params.maxTokens ?? mediaDefaults.maxTokens);
@@ -4482,7 +4663,7 @@ function ExampleModal({
                       </span>
                       {example.judgeNote ? (
                         <span>
-                          <b>LingoQA:</b> {example.judgeNote}
+                          <b>{example.group === "av-dense-captioning" ? "LingoQA" : "Note"}:</b> {example.judgeNote}
                         </span>
                       ) : null}
                     </div>
