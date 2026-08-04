@@ -68,8 +68,12 @@ ask the user to enter a fresh runtime key from
 in chat, shell history, or an environment variable, ask again and use the new
 value only through the frontend's masked runtime-key field. Never place this key
 in a command, environment variable, URL, log, state snapshot, exported report,
-or committed file. The apps clear it from request objects and input controls as
-soon as discovery or comparison starts.
+or committed file. The frontend may retain it only in the masked field's
+page-local memory so discovery and comparisons do not require repeated entry.
+An explicit **Clear key** action, page refresh, or tab close must remove it. Do
+not use Web Storage, Gradio State, server state, or a server-side credential
+session. Each request must still carry its own event-local copy, which the
+server removes from request objects after dispatch.
 
 Treat live catalog discovery as the authority for request IDs. Catalog display
 labels are hints, not stable endpoint IDs. For video input:
@@ -179,7 +183,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 - Never put HuggingFace, NGC, or Brev credentials in command-line arguments.
 - Always request the hosted-comparison runtime key at deployment time from the
   key-management page above; accept it only through the masked frontend field
-  and never retain it after the request.
+  and retain it only in that field's page-local memory until explicit Clear,
+  refresh, or tab close. Never persist or cache it in browser or server storage.
 - Resolve hosted model IDs dynamically and distinguish native-video input from
   sampled-image-frame adaptation. Never infer video capability from a family
   name alone.

@@ -403,6 +403,26 @@ class HostedComparisonTests(unittest.TestCase):
         self.assertFalse(kimi.get("id"))
         self.assertIsNone(kimi.get("supports_video"))
 
+    def test_batch_key_stays_only_in_page_field_until_explicit_clear(self):
+        source = Path(batch.__file__).read_text(encoding="utf-8")
+        discovery = source[
+            source.index("async function discoverComparisonModels()"):
+            source.index("function clearComparisonKey()")
+        ]
+        comparison = source[
+            source.index("async function runComparison()"):
+            source.index("async function exportComparison")
+        ]
+
+        self.assertNotIn("compareApiKey').value=''", discovery)
+        self.assertNotIn("compareApiKey').value=''", comparison)
+        self.assertEqual(source.count("el('compareApiKey').value=''"), 1)
+        self.assertIn("function clearComparisonKey(){ el('compareApiKey').value=''; }", source)
+        self.assertIn("compareClearKeyBtn').onclick = clearComparisonKey", source)
+        self.assertIn("Enter it once per page session", source)
+        self.assertNotIn("localStorage", source)
+        self.assertNotIn("sessionStorage", source)
+
 
 if __name__ == "__main__":
     unittest.main()

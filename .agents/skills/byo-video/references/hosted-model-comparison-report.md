@@ -48,7 +48,7 @@ test with the prompt asking for the next immediate action.
 | Candidate media adaptation | Passed; Nemotron used native video and the remaining candidates used eight sampled `image_url` frames |
 | Spot comparison | Passed; 8 of 8 deterministic model-variant requests completed |
 | Workflow ablation | Passed; control plus system-prompt/temperature variant produced 16 of 16 deterministic model-variant results |
-| Credential lifecycle | Passed; input cleared after dispatch and no credential appeared in rendered output |
+| Credential lifecycle | Passed; the masked input retained the credential only for the page session, explicit Clear removed it, and no credential appeared in server state, browser storage, or rendered output |
 | Report redaction | Passed; no credential, prompt text, configured host, or media data URL appeared in the rendered report |
 | Capability gate | Passed; a catalog-confirmed text-only model was blocked from video input before a candidate call |
 | Vite parameter parity | Passed; loaded and candidate request metadata record the actual temperature, top-p, and token limit sent |

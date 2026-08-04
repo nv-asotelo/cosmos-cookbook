@@ -108,15 +108,19 @@ hosted comparison, ask them to create or select a runtime key at
 field in the chosen frontend. Ask on every deployment, including when a key was
 provided earlier in chat or appears to exist in the environment. Do not export
 the key into the setup process, shell, URL, Gradio state, browser storage, logs,
-or reports. The frontend must clear its field and request copy immediately after
-starting discovery or inference.
+or reports. The masked frontend field may keep the key only in page-local memory
+for the current page session, allowing discovery and comparison without repeated
+entry. **Clear key**, refresh, and tab close must remove it. Each request still
+uses a separate event-local copy that is removed from the server request object;
+never create a server-side credential session.
 
 Workflow:
 
 1. Load or upload the reference video and set the baseline prompt/parameters.
-2. Enter the runtime key in the masked comparison field and click model
-   discovery. The live model catalog supplies request IDs; curated names are
-   selection hints only.
+2. Enter the runtime key once in the masked comparison field and click model
+   discovery. Reuse that page-held value for comparison requests; clear it with
+   **Clear key** or by refreshing/closing the page. The live model catalog
+   supplies request IDs; curated names are selection hints only.
 3. Review each model's media strategy. Confirmed native-video models receive the
    canonical `video_url` data URL. Image-multimodal models receive deterministic
    sampled `image_url` frames. Unknown capability stays blocked unless the user

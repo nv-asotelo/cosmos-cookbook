@@ -33,7 +33,7 @@ class FakeResponse:
 
 
 class HostedModelCompareTests(unittest.TestCase):
-    def test_gradio_key_wiring_clears_both_events_and_never_uses_state(self):
+    def test_gradio_key_wiring_retains_only_masked_page_field_with_explicit_clear(self):
         def is_clear_update(node):
             return (
                 isinstance(node, ast.Call)
@@ -55,6 +55,8 @@ class HostedModelCompareTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
         }
         discovery = functions["_hosted_discover_ui"]
+        discovery_segment = ast.get_source_segment(gradio_source, discovery)
+        self.assertNotIn('gr.update(value="")', discovery_segment)
         discovery_yields = sorted(
             (node for node in ast.walk(discovery) if isinstance(node, ast.Yield)),
             key=lambda node: node.lineno,
@@ -62,12 +64,12 @@ class HostedModelCompareTests(unittest.TestCase):
         self.assertGreaterEqual(len(discovery_yields), 3)
         self.assertIsInstance(discovery_yields[0].value, ast.Tuple)
         self.assertEqual(len(discovery_yields[0].value.elts), 4)
-        self.assertTrue(is_clear_update(discovery_yields[0].value.elts[-1]))
+        self.assertFalse(is_clear_update(discovery_yields[0].value.elts[-1]))
         comparison_segment = ast.get_source_segment(
             gradio_source,
             functions["_run_hosted_compare_ui"],
         )
-        self.assertGreaterEqual(comparison_segment.count('gr.update(value="")'), 2)
+        self.assertNotIn('gr.update(value="")', comparison_segment)
         comparison_yields = sorted(
             (
                 node
@@ -76,15 +78,27 @@ class HostedModelCompareTests(unittest.TestCase):
             ),
             key=lambda node: node.lineno,
         )
-        self.assertTrue(is_clear_update(comparison_yields[0].value.elts[-1]))
+        for yielded in comparison_yields:
+            if isinstance(yielded.value, ast.Tuple):
+                self.assertFalse(is_clear_update(yielded.value.elts[-1]))
+
+        clear_returns = [
+            node
+            for node in ast.walk(functions["_clear_hosted_runtime_key"])
+            if isinstance(node, ast.Return)
+        ]
+        self.assertEqual(len(clear_returns), 1)
+        self.assertIsInstance(clear_returns[0].value, ast.Constant)
+        self.assertEqual(clear_returns[0].value.value, "")
 
         for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
-            if isinstance(call.func, ast.Attribute) and call.func.attr == "State":
+            if isinstance(call.func, ast.Attribute) and call.func.attr in {"State", "BrowserState"}:
                 serialized = ast.dump(call)
                 self.assertNotIn("hosted_runtime_key", serialized)
 
         discovery_click_found = False
         comparison_click_found = False
+        clear_click_found = False
         for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
             if not (isinstance(call.func, ast.Attribute) and call.func.attr == "click"):
                 continue
@@ -100,8 +114,32 @@ class HostedModelCompareTests(unittest.TestCase):
             if fn.id == "_run_hosted_compare_ui":
                 comparison_click_found = True
                 self.assertEqual(output_names[-1], "hosted_runtime_key")
+            if fn.id == "_clear_hosted_runtime_key":
+                clear_click_found = True
+                self.assertEqual(output_names, ["hosted_runtime_key"])
         self.assertTrue(discovery_click_found)
         self.assertTrue(comparison_click_found)
+        self.assertTrue(clear_click_found)
+
+    def test_vite_key_lives_in_app_memory_and_run_design_is_self_explanatory(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        app_source = (repo_root / "apps/nvidia-build-reason-vite/src/App.tsx").read_text(encoding="utf-8")
+        workbench = app_source[app_source.index("function ComparisonWorkbench"):]
+
+        self.assertIn('const [hostedRuntimeKey, setHostedRuntimeKey] = useState("")', app_source)
+        self.assertIn("runtimeKey={hostedRuntimeKey}", app_source)
+        self.assertNotIn('const [runtimeKey, setRuntimeKey] = useState("")', workbench)
+        self.assertEqual(app_source.count('setRuntimeKey("")'), 1)
+        self.assertNotIn("localStorage", app_source)
+        self.assertNotIn("sessionStorage", app_source)
+        self.assertIn("Enter once for this page session", workbench)
+        self.assertIn("refreshing or closing", workbench)
+        self.assertIn("What this runs", workbench)
+        self.assertIn("Planned model runs", workbench)
+        self.assertIn('variantLabel: mode === "ablation" ? variantLabel : "Current settings"', workbench)
+        self.assertIn('attempt.data.code === "INVALID_CATALOG_CONTEXT"', workbench)
+        self.assertIn("refreshing models and retrying automatically", workbench)
+        self.assertGreaterEqual(workbench.count("sendComparison("), 3)
 
     def test_default_provider_base_uses_inference_api(self):
         config = hmc.hosted_provider_config({})

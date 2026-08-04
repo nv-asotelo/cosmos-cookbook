@@ -2984,6 +2984,7 @@ export default function App() {
   const [selectedExampleId, setSelectedExampleId] = useState(EXAMPLES[0].id);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [hostedRuntimeKey, setHostedRuntimeKey] = useState("");
   const [reasoningExpanded, setReasoningExpanded] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [media, setMedia] = useState<MediaState | null>(null);
@@ -4021,6 +4022,8 @@ export default function App() {
           <ComparisonWorkbench
             baselineBusy={isRunning}
             baselineModel={model}
+            runtimeKey={hostedRuntimeKey}
+            setRuntimeKey={setHostedRuntimeKey}
             media={media}
             params={{
               frames_per_second: framesPerSecond,
@@ -4049,8 +4052,8 @@ function comparisonReportMarkdown(report: ComparisonReport) {
     `# Model comparison: ${report.comparison.workflow_label}`,
     "",
     `- Generated: ${report.generated_at}`,
-    `- Mode: ${report.comparison.mode}`,
-    `- Media strategy: ${report.comparison.media_strategy}`,
+    `- Mode: ${comparisonModeDisplay(report.comparison.mode)}`,
+    `- Media strategy: ${comparisonMediaStrategyDisplay(report.comparison.media_strategy)}`,
     `- Variant: ${report.comparison.variant_label}`,
     `- Executed variants: ${(report.variants || []).map((item) => item.label).join(", ") || "current"}`,
     `- Loaded baseline: ${report.baseline_model}`,
@@ -4108,12 +4111,22 @@ async function mediaDataUrlForComparison(media: MediaState | null) {
   return readBlobAsDataUrl(await response.blob());
 }
 
+function comparisonModeDisplay(mode: ComparisonMode) {
+  return mode === "ablation" ? "Workflow ablation" : "Spot check";
+}
+
+function comparisonMediaStrategyDisplay(strategy: "native_video_when_confirmed" | "sampled_frames") {
+  return strategy === "sampled_frames" ? "Sampled frames" : "Native video when supported";
+}
+
 function ComparisonWorkbench({
   baselineBusy,
   baselineModel,
   media,
   params,
   prompt,
+  runtimeKey,
+  setRuntimeKey,
   systemPrompt
 }: {
   baselineBusy: boolean;
@@ -4121,9 +4134,10 @@ function ComparisonWorkbench({
   media: MediaState | null;
   params: Record<string, number>;
   prompt: string;
+  runtimeKey: string;
+  setRuntimeKey: (value: string) => void;
   systemPrompt: string;
 }) {
-  const [runtimeKey, setRuntimeKey] = useState("");
   const [maxModels, setMaxModels] = useState(8);
   const [catalog, setCatalog] = useState<HostedModelOption[]>([]);
   const [catalogCapabilityToken, setCatalogCapabilityToken] = useState("");
@@ -4134,7 +4148,7 @@ function ComparisonWorkbench({
   const [mediaStrategy, setMediaStrategy] = useState<"native_video_when_confirmed" | "sampled_frames">(
     "native_video_when_confirmed"
   );
-  const [workflowLabel, setWorkflowLabel] = useState("current-workflow");
+  const [workflowLabel, setWorkflowLabel] = useState("model-comparison");
   const [variantLabel, setVariantLabel] = useState("system-prompt-removed");
   const [changedSetting, setChangedSetting] = useState("system prompt removed");
   const [hypothesis, setHypothesis] = useState("");
@@ -4227,29 +4241,35 @@ function ComparisonWorkbench({
     setCustomModel("");
   }
 
+  async function requestModelCatalog(apiKey: string) {
+    const response = await fetch("/api/compare/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey })
+    });
+    const data = (await response.json().catch(() => null)) as
+      | { message?: string; models?: HostedModelOption[]; catalog_capability_token?: string }
+      | null;
+    if (Array.isArray(data?.models)) setCatalog(data.models);
+    if (!response.ok) throw new Error(data?.message || `Model discovery failed (HTTP ${response.status})`);
+    const models = data?.models || [];
+    const capabilityToken = String(data?.catalog_capability_token || "");
+    if (!capabilityToken) throw new Error("Model discovery returned no catalog context; try discovery again");
+    setCatalogCapabilityToken(capabilityToken);
+    return { models, capabilityToken };
+  }
+
   async function discoverModels() {
     const apiKey = runtimeKey.trim();
     if (!apiKey) {
-      setStatus("Enter a runtime API key for this catalog discovery request");
+      setStatus("Enter a runtime API key once for this page session");
       return;
     }
-    setRuntimeKey("");
     setCatalogCapabilityToken("");
     setDiscovering(true);
     setStatus("Discovering models from the live hosted catalog");
     try {
-      const response = await fetch("/api/compare/models", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey })
-      });
-      const data = (await response.json().catch(() => null)) as
-        | { message?: string; models?: HostedModelOption[]; catalog_capability_token?: string }
-        | null;
-      if (Array.isArray(data?.models)) setCatalog(data.models);
-      if (!response.ok) throw new Error(data?.message || `Model discovery failed (HTTP ${response.status})`);
-      const models = data?.models || [];
-      setCatalogCapabilityToken(String(data?.catalog_capability_token || ""));
+      const { models } = await requestModelCatalog(apiKey);
       setSelectedModels((current) => {
         const available = new Set(models.filter((item) => item.available !== false).map((item) => item.id));
         const retained = current.filter((id) => available.has(id));
@@ -4277,10 +4297,9 @@ function ComparisonWorkbench({
     }
     const apiKey = runtimeKey.trim();
     if (!apiKey) {
-      setStatus("Enter a runtime API key for this comparison request");
+      setStatus("Enter a runtime API key once for this page session");
       return;
     }
-    setRuntimeKey("");
     const parsedVariantTemperature = variantTemperatureOverride.trim()
       ? Number(variantTemperatureOverride)
       : undefined;
@@ -4299,50 +4318,72 @@ function ComparisonWorkbench({
           (selectedModels.length + 1) * workflowVariantCount === 1 ? "" : "s"
         }`
       );
-      const response = await fetch("/api/compare/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey,
-          catalogCapabilityToken: catalogCapabilityToken || undefined,
-          model: baselineModel,
-          models: selectedModels.map((id) => {
-            const option = catalog.find((item) => item.id === id);
-            const unknownModel = !option?.curated;
-            return {
-              id,
-              capabilities:
-                media?.kind === "video" && mediaStrategy === "sampled_frames" && unknownModel
-                  ? ["image", "text"]
-                  : option?.capabilities || ["text"]
-            };
-          }),
-          prompt,
-          systemPrompt,
-          mediaName: media?.name,
-          ...(media?.kind === "video" ? { video: mediaDataUrl } : media?.kind === "image" ? { image: mediaDataUrl } : {}),
-          params,
-          comparison: {
-            mode,
-            mediaStrategy,
-            workflowLabel,
-            variantLabel,
-            changedSetting,
-            hypothesis,
-            variant:
-              mode === "ablation"
-                ? {
-                    promptOverride: variantPromptOverride,
-                    removeSystemPrompt: removeVariantSystemPrompt,
-                    ...(parsedVariantTemperature !== undefined
-                      ? { temperatureOverride: parsedVariantTemperature }
-                      : {})
-                  }
-                : undefined
-          }
-        })
-      });
-      const data = (await response.json().catch(() => null)) as ComparisonReport | { message?: string } | null;
+      const comparisonBody = {
+        apiKey,
+        model: baselineModel,
+        models: selectedModels.map((id) => {
+          const option = catalog.find((item) => item.id === id);
+          const unknownModel = !option?.curated;
+          return {
+            id,
+            capabilities:
+              media?.kind === "video" && mediaStrategy === "sampled_frames" && unknownModel
+                ? ["image", "text"]
+                : option?.capabilities || ["text"]
+          };
+        }),
+        prompt,
+        systemPrompt,
+        mediaName: media?.name,
+        ...(media?.kind === "video" ? { video: mediaDataUrl } : media?.kind === "image" ? { image: mediaDataUrl } : {}),
+        params,
+        comparison: {
+          mode,
+          mediaStrategy,
+          workflowLabel,
+          variantLabel: mode === "ablation" ? variantLabel : "Current settings",
+          changedSetting: mode === "ablation" ? changedSetting : "",
+          hypothesis: mode === "ablation" ? hypothesis : "",
+          variant:
+            mode === "ablation"
+              ? {
+                  promptOverride: variantPromptOverride,
+                  removeSystemPrompt: removeVariantSystemPrompt,
+                  ...(parsedVariantTemperature !== undefined
+                    ? { temperatureOverride: parsedVariantTemperature }
+                    : {})
+                }
+              : undefined
+        }
+      };
+      async function sendComparison(capabilityToken: string) {
+        const response = await fetch("/api/compare/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...comparisonBody,
+            catalogCapabilityToken: capabilityToken || undefined
+          })
+        });
+        const data = (await response.json().catch(() => null)) as
+          | ComparisonReport
+          | { code?: string; message?: string }
+          | null;
+        return { response, data };
+      }
+
+      let attempt = await sendComparison(catalogCapabilityToken);
+      if (
+        attempt.response.status === 400 &&
+        attempt.data &&
+        "code" in attempt.data &&
+        attempt.data.code === "INVALID_CATALOG_CONTEXT"
+      ) {
+        setStatus("Catalog context expired; refreshing models and retrying automatically");
+        const refreshed = await requestModelCatalog(apiKey);
+        attempt = await sendComparison(refreshed.capabilityToken);
+      }
+      const { response, data } = attempt;
       if (!response.ok || !data || !("results" in data)) {
         throw new Error((data && "message" in data && data.message) || `Comparison failed (HTTP ${response.status})`);
       }
@@ -4397,7 +4438,7 @@ function ComparisonWorkbench({
               autoComplete="off"
               id="hosted-runtime-key"
               onChange={(event) => setRuntimeKey(event.target.value)}
-              placeholder="Required for each discovery or comparison request"
+              placeholder="Enter once for this page session"
               spellCheck={false}
               type="password"
               value={runtimeKey}
@@ -4414,8 +4455,9 @@ function ComparisonWorkbench({
             ) : null}
           </div>
           <p className="comparisonSecurityNote">
-            The key is sent only for the next request, cleared from the UI immediately after dispatch, and omitted
-            from results and exports. It is never saved in browser storage or read from a server fallback.
+            Kept only in this tab&apos;s memory for discovery and comparison. Clear it any time; refreshing or closing
+            the tab removes it. It is never saved in browser storage, read from a server fallback, or included in
+            logs, results, and exports.
           </p>
         </div>
 
@@ -4444,46 +4486,66 @@ function ComparisonWorkbench({
               Workflow ablation
             </button>
           </div>
+          <div className="comparisonDesignSummary" aria-live="polite">
+            <strong>What this runs</strong>
+            <p>
+              {mode === "ablation"
+                ? "Two versions on every model: an unchanged control and the configured variant below."
+                : "The current prompt, system prompt, media, and parameters once on the loaded baseline and each selected hosted model."}
+            </p>
+            <span>
+              {selectedModels.length > 0
+                ? `Planned model runs: ${(selectedModels.length + 1) * (mode === "ablation" ? 2 : 1)}`
+                : "Select at least one hosted candidate; the loaded baseline is always included."}
+            </span>
+          </div>
           <div className="comparisonStrategy">
-            <span>Video transport</span>
+            <span>Video input for hosted candidates</span>
             <div className="comparisonModeTabs" role="radiogroup" aria-label="Hosted video transport">
               <button
                 aria-checked={mediaStrategy === "native_video_when_confirmed"}
                 className={mediaStrategy === "native_video_when_confirmed" ? "active" : ""}
+                disabled={media?.kind !== "video"}
                 onClick={() => setMediaStrategy("native_video_when_confirmed")}
                 role="radio"
                 type="button"
               >
-                Native when confirmed
+                Use native video when supported
               </button>
               <button
                 aria-checked={mediaStrategy === "sampled_frames"}
                 className={mediaStrategy === "sampled_frames" ? "active" : ""}
+                disabled={media?.kind !== "video"}
                 onClick={() => setMediaStrategy("sampled_frames")}
                 role="radio"
                 type="button"
               >
-                Sampled frames for all
+                Use sampled frames
               </button>
             </div>
             <small>
-              Unknown IDs are blocked in native mode. Choose sampled frames for all to make an explicit image-frame
-              override for them.
+              {media?.kind !== "video"
+                ? "This setting does not affect the current image or text-only run."
+                : mediaStrategy === "sampled_frames"
+                  ? "Image-capable candidates receive deterministic sampled frames. Manually added IDs use this explicit override; confirmed text-only models remain blocked. The loaded baseline keeps its normal media path."
+                  : "Models with confirmed video support receive the original video. Confirmed image-only models receive sampled frames; unknown or custom IDs are blocked."}
             </small>
           </div>
           <div className="comparisonLabelGrid">
-            <label className="comparisonField">
-              <span>Workflow label</span>
+            <label className={`comparisonField ${mode === "spot" ? "comparisonWideField" : ""}`}>
+              <span>Run name</span>
               <input onChange={(event) => setWorkflowLabel(event.target.value)} value={workflowLabel} />
-            </label>
-            <label className="comparisonField">
-              <span>Variant label</span>
-              <input onChange={(event) => setVariantLabel(event.target.value)} value={variantLabel} />
+              <small>Used as the report title and export filename.</small>
             </label>
             {mode === "ablation" ? (
               <>
                 <label className="comparisonField">
-                  <span>Changed setting</span>
+                  <span>Variant name</span>
+                  <input onChange={(event) => setVariantLabel(event.target.value)} value={variantLabel} />
+                  <small>Identifies the changed run beside Control.</small>
+                </label>
+                <label className="comparisonField">
+                  <span>What changed</span>
                   <input
                     onChange={(event) => setChangedSetting(event.target.value)}
                     placeholder="For example: reasoning off or FPS 2 → 1"
@@ -4533,7 +4595,11 @@ function ComparisonWorkbench({
                   every selected hosted model.
                 </p>
               </>
-            ) : null}
+            ) : (
+              <p className="comparisonAblationNote">
+                Spot reports label this single unchanged workflow as Current settings.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -4640,8 +4706,8 @@ function ComparisonWorkbench({
               <p className="comparisonEyebrow">Redacted report</p>
               <h3>{report.comparison.workflow_label}</h3>
               <span>
-                {report.comparison.mode} · {report.comparison.variant_label} · {report.comparison.media_strategy} ·{" "}
-                {report.generated_at}
+                {comparisonModeDisplay(report.comparison.mode)} · {report.comparison.variant_label} ·{" "}
+                {comparisonMediaStrategyDisplay(report.comparison.media_strategy)} · {report.generated_at}
               </span>
             </div>
             <div className="comparisonExportButtons">

@@ -10397,7 +10397,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
       <div>
         <label>Runtime API key</label>
         <input id="compareApiKey" type="password" value="" autocomplete="off" spellcheck="false" />
-        <p class="compare-key-note">Use a fresh runtime key from <a href="https://inference.nvidia.com/key-management" target="_blank" rel="noreferrer">key management</a>. It is used only for the current discovery or comparison request, cleared from this form immediately, and never included in app state, logs, results, or exports.</p>
+        <p class="compare-key-note">Use a fresh runtime key from <a href="https://inference.nvidia.com/key-management" target="_blank" rel="noreferrer">key management</a>. Enter it once per page session; this masked field keeps it until you click Clear key, refresh, or close the page. It is never included in server state, logs, results, or exports.</p>
       </div>
       <div>
         <label>Comparison mode</label>
@@ -10420,6 +10420,7 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
       </div>
     </div>
     <div class="actions">
+      <button class="secondary" id="compareClearKeyBtn" type="button">Clear key</button>
       <button class="secondary" id="compareDiscoverBtn">Discover models</button>
       <button id="compareRunBtn">Compare selected videos</button>
       <button class="secondary compareExportBtn" data-format="html">Report</button>
@@ -10767,7 +10768,7 @@ function renderComparison(){
  el('compareBar').style.width=pct+'%';
  const catalogText=comparison.catalog_source==='dynamic'?'Live catalog loaded':'Curated catalog defaults';
  el('compareCatalogStatus').textContent=comparison.catalog_warning?`${catalogText}. ${comparison.catalog_warning}`:`${catalogText}. Native-video models keep video_url input. Known multimodal/image models receive deterministic sampled image_url frames. Unknown entries stay blocked unless you explicitly choose a custom media strategy.`;
- el('compareStatus').textContent=comparison.running?`Running ${done}/${total} cases (${Number(progress.errors||0)} errors). The runtime key is not retained.`:run.status==='complete'?`Complete: ${done}/${total} cases, ${Number(progress.errors||0)} errors in ${sec(run.wall_seconds)}.`:run.status==='error'?`Comparison failed: ${clipText(run.error||'unknown error',260)}`:'No comparison has run yet.';
+ el('compareStatus').textContent=comparison.running?`Running ${done}/${total} cases (${Number(progress.errors||0)} errors). The credential is omitted from run state and reports.`:run.status==='complete'?`Complete: ${done}/${total} cases, ${Number(progress.errors||0)} errors in ${sec(run.wall_seconds)}.`:run.status==='error'?`Comparison failed: ${clipText(run.error||'unknown error',260)}`:'No comparison has run yet.';
  const groups=(run.summary||{}).groups||[];
  el('compareSummary').innerHTML=groups.length?groups.map(item=>{ const latency=item.latency_seconds||{}; const errors=(item.error_messages||[]).join(' | '); return `<div class="compare-summary-row"><div><strong>${esc(item.model)}</strong><br>${esc(item.source||'')}</div><div>${esc(item.media_strategy||'')}</div><div>${esc(item.variant||'')}</div><div>${esc(item.ok||0)}/${esc(item.total||0)} ok</div><div>${sec(latency.average)} avg</div><div>${esc(errors)}</div></div>`; }).join(''):'<p class="hint">Summary will group model, media strategy, variant, status, latency, and errors.</p>';
  el('compareRows').innerHTML=(comparison.results||[]).map(row=>{ const detail=row.error?`<span style="color:var(--bad)">${esc(row.error)}</span>`:esc(clipText(row.response||'',320)); return `<tr><td>${esc(row.video_name||'')}</td><td>${esc(row.source||'')}</td><td>${esc(row.model||'')}</td><td>${esc(row.media_strategy||'')}</td><td>${esc(row.variant||'')}</td><td>${esc(row.status||'')}</td><td class="metric">${sec(row.latency_seconds)}</td><td class="metric">${sec(row.ttft_seconds)}</td><td>${detail}</td></tr>`; }).join('');
@@ -10784,15 +10785,16 @@ async function uploadReferenceVideos(){
 async function discoverComparisonModels(){
  let key=el('compareApiKey').value.trim(); if(!key){ alert('Enter a runtime API key for model discovery.'); return; }
  el('compareCatalogStatus').textContent='Discovering available models...';
- const pending=api('/api/compare/models',{api_key:key}); el('compareApiKey').value=''; key='';
+ const pending=api('/api/compare/models',{api_key:key}); key='';
  try{ await pending; await poll(); }catch(error){ alert(error.message); await poll(); }
 }
+function clearComparisonKey(){ el('compareApiKey').value=''; }
 async function runComparison(){
  let key=el('compareApiKey').value.trim(); if(!key){ alert('Enter a runtime API key for this comparison run.'); return; }
  const custom=String(el('compareCustomModel')?.value||'').trim(); const models=[...new Set([...selectedComparisonModels(),...(custom?[custom]:[])])]; if(!models.length){ alert('Select at least one hosted model with a catalog or explicit media strategy.'); return; }
  const customStrategy=String(el('compareCustomStrategy')?.value||'auto'); const model_strategies=custom&&customStrategy!=='auto'?{[custom]:customStrategy}:{};
  const body={api_key:key,ids:checkedIds(),models,model_strategies,mode:el('compareMode').value,variants:comparisonVariantsPayload(),include_loaded:el('compareIncludeLoaded').checked,concurrency:Number(el('concurrency').value),prompt_mode:promptMode(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,...params(),...reasoningPayload()};
- const pending=api('/api/compare/run',body); el('compareApiKey').value=''; key=''; body.api_key='';
+ const pending=api('/api/compare/run',body); key=''; body.api_key='';
  try{ await pending; await poll(); }catch(error){ alert(error.message); await poll(); }
 }
 async function exportComparison(format){ try{ const item=await api('/api/compare/export',{format}); await poll(); window.open(item.url,'_blank'); }catch(error){ alert(error.message); await poll(); } }
@@ -10892,6 +10894,7 @@ document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to model or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),prompt_mode:'runtime_form',allow_over_context:el('allowOverContext').checked,...params(),...reasoningPayload()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('referenceUploadBtn').onclick = uploadReferenceVideos;
+document.getElementById('compareClearKeyBtn').onclick = clearComparisonKey;
 document.getElementById('compareDiscoverBtn').onclick = discoverComparisonModels;
 document.getElementById('compareRunBtn').onclick = runComparison;
 document.querySelectorAll('.compareExportBtn').forEach(btn=>{ btn.onclick=()=>exportComparison(btn.dataset.format); });

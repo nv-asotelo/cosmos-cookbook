@@ -5600,16 +5600,16 @@ def _hosted_status_html(message, level="info"):
 
 
 def _hosted_discover_ui(runtime_key):
-    """Credential stays in this event argument; outputs contain catalog data only."""
+    """Use an event-local credential copy without changing the masked browser field."""
     key = str(runtime_key or "").strip()
     runtime_key = ""
-    # Clear the browser control before making a network request. The generator
-    # keeps the event-local copy only until discovery finishes.
+    # The event-local copy is discarded after discovery.  A no-op component
+    # update leaves the masked input available for this page session only.
     yield (
         gr.update(interactive=False),
         _hosted_status_html("Discovering available endpoint models…"),
         {},
-        gr.update(value=""),
+        gr.update(),
     )
     if not _HOSTED_COMPARE_OK:
         yield (
@@ -5643,6 +5643,11 @@ def _hosted_discover_ui(runtime_key):
         yield gr.update(interactive=True), _hosted_status_html(safe_error, "error"), {}, gr.update()
     finally:
         key = ""
+
+
+def _clear_hosted_runtime_key():
+    """Explicitly remove the page-session credential from the masked field."""
+    return ""
 
 
 def _resolve_compare_model_id(checkpoint_name, custom_value):
@@ -5815,22 +5820,22 @@ def _run_hosted_compare_ui(
 ):
     """Gradio generator for spot and workflow-ablation comparisons.
 
-    The key is never assigned to a global or Gradio State.  The final output
-    clears the password component in the browser as an additional safeguard.
+    The key is never assigned to a global or Gradio State. No-op key outputs
+    leave the masked browser field available only for the current page session.
     """
     key = str(runtime_key or "").strip()
     runtime_key = ""
     no_key_update = gr.update()
     try:
-        # Clear the browser control immediately while retaining only this
-        # generator's event-local copy for the duration of the run.
+        # Retain only this generator's event-local copy for the duration of the
+        # run; the browser field is unchanged unless the user clicks Clear key.
         yield (
             _hosted_status_html("Validating comparison inputs…"),
             '<div style="color:#94a3b8">Preparing comparison…</div>',
             "{}",
             None,
             None,
-            gr.update(value=""),
+            no_key_update,
         )
         if not _HOSTED_COMPARE_OK:
             raise _HostedCompareError(
@@ -5946,7 +5951,7 @@ def _run_hosted_compare_ui(
             json.dumps(document, indent=2, ensure_ascii=False),
             json_path,
             report_path,
-            gr.update(value=""),
+            no_key_update,
         )
     except Exception as exc:
         safe_error = _hosted_redact(str(exc), (key,))
@@ -5957,7 +5962,7 @@ def _run_hosted_compare_ui(
             json.dumps({"status": "error", "error": safe_error}, indent=2),
             None,
             None,
-            gr.update(value=""),
+            no_key_update,
         )
 
 
@@ -6484,17 +6489,23 @@ with gr.Blocks(
             "Run the same reference media and prompt through the currently loaded model and selected "
             "OpenAI-compatible endpoints. Use this for a quick spot check or a prompt/workflow ablation.  \n"
             f"Enter your personal runtime key from [{_HOSTED_KEY_URL}]({_HOSTED_KEY_URL}). "
-            "The key is masked, used only for the active request, never logged or exported, and cleared "
-            "after discovery and after every comparison run. Re-enter it when moving from discovery to inference."
+            "Enter it once per page session: the masked field keeps it only until you click Clear key, refresh, "
+            "or close the page. It is never placed in Gradio State, logs, or exports."
         )
         with gr.Row():
             hosted_runtime_key = gr.Textbox(
                 label="Runtime API key (required)",
                 type="password",
                 value="",
-                placeholder="Paste key for this request",
-                info="Request/session memory only. Never stored in Gradio State or report artifacts.",
+                placeholder="Enter once for this page session",
+                info="Masked page-session field only. Never stored in Gradio State or report artifacts.",
                 scale=3,
+            )
+            hosted_clear_key_btn = gr.Button(
+                "Clear key",
+                variant="secondary",
+                min_width=100,
+                scale=1,
             )
             hosted_discover_btn = gr.Button(
                 "Discover available models",
@@ -6620,6 +6631,12 @@ with gr.Blocks(
             fn=_hosted_discover_ui,
             inputs=[hosted_runtime_key],
             outputs=[hosted_models, hosted_discovery_status, hosted_catalog_state, hosted_runtime_key],
+            api_name=False,
+        )
+
+        hosted_clear_key_btn.click(
+            fn=_clear_hosted_runtime_key,
+            outputs=[hosted_runtime_key],
             api_name=False,
         )
 
