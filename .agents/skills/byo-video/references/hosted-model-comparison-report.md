@@ -73,7 +73,7 @@ will produce directly comparable redacted artifacts across all selected models.
 
 ## Automated validation
 
-- 38 focused Python tests passed.
+- 40 focused Python tests passed.
 - Python compilation passed for setup, Gradio, shared comparison, and Batch
   Inference helpers.
 - Vite server syntax checking, TypeScript checking, and production build passed.

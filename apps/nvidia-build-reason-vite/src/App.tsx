@@ -4138,6 +4138,7 @@ function ComparisonWorkbench({
   setRuntimeKey: (value: string) => void;
   systemPrompt: string;
 }) {
+  const runtimeKeyRef = useRef(runtimeKey);
   const [maxModels, setMaxModels] = useState(8);
   const [catalog, setCatalog] = useState<HostedModelOption[]>([]);
   const [catalogCapabilityToken, setCatalogCapabilityToken] = useState("");
@@ -4159,6 +4160,11 @@ function ComparisonWorkbench({
   const [comparing, setComparing] = useState(false);
   const [status, setStatus] = useState("Loading curated hosted models");
   const [report, setReport] = useState<ComparisonReport | null>(null);
+
+  function updateRuntimeKey(value: string) {
+    runtimeKeyRef.current = value;
+    setRuntimeKey(value);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -4307,6 +4313,20 @@ function ComparisonWorkbench({
       setStatus("Variant temperature must be a number");
       return;
     }
+    const variantChanges = [
+      variantPromptOverride.trim() ? "user prompt overridden" : "",
+      removeVariantSystemPrompt ? "system prompt removed" : "",
+      parsedVariantTemperature !== undefined ? `temperature set to ${parsedVariantTemperature}` : ""
+    ].filter(Boolean);
+    if (mode === "ablation" && variantChanges.length === 0) {
+      setStatus("Configure at least one variant change before running an ablation");
+      return;
+    }
+    const changedSettingText = changedSetting.trim();
+    const effectiveChangedSetting =
+      mode === "ablation" && (!changedSettingText || changedSettingText === "system prompt removed")
+        ? variantChanges.join("; ")
+        : changedSettingText;
     setComparing(true);
     setReport(null);
     setStatus(media ? `Preparing ${media.name} for a redacted comparison request` : "Preparing text-only comparison");
@@ -4321,17 +4341,6 @@ function ComparisonWorkbench({
       const comparisonBody = {
         apiKey,
         model: baselineModel,
-        models: selectedModels.map((id) => {
-          const option = catalog.find((item) => item.id === id);
-          const unknownModel = !option?.curated;
-          return {
-            id,
-            capabilities:
-              media?.kind === "video" && mediaStrategy === "sampled_frames" && unknownModel
-                ? ["image", "text"]
-                : option?.capabilities || ["text"]
-          };
-        }),
         prompt,
         systemPrompt,
         mediaName: media?.name,
@@ -4342,7 +4351,7 @@ function ComparisonWorkbench({
           mediaStrategy,
           workflowLabel,
           variantLabel: mode === "ablation" ? variantLabel : "Current settings",
-          changedSetting: mode === "ablation" ? changedSetting : "",
+          changedSetting: mode === "ablation" ? effectiveChangedSetting : "",
           hypothesis: mode === "ablation" ? hypothesis : "",
           variant:
             mode === "ablation"
@@ -4356,13 +4365,27 @@ function ComparisonWorkbench({
               : undefined
         }
       };
-      async function sendComparison(capabilityToken: string) {
+      function comparisonModelEntries(modelCatalog: HostedModelOption[]) {
+        return selectedModels.map((id) => {
+          const option = modelCatalog.find((item) => item.id === id);
+          const unknownModel = !option?.curated;
+          return {
+            id,
+            capabilities:
+              media?.kind === "video" && mediaStrategy === "sampled_frames" && unknownModel
+                ? ["image", "text"]
+                : option?.capabilities || ["text"]
+          };
+        });
+      }
+      async function sendComparison(capabilityToken: string, modelCatalog: HostedModelOption[]) {
         const response = await fetch("/api/compare/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...comparisonBody,
-            catalogCapabilityToken: capabilityToken || undefined
+            catalogCapabilityToken: capabilityToken || undefined,
+            models: comparisonModelEntries(modelCatalog)
           })
         });
         const data = (await response.json().catch(() => null)) as
@@ -4372,16 +4395,22 @@ function ComparisonWorkbench({
         return { response, data };
       }
 
-      let attempt = await sendComparison(catalogCapabilityToken);
+      let attempt = await sendComparison(catalogCapabilityToken, catalog);
       if (
         attempt.response.status === 400 &&
         attempt.data &&
         "code" in attempt.data &&
         attempt.data.code === "INVALID_CATALOG_CONTEXT"
       ) {
+        if (runtimeKeyRef.current.trim() !== apiKey) {
+          throw new Error("Automatic retry stopped because the page-session key was cleared or changed");
+        }
         setStatus("Catalog context expired; refreshing models and retrying automatically");
         const refreshed = await requestModelCatalog(apiKey);
-        attempt = await sendComparison(refreshed.capabilityToken);
+        if (runtimeKeyRef.current.trim() !== apiKey) {
+          throw new Error("Automatic retry stopped because the page-session key was cleared or changed");
+        }
+        attempt = await sendComparison(refreshed.capabilityToken, refreshed.models);
       }
       const { response, data } = attempt;
       if (!response.ok || !data || !("results" in data)) {
@@ -4437,7 +4466,7 @@ function ComparisonWorkbench({
             <input
               autoComplete="off"
               id="hosted-runtime-key"
-              onChange={(event) => setRuntimeKey(event.target.value)}
+              onChange={(event) => updateRuntimeKey(event.target.value)}
               placeholder="Enter once for this page session"
               spellCheck={false}
               type="password"
@@ -4449,7 +4478,7 @@ function ComparisonWorkbench({
               Open key management <ExternalLink size={13} />
             </a>
             {runtimeKey ? (
-              <button onClick={() => setRuntimeKey("")} type="button">
+              <button onClick={() => updateRuntimeKey("")} type="button">
                 Clear key
               </button>
             ) : null}
@@ -4457,7 +4486,7 @@ function ComparisonWorkbench({
           <p className="comparisonSecurityNote">
             Kept only in this tab&apos;s memory for discovery and comparison. Clear it any time; refreshing or closing
             the tab removes it. It is never saved in browser storage, read from a server fallback, or included in
-            logs, results, and exports.
+            logs, results, and exports. Clear prevents follow-up retries but does not cancel a request already sent.
           </p>
         </div>
 
@@ -4585,7 +4614,15 @@ function ComparisonWorkbench({
                 <label className="comparisonField comparisonCheckboxField">
                   <input
                     checked={removeVariantSystemPrompt}
-                    onChange={(event) => setRemoveVariantSystemPrompt(event.target.checked)}
+                    onChange={(event) => {
+                      const checked = event.target.checked;
+                      setRemoveVariantSystemPrompt(checked);
+                      setChangedSetting((current) => {
+                        if (!checked && current.trim() === "system prompt removed") return "";
+                        if (checked && !current.trim()) return "system prompt removed";
+                        return current;
+                      });
+                    }}
                     type="checkbox"
                   />
                   <span>Remove the system prompt in the variant</span>

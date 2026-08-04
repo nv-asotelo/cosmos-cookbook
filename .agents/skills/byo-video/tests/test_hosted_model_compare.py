@@ -129,7 +129,8 @@ class HostedModelCompareTests(unittest.TestCase):
         self.assertIn('const [hostedRuntimeKey, setHostedRuntimeKey] = useState("")', app_source)
         self.assertIn("runtimeKey={hostedRuntimeKey}", app_source)
         self.assertNotIn('const [runtimeKey, setRuntimeKey] = useState("")', workbench)
-        self.assertEqual(app_source.count('setRuntimeKey("")'), 1)
+        self.assertNotIn('setRuntimeKey("")', app_source)
+        self.assertIn('updateRuntimeKey("")', workbench)
         self.assertNotIn("localStorage", app_source)
         self.assertNotIn("sessionStorage", app_source)
         self.assertIn("Enter once for this page session", workbench)
@@ -139,6 +140,8 @@ class HostedModelCompareTests(unittest.TestCase):
         self.assertIn('variantLabel: mode === "ablation" ? variantLabel : "Current settings"', workbench)
         self.assertIn('attempt.data.code === "INVALID_CATALOG_CONTEXT"', workbench)
         self.assertIn("refreshing models and retrying automatically", workbench)
+        self.assertIn("runtimeKeyRef.current.trim() !== apiKey", workbench)
+        self.assertIn("refreshed.capabilityToken, refreshed.models", workbench)
         self.assertGreaterEqual(workbench.count("sendComparison("), 3)
 
     def test_default_provider_base_uses_inference_api(self):
