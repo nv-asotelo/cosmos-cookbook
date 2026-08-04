@@ -31,6 +31,7 @@ Every selection serves **Gradio web UI** on `GRADIO_PORT` (default `7860`) and w
 - `~/.claude/scripts/byo_video_setup.py` — Bootstrap + launch script
 - `~/.claude/scripts/byo_video_batch_inference.py` — Batch Inference frontend for HF dataset batch inference and FiftyOne support (filename retains `batch_inference` for backward compat)
 - `~/.claude/scripts/byo_video_runtime_guide.py` — friendly CLI guide for Claude Code-assisted dataset loads, guarded runs, prompt shaping, and exports
+- `.agents/skills/byo-video/scripts/hosted_model_compare.py` — shared secret-safe catalog, comparison-matrix, media-adaptation, and redacted-export helper used by generic Gradio
 
 ---
 
@@ -91,6 +92,59 @@ Browser smoke path:
 2. Confirm `pjramg/Safe_Unsafe_Test` is in the dataset field.
 3. Click **Run smoke** or load the dataset, select videos, then click **Run selected videos**.
 4. Use **Open FiftyOne** after the dataset loads to inspect samples and batch-inference prediction fields (FiftyOne sample fields retain the `runtime_agent_*` field names for backward compat with existing writers).
+
+### Loaded Model vs Hosted Endpoints
+
+The generic Gradio, Cosmos Reason Vite, and Batch Inference surfaces can reuse
+the current prompt and video to compare the loaded endpoint with other models.
+Use **spot** mode for the current workflow as-is. Use **ablation** mode for a
+small matrix of named prompt/parameter variants. A reference video may be a
+fresh Gradio or Vite upload, a bundled Vite example, an HF dataset row, or a
+Batch Inference reference upload.
+
+**Deployment credential gate — mandatory every time:** before the user opens
+hosted comparison, ask them to create or select a runtime key at
+<https://inference.nvidia.com/key-management> and paste it into the masked key
+field in the chosen frontend. Ask on every deployment, including when a key was
+provided earlier in chat or appears to exist in the environment. Do not export
+the key into the setup process, shell, URL, Gradio state, browser storage, logs,
+or reports. The frontend must clear its field and request copy immediately after
+starting discovery or inference.
+
+Workflow:
+
+1. Load or upload the reference video and set the baseline prompt/parameters.
+2. Enter the runtime key in the masked comparison field and click model
+   discovery. The live model catalog supplies request IDs; curated names are
+   selection hints only.
+3. Review each model's media strategy. Confirmed native-video models receive the
+   canonical `video_url` data URL. Image-multimodal models receive deterministic
+   sampled `image_url` frames. Unknown capability stays blocked unless the user
+   deliberately chooses a strategy from a known endpoint contract.
+4. Select **spot comparison** or define a bounded **workflow ablation**, choose
+   whether to include the loaded model, and run.
+5. Review per-target status, latency, answer/reasoning fields, media strategy,
+   variant, and redacted request shape. An authorized catalog response does not
+   prove inference authorization; preserve authorization/capability failures as
+   results instead of ranking them as model output.
+6. Download the redacted JSON/Markdown (Gradio), JSON/Markdown (Vite), or
+   JSON/CSV/HTML (Batch Inference) report. Reports must not contain endpoint
+   hosts, keys, auth headers, data URLs, raw video bytes, or local media paths.
+
+The hosted route is OpenAI-compatible and defaults to the configured service.
+Use these process-level overrides only for endpoint shape—not credentials:
+
+| Surface | Base/catalog/chat overrides |
+|---|---|
+| Generic Gradio | `BYO_VIDEO_HOSTED_API_BASE`, `BYO_VIDEO_HOSTED_MODELS_URL`, `BYO_VIDEO_HOSTED_CHAT_URL` |
+| Cosmos Reason Vite | `NVIDIA_HOSTED_BASE_URL`, `NVIDIA_HOSTED_CATALOG_URL`, `NVIDIA_HOSTED_INFERENCE_URL` |
+| Batch Inference | `NVIDIA_HOSTED_BASE_URL`, `NVIDIA_HOSTED_CATALOG_URL`, `NVIDIA_HOSTED_INFERENCE_URL` |
+
+For a Cosmos3 Nano baseline in Vite, open **Examples**, choose the bundled
+Agibot video, keep the prompt `What can be the next immediate action?`, run the
+loaded NIM first, then open **Compare endpoints** and reuse the exact media,
+prompt, and parameters. The report must mark the loaded result as the baseline
+and every adapted endpoint with its explicit media strategy.
 
 ---
 
@@ -736,7 +790,7 @@ SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
 **Step 1** — Deploy required Python scripts:
 
 ```bash
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide hosted_model_compare; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
@@ -1121,7 +1175,7 @@ The observer runs PHASE 5–6 via SSH instead of `brev exec`.
 Deploy scripts:
 ```bash
 SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide hosted_model_compare; do
   B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   ssh -i ~/.ssh/id_ed25519 <user@host> \
     "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1433,8 +1487,8 @@ git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
 # Install dependencies
 cd ~/cosmos-reason2 && export PATH=~/.local/bin:~/.cargo/bin:$PATH && uv sync --extra cu128
 
-# Install PyAV (required on Hyperstack — FFmpeg not in PATH)
-uv pip install "av==16.1.0"
+# Install sampled-frame dependencies (required on Hyperstack — FFmpeg not in PATH)
+uv pip install "av==16.1.0" "pillow>=10"
 
 # Download model weights (CR2-2B ~8GB, first-run only, ~5-10 min on cloud bandwidth)
 export HF_TOKEN=hf_...
@@ -1444,16 +1498,18 @@ uv run huggingface-cli download nvidia/Cosmos-Reason2-2B \
 
 ### Step 3 — Deploy scripts and launch
 
-Two scripts must be present on the instance:
+Three scripts must be present on the instance:
 - `/tmp/byo_video_setup.py` — shows live progress + ETAs, launches Gradio, prints clickable URL
 - `/tmp/gradio_cr2_byo.py` — the Gradio app itself (called by setup script)
+- `/tmp/hosted_model_compare.py` — required hosted-comparison helper imported by Gradio
 
-Both live at `~/.claude/scripts/` on Alex's Mac (canonical, versioned). Deploy via base64:
+Resolve them from the active skill-local scripts directory, falling back to the
+legacy Claude scripts directory only outside this repository. Deploy via base64:
 
 ```bash
-# Deploy both scripts to the instance
-for script in byo_video_setup gradio_cr2_byo; do
-  B64=$(base64 -i ~/.claude/scripts/${script}.py | tr -d '\n')
+SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
+for script in byo_video_setup gradio_cr2_byo hosted_model_compare; do
+  B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
   brev exec <name> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
 done
 ```
@@ -1510,7 +1566,7 @@ Bootstrap (once):
 git clone https://github.com/nvidia-cosmos/cosmos-reason2.git ~/cosmos-reason2
 cd ~/cosmos-reason2
 uv sync --extra cu128
-uv pip install "av==16.1.0" gradio
+uv pip install "av==16.1.0" "pillow>=10" gradio
 uv run huggingface-cli download nvidia/Cosmos-Reason2-2B \
   --local-dir ~/cosmos-reason2/models/Cosmos-Reason2-2B
 ```
@@ -1577,7 +1633,7 @@ Agent steps:
 3. Deploy scripts to instance (canonical source is the BYO-video skill scripts directory):
    ```bash
    SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
-   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide; do
+   for script in byo_video_setup gradio_cr2_byo gradio_cosmos_predict gradio_cosmos_reason_build byo_video_batch_inference byo_video_runtime_guide hosted_model_compare; do
      B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
      ssh -i ~/.ssh/id_ed25519 horde@<ip> \
        "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
@@ -1805,10 +1861,13 @@ Wait 5s for GPU memory to release:
 brev exec <instance> "nvidia-smi --query-gpu=memory.used --format=csv,noheader"
 ```
 
-**Step 3 — Deploy updated gradio script (if changed):**
+**Step 3 — Deploy the updated Gradio app and comparison helper:**
 ```bash
-B64=$(base64 -i ~/.claude/scripts/gradio_cr2_byo.py | tr -d '\n')
-brev exec <instance> "python3 -c \"import base64; open('/tmp/gradio_cr2_byo.py','wb').write(base64.b64decode('${B64}'))\""
+SCRIPT_DIR="${COSMOS_AGENT_SCRIPTS_DIR:-$PWD/.agents/skills/byo-video/scripts}"
+for script in gradio_cr2_byo hosted_model_compare; do
+  B64=$(base64 -i "$SCRIPT_DIR/${script}.py" | tr -d '\n')
+  brev exec <instance> "python3 -c \"import base64; open('/tmp/${script}.py','wb').write(base64.b64decode('${B64}'))\""
+done
 ```
 
 **Step 4 — Start vLLM with target model:**

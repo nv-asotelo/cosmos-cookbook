@@ -30,6 +30,8 @@ Env vars:
   BYO_VIDEO_LAUNCH_BATCH_INFERENCE — set to 1 to launch Batch Inference as a companion UI
   BATCH_INFERENCE_PORT — port for Batch Inference frontend (default: 7861; env var name retained for backward compat)
   BATCH_INFERENCE_DATASET — default public HF dataset for Batch Inference (default: pjramg/Safe_Unsafe_Test)
+  BYO_VIDEO_HOSTED_API_BASE — optional OpenAI-compatible comparison base URL override (do not put credentials here)
+  NVIDIA_HOSTED_BASE_URL — optional comparison base URL override for Vite and Batch Inference (do not put credentials here)
   SKIP_HF_PRELOAD   — set to 1 to skip HF model preload at Gradio startup (auto in vLLM mode)
   VLLM_MAX_MODEL_LEN — max context length for vLLM (default: 32768; do not reduce below 32768 for video)
 """
@@ -357,6 +359,7 @@ if FRONTEND in ("build", "build_nvidia", "nvidia-build", "nvidia_build_playgroun
     FRONTEND = "nvidia_build"
 BATCH_INFERENCE_PORT = int(os.environ.get("BATCH_INFERENCE_PORT", "7861"))
 BATCH_INFERENCE_APP  = "/tmp/byo_video_batch_inference.py"
+HOSTED_COMPARE_HELPER = "/tmp/hosted_model_compare.py"
 BATCH_INFERENCE_LOG_FILE = "/tmp/byo_video_batch_inference.log"
 BATCH_INFERENCE_URL_FILE = "/tmp/byo_video_batch_inference_url.txt"
 BATCH_INFERENCE_LIVE_FLAG = "/tmp/byo_video_batch_inference_live.flag"
@@ -1684,6 +1687,12 @@ header(f"Step 10 — Launch {FRONTEND} frontend", eta="~5-10s")
 
 if not os.path.exists(GRADIO_APP):
     print(f"  ✗  {GRADIO_APP} not found — deploy gradio_cr2_byo.py first"); sys.exit(1)
+if GRADIO_APP.endswith("gradio_cr2_byo.py") and not os.path.exists(HOSTED_COMPARE_HELPER):
+    print(
+        f"  ✗  {HOSTED_COMPARE_HELPER} not found — deploy hosted_model_compare.py "
+        "beside the generic Gradio app before launch"
+    )
+    sys.exit(1)
 
 if os.path.exists(URL_FILE):
     os.remove(URL_FILE)

@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   FileImage,
   FileVideo,
@@ -10,6 +11,7 @@ import {
   Info,
   Menu,
   Play,
+  RefreshCw,
   RotateCcw,
   Search,
   Upload,
@@ -126,6 +128,8 @@ const DEFAULT_FRAMES_PER_SECOND = 2;
 const DEFAULT_REPETITION_PENALTY = SAMPLING_DEFAULTS.reasoning.repetitionPenalty;
 const DEFAULT_PRESENCE_PENALTY = SAMPLING_DEFAULTS.reasoning.presencePenalty;
 const DEFAULT_SEED = 42;
+const HOSTED_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$/;
+const HOSTED_SECRET_LIKE_PATTERN = /\b(?:nvapi|sk)-[A-Za-z0-9._-]{16,}\b/i;
 const AGIBOT_VIDEO = "/examples/agibot.mp4";
 const ROBOT_TAPE_IMAGE = "/examples/robot_tape.png";
 const EMBODIED_EGO_DRILL_VIDEO = "/examples/embodied-ego-drill.mp4";
@@ -340,6 +344,65 @@ type ApiResult = {
     preset?: string;
     chunks?: LongChunkProgress[];
   };
+};
+
+type ComparisonMode = "spot" | "ablation";
+
+type HostedModelOption = {
+  id: string;
+  label?: string;
+  catalog_key?: string;
+  family: string;
+  capabilities?: string[];
+  capability_source?: "live_catalog" | "confirmed_contract" | "unconfirmed";
+  note?: string;
+  created?: number | null;
+  owned_by?: string;
+  available?: boolean | null;
+  curated?: boolean;
+  discovery_required?: boolean;
+  recommended?: boolean;
+};
+
+type ComparisonResult = {
+  role: "baseline" | "candidate";
+  provider: string;
+  model: string;
+  requested_model?: string;
+  status: "success" | "error";
+  elapsed_ms: number;
+  attempts?: number;
+  http_status?: number | null;
+  response?: string;
+  answer?: string;
+  reasoning?: string;
+  schema?: string | null;
+  usage?: unknown;
+  finish_reason?: string | null;
+  error?: string;
+  request_shape?: Record<string, unknown>;
+  variant_id?: string;
+  variant_label?: string;
+};
+
+type ComparisonReport = {
+  schema_version: string;
+  generated_at: string;
+  status: "success" | "partial";
+  comparison: {
+    mode: ComparisonMode;
+    media_strategy: "native_video_when_confirmed" | "sampled_frames";
+    workflow_label: string;
+    variant_label: string;
+    changed_setting?: string;
+    hypothesis?: string;
+  };
+  baseline_model: string;
+  input: Record<string, unknown>;
+  settings: Record<string, unknown>;
+  redaction: Record<string, string>;
+  variants?: Array<{ id: string; label: string }>;
+  results: ComparisonResult[];
 };
 
 type StreamPhase =
@@ -3875,6 +3938,7 @@ export default function App() {
         aria-labelledby={`tab-${activeTab.toLowerCase().replace(/\s+/g, "-")}`}
       >
         {activeTab === "Experience" ? (
+          <>
           <ExperiencePanel
             backendInfo={backendInfo}
             copied={copied}
@@ -3954,11 +4018,667 @@ export default function App() {
             framesPerSecond={framesPerSecond}
             applyExample={applyExample}
           />
+          <ComparisonWorkbench
+            baselineBusy={isRunning}
+            baselineModel={model}
+            media={media}
+            params={{
+              frames_per_second: framesPerSecond,
+              max_tokens: maxTokens,
+              presence_penalty: presencePenalty,
+              repetition_penalty: repetitionPenalty,
+              seed,
+              temperature,
+              top_k: topK,
+              top_p: topP
+            }}
+            prompt={effectivePrompt}
+            systemPrompt={systemPrompt}
+          />
+          </>
         ) : (
           <StaticTab tab={activeTab} model={model} backendInfo={backendInfo} />
         )}
       </section>
     </main>
+  );
+}
+
+function comparisonReportMarkdown(report: ComparisonReport) {
+  const lines = [
+    `# Model comparison: ${report.comparison.workflow_label}`,
+    "",
+    `- Generated: ${report.generated_at}`,
+    `- Mode: ${report.comparison.mode}`,
+    `- Media strategy: ${report.comparison.media_strategy}`,
+    `- Variant: ${report.comparison.variant_label}`,
+    `- Executed variants: ${(report.variants || []).map((item) => item.label).join(", ") || "current"}`,
+    `- Loaded baseline: ${report.baseline_model}`,
+    `- Overall status: ${report.status}`
+  ];
+  if (report.comparison.changed_setting) lines.push(`- Changed setting: ${report.comparison.changed_setting}`);
+  if (report.comparison.hypothesis) lines.push(`- Hypothesis: ${report.comparison.hypothesis}`);
+  lines.push("", "## Redacted input metadata", "", "```json", safeJson(report.input), "```", "");
+  for (const result of report.results) {
+    lines.push(
+      `## ${result.role === "baseline" ? "Baseline" : "Candidate"}: ${result.model}`,
+      "",
+      `- Status: ${result.status}`,
+      `- Workflow variant: ${result.variant_label || "current"}`,
+      `- Elapsed: ${(Math.max(0, result.elapsed_ms) / 1000).toFixed(2)}s`,
+      `- Provider role: ${result.provider}`
+    );
+    if (result.error) lines.push(`- Error: ${result.error}`);
+    lines.push("", "### Response", "");
+    const responseLines = String(result.response || "No response returned").split(/\r?\n/);
+    lines.push(...responseLines.map((line) => `> ${line}`));
+    lines.push("", "### Request shape", "", "```json", safeJson(result.request_shape || {}), "```", "");
+  }
+  lines.push("## Redaction", "", "```json", safeJson(report.redaction), "```", "");
+  return lines.join("\n");
+}
+
+function downloadComparisonArtifact(filename: string, content: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function comparisonFilename(label: string, extension: string) {
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64) || "model-comparison";
+  return `${slug}-${new Date().toISOString().slice(0, 10)}.${extension}`;
+}
+
+async function mediaDataUrlForComparison(media: MediaState | null) {
+  if (!media) return "";
+  if (media.dataUrl) return media.dataUrl;
+  const source = media.sourceUrl || media.previewUrl;
+  if (!source) throw new Error("The current media cannot be prepared for comparison");
+  const response = await fetch(source);
+  if (!response.ok) throw new Error(`Could not read current media (HTTP ${response.status})`);
+  return readBlobAsDataUrl(await response.blob());
+}
+
+function ComparisonWorkbench({
+  baselineBusy,
+  baselineModel,
+  media,
+  params,
+  prompt,
+  systemPrompt
+}: {
+  baselineBusy: boolean;
+  baselineModel: string;
+  media: MediaState | null;
+  params: Record<string, number>;
+  prompt: string;
+  systemPrompt: string;
+}) {
+  const [runtimeKey, setRuntimeKey] = useState("");
+  const [maxModels, setMaxModels] = useState(8);
+  const [catalog, setCatalog] = useState<HostedModelOption[]>([]);
+  const [catalogCapabilityToken, setCatalogCapabilityToken] = useState("");
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [customModel, setCustomModel] = useState("");
+  const [mode, setMode] = useState<ComparisonMode>("spot");
+  const [mediaStrategy, setMediaStrategy] = useState<"native_video_when_confirmed" | "sampled_frames">(
+    "native_video_when_confirmed"
+  );
+  const [workflowLabel, setWorkflowLabel] = useState("current-workflow");
+  const [variantLabel, setVariantLabel] = useState("system-prompt-removed");
+  const [changedSetting, setChangedSetting] = useState("system prompt removed");
+  const [hypothesis, setHypothesis] = useState("");
+  const [variantPromptOverride, setVariantPromptOverride] = useState("");
+  const [removeVariantSystemPrompt, setRemoveVariantSystemPrompt] = useState(true);
+  const [variantTemperatureOverride, setVariantTemperatureOverride] = useState("");
+  const [discovering, setDiscovering] = useState(false);
+  const [comparing, setComparing] = useState(false);
+  const [status, setStatus] = useState("Loading curated hosted models");
+  const [report, setReport] = useState<ComparisonReport | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadConfig() {
+      try {
+        const response = await fetch("/api/compare/config", { cache: "no-store" });
+        if (!response.ok) throw new Error("Comparison configuration is unavailable");
+        const config = (await response.json()) as {
+          max_models?: number;
+          curated_models?: HostedModelOption[];
+        };
+        if (cancelled) return;
+        const models = Array.isArray(config.curated_models) ? config.curated_models : [];
+        setCatalog(models);
+        setMaxModels(Math.max(1, Number(config.max_models) || 8));
+        const defaults = models.filter((item) => item.recommended).map((item) => item.id).slice(0, 3);
+        setSelectedModels(defaults);
+        setStatus("Curated labels loaded. Discover the live catalog to resolve current request IDs.");
+      } catch (error) {
+        if (!cancelled) setStatus(error instanceof Error ? error.message : "Comparison configuration is unavailable");
+      }
+    }
+    void loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const visibleModels = useMemo(() => {
+    const query = catalogQuery.trim().toLowerCase();
+    return catalog
+      .filter(
+        (item) =>
+          !query ||
+          `${item.family} ${item.label || ""} ${item.id} ${(item.capabilities || []).join(" ")} ${item.note || ""}`
+            .toLowerCase()
+            .includes(query)
+      )
+      .slice(0, 80);
+  }, [catalog, catalogQuery]);
+
+  function toggleModel(option: HostedModelOption) {
+    if (option.available === false) return;
+    setSelectedModels((current) => {
+      if (current.includes(option.id)) return current.filter((id) => id !== option.id);
+      if (current.length >= maxModels) return current;
+      return [...current, option.id];
+    });
+  }
+
+  function addCustomModel() {
+    const id = customModel.trim();
+    if (!id || selectedModels.includes(id) || selectedModels.length >= maxModels) return;
+    const currentCredential = runtimeKey.trim();
+    if ((currentCredential && id.includes(currentCredential)) || HOSTED_SECRET_LIKE_PATTERN.test(id)) {
+      setCustomModel("");
+      setStatus("That value looks like a credential, not a model ID. It was not added.");
+      return;
+    }
+    if (id.includes("://") || !HOSTED_MODEL_ID_PATTERN.test(id)) {
+      setStatus("Use a valid hosted model ID containing only letters, numbers, '.', '_', ':', '/', '+', or '-'.");
+      return;
+    }
+    setCatalog((current) =>
+      current.some((item) => item.id === id)
+        ? current
+        : [
+            {
+              id,
+              label: id,
+              family: "Custom",
+              capabilities: ["text"],
+              note: "Manually entered model ID; choose sampled frames explicitly before sending video",
+              available: null
+            },
+            ...current
+          ]
+    );
+    setSelectedModels((current) => [...current, id]);
+    setCustomModel("");
+  }
+
+  async function discoverModels() {
+    const apiKey = runtimeKey.trim();
+    if (!apiKey) {
+      setStatus("Enter a runtime API key for this catalog discovery request");
+      return;
+    }
+    setRuntimeKey("");
+    setCatalogCapabilityToken("");
+    setDiscovering(true);
+    setStatus("Discovering models from the live hosted catalog");
+    try {
+      const response = await fetch("/api/compare/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey })
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { message?: string; models?: HostedModelOption[]; catalog_capability_token?: string }
+        | null;
+      if (Array.isArray(data?.models)) setCatalog(data.models);
+      if (!response.ok) throw new Error(data?.message || `Model discovery failed (HTTP ${response.status})`);
+      const models = data?.models || [];
+      setCatalogCapabilityToken(String(data?.catalog_capability_token || ""));
+      setSelectedModels((current) => {
+        const available = new Set(models.filter((item) => item.available !== false).map((item) => item.id));
+        const retained = current.filter((id) => available.has(id));
+        const latest = models.filter((item) => item.recommended && item.available !== false).map((item) => item.id);
+        return Array.from(new Set([...retained, ...latest])).slice(0, maxModels);
+      });
+      const discoveredCount = models.filter((item) => item.available === true).length;
+      const latestFamilies = Array.from(
+        new Set(models.filter((item) => item.recommended && item.available).map((item) => item.family))
+      );
+      setStatus(
+        `Discovered ${discoveredCount} models${latestFamilies.length ? `; selected latest ${latestFamilies.join(", ")}` : ""}.`
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Model discovery failed");
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
+  async function runComparison() {
+    if (selectedModels.length === 0) {
+      setStatus("Select at least one hosted model");
+      return;
+    }
+    const apiKey = runtimeKey.trim();
+    if (!apiKey) {
+      setStatus("Enter a runtime API key for this comparison request");
+      return;
+    }
+    setRuntimeKey("");
+    const parsedVariantTemperature = variantTemperatureOverride.trim()
+      ? Number(variantTemperatureOverride)
+      : undefined;
+    if (parsedVariantTemperature !== undefined && !Number.isFinite(parsedVariantTemperature)) {
+      setStatus("Variant temperature must be a number");
+      return;
+    }
+    setComparing(true);
+    setReport(null);
+    setStatus(media ? `Preparing ${media.name} for a redacted comparison request` : "Preparing text-only comparison");
+    try {
+      const mediaDataUrl = await mediaDataUrlForComparison(media);
+      const workflowVariantCount = mode === "ablation" ? 2 : 1;
+      setStatus(
+        `Running ${(selectedModels.length + 1) * workflowVariantCount} model-variant request${
+          (selectedModels.length + 1) * workflowVariantCount === 1 ? "" : "s"
+        }`
+      );
+      const response = await fetch("/api/compare/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey,
+          catalogCapabilityToken: catalogCapabilityToken || undefined,
+          model: baselineModel,
+          models: selectedModels.map((id) => {
+            const option = catalog.find((item) => item.id === id);
+            const unknownModel = !option?.curated;
+            return {
+              id,
+              capabilities:
+                media?.kind === "video" && mediaStrategy === "sampled_frames" && unknownModel
+                  ? ["image", "text"]
+                  : option?.capabilities || ["text"]
+            };
+          }),
+          prompt,
+          systemPrompt,
+          mediaName: media?.name,
+          ...(media?.kind === "video" ? { video: mediaDataUrl } : media?.kind === "image" ? { image: mediaDataUrl } : {}),
+          params,
+          comparison: {
+            mode,
+            mediaStrategy,
+            workflowLabel,
+            variantLabel,
+            changedSetting,
+            hypothesis,
+            variant:
+              mode === "ablation"
+                ? {
+                    promptOverride: variantPromptOverride,
+                    removeSystemPrompt: removeVariantSystemPrompt,
+                    ...(parsedVariantTemperature !== undefined
+                      ? { temperatureOverride: parsedVariantTemperature }
+                      : {})
+                  }
+                : undefined
+          }
+        })
+      });
+      const data = (await response.json().catch(() => null)) as ComparisonReport | { message?: string } | null;
+      if (!response.ok || !data || !("results" in data)) {
+        throw new Error((data && "message" in data && data.message) || `Comparison failed (HTTP ${response.status})`);
+      }
+      setReport(data);
+      const successCount = data.results.filter((item) => item.status === "success").length;
+      setStatus(
+        `Comparison complete: ${successCount}/${data.results.length} model-variant runs returned successfully.`
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Comparison failed");
+    } finally {
+      setComparing(false);
+    }
+  }
+
+  function exportReport(format: "json" | "md") {
+    if (!report) return;
+    const label = report.comparison.workflow_label || "model-comparison";
+    if (format === "json") {
+      downloadComparisonArtifact(comparisonFilename(label, "json"), safeJson(report), "application/json");
+      return;
+    }
+    downloadComparisonArtifact(comparisonFilename(label, "md"), comparisonReportMarkdown(report), "text/markdown");
+  }
+
+  return (
+    <section className="comparisonWorkbench" aria-labelledby="comparison-workbench-title">
+      <div className="comparisonHeader">
+        <div>
+          <p className="comparisonEyebrow">Endpoint comparison</p>
+          <h2 id="comparison-workbench-title">Compare the loaded model with hosted models</h2>
+          <p>
+            The current prompt, parameters, and media are reused for every endpoint. The loaded model remains the
+            baseline; hosted models are candidates.
+          </p>
+        </div>
+        <div className="comparisonBaselineBadge">
+          <span>Loaded baseline</span>
+          <strong>{baselineModel}</strong>
+        </div>
+      </div>
+
+      <div className="comparisonSetupGrid">
+        <div className="comparisonSetupCard">
+          <div className="comparisonCardTitle">
+            <span>1</span>
+            Runtime credential
+          </div>
+          <label className="comparisonField" htmlFor="hosted-runtime-key">
+            <span>API key</span>
+            <input
+              autoComplete="off"
+              id="hosted-runtime-key"
+              onChange={(event) => setRuntimeKey(event.target.value)}
+              placeholder="Required for each discovery or comparison request"
+              spellCheck={false}
+              type="password"
+              value={runtimeKey}
+            />
+          </label>
+          <div className="comparisonKeyActions">
+            <a href="https://inference.nvidia.com/key-management" rel="noreferrer" target="_blank">
+              Open key management <ExternalLink size={13} />
+            </a>
+            {runtimeKey ? (
+              <button onClick={() => setRuntimeKey("")} type="button">
+                Clear key
+              </button>
+            ) : null}
+          </div>
+          <p className="comparisonSecurityNote">
+            The key is sent only for the next request, cleared from the UI immediately after dispatch, and omitted
+            from results and exports. It is never saved in browser storage or read from a server fallback.
+          </p>
+        </div>
+
+        <div className="comparisonSetupCard">
+          <div className="comparisonCardTitle">
+            <span>2</span>
+            Run design
+          </div>
+          <div className="comparisonModeTabs" role="radiogroup" aria-label="Comparison mode">
+            <button
+              aria-checked={mode === "spot"}
+              className={mode === "spot" ? "active" : ""}
+              onClick={() => setMode("spot")}
+              role="radio"
+              type="button"
+            >
+              Spot check
+            </button>
+            <button
+              aria-checked={mode === "ablation"}
+              className={mode === "ablation" ? "active" : ""}
+              onClick={() => setMode("ablation")}
+              role="radio"
+              type="button"
+            >
+              Workflow ablation
+            </button>
+          </div>
+          <div className="comparisonStrategy">
+            <span>Video transport</span>
+            <div className="comparisonModeTabs" role="radiogroup" aria-label="Hosted video transport">
+              <button
+                aria-checked={mediaStrategy === "native_video_when_confirmed"}
+                className={mediaStrategy === "native_video_when_confirmed" ? "active" : ""}
+                onClick={() => setMediaStrategy("native_video_when_confirmed")}
+                role="radio"
+                type="button"
+              >
+                Native when confirmed
+              </button>
+              <button
+                aria-checked={mediaStrategy === "sampled_frames"}
+                className={mediaStrategy === "sampled_frames" ? "active" : ""}
+                onClick={() => setMediaStrategy("sampled_frames")}
+                role="radio"
+                type="button"
+              >
+                Sampled frames for all
+              </button>
+            </div>
+            <small>
+              Unknown IDs are blocked in native mode. Choose sampled frames for all to make an explicit image-frame
+              override for them.
+            </small>
+          </div>
+          <div className="comparisonLabelGrid">
+            <label className="comparisonField">
+              <span>Workflow label</span>
+              <input onChange={(event) => setWorkflowLabel(event.target.value)} value={workflowLabel} />
+            </label>
+            <label className="comparisonField">
+              <span>Variant label</span>
+              <input onChange={(event) => setVariantLabel(event.target.value)} value={variantLabel} />
+            </label>
+            {mode === "ablation" ? (
+              <>
+                <label className="comparisonField">
+                  <span>Changed setting</span>
+                  <input
+                    onChange={(event) => setChangedSetting(event.target.value)}
+                    placeholder="For example: reasoning off or FPS 2 → 1"
+                    value={changedSetting}
+                  />
+                </label>
+                <label className="comparisonField">
+                  <span>Hypothesis</span>
+                  <input
+                    onChange={(event) => setHypothesis(event.target.value)}
+                    placeholder="Expected effect of this variant"
+                    value={hypothesis}
+                  />
+                </label>
+                <label className="comparisonField comparisonWideField">
+                  <span>Variant user prompt override</span>
+                  <textarea
+                    onChange={(event) => setVariantPromptOverride(event.target.value)}
+                    placeholder="Blank keeps the control prompt"
+                    rows={3}
+                    value={variantPromptOverride}
+                  />
+                </label>
+                <label className="comparisonField">
+                  <span>Variant temperature override</span>
+                  <input
+                    inputMode="decimal"
+                    max="2"
+                    min="0"
+                    onChange={(event) => setVariantTemperatureOverride(event.target.value)}
+                    placeholder="Blank keeps control"
+                    step="0.05"
+                    type="number"
+                    value={variantTemperatureOverride}
+                  />
+                </label>
+                <label className="comparisonField comparisonCheckboxField">
+                  <input
+                    checked={removeVariantSystemPrompt}
+                    onChange={(event) => setRemoveVariantSystemPrompt(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Remove the system prompt in the variant</span>
+                </label>
+                <p className="comparisonAblationNote">
+                  Ablation mode executes both the unchanged control and this variant against the loaded baseline and
+                  every selected hosted model.
+                </p>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="comparisonCatalog">
+        <div className="comparisonCatalogHeader">
+          <div>
+            <div className="comparisonCardTitle">
+              <span>3</span>
+              Hosted candidates
+            </div>
+            <p>
+              Live discovery resolves request IDs for Cosmos, Qwen, Nemotron, Gemma, Gemini, Claude, GPT, and Kimi
+              catalog labels.
+            </p>
+          </div>
+          <button className="comparisonDiscoverButton" disabled={discovering || comparing} onClick={discoverModels} type="button">
+            <RefreshCw className={discovering ? "spin" : ""} size={15} />
+            {discovering ? "Discovering" : "Discover models"}
+          </button>
+        </div>
+        <div className="comparisonCatalogTools">
+          <input
+            aria-label="Filter hosted model catalog"
+            onChange={(event) => setCatalogQuery(event.target.value)}
+            placeholder="Filter by family or model ID"
+            type="search"
+            value={catalogQuery}
+          />
+          <span>
+            {selectedModels.length}/{maxModels} selected
+          </span>
+        </div>
+        <div className="comparisonModelList">
+          {visibleModels.map((option) => {
+            const selected = selectedModels.includes(option.id);
+            return (
+              <button
+                aria-pressed={selected}
+                className={`${selected ? "selected " : ""}${option.available === false ? "unavailable" : ""}`.trim()}
+                disabled={option.available === false}
+                key={option.catalog_key || option.id}
+                onClick={() => toggleModel(option)}
+                title={option.note}
+                type="button"
+              >
+                <span className="comparisonModelCheck">{selected ? "✓" : ""}</span>
+                <span className="comparisonModelCopy">
+                  <strong>
+                    {option.label || option.id}
+                    {option.label && option.id && option.label !== option.id ? ` — ${option.id}` : ""}
+                  </strong>
+                  <small>
+                    {option.family}
+                    {option.capabilities?.length ? ` · ${option.capabilities.join("/")}` : ""}
+                    {option.recommended ? " · latest family candidate" : ""}
+                    {option.discovery_required ? " · discover to resolve request ID" : ""}
+                    {option.available === false && !option.discovery_required ? " · not in discovered catalog" : ""}
+                  </small>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="comparisonCustomModel">
+          <input
+            aria-label="Custom hosted model ID"
+            onChange={(event) => setCustomModel(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addCustomModel();
+              }
+            }}
+            placeholder="Custom model ID"
+            value={customModel}
+          />
+          <button disabled={!customModel.trim() || selectedModels.length >= maxModels} onClick={addCustomModel} type="button">
+            Add model
+          </button>
+        </div>
+      </div>
+
+      <div className="comparisonRunRow">
+        <div>
+          <strong>{media ? media.name : "Text-only input"}</strong>
+          <span>{status}</span>
+        </div>
+        <button
+          className="comparisonRunButton"
+          disabled={comparing || baselineBusy || selectedModels.length === 0}
+          onClick={runComparison}
+          type="button"
+        >
+          <Play fill="currentColor" size={15} />
+          {comparing ? "Comparing endpoints" : "Run comparison"}
+        </button>
+      </div>
+
+      {report ? (
+        <div className="comparisonResults">
+          <div className="comparisonResultsHeader">
+            <div>
+              <p className="comparisonEyebrow">Redacted report</p>
+              <h3>{report.comparison.workflow_label}</h3>
+              <span>
+                {report.comparison.mode} · {report.comparison.variant_label} · {report.comparison.media_strategy} ·{" "}
+                {report.generated_at}
+              </span>
+            </div>
+            <div className="comparisonExportButtons">
+              <button onClick={() => exportReport("json")} type="button">
+                <Download size={14} /> JSON
+              </button>
+              <button onClick={() => exportReport("md")} type="button">
+                <Download size={14} /> Report
+              </button>
+            </div>
+          </div>
+          <div className="comparisonResultGrid">
+            {report.results.map((item, index) => (
+              <article className={`comparisonResultCard ${item.status}`} key={`${item.role}-${item.model}-${index}`}>
+                <div className="comparisonResultTopline">
+                  <span>{item.role === "baseline" ? "Loaded baseline" : "Hosted candidate"}</span>
+                  <span className={`comparisonStatus ${item.status}`}>{item.status}</span>
+                </div>
+                <h4>{item.model}</h4>
+                <p className="comparisonTiming">
+                  {item.variant_label ? `${item.variant_label} · ` : ""}
+                  {(Math.max(0, item.elapsed_ms) / 1000).toFixed(2)}s
+                  {item.attempts && item.attempts > 1 ? ` · ${item.attempts} attempts` : ""}
+                  {item.http_status ? ` · HTTP ${item.http_status}` : ""}
+                </p>
+                {item.error ? <p className="comparisonError">{item.error}</p> : null}
+                <pre className="comparisonResponse">{item.response || "No response returned"}</pre>
+                <details className="comparisonShape">
+                  <summary>Request-shape metadata</summary>
+                  <pre>{safeJson(item.request_shape || {})}</pre>
+                </details>
+              </article>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

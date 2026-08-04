@@ -1,6 +1,6 @@
 ---
 name: byo-video
-description: Deploy the Cosmos BYO-Video guided dataset batch UI, single-video upload UI, or dataset browser/result review flow on Brev, Horde, SSH, or a local GPU. Use for Cosmos Reason/Cosmos3/Nemotron/Qwen VLM video or image inference, HF public dataset batch inference, NIM-local mode, runtime monitoring, and NIM model switching.
+description: Deploy the Cosmos BYO-Video guided dataset batch UI, single-video upload UI, model-comparison playground, or dataset browser/result review flow on Brev, Horde, SSH, or a local GPU. Use for Cosmos Reason/Cosmos3/Nemotron/Qwen VLM video or image inference, reference-video comparisons and workflow ablations, HF public dataset batch inference, NIM-local mode, runtime monitoring, and NIM model switching.
 compatibility: Codex, Claude Code, and Kimi Code CLI. Translate legacy Claude tool names in the runbook to the current agent's native tools.
 ---
 
@@ -52,6 +52,39 @@ asks for a guided inference flow, HF public dataset loading, concurrent batch
 processing, or the worker-safety smoke test. Use `BYO_VIDEO_FRONTEND=gradio`
 for the generic single-video upload UI. Use `BYO_VIDEO_FRONTEND=fiftyone` when
 the user specifically wants FiftyOne available alongside result writeback.
+
+## Hosted Endpoint Comparisons
+
+The generic Gradio app, Cosmos Reason Vite app, and Batch Inference app can run
+the current media and prompt against the loaded endpoint plus selected hosted
+models. Use **spot comparison** for one workflow configuration and **workflow
+ablation** for a small prompt/parameter matrix. Reference videos may come from
+the Gradio/Vite upload, a bundled Vite example, or Batch Inference dataset and
+reference-upload rows.
+
+At the start of **every deployment session**, before enabling hosted comparison,
+ask the user to enter a fresh runtime key from
+<https://inference.nvidia.com/key-management>. Even if a key is already present
+in chat, shell history, or an environment variable, ask again and use the new
+value only through the frontend's masked runtime-key field. Never place this key
+in a command, environment variable, URL, log, state snapshot, exported report,
+or committed file. The apps clear it from request objects and input controls as
+soon as discovery or comparison starts.
+
+Treat live catalog discovery as the authority for request IDs. Catalog display
+labels are hints, not stable endpoint IDs. For video input:
+
+- use native `video_url` only when the selected model is confirmed to accept it;
+- use deterministic sampled `image_url` frames for image-multimodal endpoints;
+- keep unknown media capability blocked unless the user explicitly selects a
+  media strategy based on a known endpoint contract;
+- record the chosen media strategy, prompt/parameter variant, latency, status,
+  and redacted request shape for every result.
+
+Do not interpret catalog success as inference success. Report authorization,
+capability, transport, and model-output outcomes separately. Comparison exports
+must use a neutral provider label, relative API paths, and redacted media/key
+fields; never include configured endpoint hosts or credential-retrieval details.
 
 ## Codex Mode Note
 
@@ -105,6 +138,8 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 
 - `references/byo-video-runbook.md`: complete deployment protocol, model picker,
   NIM-local operations, runtime monitor, and recovery rules.
+- `references/hosted-model-comparison-report.md`: implementation coverage,
+  current comparison set, smoke evidence, and live-run limitations.
 - `references/rf100-air-support-runbook.md`: RF100-VL large-batch SRE guidance
   for shard role discovery, forward/reverse lanes, throughput decay, evidence
   freeze, deletion-safety updates, and user check-ins.
@@ -116,7 +151,11 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
   or terminal users to load datasets, import papers, run guarded batches, shape
   structured prompts, and export artifacts through the batch-inference API.
 - `scripts/gradio_cr2_byo.py`: default Build-style Gradio app for video/image
-  inference across supported BYO-video models.
+  inference across supported BYO-video models, including spot comparison and
+  workflow-ablation controls.
+- `scripts/hosted_model_compare.py`: secret-safe hosted catalog discovery,
+  media-strategy resolution, comparison matrix execution, and redacted report
+  export shared by the generic Gradio workflow.
 - `scripts/alpamayo_openai_server.py`: OpenAI-compatible `/v1/models` and
   `/v1/chat/completions` adapter for Alpamayo VQA/captioning over BYO images
   and videos.
@@ -138,6 +177,14 @@ python3 "$SCRIPT_DIR/nim_catalog.py" list --no-probe
 
 - Do all credential checks before provisioning or model downloads.
 - Never put HuggingFace, NGC, or Brev credentials in command-line arguments.
+- Always request the hosted-comparison runtime key at deployment time from the
+  key-management page above; accept it only through the masked frontend field
+  and never retain it after the request.
+- Resolve hosted model IDs dynamically and distinguish native-video input from
+  sampled-image-frame adaptation. Never infer video capability from a family
+  name alone.
+- Keep hosted comparison reports secret-safe and portable: no configured hosts,
+  auth headers, keys, data URLs, local media paths, or raw request bodies.
 - For RF100-VL air support, classify every active Brev by current-run metadata,
   results pointers, process state, and model endpoint before using the instance
   name. Former CR2 hosts may be reverse Cosmos-3-Super-Reasoner lanes.

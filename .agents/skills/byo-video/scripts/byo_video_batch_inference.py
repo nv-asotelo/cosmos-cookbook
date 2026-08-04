@@ -8,8 +8,9 @@ that the BYO-video setup script starts.
 
 Two views are exposed in the UI:
 - Basic View: per-video inference against a Hugging Face dataset with prompt
-  presets, parameter sliders, and FiftyOne integration (preserved from the
-  original tool).
+  presets, parameter sliders, reference-video uploads, FiftyOne integration,
+  and credential-safe spot/ablation comparison between the loaded endpoint and
+  dynamically discovered hosted models.
 - Benchmark View: 1000-row LingoQA Q/A benchmark against a reasoning-capable
   NIM (e.g. Cosmos3-Super-Reasoner / cosmos-reason2-*), scored by the official
   wayveai/Lingo-Judge (DeBERTa-v3-base) and rendered in an arxiv-2312.14115
@@ -37,6 +38,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -129,6 +131,50 @@ THUMBNAIL_DIR = Path(os.getenv("BATCH_INFERENCE_THUMBNAILS", "/tmp/byo_video_bat
 THUMBNAIL_SIZE = (220, 124)
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("BATCH_INFERENCE_REQUEST_TIMEOUT_SECONDS", "180"))
 EXPORT_DIR = Path(os.getenv("BATCH_INFERENCE_EXPORTS", "/tmp/byo_video_batch_inference_exports"))
+REFERENCE_VIDEO_DIR = Path(os.getenv("BATCH_INFERENCE_REFERENCE_VIDEOS", "/tmp/byo_video_batch_inference_references"))
+REFERENCE_VIDEO_MAX_BYTES = int(os.getenv("BATCH_INFERENCE_REFERENCE_VIDEO_MAX_BYTES", str(512 * 1024 * 1024)))
+REFERENCE_VIDEO_TOTAL_MAX_BYTES = int(
+    os.getenv("BATCH_INFERENCE_REFERENCE_VIDEO_TOTAL_MAX_BYTES", str(2 * 1024 * 1024 * 1024))
+)
+_HOSTED_DEFAULT_BASE_URL = os.getenv("NVIDIA_HOSTED_BASE_URL", "https://inference-api.nvidia.com/v1").rstrip("/")
+NVIDIA_HOSTED_CATALOG_URL = os.getenv("NVIDIA_HOSTED_CATALOG_URL", _HOSTED_DEFAULT_BASE_URL + "/models").strip()
+NVIDIA_HOSTED_INFERENCE_URL = os.getenv("NVIDIA_HOSTED_INFERENCE_URL", _HOSTED_DEFAULT_BASE_URL + "/chat/completions").strip()
+NVIDIA_HOSTED_AUTH_HEADER = os.getenv("NVIDIA_HOSTED_AUTH_HEADER", "Authorization").strip()
+NVIDIA_HOSTED_AUTH_SCHEME = os.getenv("NVIDIA_HOSTED_AUTH_SCHEME", "Bearer").strip()
+COMPARISON_MAX_CASES = int(os.getenv("BATCH_INFERENCE_COMPARISON_MAX_CASES", "256"))
+CURATED_HOSTED_MODELS = [
+    {"id": "", "label": "Cosmos3 Super Reasoner — discover exact request id", "family": "Cosmos", "supports_video": True, "supports_image": True, "supports_text": True},
+    {"id": "", "label": "Cosmos3 Nano Reasoner — discover exact request id", "family": "Cosmos", "supports_video": True, "supports_image": True, "supports_text": True},
+    {"id": "", "label": "Gemma 4 — discover exact request id", "family": "Gemma", "supports_video": False, "supports_image": True, "supports_text": True},
+    {"id": "", "label": "Nemotron 3 Nano Omni — discover exact request id", "family": "Nemotron", "supports_video": None, "supports_image": None, "supports_text": True},
+    {"id": "", "label": "Qwen latest — discover exact request id", "family": "Qwen", "supports_video": None, "supports_image": None, "supports_text": True},
+    {"id": "", "label": "Gemini 3.6 — discover exact request id", "family": "Gemini", "supports_video": None, "supports_image": None, "supports_text": True},
+    {"id": "", "label": "Claude latest — discover exact request id", "family": "Claude", "supports_video": None, "supports_image": None, "supports_text": True},
+    {"id": "", "label": "GPT 5.6 — discover exact request id", "family": "GPT", "supports_video": None, "supports_image": None, "supports_text": True},
+    {"id": "", "label": "Kimi K2.6 — catalog must confirm video input", "family": "Kimi", "supports_video": None, "supports_image": None, "supports_text": True},
+]
+
+
+def write_private_json(path: Path, payload: Any) -> None:
+    """Atomically persist JSON with owner-only permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
 CONTEXT_PATCH_PIXELS = int(os.getenv("BATCH_INFERENCE_CONTEXT_PATCH_PIXELS", str(14 * 14)))
 CONTEXT_SAFETY_RESERVE = int(os.getenv("BATCH_INFERENCE_CONTEXT_SAFETY_RESERVE", "1024"))
 DEFAULT_MODEL_MAX_LEN = int(os.getenv("BATCH_INFERENCE_MODEL_MAX_LEN", "32768"))
@@ -219,6 +265,7 @@ SLIDER_META = {
     },
 }
 STATE_LOCK = threading.Lock()
+REFERENCE_UPLOAD_LOCK = threading.Lock()
 FIFTYONE_SESSION = None
 
 GENERIC_SYSTEM = "You are a helpful assistant."
@@ -343,6 +390,28 @@ STATE: Dict[str, Any] = {
     "paper_import": None,
     "logs": [],
     "server": {},
+    "comparison": {
+        "running": False,
+        "catalog": [
+            dict(
+                item,
+                source="curated",
+                capability_source="curated",
+                video_candidate=bool(item.get("supports_video")),
+                comparison_media_strategy=(
+                    "native_video" if item.get("supports_video") is True
+                    else ("sampled_frames" if item.get("supports_image") is True else None)
+                ),
+            )
+            for item in CURATED_HOSTED_MODELS
+        ],
+        "catalog_source": "curated",
+        "catalog_warning": None,
+        "run": None,
+        "results": [],
+        "history": [],
+        "exports": [],
+    },
     "defaults": {
         "system_prompt": WORKER_SAFETY_SYSTEM,
         "user_prompt": WORKER_SAFETY_USER,
@@ -372,7 +441,116 @@ STATE: Dict[str, Any] = {
 }
 
 
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?i)\b(?:nvapi|sk|hf)[-_][A-Za-z0-9._-]{8,}\b"),
+    re.compile(r"(?i)\bBearer\s+[^\s,;\"']+"),
+    re.compile(r"(?i)(api[_-]?key|authorization|access[_-]?token|secret)(\s*[:=]\s*)[^\s,;]+"),
+)
+SECRET_KEY_NAMES = re.compile(r"(?i)(?:api[_-]?key|authorization|access[_-]?token|secret|credential)")
+
+
+def redact_sensitive(value: Any, depth: int = 64) -> Any:
+    """Return a JSON-safe credential-redacted copy of arbitrary runtime data."""
+    if depth <= 0:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            out[key_text] = "[REDACTED]" if SECRET_KEY_NAMES.search(key_text) else redact_sensitive(item, depth - 1)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [redact_sensitive(item, depth - 1) for item in value]
+    if isinstance(value, Path):
+        return redact_sensitive(str(value), depth - 1)
+    if isinstance(value, str):
+        text = value
+        for pattern in SECRET_VALUE_PATTERNS:
+            if pattern.pattern.startswith("(?i)(api"):
+                text = pattern.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+            else:
+                text = pattern.sub("[REDACTED]", text)
+        return text
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_sensitive(str(value), depth - 1)
+
+
+def safe_error(exc: Any, limit: int = 1000) -> str:
+    return str(redact_sensitive(str(exc)))[:limit]
+
+
+def redact_runtime_secret(value: Any, secret: str, depth: int = 64) -> Any:
+    """Redact an arbitrary per-request secret in addition to known token shapes."""
+    if depth <= 0:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        return {str(key): redact_runtime_secret(item, secret, depth - 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [redact_runtime_secret(item, secret, depth - 1) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive(value.replace(secret, "[REDACTED]") if secret else value)
+    return redact_sensitive(value, depth)
+
+
+def safe_runtime_error(exc: Any, secret: str, limit: int = 1000) -> str:
+    return str(redact_runtime_secret(str(exc), secret))[:limit]
+
+
+def redact_endpoint_references(value: Any, endpoints: Iterable[str], depth: int = 64) -> Any:
+    replacements = set()
+    for endpoint in endpoints:
+        endpoint = str(endpoint or "").strip()
+        if not endpoint:
+            continue
+        replacements.add(endpoint)
+        try:
+            parsed = urllib.parse.urlparse(endpoint)
+            if parsed.netloc:
+                replacements.add(parsed.netloc)
+            if parsed.hostname:
+                replacements.add(parsed.hostname)
+        except Exception:
+            pass
+    if depth <= 0:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        return {str(key): redact_endpoint_references(item, replacements, depth - 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [redact_endpoint_references(item, replacements, depth - 1) for item in value]
+    if isinstance(value, str):
+        text = value
+        for replacement in sorted(replacements, key=len, reverse=True):
+            text = text.replace(replacement, "[ENDPOINT]")
+        return text
+    return value
+
+
+def redact_comparison_payload(value: Any, secret: str, endpoint: str) -> Any:
+    return redact_endpoint_references(redact_runtime_secret(value, secret), [endpoint])
+
+
+def safe_comparison_error(exc: Any, secret: str, endpoint: str, limit: int = 1000) -> str:
+    return str(redact_comparison_payload(str(exc), secret, endpoint))[:limit]
+
+
+def safe_comparison_error_with_prompts(
+    exc: Any,
+    secret: str,
+    endpoint: str,
+    prompts: Iterable[Any],
+    limit: int = 1000,
+) -> str:
+    value: Any = redact_comparison_payload(str(exc), secret, endpoint)
+    for prompt in prompts:
+        prompt_text = str(prompt or "")
+        if prompt_text:
+            value = redact_runtime_secret(value, prompt_text)
+    return str(value)[:limit]
+
+
 def log(message: str) -> None:
+    message = str(redact_sensitive(str(message)))
     line = time.strftime("%H:%M:%S") + " " + message
     with STATE_LOCK:
         STATE["logs"].append(line)
@@ -383,6 +561,7 @@ def log(message: str) -> None:
 def snapshot() -> Dict[str, Any]:
     with STATE_LOCK:
         data = json.loads(json.dumps(STATE, default=str))
+    data = redact_sensitive(data)
     data["server_epoch"] = time.time()
     return data
 
@@ -1510,7 +1689,7 @@ def import_paper_worker(source: str, max_videos: int, load_now: bool = True) -> 
         )
     finally:
         try:
-            RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+            write_private_json(RESULTS_FILE, snapshot())
         except Exception:
             pass
 
@@ -2110,6 +2289,10 @@ def load_with_hf_hub(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
 def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
     limit = "all" if max_videos <= 0 else str(max_videos)
     started_epoch = time.time()
+    reference_videos = [
+        item for item in snapshot().get("videos", [])
+        if item.get("source") == "reference_upload" and Path(str(item.get("filepath") or "")).is_file()
+    ]
     update_state(
         loading_dataset=True,
         dataset_repo=repo_id,
@@ -2163,14 +2346,15 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
                 "updated_epoch": now,
                 "finished_epoch": now,
                 "last_event": "Dataset load failed",
-                "last_error": str(exc),
+                "last_error": safe_error(exc),
             },
         )
         raise
+    merged_videos = videos + [item for item in reference_videos if item.get("id") not in {video.get("id") for video in videos}]
     now = time.time()
     update_state(
         dataset_repo=repo_id,
-        videos=videos,
+        videos=merged_videos,
         results=[],
         loading_dataset=False,
         progress={
@@ -2182,12 +2366,12 @@ def load_dataset(repo_id: str, max_videos: int) -> List[Dict[str, Any]]:
             "started_epoch": started_epoch,
             "updated_epoch": now,
             "finished_epoch": now,
-            "last_event": f"Loaded {len(videos)} videos",
+            "last_event": f"Loaded {len(videos)} dataset videos and retained {len(merged_videos) - len(videos)} reference uploads",
             "last_error": None,
         },
         batch_metrics=None,
     )
-    return videos
+    return merged_videos
 
 
 def load_dataset_worker(repo_id: str, max_videos: int) -> None:
@@ -2197,7 +2381,7 @@ def load_dataset_worker(repo_id: str, max_videos: int) -> None:
         log(f"Dataset load failed: {exc}")
     finally:
         try:
-            RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+            write_private_json(RESULTS_FILE, snapshot())
         except Exception:
             pass
 
@@ -2438,7 +2622,17 @@ def bool_param(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_pixels: int, max_frames: int, backend: str = "", force_frames: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def content_for_video(
+    video_path: str,
+    prompt: str,
+    model: str,
+    fps: float,
+    max_pixels: int,
+    max_frames: int,
+    backend: str = "",
+    force_frames: bool = False,
+    force_native_video: bool = False,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta = get_video_meta(video_path)
     effective_max_frames = int(max_frames)
     if force_frames and "nim" in (backend or os.getenv("INFERENCE_BACKEND", "")).lower():
@@ -2446,7 +2640,14 @@ def content_for_video(video_path: str, prompt: str, model: str, fps: float, max_
         if effective_max_frames <= 0 or effective_max_frames > fallback_limit:
             effective_max_frames = fallback_limit
     plan = estimate_plan(meta, fps, max_pixels, effective_max_frames, model if not force_frames else "", backend if not force_frames else "")
-    if not force_frames and model_uses_native_video(model, backend):
+    if not force_frames and (force_native_video or model_uses_native_video(model, backend)):
+        if plan.get("mode") != "native_video_url":
+            plan.update({
+                "mode": "native_video_url",
+                "frames_passed": int(meta.get("total_frames") or 0),
+                "visual_tokens_est": None,
+                "note": "Video is passed as video_url; endpoint samples frames internally.",
+            })
         mime = mimetypes.guess_type(video_path)[0] or "video/mp4"
         data = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
         return [
@@ -2500,6 +2701,1084 @@ def selected_videos_for_ids(ids: Iterable[str]) -> List[Dict[str, Any]]:
     videos_by_id = {v["id"]: v for v in snap["videos"]}
     selected = [videos_by_id[i] for i in ids if i in videos_by_id]
     return selected or list(videos_by_id.values())
+
+
+def validated_runtime_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        raise ClientInputError("A runtime API key is required for hosted model discovery and comparison")
+    if len(key) < 8 or len(key) > 4096 or any(ch.isspace() for ch in key):
+        raise ClientInputError("The runtime API key format is invalid")
+    return key
+
+
+def validated_hosted_endpoint(value: Any, label: str = "Hosted endpoint") -> str:
+    """Validate a configured hosted URL before any credential-bearing request."""
+    endpoint = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        parsed.port
+    except Exception as exc:
+        raise RuntimeError(f"{label} configuration is invalid") from exc
+    allow_local_http = os.getenv("NVIDIA_HOSTED_ALLOW_HTTP", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    is_local_mock = (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+    valid_scheme = parsed.scheme == "https" or (
+        parsed.scheme == "http" and allow_local_http and is_local_mock
+    )
+    if (
+        not endpoint
+        or any(character.isspace() or ord(character) < 0x20 for character in endpoint)
+        or not valid_scheme
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            f"{label} must use HTTPS (or opt-in loopback HTTP for a local mock) without credentials, query, or fragment"
+        )
+    return endpoint.rstrip("/")
+
+
+def hosted_model_family(model_id: str) -> str:
+    lower = str(model_id or "").lower()
+    for needle, family in (
+        ("cosmos", "Cosmos"),
+        ("nemotron", "Nemotron"),
+        ("qwen", "Qwen"),
+        ("gemma", "Gemma"),
+        ("gemini", "Gemini"),
+        ("kimi", "Kimi"),
+        ("claude", "Claude"),
+        ("gpt", "GPT"),
+    ):
+        if needle in lower:
+            return family
+    return "Other"
+
+
+def _capability_text(raw: Dict[str, Any]) -> str:
+    fields = [
+        raw.get("capabilities"),
+        raw.get("modalities"),
+        raw.get("input_modalities"),
+        raw.get("supported_modalities"),
+        raw.get("features"),
+        (
+            {key: raw.get(key) for key in (
+                "supports_video", "supports_image", "supports_text", "supports_vlm",
+                "supports_vision", "supports_multimodal",
+            ) if key in raw}
+            if any(key in raw for key in (
+                "supports_video", "supports_image", "supports_text", "supports_vlm",
+                "supports_vision", "supports_multimodal",
+            )) else None
+        ),
+    ]
+    return " ".join(json.dumps(value, default=str) for value in fields if value is not None).lower()
+
+
+def _top_level_capability_flags(raw: Dict[str, Any]) -> Dict[str, Any]:
+    flags: Dict[str, Any] = {}
+    if "supports_video" in raw:
+        flags["video"] = raw.get("supports_video")
+    image_values = [
+        raw.get(key) for key in (
+            "supports_image", "supports_vlm", "supports_vision", "supports_multimodal",
+        ) if key in raw
+    ]
+    if image_values:
+        flags["image"] = True if True in image_values else (
+            False if all(value is False for value in image_values) else image_values[0]
+        )
+    if "supports_text" in raw:
+        flags["text"] = raw.get("supports_text")
+    return flags
+
+
+def _explicit_modality_state(value: Any, modality: str) -> Optional[bool]:
+    modality = modality.lower()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            if modality in normalized_key:
+                if isinstance(item, bool):
+                    return item
+                if isinstance(item, (int, float)):
+                    return bool(item)
+                if isinstance(item, str) and item.strip().lower() in {"true", "yes", "supported", "enabled"}:
+                    return True
+                if isinstance(item, str) and item.strip().lower() in {"false", "no", "unsupported", "disabled"}:
+                    return False
+            nested = _explicit_modality_state(item, modality)
+            if nested is not None:
+                return nested
+        return None
+    if isinstance(value, (list, tuple, set)):
+        states = [_explicit_modality_state(item, modality) for item in value]
+        return True if True in states else (False if False in states else None)
+    if isinstance(value, str):
+        tokens = set(re.findall(r"[a-z0-9_+-]+", value.lower()))
+        aliases = {
+            "video": {"video", "video_url", "multiframe", "multi-frame"},
+            "image": {"image", "image_url", "vision"},
+            "text": {"text", "chat", "language"},
+        }.get(modality, {modality})
+        return True if tokens.intersection(aliases) else None
+    return None
+
+
+def hosted_model_capabilities(model_id: str, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve explicit input modalities; unknown is never treated as video-capable."""
+    row = raw or {}
+    capability_text = _capability_text(row)
+    explicit = bool(capability_text.strip())
+    capability_values = [
+        row.get("capabilities"), row.get("modalities"), row.get("input_modalities"),
+        row.get("supported_modalities"), row.get("features"), _top_level_capability_flags(row),
+    ]
+    video_state = _explicit_modality_state(capability_values, "video")
+    image_state = _explicit_modality_state(capability_values, "image")
+    text_state = _explicit_modality_state(capability_values, "text")
+    supports_video = video_state is True
+    supports_image = image_state is True
+    supports_text = text_state is not False
+    if not explicit:
+        curated = next((item for item in CURATED_HOSTED_MODELS if item["id"] == model_id), None)
+        if curated:
+            supports_video = bool(curated.get("supports_video"))
+            supports_image = bool(curated.get("supports_image"))
+            supports_text = bool(curated.get("supports_text", True))
+            source = "curated"
+        else:
+            lower = model_id.lower()
+            short_id = lower.rsplit("/", 1)[-1]
+            known_native_video = short_id in {"cosmos3-nano-reasoner", "cosmos3-super-reasoner"} or bool(
+                re.search(
+                    r"(?:^|/)nemotron[-_.]?3[-_.]?nano[-_.]?omni[-_.]?30b[-_.]?a3b[-_.]?reasoning(?:$|[-_.:])",
+                    lower,
+                )
+            )
+            known_image_model = (
+                known_native_video
+                or bool(re.search(r"(?:^|/)qwen3(?:[._-]?5[-_.]?397b[-_.]?a17b|[._-]?6[-_.]?35b[-_.]?a3b)(?:$|[-_.:])", lower))
+                or bool(re.search(r"(?:^|/)gemma[-_.]?4[-_.]?31b[-_.]?it(?:$|[-_.:])", lower))
+                or bool(re.search(r"(?:^|/)gemini[-_.]?3[._-]?6[-_.]?flash(?:$|[-_.:])", lower))
+                or bool(re.search(r"(?:^|/)claude[-_.]?opus[-_.]?(?:5|4[-_.]?8)(?:$|[-_.:])", lower))
+                or bool(re.search(r"(?:^|/)gpt[-_.]?5[._-]?6[-_.]?sol(?:$|[-_.:])", lower))
+                or bool(re.search(r"(?:^|/)kimi[-_.]?k2[._-]?6(?:$|[-_.:])", lower))
+            )
+            supports_video = known_native_video
+            supports_image = known_image_model
+            supports_text = True
+            source = "confirmed_model_contract" if known_image_model else "unknown"
+    else:
+        source = "catalog"
+    media_strategy = "native_video" if supports_video else ("sampled_frames" if supports_image else None)
+    return {
+        "supports_video": supports_video,
+        "supports_image": supports_image,
+        "supports_text": supports_text,
+        "capability_source": source,
+        "video_candidate": supports_video,
+        "comparison_media_strategy": media_strategy,
+    }
+
+
+def curated_hosted_models() -> List[Dict[str, Any]]:
+    return [
+        dict(
+            item,
+            source="curated",
+            capability_source="curated",
+            video_candidate=bool(item.get("supports_video")),
+            comparison_media_strategy=(
+                "native_video" if item.get("supports_video") is True
+                else ("sampled_frames" if item.get("supports_image") is True else None)
+            ),
+        )
+        for item in CURATED_HOSTED_MODELS
+    ]
+
+
+def hosted_auth_headers(api_key: str) -> Dict[str, str]:
+    header = NVIDIA_HOSTED_AUTH_HEADER
+    if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", header):
+        raise RuntimeError("Hosted auth header configuration is invalid")
+    scheme = NVIDIA_HOSTED_AUTH_SCHEME
+    if scheme and not re.fullmatch(r"[A-Za-z][A-Za-z0-9._~-]{0,31}", scheme):
+        raise RuntimeError("Hosted auth scheme configuration is invalid")
+    value = f"{scheme} {api_key}".strip() if scheme else api_key
+    return {"Accept": "application/json", header: value}
+
+
+def discover_hosted_models(api_key: Any) -> Dict[str, Any]:
+    """Discover serverless models without retaining or returning the runtime key."""
+    catalog_url = validated_hosted_endpoint(NVIDIA_HOSTED_CATALOG_URL, "Hosted catalog URL")
+    key = validated_runtime_key(api_key)
+    if requests is None:
+        raise RuntimeError(f"requests import failed: {REQUESTS_IMPORT_ERROR}")
+    headers = hosted_auth_headers(key)
+    warning: Optional[str] = None
+    source = "dynamic"
+    try:
+        response = requests.get(
+            catalog_url,
+            headers=headers,
+            timeout=HTTP_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+        if response.status_code in (401, 403):
+            raise ClientInputError("Hosted model discovery rejected the runtime key")
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError(f"Hosted model discovery returned HTTP {response.status_code}")
+        body = response.json()
+        rows = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("Hosted model discovery returned an unexpected response")
+        models: List[Dict[str, Any]] = []
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or row.get("root") or row.get("name") or "").strip()
+            if (
+                not model_id
+                or key in model_id
+                or len(model_id) > 240
+                or model_id in seen
+                or "://" in model_id
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", model_id)
+            ):
+                continue
+            if redact_sensitive(model_id) != model_id:
+                continue
+            seen.add(model_id)
+            capabilities = hosted_model_capabilities(model_id, row)
+            models.append({
+                "id": model_id,
+                "label": str(redact_runtime_secret(str(row.get("name") or model_id)[:300], key)),
+                "family": hosted_model_family(model_id),
+                "source": "dynamic",
+                **capabilities,
+            })
+        if not models:
+            raise RuntimeError("Hosted model discovery returned no usable models")
+        models.sort(key=lambda item: (not item["video_candidate"], item["family"] == "Other", item["family"], item["id"].lower()))
+        models = redact_runtime_secret(models, key)
+    except ClientInputError:
+        raise
+    except Exception as exc:
+        models = curated_hosted_models()
+        source = "curated"
+        warning = "Live discovery was unavailable; showing curated defaults."
+    finally:
+        headers.clear()
+        key = ""
+    with STATE_LOCK:
+        comparison = dict(STATE.get("comparison") or {})
+        comparison.update({"catalog": models, "catalog_source": source, "catalog_warning": warning})
+        STATE["comparison"] = comparison
+    return redact_sensitive({"ok": True, "models": models, "source": source, "warning": warning})
+
+
+def reference_video_storage_bytes() -> int:
+    if not REFERENCE_VIDEO_DIR.exists():
+        return 0
+    total = 0
+    for item in REFERENCE_VIDEO_DIR.iterdir():
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def store_reference_video(stream: Any, length: int, display_name: str) -> Path:
+    """Write one bounded upload into a private, aggregate-quota-limited directory."""
+    if length <= 0:
+        raise ClientInputError("Reference upload is empty")
+    if length > REFERENCE_VIDEO_MAX_BYTES:
+        raise ClientInputError(
+            f"Reference upload exceeds the {REFERENCE_VIDEO_MAX_BYTES // (1024 * 1024)} MiB limit"
+        )
+    safe_name = Path(display_name).name or "reference.mp4"
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS:
+        raise ClientInputError("Reference upload must use a supported video extension")
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip(".-")[:80] or "reference"
+    with REFERENCE_UPLOAD_LOCK:
+        REFERENCE_VIDEO_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        REFERENCE_VIDEO_DIR.chmod(0o700)
+        if reference_video_storage_bytes() + length > REFERENCE_VIDEO_TOTAL_MAX_BYTES:
+            raise ClientInputError("Reference upload storage quota is exhausted")
+        destination = REFERENCE_VIDEO_DIR / f"{safe_stem}-{os.urandom(6).hex()}{suffix}"
+        file_descriptor = os.open(
+            str(destination),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        remaining = length
+        try:
+            os.fchmod(file_descriptor, 0o600)
+            with os.fdopen(file_descriptor, "wb") as handle:
+                file_descriptor = -1
+                while remaining > 0:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ClientInputError("Reference upload ended before the declared content length")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+        except Exception:
+            if file_descriptor >= 0:
+                os.close(file_descriptor)
+            destination.unlink(missing_ok=True)
+            raise
+    return destination
+
+
+def register_reference_video(path: Path, display_name: str) -> Dict[str, Any]:
+    """Add an already-uploaded reference video without replacing dataset rows."""
+    resolved = path.resolve()
+    if not resolved.is_file() or resolved.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ClientInputError("Reference upload must be a supported video file")
+    if resolved.stat().st_size <= 0:
+        raise ClientInputError("Reference upload is empty")
+    video = attach_meta({
+        "id": video_id(str(resolved)),
+        "name": Path(display_name).name or resolved.name,
+        "filepath": str(resolved),
+        "label": "Reference upload",
+        "source": "reference_upload",
+        "dataset_row": {"source": "reference_upload", "reference_video": True},
+    })
+    with STATE_LOCK:
+        existing = list(STATE.get("videos") or [])
+        existing = [item for item in existing if item.get("id") != video["id"]]
+        existing.append(video)
+        STATE["videos"] = existing
+    try:
+        write_private_json(RESULTS_FILE, snapshot())
+    except Exception as exc:
+        log(f"Could not save reference-video state: {safe_error(exc)}")
+    return redact_sensitive(video)
+
+
+def normalized_media_strategy(value: Any) -> Optional[str]:
+    strategy = str(value or "").strip().lower()
+    if not strategy or strategy == "auto":
+        return None
+    if strategy not in {"native_video", "sampled_frames"}:
+        raise ClientInputError("Media strategy must be native_video or sampled_frames")
+    return strategy
+
+
+def comparison_catalog_rows() -> Dict[str, Dict[str, Any]]:
+    return {
+        str(item.get("id") or ""): item
+        for item in ((snapshot().get("comparison") or {}).get("catalog") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def comparison_strategy_for_model(model_id: str, overrides: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    override = normalized_media_strategy((overrides or {}).get(model_id))
+    if override:
+        return override
+    row = comparison_catalog_rows().get(model_id) or {}
+    strategy = normalized_media_strategy(row.get("comparison_media_strategy"))
+    if strategy:
+        return strategy
+    if row.get("supports_video") is True:
+        return "native_video"
+    if row.get("supports_image") is True:
+        return "sampled_frames"
+    return None
+
+
+def validate_comparison_payload_secrets(payload: Dict[str, Any], runtime_key: str) -> None:
+    """Reject credentials pasted into model/workflow fields without echoing them."""
+    relevant = {
+        "models": payload.get("models"),
+        "model_strategies": payload.get("model_strategies"),
+        "variants": payload.get("variants"),
+        "system_prompt": payload.get("system_prompt"),
+        "user_prompt": payload.get("user_prompt"),
+        "reasoning_model": payload.get("reasoning_model"),
+    }
+    serialized = json.dumps(relevant, default=str)
+    if runtime_key and runtime_key in serialized:
+        raise ClientInputError("Credentials must not be included in model or workflow fields")
+    model_fields = json.dumps({
+        "models": payload.get("models"),
+        "model_strategies": payload.get("model_strategies"),
+        "reasoning_model": payload.get("reasoning_model"),
+    }, default=str)
+    if redact_sensitive(model_fields) != model_fields:
+        raise ClientInputError("Credentials must not be included in model fields")
+
+
+def normalized_comparison_models(values: Iterable[Any], strategy_overrides: Optional[Dict[str, Any]] = None) -> List[str]:
+    catalog = {
+        str(item.get("id") or ""): item
+        for item in ((snapshot().get("comparison") or {}).get("catalog") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    models: List[str] = []
+    seen = set()
+    blocked: List[str] = []
+    for value in values or []:
+        model_id = str(value or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        if (
+            len(model_id) > 240
+            or "://" in model_id
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", model_id)
+        ):
+            raise ClientInputError("A selected hosted model id is invalid")
+        if redact_sensitive(model_id) != model_id:
+            raise ClientInputError("A selected hosted model id contains a credential-like value")
+        catalog_row = catalog.get(model_id)
+        strategy = comparison_strategy_for_model(model_id, strategy_overrides)
+        if not strategy or (not catalog_row and not normalized_media_strategy((strategy_overrides or {}).get(model_id))):
+            blocked.append(model_id)
+            continue
+        seen.add(model_id)
+        models.append(model_id)
+    if blocked:
+        raise ClientInputError(
+            "Reference-video comparison requires catalog-confirmed native video/image input or an explicit media strategy override; blocked: "
+            + ", ".join(blocked[:8])
+        )
+    if not models:
+        raise ClientInputError("Select at least one hosted model")
+    return models[:24]
+
+
+def normalized_comparison_variants(
+    mode: str,
+    raw_variants: Any,
+    system_prompt: str,
+    user_prompt: str,
+    params: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    mode = "ablation" if str(mode).lower() == "ablation" else "spot"
+    if mode == "spot":
+        return [{
+            "id": "current-workflow",
+            "label": "Current workflow",
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "params": dict(params),
+        }]
+    variants: List[Dict[str, Any]] = []
+    if isinstance(raw_variants, list):
+        for index, raw in enumerate(raw_variants[:8]):
+            if not isinstance(raw, dict):
+                continue
+            label = str(raw.get("label") or f"Variant {index + 1}").strip()[:100]
+            variant_system = str(raw.get("system_prompt") if raw.get("system_prompt") is not None else system_prompt)
+            variant_user = str(raw.get("user_prompt") if raw.get("user_prompt") is not None else user_prompt)
+            variant_params = dict(params)
+            overrides = raw.get("params")
+            if isinstance(overrides, dict):
+                for key in ("fps", "max_pixels", "max_tokens", "temperature", "top_p", "repetition_penalty", "max_frames", "reasoning_enabled", "reasoning_format"):
+                    if key in overrides:
+                        variant_params[key] = overrides[key]
+            if "user_prompt" in raw:
+                variant_params["prompt_mode"] = "runtime_form"
+            variants.append({
+                "id": f"variant-{index + 1}-{hashlib.sha1(label.encode('utf-8', 'ignore')).hexdigest()[:6]}",
+                "label": label,
+                "system_prompt": variant_system,
+                "user_prompt": variant_user,
+                "params": variant_params,
+            })
+    if not variants:
+        plain_params = dict(params)
+        plain_params.update({"prompt_mode": "runtime_form", "reasoning_enabled": False})
+        variants = [
+            {
+                "id": "current-workflow",
+                "label": "Current workflow",
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "params": dict(params),
+            },
+            {
+                "id": "plain-prompt",
+                "label": "Reasoning scaffold removed",
+                "system_prompt": system_prompt,
+                "user_prompt": strip_reasoning_wrapper(user_prompt),
+                "params": plain_params,
+            },
+        ]
+    return variants
+
+
+def loaded_comparison_target() -> Dict[str, Any]:
+    server = detect_server()
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    local_key = os.getenv("VLLM_API_KEY")
+    if local_key:
+        headers["Authorization"] = f"Bearer {local_key}"
+    raw_model = str(server.get("model") or os.getenv("MODEL_NAME") or "loaded-model")
+    model_path = raw_model.removeprefix("file://")
+    safe_model = (
+        Path(model_path).name or "loaded-model"
+        if raw_model.startswith("file://") or Path(model_path).is_absolute()
+        else raw_model
+    )
+    return {
+        "source": "loaded",
+        "label": "Loaded endpoint baseline",
+        "model": safe_model,
+        "backend": str(server.get("backend") or INFERENCE_BACKEND),
+        "base_url": str(server.get("base_url") or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")),
+        "headers": headers,
+        "_runtime_secret": local_key or "",
+    }
+
+
+def _prompt_request_shape(text: Any) -> Dict[str, Any]:
+    encoded = str(text or "").encode("utf-8", "ignore")
+    return {
+        "chars": len(str(text or "")),
+        "sha256_16": hashlib.sha256(encoded).hexdigest()[:16],
+    }
+
+
+def comparison_request_shape(
+    video: Dict[str, Any],
+    target: Dict[str, Any],
+    variant: Dict[str, Any],
+    *,
+    effective_system: Optional[str] = None,
+    effective_user: Optional[str] = None,
+    content: Optional[List[Dict[str, Any]]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Describe a comparison request without prompts, auth, media bytes, or endpoint hosts."""
+    backend = str(target.get("backend") or "")
+    media_strategy = str(
+        (plan or {}).get("media_strategy")
+        or target.get("media_strategy")
+        or "loaded_endpoint_default"
+    )
+    system_text = str(
+        effective_system if effective_system is not None else variant.get("system_prompt") or ""
+    )
+    user_text = str(
+        effective_user if effective_user is not None else variant.get("user_prompt") or ""
+    )
+    if content is None:
+        inferred_type = "video_url" if media_strategy == "native_video" else "image_url"
+        content_types = [inferred_type, "text"]
+    else:
+        content_types = list(dict.fromkeys(
+            str(item.get("type") or "unknown") for item in content if isinstance(item, dict)
+        ))
+    request_parameters: Dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key in ("temperature", "top_p", "max_tokens", "repetition_penalty"):
+            if key in payload:
+                request_parameters[key] = payload[key]
+        if isinstance(payload.get("nvext"), dict):
+            request_parameters["nvext"] = {
+                key: value for key, value in payload["nvext"].items()
+                if key in {"repetition_penalty"} and isinstance(value, (bool, int, float))
+            }
+    else:
+        params = dict(variant.get("params") or {})
+        for key in ("temperature", "top_p", "max_tokens", "repetition_penalty", "fps", "max_pixels", "max_frames"):
+            value = params.get(key)
+            if isinstance(value, (bool, int, float)):
+                request_parameters[key] = value
+    raw_path = urllib.parse.urlsplit(str(target.get("base_url") or "")).path.rstrip("/")
+    if backend.lower().startswith("cosmos3") or backend.lower() == "cosmos3_native":
+        transport = "cosmos_generate"
+        request_path = raw_path or "/generate"
+    else:
+        transport = "openai_chat_completions"
+        request_path = raw_path if raw_path.endswith("/chat/completions") else raw_path + "/chat/completions"
+    media_plan = plan or {}
+    return {
+        "transport": transport,
+        "path": request_path or "/chat/completions",
+        "model": str(target.get("model") or ""),
+        "messages": [
+            {"role": "system", "content_types": ["text"], "text": _prompt_request_shape(system_text)},
+            {"role": "user", "content_types": content_types, "text": _prompt_request_shape(user_text)},
+        ],
+        "parameters": request_parameters,
+        "media": {
+            "name": Path(str(video.get("name") or video.get("filepath") or "video")).name,
+            "source": str(video.get("source") or "dataset"),
+            "strategy": media_strategy,
+            "frame_count": media_plan.get("frames_passed"),
+            "payload": "omitted",
+        },
+    }
+
+
+def run_comparison_case(
+    video: Dict[str, Any],
+    target: Dict[str, Any],
+    variant: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run one video/variant against one ephemeral target configuration."""
+    started = time.monotonic()
+    model = str(target.get("model") or "")
+    backend = str(target.get("backend") or "")
+    base_url = str(target.get("base_url") or "")
+    if backend.lower() == "hosted_openai":
+        base_url = validated_hosted_endpoint(base_url, "Hosted inference URL")
+    media_strategy = str(target.get("media_strategy") or ("native_video" if model_uses_native_video(model, backend) else "sampled_frames"))
+    headers = dict(target.get("headers") or {})
+    params = dict(variant.get("params") or {})
+    params.setdefault("reasoning_model", model)
+    params.setdefault("reasoning_backend", backend)
+    effective_system, effective_user, prompt_source = prompts_for_video(
+        video,
+        str(variant.get("system_prompt") or ""),
+        str(variant.get("user_prompt") or ""),
+        params,
+    )
+    fps = float(params.get("fps") or STATE["defaults"]["fps"])
+    max_pixels = int(params.get("max_pixels") or STATE["defaults"]["max_pixels"])
+    max_frames = int(params.get("max_frames") if params.get("max_frames") is not None else STATE["defaults"]["max_frames"])
+    if media_strategy == "sampled_frames":
+        content, plan = content_for_video(
+            video["filepath"], effective_user, model, fps, max_pixels, max_frames, backend=backend, force_frames=True
+        )
+        # Hosted image-model examples put media first and the question last.
+        content = [item for item in content if item.get("type") == "image_url"] + [
+            item for item in content if item.get("type") == "text"
+        ]
+        plan["mode"] = "sampled_image_frames"
+    elif media_strategy == "native_video":
+        content, plan = content_for_video(
+            video["filepath"], effective_user, model, fps, max_pixels, max_frames,
+            backend=backend, force_native_video=True,
+        )
+    else:
+        raise ClientInputError(f"Unsupported comparison media strategy: {media_strategy}")
+    plan["media_strategy"] = media_strategy
+    preprocessing_seconds = time.monotonic() - started
+    if backend.lower().startswith("cosmos3") or backend.lower() == "cosmos3_native":
+        completion = post_cosmos3_generate(
+            base_url,
+            headers,
+            vision_path=video["filepath"],
+            prompt=effective_user,
+            params=params,
+            run_name=f"compare-{int(time.time() * 1000)}-{video['id']}",
+        )
+    else:
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": effective_system},
+                {"role": "user", "content": content},
+            ],
+            "temperature": float(params.get("temperature") if params.get("temperature") is not None else STATE["defaults"]["temperature"]),
+            "top_p": float(params.get("top_p") if params.get("top_p") is not None else STATE["defaults"]["top_p"]),
+        }
+        repetition_penalty = float(params.get("repetition_penalty") if params.get("repetition_penalty") is not None else STATE["defaults"]["repetition_penalty"])
+        if backend.lower() == "hosted_openai":
+            payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
+        elif "nim" in backend.lower():
+            payload["nvext"] = {"repetition_penalty": repetition_penalty}
+        else:
+            payload["max_tokens"] = int(params.get("max_tokens") or STATE["defaults"]["max_tokens"])
+            payload["repetition_penalty"] = repetition_penalty
+        try:
+            completion = post_chat_completion(
+                base_url,
+                headers,
+                payload,
+                allow_redirects=backend.lower() != "hosted_openai",
+            )
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if "nim" in backend.lower() and status_code in (400, 422) and plan.get("mode") == "native_video_url":
+                fallback_content, fallback_plan = content_for_video(
+                    video["filepath"], effective_user, model, fps, max_pixels, 0, backend=backend, force_frames=True
+                )
+                fallback_content = [item for item in fallback_content if item.get("type") == "image_url"] + [
+                    item for item in fallback_content if item.get("type") == "text"
+                ]
+                fallback_plan["fallback_from_video_url"] = status_code
+                payload["messages"][1]["content"] = fallback_content
+                completion = post_chat_completion(
+                    base_url,
+                    headers,
+                    payload,
+                    allow_redirects=backend.lower() != "hosted_openai",
+                )
+                plan = fallback_plan
+                media_strategy = "sampled_frames_fallback"
+                plan["media_strategy"] = media_strategy
+            else:
+                raise
+    response_text = str(completion.get("text") or "")
+    metrics = dict(completion.get("metrics") or {})
+    metrics["preprocessing_seconds"] = preprocessing_seconds
+    metrics["e2e_seconds"] = time.monotonic() - started
+    eval_input = {
+        "response": response_text,
+        "json": parse_json_from_text(response_text),
+        "error": None,
+    }
+    return redact_comparison_payload({
+        "video_id": video.get("id"),
+        "video_name": video.get("name"),
+        "video_source": video.get("source") or "dataset",
+        "source": target.get("source"),
+        "target": target.get("label"),
+        "model": model,
+        "media_strategy": media_strategy,
+        "variant_id": variant.get("id"),
+        "variant": variant.get("label"),
+        "status": "ok",
+        "latency_seconds": metrics.get("e2e_seconds"),
+        "ttft_seconds": metrics.get("ttft_seconds"),
+        "metrics": metrics,
+        "plan": plan,
+        "request_shape": comparison_request_shape(
+            video,
+            target,
+            variant,
+            effective_system=effective_system,
+            effective_user=effective_user,
+            content=content,
+            payload=payload if not (backend.lower().startswith("cosmos3") or backend.lower() == "cosmos3_native") else None,
+            plan=plan,
+        ),
+        "prompt_source": prompt_source,
+        "response": response_text,
+        "evaluation": evaluate_result(video, eval_input),
+        "error": None,
+    }, str(target.get("_runtime_secret") or ""), base_url)
+
+
+def run_comparison_case_recorded(
+    video: Dict[str, Any],
+    target: Dict[str, Any],
+    variant: Dict[str, Any],
+) -> Dict[str, Any]:
+    started = time.monotonic()
+    try:
+        return run_comparison_case(video, target, variant)
+    except Exception as exc:
+        secret = str(target.get("_runtime_secret") or "")
+        return redact_comparison_payload({
+            "video_id": video.get("id"),
+            "video_name": video.get("name"),
+            "video_source": video.get("source") or "dataset",
+            "source": target.get("source"),
+            "target": target.get("label"),
+            "model": target.get("model"),
+            "media_strategy": target.get("media_strategy") or "loaded_endpoint_default",
+            "variant_id": variant.get("id"),
+            "variant": variant.get("label"),
+            "status": "error",
+            "latency_seconds": time.monotonic() - started,
+            "ttft_seconds": None,
+            "metrics": {"e2e_seconds": time.monotonic() - started},
+            "request_shape": comparison_request_shape(video, target, variant),
+            "response": "",
+            "evaluation": {},
+            "error": safe_comparison_error_with_prompts(
+                exc,
+                secret,
+                str(target.get("base_url") or ""),
+                (variant.get("system_prompt"), variant.get("user_prompt")),
+            ),
+        }, secret, str(target.get("base_url") or ""))
+
+
+def comparison_summary(results: List[Dict[str, Any]], wall_seconds: float) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in results:
+        key = " | ".join((str(row.get("source") or ""), str(row.get("model") or ""), str(row.get("media_strategy") or ""), str(row.get("variant") or "")))
+        item = grouped.setdefault(key, {
+            "source": row.get("source"),
+            "model": row.get("model"),
+            "media_strategy": row.get("media_strategy"),
+            "variant": row.get("variant"),
+            "total": 0,
+            "ok": 0,
+            "errors": 0,
+            "latencies": [],
+            "error_messages": [],
+        })
+        item["total"] += 1
+        if row.get("status") == "ok":
+            item["ok"] += 1
+        else:
+            item["errors"] += 1
+            if row.get("error"):
+                item["error_messages"].append(safe_error(row["error"], 300))
+        if row.get("latency_seconds") is not None:
+            item["latencies"].append(row["latency_seconds"])
+    rows: List[Dict[str, Any]] = []
+    for item in grouped.values():
+        latencies = item.pop("latencies")
+        item["latency_seconds"] = stats_summary(latencies)
+        item["error_messages"] = list(dict.fromkeys(item["error_messages"]))[:10]
+        rows.append(item)
+    rows.sort(key=lambda item: (item["source"] != "loaded", str(item["model"]), str(item["media_strategy"]), str(item["variant"])))
+    errors = sum(1 for row in results if row.get("status") != "ok")
+    return redact_sensitive({
+        "total": len(results),
+        "ok": len(results) - errors,
+        "errors": errors,
+        "wall_seconds": wall_seconds,
+        "groups": rows,
+    })
+
+
+def run_hosted_comparison(
+    ids: Iterable[str],
+    hosted_models: List[str],
+    media_strategies: Dict[str, str],
+    api_key: str,
+    mode: str,
+    variants: List[Dict[str, Any]],
+    concurrency: int,
+    include_loaded: bool,
+) -> None:
+    started = time.monotonic()
+    started_epoch = time.time()
+    run_id = f"compare-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+    videos = selected_videos_for_ids(ids)
+    targets: List[Dict[str, Any]] = []
+    try:
+        if include_loaded:
+            targets.append(loaded_comparison_target())
+        hosted_url = validated_hosted_endpoint(NVIDIA_HOSTED_INFERENCE_URL, "Hosted inference URL")
+        hosted_headers = {"Content-Type": "application/json", **hosted_auth_headers(api_key)}
+        targets.extend({
+            "source": "hosted_endpoint",
+            "label": "Hosted endpoint",
+            "model": model,
+            "backend": "hosted_openai",
+            "media_strategy": media_strategies.get(model) or "native_video",
+            "base_url": hosted_url,
+            "headers": dict(hosted_headers),
+            "_runtime_secret": api_key,
+        } for model in hosted_models)
+        hosted_headers.clear()
+        total = len(videos) * len(targets) * len(variants)
+        if not videos:
+            raise ClientInputError("Load or upload at least one video before comparing endpoints")
+        if not targets:
+            raise ClientInputError("No comparison targets were selected")
+        if total > COMPARISON_MAX_CASES:
+            raise ClientInputError(
+                f"Comparison expands to {total} cases; reduce videos, models, or variants to {COMPARISON_MAX_CASES} or fewer"
+            )
+        run_meta = {
+            "run_id": run_id,
+            "mode": "ablation" if mode == "ablation" else "spot",
+            "status": "running",
+            "started_epoch": started_epoch,
+            "video_count": len(videos),
+            "models": [{"source": target["source"], "model": target["model"], "media_strategy": target.get("media_strategy") or "loaded_endpoint_default"} for target in targets],
+            "variants": [{"id": variant["id"], "label": variant["label"]} for variant in variants],
+            "progress": {"done": 0, "total": total, "errors": 0},
+        }
+        with STATE_LOCK:
+            comparison = dict(STATE.get("comparison") or {})
+            comparison.update({"running": True, "run": run_meta, "results": []})
+            STATE["comparison"] = comparison
+        log(f"Comparison {run_id} started: {total} cases")
+        results: List[Dict[str, Any]] = []
+        errors = 0
+        work = [(video, target, variant) for video in videos for target in targets for variant in variants]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(16, int(concurrency)))) as pool:
+            future_map = {
+                pool.submit(run_comparison_case_recorded, video, target, variant): (video, target, variant)
+                for video, target, variant in work
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                video, target, variant = future_map[future]
+                try:
+                    result = future.result()
+                    if result.get("status") != "ok":
+                        errors += 1
+                except Exception as exc:
+                    errors += 1
+                    result = redact_comparison_payload({
+                        "video_id": video.get("id"),
+                        "video_name": video.get("name"),
+                        "video_source": video.get("source") or "dataset",
+                        "source": target.get("source"),
+                        "target": target.get("label"),
+                        "model": target.get("model"),
+                        "media_strategy": target.get("media_strategy") or "loaded_endpoint_default",
+                        "variant_id": variant.get("id"),
+                        "variant": variant.get("label"),
+                        "status": "error",
+                        "latency_seconds": None,
+                        "ttft_seconds": None,
+                        "metrics": {},
+                        "request_shape": comparison_request_shape(video, target, variant),
+                        "response": "",
+                        "evaluation": {},
+                        "error": safe_comparison_error_with_prompts(
+                            exc,
+                            str(target.get("_runtime_secret") or ""),
+                            str(target.get("base_url") or ""),
+                            (variant.get("system_prompt"), variant.get("user_prompt")),
+                        ),
+                    }, str(target.get("_runtime_secret") or ""), str(target.get("base_url") or ""))
+                results.append(result)
+                with STATE_LOCK:
+                    comparison = dict(STATE.get("comparison") or {})
+                    current_run = dict(comparison.get("run") or run_meta)
+                    current_run["progress"] = {"done": len(results), "total": total, "errors": errors}
+                    comparison.update({"run": current_run, "results": list(results)})
+                    STATE["comparison"] = comparison
+        wall_seconds = time.monotonic() - started
+        summary = comparison_summary(results, wall_seconds)
+        run_meta.update({
+            "status": "complete",
+            "finished_epoch": time.time(),
+            "wall_seconds": wall_seconds,
+            "progress": {"done": len(results), "total": total, "errors": errors},
+            "summary": summary,
+        })
+        with STATE_LOCK:
+            comparison = dict(STATE.get("comparison") or {})
+            history = list(comparison.get("history") or [])[-19:]
+            history.append({
+                "run_id": run_id,
+                "mode": run_meta["mode"],
+                "status": "complete",
+                "started_epoch": started_epoch,
+                "summary": summary,
+            })
+            comparison.update({"running": False, "run": run_meta, "results": results, "history": history})
+            STATE["comparison"] = comparison
+        write_private_json(RESULTS_FILE, snapshot())
+        log(f"Comparison {run_id} complete: {len(results) - errors} ok, {errors} errors")
+    except Exception as exc:
+        error = safe_comparison_error(exc, api_key, NVIDIA_HOSTED_INFERENCE_URL)
+        with STATE_LOCK:
+            comparison = dict(STATE.get("comparison") or {})
+            current_run = dict(comparison.get("run") or {})
+            current_run.update({"run_id": run_id, "status": "error", "error": error, "finished_epoch": time.time()})
+            comparison.update({"running": False, "run": current_run})
+            STATE["comparison"] = comparison
+        log(f"Comparison {run_id} failed: {error}")
+    finally:
+        for target in targets:
+            headers = target.get("headers")
+            if isinstance(headers, dict):
+                headers.clear()
+            target["_runtime_secret"] = ""
+        api_key = ""
+
+
+def comparison_export_payload() -> Dict[str, Any]:
+    comparison = snapshot().get("comparison") or {}
+    run = comparison.get("run") or {}
+    if not run or not comparison.get("results"):
+        raise ClientInputError("Run a comparison before exporting")
+    return redact_sensitive({
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run": run,
+        "summary": run.get("summary") or comparison_summary(comparison.get("results") or [], float(run.get("wall_seconds") or 0)),
+        "results": comparison.get("results") or [],
+    })
+
+
+def create_comparison_export(fmt: str) -> Path:
+    fmt = str(fmt or "html").lower()
+    if fmt not in {"html", "json", "csv"}:
+        raise ClientInputError("Comparison export format must be html, json, or csv")
+    payload = comparison_export_payload()
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        EXPORT_DIR.chmod(0o700)
+    except OSError:
+        pass
+    path = EXPORT_DIR / f"byo-video-comparison-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}.{fmt}"
+    if fmt == "json":
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    elif fmt == "csv":
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["video", "video_source", "endpoint_source", "model", "media_strategy", "variant", "status", "latency_seconds", "ttft_seconds", "error", "response"])
+            for row in payload["results"]:
+                writer.writerow([
+                    row.get("video_name"), row.get("video_source"), row.get("source"), row.get("model"), row.get("media_strategy"),
+                    row.get("variant"), row.get("status"), row.get("latency_seconds"), row.get("ttft_seconds"),
+                    row.get("error"), row.get("response"),
+                ])
+    else:
+        summary_rows = []
+        for item in (payload.get("summary") or {}).get("groups") or []:
+            latency = item.get("latency_seconds") or {}
+            summary_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(item.get('source') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('model') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('media_strategy') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('variant') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('ok') or 0))}/{html.escape(str(item.get('total') or 0))}</td>"
+                f"<td>{html.escape(str(round(float(latency.get('average') or 0), 3)))}</td>"
+                f"<td>{html.escape(' | '.join(item.get('error_messages') or []))}</td>"
+                "</tr>"
+            )
+        result_rows_html = []
+        for row in payload["results"]:
+            result_rows_html.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('video_name') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('source') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('model') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('media_strategy') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('variant') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('status') or ''))}</td>"
+                f"<td>{html.escape(str(round(float(row.get('latency_seconds') or 0), 3)))}</td>"
+                f"<td>{html.escape(str(row.get('error') or ''))}</td>"
+                f"<td><pre>{html.escape(str(row.get('response') or ''))}</pre></td>"
+                "</tr>"
+            )
+        run = payload.get("run") or {}
+        path.write_text(
+            "<!doctype html><html><head><meta charset='utf-8'><title>BYO Video Endpoint Comparison</title>"
+            "<style>body{font:14px system-ui;margin:32px;color:#1f2937}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #d8dee8;padding:8px;vertical-align:top;text-align:left}pre{white-space:pre-wrap;max-width:70ch;margin:0}</style>"
+            "</head><body><h1>BYO Video Endpoint Comparison</h1>"
+            f"<p>Run {html.escape(str(run.get('run_id') or ''))} · {html.escape(str(run.get('mode') or ''))} · status {html.escape(str(run.get('status') or ''))}</p>"
+            "<h2>Summary</h2><table><thead><tr><th>Source</th><th>Model</th><th>Media strategy</th><th>Variant</th><th>OK</th><th>Avg latency (s)</th><th>Errors</th></tr></thead><tbody>"
+            + "".join(summary_rows)
+            + "</tbody></table><h2>Results</h2><table><thead><tr><th>Video</th><th>Source</th><th>Model</th><th>Media strategy</th><th>Variant</th><th>Status</th><th>Latency (s)</th><th>Error</th><th>Response</th></tr></thead><tbody>"
+            + "".join(result_rows_html)
+            + "</tbody></table></body></html>",
+            encoding="utf-8",
+        )
+    # Defense in depth: verify serialized artifacts do not contain known secret shapes.
+    if fmt in {"html", "json", "csv"}:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        redacted = str(redact_sensitive(raw))
+        if redacted != raw:
+            path.write_text(redacted, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
 
 
 def context_params(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2648,8 +3927,13 @@ def response_text_from_choice(choice: Dict[str, Any]) -> str:
 
 
 def raise_for_status_with_body(resp: Any) -> None:
-    if resp.status_code < 400:
+    if 200 <= resp.status_code < 300:
         return
+    if 300 <= resp.status_code < 400:
+        raise requests.HTTPError(
+            f"{resp.status_code} redirect refused for configured endpoint",
+            response=resp,
+        )
     body = (resp.text or "").strip()
     detail = f"{resp.status_code} Client Error: {resp.reason} for url: {resp.url}"
     if body:
@@ -2755,16 +4039,37 @@ def post_cosmos3_generate(
     }
 
 
-def post_chat_completion(base_url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
-    url = base_url.rstrip("/") + "/chat/completions"
+def post_chat_completion(
+    base_url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    *,
+    allow_redirects: bool = True,
+) -> Dict[str, Any]:
+    normalized_url = base_url.rstrip("/")
+    url = normalized_url if normalized_url.endswith("/chat/completions") else normalized_url + "/chat/completions"
     request_started = time.monotonic()
     stream_payload = dict(payload)
     stream_payload["stream"] = True
     stream_payload["stream_options"] = {"include_usage": True}
-    resp = requests.post(url, headers=headers, json=stream_payload, timeout=REQUEST_TIMEOUT_SECONDS, stream=True)
+    resp = requests.post(
+        url,
+        headers=headers,
+        json=stream_payload,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        stream=True,
+        allow_redirects=allow_redirects,
+    )
     if resp.status_code >= 400 and "stream_options" in (resp.text or ""):
         stream_payload.pop("stream_options", None)
-        resp = requests.post(url, headers=headers, json=stream_payload, timeout=REQUEST_TIMEOUT_SECONDS, stream=True)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=stream_payload,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            stream=True,
+            allow_redirects=allow_redirects,
+        )
     raise_for_status_with_body(resp)
 
     chunks: List[str] = []
@@ -3922,7 +5227,7 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
                     "active_requests": list(active.values()),
                 }
                 STATE["batch_metrics"] = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "running", run_context)
-            RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+            write_private_json(RESULTS_FILE, snapshot())
     final_summary = batch_summary(dataset_repo, results, len(selected), errors, concurrency, batch_started, "complete", run_context)
     finished_epoch = time.time()
     with STATE_LOCK:
@@ -3949,7 +5254,7 @@ def run_batch(ids: Iterable[str], concurrency: int, system_prompt: str, user_pro
         STATE["batch_metrics"] = final_summary
         STATE["batch_history"] = (STATE.get("batch_history") or [])[-19:] + [final_summary]
         STATE["run_history"] = (STATE.get("run_history") or [])[-5:] + [{"summary": final_summary, "results": compact_run_results(results)}]
-    RESULTS_FILE.write_text(json.dumps(snapshot(), indent=2), encoding="utf-8")
+    write_private_json(RESULTS_FILE, snapshot())
     log(f"Batch complete: {len(results) - errors} ok, {errors} errors")
 
 
@@ -8830,6 +10135,13 @@ details.meta-details pre { max-height:160px; overflow:auto; white-space:pre-wrap
 .export-sections .toggle-row { margin:3px 0; }
 .export-links { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
 .export-link { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; color:var(--accent); background:#fff; text-decoration:none; }
+.compare-panel { margin-top:12px; border:1px solid var(--line); border-radius:8px; padding:14px; background:#f8fafc; }
+.compare-grid { display:grid; grid-template-columns:repeat(2, minmax(220px, 1fr)); gap:10px 16px; }
+.compare-grid .wide { grid-column:1 / -1; }
+.compare-models { min-height:150px; }
+.compare-summary { margin:12px 0; }
+.compare-summary-row { display:grid; grid-template-columns:minmax(130px, 1.4fr) minmax(110px, 1fr) minmax(100px, 1fr) 72px 100px minmax(140px, 1.4fr); gap:8px; padding:7px 0; border-bottom:1px solid var(--line); font-size:12px; align-items:start; }
+.compare-key-note { color:var(--muted); font-size:11px; margin:4px 0 0; }
 .paper-panel { margin-top:12px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#f8fafc; }
 .paper-panel .kv { grid-template-columns:minmax(72px, max-content) minmax(0, 1fr); margin-top:8px; max-height:260px; overflow:auto; padding-right:4px; }
 .guide { display:grid; gap:8px; }
@@ -8971,7 +10283,9 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   section { margin-top:14px; }
   aside { position:static; max-height:none; overflow:visible; }
   .actions button { flex:1 1 100%; }
-  .params, .export-sections { grid-template-columns:1fr; }
+  .params, .export-sections, .compare-grid { grid-template-columns:1fr; }
+  .compare-grid .wide { grid-column:auto; }
+  .compare-summary-row { grid-template-columns:1fr; gap:2px; }
   .bench-flow, .bench-analysis-grid, .bench-gate-grid { grid-template-columns:1fr; }
 }
 </style>
@@ -9008,6 +10322,13 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   </div>
   <label>Max videos to load (0 = all)</label>
   <input id="maxVideos" type="number" min="0" value="20" />
+  <label>Reference video uploads</label>
+  <input id="referenceVideos" type="file" accept="video/*,.mp4,.mov,.m4v,.avi,.webm,.mkv" multiple />
+  <p class="hint">Uploads are appended to the current dataset selection so the same references can be reused for batch runs and endpoint comparisons.</p>
+  <div class="actions">
+    <button class="secondary" id="referenceUploadBtn">Add reference videos</button>
+  </div>
+  <p class="hint" id="referenceUploadStatus"></p>
   <label>Concurrency</label>
   <input id="concurrency" type="number" min="1" value="4" />
   <div class="actions">
@@ -9069,6 +10390,48 @@ th { color:var(--muted); font-size:12px; font-weight:650; }
   </div>
   <h3>Videos</h3>
   <div class="results"><table><thead><tr><th></th><th>Preview</th><th>Name</th><th>Expected</th><th>HF row</th><th>Resolution</th><th>Duration</th><th>Source frames</th><th>Frames to VLM</th><th>Est visual tokens</th><th>Path</th></tr></thead><tbody id="videoRows"></tbody></table></div>
+  <h3>Loaded vs hosted endpoint comparison</h3>
+  <div class="compare-panel">
+    <p class="hint">Run the currently selected dataset rows or uploaded references against the loaded endpoint baseline and one or more hosted models. Spot mode holds the workflow constant; ablation mode repeats cases across prompt variants.</p>
+    <div class="compare-grid">
+      <div>
+        <label>Runtime API key</label>
+        <input id="compareApiKey" type="password" value="" autocomplete="off" spellcheck="false" />
+        <p class="compare-key-note">Use a fresh runtime key from <a href="https://inference.nvidia.com/key-management" target="_blank" rel="noreferrer">key management</a>. It is used only for the current discovery or comparison request, cleared from this form immediately, and never included in app state, logs, results, or exports.</p>
+      </div>
+      <div>
+        <label>Comparison mode</label>
+        <select id="compareMode"><option value="spot">Spot comparison</option><option value="ablation">Workflow ablation</option></select>
+        <label class="toggle-row"><input id="compareIncludeLoaded" type="checkbox" checked /><span><strong>Include loaded endpoint baseline</strong></span></label>
+      </div>
+      <div class="wide">
+        <label>Hosted models (multi-select)</label>
+        <select id="compareModels" class="compare-models" multiple size="8"></select>
+        <label>Exact catalog model ID (optional)</label>
+        <input id="compareCustomModel" value="" autocomplete="off" spellcheck="false" placeholder="Paste an exact ID returned by live discovery" />
+        <label>Custom model media strategy</label>
+        <select id="compareCustomStrategy"><option value="auto">Catalog capability (required)</option><option value="sampled_frames">Explicit deterministic sampled frames</option><option value="native_video">Explicit native video_url</option></select>
+        <p class="hint" id="compareCatalogStatus">Curated defaults are shown until live discovery runs.</p>
+      </div>
+      <div class="wide">
+        <label>Ablation variants (optional; one per line as label :: replacement user prompt)</label>
+        <textarea id="compareVariants" placeholder="Concise answer :: Answer in one sentence.&#10;Reasoned answer :: Think step-by-step, then give a final answer."></textarea>
+        <p class="hint">Blank ablation variants automatically compare the current workflow with its reasoning scaffold removed. Spot mode ignores this field.</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="secondary" id="compareDiscoverBtn">Discover models</button>
+      <button id="compareRunBtn">Compare selected videos</button>
+      <button class="secondary compareExportBtn" data-format="html">Report</button>
+      <button class="secondary compareExportBtn" data-format="json">JSON</button>
+      <button class="secondary compareExportBtn" data-format="csv">CSV</button>
+    </div>
+    <p class="hint" id="compareStatus">No comparison has run yet.</p>
+    <div class="progress"><div id="compareBar"></div></div>
+    <div id="compareSummary" class="compare-summary"></div>
+    <div class="results"><table><thead><tr><th>Video</th><th>Source</th><th>Model</th><th>Media</th><th>Variant</th><th>Status</th><th>Latency</th><th>TTFT</th><th>Error / response</th></tr></thead><tbody id="compareRows"></tbody></table></div>
+    <div class="export-links" id="compareExportLinks"></div>
+  </div>
   <h3>Results</h3>
   <div class="results"><table><thead><tr><th>Video</th><th>Task</th><th>Domain</th><th>Expected</th><th>Model output</th><th>Metric</th><th>Score / match</th><th>TTFT</th><th>Output tok/s</th><th>E2E</th><th>Description / error</th></tr></thead><tbody id="resultRows"></tbody></table></div>
   <h3>Batch history</h3>
@@ -9307,6 +10670,7 @@ let lastAppliedPromptKey = '';
 let promptSyncing = false;
 let promptUserSelected = false;
 let reasoningProfileId = '';
+let comparisonCatalogSig = '';
 const CONTEXT_WARNING_RATIO = 0.85;
 const REASONING_PROFILES = {
   cosmos_think_answer: {id:'cosmos_think_answer', label:'Cosmos Reason / Cosmos3', prefix:'<think>\\nyour reasoning\\n</think>\\n<answer>\\n', suffix:'\\n</answer>', note:'Cosmos Reason/Cosmos3 prompt scaffold'},
@@ -9317,7 +10681,7 @@ const REASONING_PROFILES = {
 };
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function api(path, body){ const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j = await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
-function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn','paperBtn','promptImportBtn','reasoningToggle'].forEach(id=>document.getElementById(id).disabled=true); }
+function setBusy(message){ document.getElementById('progressText').textContent = message; document.getElementById('bar').style.width = '12%'; if(el('sideBar')){ el('sideBar').style.width='12%'; el('statusTitle').textContent='Starting'; el('statusPct').textContent='12%'; el('runtimeNotice').className='status-note'; el('runtimeNotice').textContent=message; } ['loadBtn','runBtn','smokeBtn','foBtn','fitBudgetBtn','paperBtn','promptImportBtn','reasoningToggle','referenceUploadBtn','compareRunBtn','compareDiscoverBtn'].forEach(id=>{ if(document.getElementById(id)) document.getElementById(id).disabled=true; }); }
 function checkedIds(){ return [...document.querySelectorAll('.pick:checked')].map(x=>x.value); }
 function el(id){ return document.getElementById(id); }
 function num(id){ return Number(document.getElementById(id).value); }
@@ -9384,6 +10748,54 @@ function renderPaperImport(){ const p=state?.paper_import||{}; const rows=[]; if
 function checkedExportSections(){ return [...document.querySelectorAll('.exportSection:checked')].map(x=>x.value); }
 function renderExportSections(){ const sections=state?.defaults?.export_sections||[]; const target=el('exportSections'); if(!target || target.dataset.ready) return; target.innerHTML = sections.map(s=>`<label class="toggle-row"><input class="exportSection" type="checkbox" value="${esc(s.id)}" ${s.default?'checked':''}/><span><strong>${esc(s.label)}</strong></span></label>`).join(''); target.dataset.ready='1'; }
 function addExportLink(item){ const box=el('exportLinks'); const a=document.createElement('a'); a.className='export-link'; a.href=item.url; a.target='_blank'; a.textContent=`${item.format.toUpperCase()} | ${item.filename}`; box.prepend(a); }
+function selectedComparisonModels(){ return [...(el('compareModels')?.selectedOptions||[])].map(option=>option.value).filter(Boolean); }
+function comparisonVariantsPayload(){ if(el('compareMode')?.value!=='ablation') return []; return String(el('compareVariants')?.value||'').split(/\\r?\\n/).map(line=>line.trim()).filter(Boolean).slice(0,8).map((line,index)=>{ const marker=line.indexOf('::'); if(marker<0) return {label:`Variant ${index+1}`,user_prompt:line}; return {label:line.slice(0,marker).trim()||`Variant ${index+1}`,user_prompt:line.slice(marker+2).trim()}; }); }
+function syncComparisonCatalog(){
+ const select=el('compareModels'); if(!select) return;
+ const catalog=state?.comparison?.catalog||[]; const sig=JSON.stringify(catalog.map(item=>[item.id,item.label,item.comparison_media_strategy,item.capability_source]));
+ if(sig===comparisonCatalogSig) return;
+ const prior=new Set(selectedComparisonModels());
+ select.innerHTML=catalog.map(item=>{ const strategy=item.comparison_media_strategy||''; const capable=!!strategy; const capability=strategy==='native_video'?'native video_url':(strategy==='sampled_frames'?'deterministic sampled image frames':'media capability unknown'); const label=item.id?(item.label&&item.label!==item.id?`${item.label} — ${item.id}`:item.id):(item.label||'Catalog hint'); return `<option value="${esc(item.id||'')}" ${capable&&item.id?'':'disabled'}>${esc(label)} [${esc(capability)}]</option>`; }).join('');
+ let chosen=[...prior].filter(id=>catalog.some(item=>item.id===id&&item.comparison_media_strategy));
+ if(!chosen.length) chosen=catalog.filter(item=>item.id&&item.comparison_media_strategy).slice(0,4).map(item=>item.id);
+ [...select.options].forEach(option=>{ option.selected=chosen.includes(option.value); });
+ comparisonCatalogSig=sig;
+}
+function renderComparison(){
+ const comparison=state?.comparison||{}; syncComparisonCatalog();
+ const run=comparison.run||{}; const progress=run.progress||{}; const total=Number(progress.total||0); const done=Number(progress.done||0); const pct=total?Math.round(100*done/total):(comparison.running?5:(run.status==='complete'?100:0));
+ el('compareBar').style.width=pct+'%';
+ const catalogText=comparison.catalog_source==='dynamic'?'Live catalog loaded':'Curated catalog defaults';
+ el('compareCatalogStatus').textContent=comparison.catalog_warning?`${catalogText}. ${comparison.catalog_warning}`:`${catalogText}. Native-video models keep video_url input. Known multimodal/image models receive deterministic sampled image_url frames. Unknown entries stay blocked unless you explicitly choose a custom media strategy.`;
+ el('compareStatus').textContent=comparison.running?`Running ${done}/${total} cases (${Number(progress.errors||0)} errors). The runtime key is not retained.`:run.status==='complete'?`Complete: ${done}/${total} cases, ${Number(progress.errors||0)} errors in ${sec(run.wall_seconds)}.`:run.status==='error'?`Comparison failed: ${clipText(run.error||'unknown error',260)}`:'No comparison has run yet.';
+ const groups=(run.summary||{}).groups||[];
+ el('compareSummary').innerHTML=groups.length?groups.map(item=>{ const latency=item.latency_seconds||{}; const errors=(item.error_messages||[]).join(' | '); return `<div class="compare-summary-row"><div><strong>${esc(item.model)}</strong><br>${esc(item.source||'')}</div><div>${esc(item.media_strategy||'')}</div><div>${esc(item.variant||'')}</div><div>${esc(item.ok||0)}/${esc(item.total||0)} ok</div><div>${sec(latency.average)} avg</div><div>${esc(errors)}</div></div>`; }).join(''):'<p class="hint">Summary will group model, media strategy, variant, status, latency, and errors.</p>';
+ el('compareRows').innerHTML=(comparison.results||[]).map(row=>{ const detail=row.error?`<span style="color:var(--bad)">${esc(row.error)}</span>`:esc(clipText(row.response||'',320)); return `<tr><td>${esc(row.video_name||'')}</td><td>${esc(row.source||'')}</td><td>${esc(row.model||'')}</td><td>${esc(row.media_strategy||'')}</td><td>${esc(row.variant||'')}</td><td>${esc(row.status||'')}</td><td class="metric">${sec(row.latency_seconds)}</td><td class="metric">${sec(row.ttft_seconds)}</td><td>${detail}</td></tr>`; }).join('');
+ el('compareExportLinks').innerHTML=(comparison.exports||[]).slice().reverse().map(item=>`<a class="export-link" href="${esc(item.url)}" target="_blank">${esc(String(item.format||'').toUpperCase())} | ${esc(item.filename||'')}</a>`).join('');
+ const busy=!!(state.running||state.loading_dataset||comparison.running); el('compareRunBtn').disabled=busy; el('compareDiscoverBtn').disabled=busy; el('referenceUploadBtn').disabled=busy; [...document.querySelectorAll('.compareExportBtn')].forEach(button=>button.disabled=!!comparison.running||!(comparison.results||[]).length);
+}
+async function uploadReferenceVideos(){
+ const files=[...(el('referenceVideos')?.files||[])]; if(!files.length){ alert('Choose one or more reference videos first.'); return; }
+ el('referenceUploadStatus').textContent=`Uploading 0/${files.length}...`; el('referenceUploadBtn').disabled=true;
+ try{ let done=0; for(const file of files){ const response=await fetch('/api/reference-video',{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-File-Name':encodeURIComponent(file.name)},body:file}); const result=await response.json(); if(!response.ok) throw new Error(result.error||response.statusText); done++; el('referenceUploadStatus').textContent=`Uploaded ${done}/${files.length}: ${file.name}`; } el('referenceVideos').value=''; await poll(); }
+ catch(error){ el('referenceUploadStatus').textContent=`Upload failed: ${error.message}`; alert(error.message); await poll(); }
+ finally{ el('referenceUploadBtn').disabled=false; }
+}
+async function discoverComparisonModels(){
+ let key=el('compareApiKey').value.trim(); if(!key){ alert('Enter a runtime API key for model discovery.'); return; }
+ el('compareCatalogStatus').textContent='Discovering available models...';
+ const pending=api('/api/compare/models',{api_key:key}); el('compareApiKey').value=''; key='';
+ try{ await pending; await poll(); }catch(error){ alert(error.message); await poll(); }
+}
+async function runComparison(){
+ let key=el('compareApiKey').value.trim(); if(!key){ alert('Enter a runtime API key for this comparison run.'); return; }
+ const custom=String(el('compareCustomModel')?.value||'').trim(); const models=[...new Set([...selectedComparisonModels(),...(custom?[custom]:[])])]; if(!models.length){ alert('Select at least one hosted model with a catalog or explicit media strategy.'); return; }
+ const customStrategy=String(el('compareCustomStrategy')?.value||'auto'); const model_strategies=custom&&customStrategy!=='auto'?{[custom]:customStrategy}:{};
+ const body={api_key:key,ids:checkedIds(),models,model_strategies,mode:el('compareMode').value,variants:comparisonVariantsPayload(),include_loaded:el('compareIncludeLoaded').checked,concurrency:Number(el('concurrency').value),prompt_mode:promptMode(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,...params(),...reasoningPayload()};
+ const pending=api('/api/compare/run',body); el('compareApiKey').value=''; key=''; body.api_key='';
+ try{ await pending; await poll(); }catch(error){ alert(error.message); await poll(); }
+}
+async function exportComparison(format){ try{ const item=await api('/api/compare/export',{format}); await poll(); window.open(item.url,'_blank'); }catch(error){ alert(error.message); await poll(); } }
 function parseDimensionText(value){ const m=String(value||'').match(/(\\d{2,5})\\s*[xX×]\\s*(\\d{2,5})/); return m ? {width:Number(m[1]), height:Number(m[2])} : null; }
 function videoNativeSize(v){ const m=v?.meta||{}; let width=Number(m.width||0); let height=Number(m.height||0); let source=width&&height?'decoded video':''; const row=v?.dataset_row||{}; const meta=row.metadata&&typeof row.metadata==='object'?row.metadata:{}; if(!(width&&height)){ for(const obj of [row,meta]){ width=Number(obj.width||obj.video_width||obj.w||0); height=Number(obj.height||obj.video_height||obj.h||0); if(width&&height){ source='dataset metadata'; break; } const parsed=parseDimensionText(obj.resolution||obj.dimensions||obj.size||obj.frame_size||''); if(parsed){ width=parsed.width; height=parsed.height; source='dataset resolution'; break; } } } return {width,height,pixels:width&&height?width*height:0,source}; }
 function modelFitVisualTokens(){ return Number(state?.defaults?.model_fit_visual_tokens || 6144); }
@@ -9460,8 +10872,8 @@ function render(){ if(!state) return; initControls(); syncReasoningFormatLabel()
  contextBlocked = renderContextGuard();
  document.getElementById('resultRows').innerHTML = (state.results||[]).map(r=>{ const j=r.json||{}; const ev=r.evaluation||{}; const expected=ev.has_expected ? clipText(ev.expected_answer||ev.expected_label||'',180) : ''; const pred=clipText(ev.predicted_answer||ev.predicted_label||(j.prediction_label ? `${j.prediction_class_id} ${j.prediction_label}` : r.response||''),180); const match=ev.has_expected ? (ev.is_correct ? 'correct' : 'miss') : ''; const score=ev.answer_score!==null&&ev.answer_score!==undefined ? percent(ev.answer_score) : match; const plan=r.plan||{}; const met=r.metrics||{}; const tokenSuffix=met.output_tokens_estimated ? ' est' : ''; const meta = plan.frames_passed ? `frames=${esc(plan.frames_passed)} tokens=${esc(plan.visual_tokens_est||'server')}` : ''; const desc=r.error ? `<span style="color:var(--bad)">${esc(r.error)}</span>` : esc((meta ? meta+' | ' : '') + (j.video_description||clipText(r.response||'',260))); const domain=ev.capability_domain||ev.domain||''; return `<tr><td>${esc(r.name)}</td><td>${esc(ev.task||'')}</td><td>${esc(domain)}<br>${esc(ev.sft_type||'')}</td><td>${esc(expected)}</td><td>${esc(pred)}</td><td>${esc(ev.metric||'')}</td><td>${esc(score)}</td><td class="metric">${sec(met.ttft_seconds)}</td><td class="metric">${rate(met.output_tokens_per_second)}${tokenSuffix}</td><td class="metric">${sec(met.e2e_seconds)}</td><td>${desc}${detailsJson('output',{json:r.json, evaluation:r.evaluation, usage:r.usage, prompt_source:r.prompt_source, user_prompt:r.user_prompt_used})}</td></tr>`; }).join('');
  document.getElementById('batchRows').innerHTML = (state.batch_history||[]).slice().reverse().map(b=>{ const ev=b.evaluation||{}; return `<tr><td>${esc(b.dataset_repo)}</td><td>${esc(b.run_label||'')}</td><td>${esc(b.status)}</td><td>${esc(b.completed)}/${esc(b.total)}</td><td>${esc(b.errors)}</td><td>${ev.evaluated ? `${esc(ev.correct)}/${esc(ev.evaluated)} (${percent(ev.accuracy)})` : ''}</td><td class="metric">${sec(b.batch_wall_seconds)}</td><td class="metric">${rate(b.video_requests_per_second)}</td><td class="metric">${sec(b.e2e_seconds?.median)}</td><td>${esc(b.prompt_hash||'')}</td></tr>`; }).join('');
- document.getElementById('log').textContent = (state.logs||[]).join('\\n');
- const busy=!!(state.running||state.loading_dataset); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('promptImportBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; document.getElementById('reasoningToggle').disabled = busy; requestAnimationFrame(autosizePrompts); }
+ renderComparison(); document.getElementById('log').textContent = (state.logs||[]).join('\\n');
+ const busy=!!(state.running||state.loading_dataset||(state.comparison||{}).running); document.getElementById('loadBtn').disabled = busy; document.getElementById('paperBtn').disabled = busy; document.getElementById('promptImportBtn').disabled = busy; document.getElementById('runBtn').disabled = busy || contextBlocked; document.getElementById('smokeBtn').disabled = busy || contextBlocked; document.getElementById('foBtn').disabled = busy; document.getElementById('reasoningToggle').disabled = busy; requestAnimationFrame(autosizePrompts); }
 async function poll(){ const r = await fetch('/api/state'); state = await r.json(); state._receivedAt = Date.now()/1000; render(); }
 document.getElementById('promptPreset').onchange = applySelectedPrompt;
 document.getElementById('savePromptBtn').onclick = async()=>{ try{ await saveCurrentPrompt(); }catch(e){ alert(e.message); await poll(); } };
@@ -9479,6 +10891,10 @@ document.getElementById('loadBtn').onclick = async()=>{ try{ setBusy('Loading da
 document.getElementById('runBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to model or enable Allow over-budget OSS run.'); return; } try{ setBusy('Starting selected-video batch...'); await api('/api/run',{ids:checkedIds(),concurrency:Number(el('concurrency').value),prompt_label:promptLabel(),prompt_mode:promptMode(),system_prompt:el('systemPrompt').value,user_prompt:el('userPrompt').value,allow_over_context:el('allowOverContext').checked,...params(),...reasoningPayload()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('smokeBtn').onclick = async()=>{ if(contextBlocked){ alert('Current OSS image-frame settings are over the estimated model context. Use Fit to model or enable Allow over-budget OSS run.'); return; } try{ setBusy('Loading smoke dataset and starting batch...'); await api('/api/smoke',{max_videos:Number(el('maxVideos').value),concurrency:Number(el('concurrency').value),prompt_mode:'runtime_form',allow_over_context:el('allowOverContext').checked,...params(),...reasoningPayload()}); await poll(); }catch(e){ alert(e.message); await poll(); } };
 document.getElementById('foBtn').onclick = async()=>{ try{ setBusy('Opening FiftyOne app...'); const j=await api('/api/fiftyone',{}); await poll(); alert('FiftyOne: '+j.url); }catch(e){ alert(e.message); await poll(); } };
+document.getElementById('referenceUploadBtn').onclick = uploadReferenceVideos;
+document.getElementById('compareDiscoverBtn').onclick = discoverComparisonModels;
+document.getElementById('compareRunBtn').onclick = runComparison;
+document.querySelectorAll('.compareExportBtn').forEach(btn=>{ btn.onclick=()=>exportComparison(btn.dataset.format); });
 async function exportArtifact(format){ const buttons=[...document.querySelectorAll('.exportBtn')]; let status=null; try{ buttons.forEach(b=>b.disabled=true); status=document.createElement('span'); status.className='export-link'; status.textContent=`Creating ${format.toUpperCase()}...`; el('exportLinks').prepend(status); const j=await api('/api/export',{format,sections:checkedExportSections()}); status.remove(); status=null; addExportLink(j); await poll(); }catch(e){ if(status) status.remove(); alert(e.message); await poll(); } finally{ buttons.forEach(b=>b.disabled=false); } }
 document.querySelectorAll('.exportBtn').forEach(btn=>{ btn.onclick = ()=>exportArtifact(btn.dataset.format); });
 document.getElementById('allBtn').onclick = ()=>{ document.querySelectorAll('.pick').forEach(x=>x.checked=true); };
@@ -10657,11 +12073,106 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            if self.path == "/api/reference-video":
+                self.handle_reference_upload()
+                return
             payload = self.read_json()
-            if self.path == "/api/load":
+            if self.path == "/api/compare/models":
+                key = validated_runtime_key(payload.pop("api_key", None))
+                try:
+                    self.send_json(discover_hosted_models(key))
+                finally:
+                    key = ""
+            elif self.path == "/api/compare/run":
                 snap = snapshot()
-                if snap.get("running") or snap.get("loading_dataset"):
-                    raise RuntimeError("A batch or dataset load is already running")
+                comparison = snap.get("comparison") or {}
+                if snap.get("running") or snap.get("loading_dataset") or comparison.get("running"):
+                    raise RuntimeError("A batch, dataset load, or comparison is already running")
+                key = validated_runtime_key(payload.pop("api_key", None))
+                try:
+                    validate_comparison_payload_secrets(payload, key)
+                except Exception:
+                    key = ""
+                    raise
+                strategy_overrides = payload.get("model_strategies")
+                if not isinstance(strategy_overrides, dict):
+                    strategy_overrides = {}
+                models = normalized_comparison_models(payload.get("models") or [], strategy_overrides)
+                media_strategies = {
+                    model: comparison_strategy_for_model(model, strategy_overrides) or ""
+                    for model in models
+                }
+                ids = payload.get("ids") or []
+                system_prompt = str(payload.get("system_prompt") or DEFAULT_SYSTEM)
+                user_prompt = str(payload.get("user_prompt") or DEFAULT_PROMPT)
+                params = params_from_payload(payload)
+                mode = "ablation" if str(payload.get("mode") or "spot").lower() == "ablation" else "spot"
+                variants = normalized_comparison_variants(
+                    mode,
+                    payload.get("variants"),
+                    system_prompt,
+                    user_prompt,
+                    params,
+                )
+                if key in json.dumps({"models": models, "media_strategies": media_strategies, "variants": variants}, default=str):
+                    key = ""
+                    raise ClientInputError("The runtime API key must not be included in model ids or workflow prompts")
+                include_loaded = bool_param(payload.get("include_loaded", True))
+                videos = selected_videos_for_ids(ids)
+                target_count = len(models) + (1 if include_loaded else 0)
+                total_cases = len(videos) * target_count * len(variants)
+                if not videos:
+                    key = ""
+                    raise ClientInputError("Load or upload at least one video before comparing endpoints")
+                if total_cases > COMPARISON_MAX_CASES:
+                    key = ""
+                    raise ClientInputError(
+                        f"Comparison expands to {total_cases} cases; reduce videos, models, or variants to {COMPARISON_MAX_CASES} or fewer"
+                    )
+                thread = threading.Thread(
+                    target=run_hosted_comparison,
+                    args=(
+                        ids,
+                        models,
+                        media_strategies,
+                        key,
+                        mode,
+                        variants,
+                        max(1, min(16, int(payload.get("concurrency") or 4))),
+                        include_loaded,
+                    ),
+                    daemon=True,
+                )
+                thread.start()
+                key = ""
+                self.send_json({
+                    "ok": True,
+                    "status": "running",
+                    "mode": mode,
+                    "video_count": len(videos),
+                    "target_count": target_count,
+                    "variant_count": len(variants),
+                    "total_cases": total_cases,
+                })
+            elif self.path == "/api/compare/export":
+                fmt = str(payload.get("format") or "html")
+                path = create_comparison_export(fmt)
+                item = {
+                    "ok": True,
+                    "format": path.suffix.lstrip(".").lower(),
+                    "filename": path.name,
+                    "url": "/api/export/" + urllib.parse.quote(path.name),
+                    "bytes": path.stat().st_size,
+                }
+                with STATE_LOCK:
+                    comparison = dict(STATE.get("comparison") or {})
+                    comparison["exports"] = (comparison.get("exports") or [])[-9:] + [item]
+                    STATE["comparison"] = comparison
+                self.send_json(item)
+            elif self.path == "/api/load":
+                snap = snapshot()
+                if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+                    raise RuntimeError("A batch, dataset load, or comparison is already running")
                 repo_id = str(payload.get("repo_id") or DEFAULT_DATASET)
                 max_videos = int_payload(payload, "max_videos", 20)
                 thread = threading.Thread(target=load_dataset_worker, args=(repo_id, max_videos), daemon=True)
@@ -10673,8 +12184,8 @@ class Handler(BaseHTTPRequestHandler):
                 max_videos = int_payload(payload, "max_videos", 20)
                 if load_now:
                     snap = snapshot()
-                    if snap.get("running") or snap.get("loading_dataset"):
-                        raise RuntimeError("A batch or dataset load is already running")
+                    if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+                        raise RuntimeError("A batch, dataset load, or comparison is already running")
                     thread = threading.Thread(target=import_paper_worker, args=(source, max_videos, load_now), daemon=True)
                     thread.start()
                     self.send_json({"ok": True, "status": "importing", "source": source, "max_videos": max_videos})
@@ -10683,8 +12194,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(discovery)
             elif self.path == "/api/prompts/import":
                 snap = snapshot()
-                if snap.get("running") or snap.get("loading_dataset"):
-                    raise RuntimeError("A batch, dataset load, or prompt import is already running")
+                if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+                    raise RuntimeError("A batch, dataset load, comparison, or prompt import is already running")
                 source = str(payload.get("source") or "")
                 thread = threading.Thread(target=import_paper_worker, args=(source, 0, False), daemon=True)
                 thread.start()
@@ -10699,8 +12210,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, **saved})
             elif self.path == "/api/run":
                 snap = snapshot()
-                if snap.get("running") or snap.get("loading_dataset"):
-                    raise RuntimeError("A batch or dataset load is already running")
+                if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+                    raise RuntimeError("A batch, dataset load, or comparison is already running")
                 ids = payload.get("ids") or []
                 system_prompt = str(payload.get("system_prompt") or WORKER_SAFETY_SYSTEM)
                 user_prompt = str(payload.get("user_prompt") or WORKER_SAFETY_USER)
@@ -10722,12 +12233,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "context_budget": context_report})
             elif self.path == "/api/smoke":
                 snap = snapshot()
-                if snap.get("running") or snap.get("loading_dataset"):
-                    raise RuntimeError("A batch or dataset load is already running")
+                if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+                    raise RuntimeError("A batch, dataset load, or comparison is already running")
                 max_videos = int_payload(payload, "max_videos", 2)
                 concurrency = int_payload(payload, "concurrency", 2)
                 load_dataset(DEFAULT_DATASET, max_videos)
-                ids = [v["id"] for v in snapshot()["videos"]]
+                ids = [v["id"] for v in snapshot()["videos"] if v.get("source") != "reference_upload"]
                 params = params_from_payload(payload)
                 context_report = validate_context_budget(ids, params, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, bool(payload.get("allow_over_context")))
                 thread = threading.Thread(target=run_batch, args=(ids, concurrency, WORKER_SAFETY_SYSTEM, WORKER_SAFETY_USER, params, "Worker safety smoke"), daemon=True)
@@ -10931,27 +12442,63 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
         except Exception as exc:
-            log(f"API error: {exc}")
+            error = safe_error(exc)
+            log(f"API error: {error}")
             with STATE_LOCK:
                 progress = dict(STATE.get("progress") or {})
                 progress.update({
                     "updated_epoch": time.time(),
                     "last_event": "API error",
-                    "last_error": str(exc),
+                    "last_error": error,
                 })
                 STATE["progress"] = progress
-            self.send_json({"error": str(exc)}, status=400 if isinstance(exc, ClientInputError) else 500)
+            self.send_json({"error": error}, status=400 if isinstance(exc, ClientInputError) else 500)
+
+    def handle_reference_upload(self) -> None:
+        snap = snapshot()
+        if snap.get("running") or snap.get("loading_dataset") or (snap.get("comparison") or {}).get("running"):
+            raise RuntimeError("Wait for the active batch or comparison before uploading a reference video")
+        try:
+            length = int(self.headers.get("content-length", "0") or "0")
+        except ValueError as exc:
+            raise ClientInputError("Reference upload has an invalid content length") from exc
+        if length <= 0:
+            raise ClientInputError("Reference upload is empty")
+        if length > REFERENCE_VIDEO_MAX_BYTES:
+            raise ClientInputError(
+                f"Reference upload exceeds the {REFERENCE_VIDEO_MAX_BYTES // (1024 * 1024)} MiB limit"
+            )
+        raw_name = urllib.parse.unquote(self.headers.get("X-File-Name", "reference.mp4"))
+        display_name = Path(raw_name).name or "reference.mp4"
+        destination: Optional[Path] = None
+        try:
+            destination = store_reference_video(self.rfile, length, display_name)
+            video = register_reference_video(destination, display_name)
+        except Exception:
+            try:
+                if destination is not None:
+                    destination.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        self.send_json({"ok": True, "video": video})
 
     def read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("content-length", "0") or "0")
         if not length:
             return {}
+        if length > 10 * 1024 * 1024:
+            raise ClientInputError("JSON request body is too large")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def send_json(self, data: Dict[str, Any], status: int = 200) -> None:
-        body = json.dumps(data, default=str).encode("utf-8")
+    def send_json(self, data: Any, status: int = 200) -> None:
+        body = json.dumps(redact_sensitive(data), default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -10960,6 +12507,9 @@ class Handler(BaseHTTPRequestHandler):
         body = text.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -10968,6 +12518,9 @@ class Handler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         if download_name:
             self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
@@ -11014,7 +12567,7 @@ def serve(host: str, port: int) -> None:
 
 def smoke(args: argparse.Namespace) -> int:
     load_dataset(args.dataset, args.max_videos)
-    ids = [v["id"] for v in snapshot()["videos"]]
+    ids = [v["id"] for v in snapshot()["videos"] if v.get("source") != "reference_upload"]
     run_batch(
         ids,
         args.concurrency,

@@ -114,6 +114,56 @@ except ImportError:
     _requests = None
     _REQUESTS_OK = False
 
+# Hosted comparison support is kept in a Gradio-independent helper so the
+# request shaping, credential redaction, discovery, and exports can be tested
+# without importing (and launching) this 6k-line app.  Deployment copies the
+# helper beside this script, including when both live under /tmp.
+try:
+    from hosted_model_compare import (
+        CURATED_FALLBACK_MODEL_IDS as _HOSTED_FALLBACK_MODELS,
+        CURATED_FALLBACK_LABELS as _HOSTED_FALLBACK_LABELS,
+        DEFAULT_ABLATION_SPEC as _HOSTED_DEFAULT_ABLATION_SPEC,
+        KEY_MANAGEMENT_URL as _HOSTED_KEY_URL,
+        HostedCompareError as _HostedCompareError,
+        build_loaded_request_shape as _hosted_loaded_request_shape,
+        curated_model_selection as _hosted_curated_selection,
+        describe_media_source as _hosted_describe_media,
+        discover_hosted_models as _hosted_discover_models,
+        discovery_summary_html as _hosted_discovery_summary_html,
+        parse_ablation_variants as _hosted_parse_variants,
+        redact_report_text as _hosted_redact_report_text,
+        redact_sensitive as _hosted_redact,
+        report_safe_model_label as _hosted_report_model_label,
+        results_html as _hosted_results_html,
+        run_hosted_comparisons as _run_hosted_endpoint_matrix,
+        write_redacted_exports as _write_hosted_exports,
+    )
+    _HOSTED_COMPARE_OK = True
+    _HOSTED_COMPARE_IMPORT_ERROR = ""
+except Exception as _hosted_import_exc:
+    _HOSTED_FALLBACK_MODELS = ()
+    _HOSTED_FALLBACK_LABELS = ()
+    _HOSTED_DEFAULT_ABLATION_SPEC = "[]"
+    _HOSTED_KEY_URL = "https://inference.nvidia.com/key-management"
+    _HostedCompareError = RuntimeError
+    _HOSTED_COMPARE_OK = False
+    _HOSTED_COMPARE_IMPORT_ERROR = str(_hosted_import_exc)
+    def _hosted_redact(value, secrets=()):
+        text = str(value)
+        for secret in secrets:
+            if secret:
+                text = text.replace(str(secret), "<redacted>")
+        return text
+    def _hosted_redact_report_text(value, secrets=(), configured_values=()):
+        text = _hosted_redact(value, secrets)
+        for configured in configured_values:
+            if configured:
+                text = str(text).replace(str(configured), "<configured-endpoint>")
+        return str(text)
+    def _hosted_report_model_label(value):
+        raw = str(value or "")
+        return os.path.basename(raw.removeprefix("file://").rstrip(os.sep)) or raw
+
 try:
     import vllm as _vllm_module
     _VLLM_VERSION = getattr(_vllm_module, "__version__", None)
@@ -5534,6 +5584,383 @@ def _clean_hf_cache():
     return _disk_status_html() + msg
 
 
+# ── Hosted endpoint comparison helpers ───────────────────────────────────────
+def _hosted_status_html(message, level="info"):
+    colors = {
+        "info": ("#1e3a5f", "#60a5fa", "#dbeafe"),
+        "ok": ("#14532d", "#22c55e", "#dcfce7"),
+        "warn": ("#78350f", "#f59e0b", "#fef3c7"),
+        "error": ("#450a0a", "#f87171", "#fee2e2"),
+    }
+    bg, border, fg = colors.get(level, colors["info"])
+    return (
+        f'<div style="background:{bg};border:1px solid {border};border-radius:6px;'
+        f'padding:10px 13px;color:{fg};font-size:13px">{_html.escape(str(message))}</div>'
+    )
+
+
+def _hosted_discover_ui(runtime_key):
+    """Credential stays in this event argument; outputs contain catalog data only."""
+    key = str(runtime_key or "").strip()
+    runtime_key = ""
+    # Clear the browser control before making a network request. The generator
+    # keeps the event-local copy only until discovery finishes.
+    yield (
+        gr.update(interactive=False),
+        _hosted_status_html("Discovering available endpoint models…"),
+        {},
+        gr.update(value=""),
+    )
+    if not _HOSTED_COMPARE_OK:
+        yield (
+            gr.update(),
+            _hosted_status_html(
+                f"Hosted comparison helper is unavailable: {_HOSTED_COMPARE_IMPORT_ERROR}", "error"
+            ),
+            {},
+            gr.update(),
+        )
+        return
+    try:
+        models = _hosted_discover_models(key)
+        selected, family_map = _hosted_curated_selection(
+            models,
+            exclude_model_ids=[_SERVER_MODEL_ID or MODEL_NAME],
+        )
+        choices = [item["id"] for item in models]
+        catalog_modalities = {
+            item["id"]: list(item.get("input_modalities") or [])
+            for item in models
+        }
+        yield (
+            gr.update(choices=choices, value=selected, interactive=True),
+            _hosted_discovery_summary_html(models, family_map),
+            catalog_modalities,
+            gr.update(),
+        )
+    except Exception as exc:
+        safe_error = _hosted_redact(str(exc), (key,))
+        yield gr.update(interactive=True), _hosted_status_html(safe_error, "error"), {}, gr.update()
+    finally:
+        key = ""
+
+
+def _resolve_compare_model_id(checkpoint_name, custom_value):
+    custom = str(custom_value or "").strip()
+    if custom:
+        return custom
+    if INFERENCE_BACKEND in ("vllm", "nim_local", "alpamayo"):
+        refreshed = _refresh_server_model_id(timeout=1.5)
+        if refreshed:
+            return refreshed
+    for name, model_id in CHECKPOINT_PRESETS:
+        if name == checkpoint_name:
+            return model_id
+    return _SERVER_MODEL_ID or MODEL_NAME
+
+
+def _resolve_compare_media(video_path, image_path, server_source):
+    if str(server_source or "").strip():
+        raise _HostedCompareError(
+            "Hosted comparison accepts frontend uploads only; upload the reference video/image first."
+        )
+    if video_path:
+        return video_path, False
+    if image_path:
+        return image_path, True
+    raise _HostedCompareError("Upload or select a reference video/image before comparing models.")
+
+
+def _baseline_failed(text):
+    lowered = str(text or "").strip().lower()
+    return (
+        not lowered
+        or lowered.startswith("[error")
+        or lowered.startswith("[nim error")
+        or lowered.startswith("[vllm error")
+        or lowered.startswith("[hf error")
+        or lowered.startswith("[alpamayo error")
+        or "adapter not responding" in lowered[:500]
+        or " skipped —" in lowered[:240]
+        or "server not running" in lowered[:500]
+        or "container not responding" in lowered[:500]
+    )
+
+
+def _run_loaded_baseline_matrix(
+    media,
+    is_image,
+    variants,
+    checkpoint_name,
+    custom_checkpoint,
+    fps,
+    max_pixels,
+    max_new_tokens,
+    disable_autocap,
+    temperature,
+    top_p,
+    repetition_penalty,
+    descriptor,
+):
+    """Collect the loaded-model baseline once per prompt/workflow variant."""
+    model_id = _resolve_compare_model_id(checkpoint_name, custom_checkpoint)
+    raw_model_id = str(model_id or "")
+    expanded_model_id = os.path.abspath(os.path.expanduser(raw_model_id)) if raw_model_id else ""
+    model_id_is_path = raw_model_id.startswith("file://") or bool(
+        expanded_model_id
+        and (os.path.isabs(raw_model_id) or os.path.exists(expanded_model_id))
+    )
+    if model_id_is_path:
+        report_model_id = _hosted_report_model_label(raw_model_id)
+    else:
+        report_model_id = _hosted_report_model_label(raw_model_id)
+    results = []
+    for variant in variants:
+        started = time.perf_counter()
+        final_text = ""
+        status = "ok"
+        error = ""
+        try:
+            for text_value, _status_value, _table_value in run_inference(
+                media,
+                variant.get("prompt", ""),
+                variant.get("system_prompt", ""),
+                fps,
+                max_pixels,
+                max_new_tokens,
+                model_id,
+                disable_autocap=disable_autocap,
+                display_label=f"Loaded baseline · {_display_model_name(model_id)}",
+                is_image=is_image,
+                temperature=temperature,
+                top_p=top_p,
+                rep_penalty=repetition_penalty,
+            ):
+                final_text = text_value
+            if _baseline_failed(final_text):
+                status = "error"
+                error = "Loaded baseline inference did not return a usable result."
+                final_text = ""
+        except Exception:
+            status = "error"
+            error = "Loaded baseline inference failed before a result was produced."
+        latency = time.perf_counter() - started
+        request_shape = _hosted_loaded_request_shape(
+            report_model_id,
+            INFERENCE_BACKEND,
+            descriptor,
+            variant.get("prompt", ""),
+            variant.get("system_prompt", ""),
+            fps=int(fps),
+            max_pixels=int(max_pixels),
+            temperature=float(temperature),
+            top_p=float(top_p),
+            repetition_penalty=float(repetition_penalty),
+            max_tokens=int(max_new_tokens),
+        )
+        configured_values = (
+            str(media or ""),
+            str(VLLM_BASE_URL or ""),
+            str(NIM_ENDPOINT or ""),
+            raw_model_id if model_id_is_path else "",
+        )
+        results.append(
+            {
+                "backend": "loaded_model",
+                "provider": "Loaded baseline",
+                "model": report_model_id,
+                "variant": variant.get("name", "spot"),
+                "status": status,
+                "latency_s": round(latency, 3),
+                "output": _hosted_redact_report_text(
+                    final_text, configured_values=configured_values
+                ),
+                "error": _hosted_redact_report_text(
+                    error,
+                    secrets=(variant.get("prompt", ""), variant.get("system_prompt", "")),
+                    configured_values=configured_values,
+                ),
+                "usage": {},
+                "request_shape": request_shape,
+            }
+        )
+    return _hosted_redact(results)
+
+
+def _run_hosted_compare_ui(
+    video_path,
+    image_path,
+    server_source,
+    user_prompt,
+    system_prompt,
+    fps,
+    max_pixels,
+    max_new_tokens,
+    checkpoint_name,
+    custom_checkpoint,
+    disable_autocap,
+    temperature,
+    top_p,
+    repetition_penalty,
+    compare_mode,
+    ablation_spec,
+    include_loaded,
+    hosted_models,
+    custom_hosted_models,
+    catalog_modalities,
+    hosted_media_strategy,
+    sampled_frame_count,
+    concurrency,
+    runtime_key,
+):
+    """Gradio generator for spot and workflow-ablation comparisons.
+
+    The key is never assigned to a global or Gradio State.  The final output
+    clears the password component in the browser as an additional safeguard.
+    """
+    key = str(runtime_key or "").strip()
+    runtime_key = ""
+    no_key_update = gr.update()
+    try:
+        # Clear the browser control immediately while retaining only this
+        # generator's event-local copy for the duration of the run.
+        yield (
+            _hosted_status_html("Validating comparison inputs…"),
+            '<div style="color:#94a3b8">Preparing comparison…</div>',
+            "{}",
+            None,
+            None,
+            gr.update(value=""),
+        )
+        if not _HOSTED_COMPARE_OK:
+            raise _HostedCompareError(
+                f"Hosted comparison helper is unavailable: {_HOSTED_COMPARE_IMPORT_ERROR}"
+            )
+        if not key:
+            raise _HostedCompareError(f"Enter a runtime API key from {_HOSTED_KEY_URL}.")
+        selected_models = [str(item).strip() for item in (hosted_models or []) if str(item).strip()]
+        for custom_model in re.split(r"[,\n]+", str(custom_hosted_models or "")):
+            custom_model = custom_model.strip()
+            if custom_model and custom_model not in selected_models:
+                selected_models.append(custom_model)
+        if not selected_models:
+            raise _HostedCompareError("Select at least one hosted endpoint model.")
+        media, is_image = _resolve_compare_media(video_path, image_path, server_source)
+        variants = _hosted_parse_variants(compare_mode, user_prompt, system_prompt, ablation_spec)
+        workflow_fields = json.dumps(variants, ensure_ascii=False, default=str)
+        if key in workflow_fields or key in str(custom_checkpoint or ""):
+            raise _HostedCompareError(
+                "Credentials must not be included in model or workflow fields."
+            )
+        descriptor = _hosted_describe_media(media, is_image)
+        total_runs = len(variants) * (len(selected_models) + (1 if include_loaded else 0))
+        yield (
+            _hosted_status_html(
+                f"Preparing {total_runs} comparison run(s) across {len(variants)} workflow variant(s)."
+            ),
+            '<div style="color:#94a3b8">Comparison is running…</div>',
+            "{}",
+            None,
+            None,
+            no_key_update,
+        )
+
+        results = []
+        if include_loaded:
+            yield (
+                _hosted_status_html("Running the currently loaded model baseline…"),
+                '<div style="color:#94a3b8">Loaded baseline is running…</div>',
+                "{}",
+                None,
+                None,
+                no_key_update,
+            )
+            results.extend(
+                _run_loaded_baseline_matrix(
+                    media,
+                    is_image,
+                    variants,
+                    checkpoint_name,
+                    custom_checkpoint,
+                    fps,
+                    max_pixels,
+                    max_new_tokens,
+                    disable_autocap,
+                    temperature,
+                    top_p,
+                    repetition_penalty,
+                    descriptor,
+                )
+            )
+
+        yield (
+            _hosted_status_html(
+                f"Running {len(selected_models) * len(variants)} hosted endpoint request(s)…"
+            ),
+            _hosted_results_html(results),
+            json.dumps({"results": results}, indent=2, ensure_ascii=False),
+            None,
+            None,
+            no_key_update,
+        )
+        results.extend(
+            _run_hosted_endpoint_matrix(
+                key,
+                selected_models,
+                variants,
+                media,
+                is_image,
+                temperature=temperature,
+                top_p=top_p,
+                concurrency=int(concurrency or 1),
+                catalog_modalities=catalog_modalities or {},
+                media_strategy=hosted_media_strategy,
+                sampled_frame_count=int(sampled_frame_count or 8),
+                sampled_frame_max_pixels=int(max_pixels),
+                max_tokens=int(max_new_tokens),
+            )
+        )
+
+        json_path, report_path, document = _write_hosted_exports(
+            results,
+            mode=compare_mode,
+            media_descriptor=descriptor,
+            metadata={
+                "loaded_baseline_included": bool(include_loaded),
+                "workflow_variants": [variant.get("name") for variant in variants],
+                "endpoint_model_count": len(selected_models),
+            },
+            secrets=(key,),
+        )
+        ok_count = sum(1 for row in results if row.get("status") == "ok")
+        unsupported_count = sum(1 for row in results if row.get("status") == "unsupported_media")
+        error_count = len(results) - ok_count - unsupported_count
+        status_text = (
+            f"Comparison complete: {ok_count} succeeded, {unsupported_count} unsupported-media, "
+            f"{error_count} failed. Exports contain redacted request shapes and no credentials/media bytes."
+        )
+        key = ""
+        yield (
+            _hosted_status_html(status_text, "ok" if error_count == 0 else "warn"),
+            _hosted_results_html(results),
+            json.dumps(document, indent=2, ensure_ascii=False),
+            json_path,
+            report_path,
+            gr.update(value=""),
+        )
+    except Exception as exc:
+        safe_error = _hosted_redact(str(exc), (key,))
+        key = ""
+        yield (
+            _hosted_status_html(safe_error, "error"),
+            '<div style="color:#fca5a5">Comparison did not run.</div>',
+            json.dumps({"status": "error", "error": safe_error}, indent=2),
+            None,
+            None,
+            gr.update(value=""),
+        )
+
+
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 with gr.Blocks(
     title="Cosmos Reason — BYO Video Demo",
@@ -6044,6 +6471,205 @@ with gr.Blocks(
 
     # ── Benchmark results table ───────────────────────────────────────────────
     results_table = gr.HTML(_table_html(), label="Benchmark Log", show_progress="hidden")
+
+    # ── Loaded model vs hosted endpoint comparison ───────────────────────────
+    # This stays visible in the generic/non-Build Gradio surface regardless of
+    # the loaded backend.  Credentials exist only in the password component and
+    # individual event arguments; they are never put in gr.State.
+    _hosted_initial_choices = list(_HOSTED_FALLBACK_MODELS)
+    _hosted_initial_values = list(_hosted_initial_choices)
+    hosted_catalog_state = gr.State({})
+    with gr.Accordion("Compare loaded model to hosted endpoints", open=False):
+        gr.Markdown(
+            "Run the same reference media and prompt through the currently loaded model and selected "
+            "OpenAI-compatible endpoints. Use this for a quick spot check or a prompt/workflow ablation.  \n"
+            f"Enter your personal runtime key from [{_HOSTED_KEY_URL}]({_HOSTED_KEY_URL}). "
+            "The key is masked, used only for the active request, never logged or exported, and cleared "
+            "after discovery and after every comparison run. Re-enter it when moving from discovery to inference."
+        )
+        with gr.Row():
+            hosted_runtime_key = gr.Textbox(
+                label="Runtime API key (required)",
+                type="password",
+                value="",
+                placeholder="Paste key for this request",
+                info="Request/session memory only. Never stored in Gradio State or report artifacts.",
+                scale=3,
+            )
+            hosted_discover_btn = gr.Button(
+                "Discover available models",
+                variant="secondary",
+                min_width=210,
+                scale=1,
+                interactive=_HOSTED_COMPARE_OK,
+            )
+        hosted_discovery_status = gr.HTML(
+            _hosted_status_html(
+                "Enter a runtime key and discover the live catalog. Fallback family labels are hints only, not callable endpoint IDs.",
+                "info",
+            )
+            if _HOSTED_COMPARE_OK
+            else _hosted_status_html(
+                f"Hosted comparison helper is unavailable: {_HOSTED_COMPARE_IMPORT_ERROR}", "error"
+            )
+        )
+        hosted_models = gr.Dropdown(
+            label="Hosted endpoint models",
+            choices=_hosted_initial_choices,
+            value=_hosted_initial_values,
+            multiselect=True,
+            info=(
+                "Authenticated discovery is authoritative. Models that do not support the uploaded media "
+                "type are reported as unsupported and are not silently converted to text-only calls."
+            ),
+        )
+        hosted_custom_models = gr.Textbox(
+            label="Additional exact model IDs (optional)",
+            value="",
+            placeholder="One authenticated catalog model ID per line",
+            lines=2,
+            info=(
+                "Use only exact IDs from your provider catalog. Unknown media capability stays blocked in "
+                "Auto mode; choose a custom-contract strategy only when you know that endpoint's payload contract."
+            ),
+        )
+        gr.Markdown(
+            "Discovery looks for these comparison families without guessing endpoint IDs: "
+            "**Cosmos3 Reasoner, Nemotron 3 Nano Omni, Qwen 3.5/3.6, Gemma 4, Gemini 3.6 Flash, "
+            "Claude 5/4.8, GPT 5.6, and Kimi K2.6**.  \n"
+            "Catalog labels (not callable IDs): "
+            + ", ".join(f"`{label}`" for label in _HOSTED_FALLBACK_LABELS)
+            + "."
+        )
+        with gr.Row():
+            hosted_compare_mode = gr.Radio(
+                label="Comparison mode",
+                choices=["Spot comparison", "Workflow ablation"],
+                value="Spot comparison",
+                info="Spot uses the current prompts once. Ablation evaluates each JSON workflow variant.",
+            )
+            hosted_include_loaded = gr.Checkbox(
+                label="Include currently loaded model baseline",
+                value=True,
+            )
+            hosted_concurrency = gr.Slider(
+                minimum=1,
+                maximum=8,
+                step=1,
+                value=4,
+                label="Endpoint concurrency",
+            )
+        with gr.Row():
+            hosted_media_strategy = gr.Radio(
+                label="Reference media strategy",
+                choices=[
+                    "Auto capability-gated",
+                    "Force native video_url (custom contract)",
+                    "Force sampled image frames (custom contract)",
+                ],
+                value="Auto capability-gated",
+                info=(
+                    "Auto sends native video_url only for confirmed video endpoints, otherwise deterministic "
+                    "image_url frames for confirmed image-multimodal endpoints. Unknown capability is blocked."
+                ),
+            )
+            hosted_sampled_frames = gr.Slider(
+                minimum=1,
+                maximum=32,
+                step=1,
+                value=8,
+                label="Deterministic sampled frames",
+                info="Used only when a video is adapted to image_url items; frames span the full clip.",
+            )
+        hosted_ablation_spec = gr.Textbox(
+            label="Workflow ablation variants (JSON)",
+            value=_HOSTED_DEFAULT_ABLATION_SPEC,
+            lines=12,
+            max_lines=18,
+            visible=False,
+            info=(
+                "List objects with name, prompt, and system_prompt. {prompt} and {system} expand to the "
+                "current Advanced Settings values. Maximum 8 variants / 48 endpoint calls."
+            ),
+        )
+        hosted_compare_btn = gr.Button(
+            "Run loaded + endpoint comparison",
+            variant="primary",
+            size="lg",
+            interactive=_HOSTED_COMPARE_OK,
+        )
+        hosted_compare_status = gr.HTML(
+            _hosted_status_html("No hosted comparison has run yet.", "info")
+        )
+        hosted_compare_results = gr.HTML(
+            '<div style="color:#94a3b8">Per-model status, latency, output, and request shape appear here.</div>'
+        )
+        with gr.Accordion("Redacted comparison JSON", open=False):
+            hosted_compare_json = gr.Code(
+                value="{}",
+                language="json",
+                interactive=False,
+                lines=24,
+                show_label=False,
+            )
+        with gr.Row():
+            hosted_json_export = gr.File(label="Redacted JSON export", interactive=False)
+            hosted_report_export = gr.File(label="Redacted Markdown report", interactive=False)
+
+        hosted_discover_btn.click(
+            fn=_hosted_discover_ui,
+            inputs=[hosted_runtime_key],
+            outputs=[hosted_models, hosted_discovery_status, hosted_catalog_state, hosted_runtime_key],
+            api_name=False,
+        )
+
+        def _toggle_hosted_ablation(mode):
+            return gr.update(visible="ablation" in str(mode or "").lower())
+
+        hosted_compare_mode.change(
+            fn=_toggle_hosted_ablation,
+            inputs=[hosted_compare_mode],
+            outputs=[hosted_ablation_spec],
+        )
+
+        hosted_compare_btn.click(
+            fn=_run_hosted_compare_ui,
+            inputs=[
+                video_input,
+                image_input,
+                server_media_source,
+                user_box,
+                system_box,
+                fps_slider,
+                maxpx_slider,
+                maxtok_slider,
+                checkpoint_dd,
+                custom_ckpt,
+                disable_autocap_chk,
+                temp_slider,
+                top_p_slider,
+                rep_penalty_slider,
+                hosted_compare_mode,
+                hosted_ablation_spec,
+                hosted_include_loaded,
+                hosted_models,
+                hosted_custom_models,
+                hosted_catalog_state,
+                hosted_media_strategy,
+                hosted_sampled_frames,
+                hosted_concurrency,
+                hosted_runtime_key,
+            ],
+            outputs=[
+                hosted_compare_status,
+                hosted_compare_results,
+                hosted_compare_json,
+                hosted_json_export,
+                hosted_report_export,
+                hosted_runtime_key,
+            ],
+            api_name=False,
+        )
 
     # ── Event handlers ───────────────────────────────────────────────────────
     # Adaptive defaults: on media upload, snap fps + max_pixels sliders to the

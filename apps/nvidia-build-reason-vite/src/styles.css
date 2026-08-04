@@ -16,6 +16,617 @@
   color-scheme: dark;
 }
 
+.comparisonWorkbench {
+  width: calc(100% - 64px);
+  margin: 20px auto 40px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #0b0b0b;
+  padding: 22px;
+}
+
+.comparisonHeader,
+.comparisonCatalogHeader,
+.comparisonRunRow,
+.comparisonResultsHeader,
+.comparisonResultTopline,
+.comparisonKeyActions,
+.comparisonCatalogTools,
+.comparisonExportButtons,
+.comparisonCardTitle {
+  display: flex;
+  align-items: center;
+}
+
+.comparisonHeader,
+.comparisonCatalogHeader,
+.comparisonRunRow,
+.comparisonResultsHeader {
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.comparisonHeader h2 {
+  margin-top: 3px;
+  font-size: 22px;
+  line-height: 30px;
+  font-weight: 600;
+}
+
+.comparisonHeader > div:first-child > p:last-child,
+.comparisonCatalogHeader p,
+.comparisonSecurityNote {
+  max-width: 760px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.comparisonEyebrow {
+  color: var(--green);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.comparisonBaselineBadge {
+  min-width: 260px;
+  border: 1px solid #416600;
+  border-radius: 8px;
+  background: #101a05;
+  padding: 10px 12px;
+}
+
+.comparisonBaselineBadge span,
+.comparisonBaselineBadge strong {
+  display: block;
+}
+
+.comparisonBaselineBadge span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.comparisonBaselineBadge strong {
+  overflow: hidden;
+  margin-top: 3px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparisonSetupGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.comparisonSetupCard,
+.comparisonCatalog,
+.comparisonResults {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: #101010;
+}
+
+.comparisonSetupCard {
+  padding: 16px;
+}
+
+.comparisonCardTitle {
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.comparisonCardTitle > span {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--green);
+  color: #050505;
+  font-size: 11px;
+}
+
+.comparisonField {
+  display: grid;
+  gap: 6px;
+  margin-top: 13px;
+}
+
+.comparisonField > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.comparisonField input,
+.comparisonField textarea,
+.comparisonCatalogTools input,
+.comparisonCustomModel input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #3b3b3b;
+  border-radius: 4px;
+  outline: 0;
+  background: #070707;
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.comparisonField input:focus,
+.comparisonField textarea:focus,
+.comparisonCatalogTools input:focus,
+.comparisonCustomModel input:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 1px var(--green);
+}
+
+.comparisonField textarea {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+  border: 1px solid #3b3b3b;
+  border-radius: 4px;
+  outline: 0;
+  background: #070707;
+  color: var(--text);
+  padding: 9px 10px;
+  font: 12px/1.45 inherit;
+}
+
+.comparisonWideField,
+.comparisonAblationNote {
+  grid-column: 1 / -1;
+}
+
+.comparisonCheckboxField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comparisonCheckboxField input {
+  width: auto;
+  min-height: 0;
+}
+
+.comparisonAblationNote {
+  margin: 10px 0 0;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.comparisonKeyActions {
+  justify-content: space-between;
+  margin-top: 9px;
+}
+
+.comparisonKeyActions a,
+.comparisonKeyActions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.comparisonModeTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 13px;
+}
+
+.comparisonModeTabs button {
+  min-height: 34px;
+  border: 1px solid #383838;
+  border-radius: 4px;
+  background: #080808;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.comparisonModeTabs button.active {
+  border-color: var(--green);
+  background: #152204;
+  color: var(--text);
+}
+
+.comparisonStrategy {
+  margin-top: 13px;
+  border-top: 1px solid #2b2b2b;
+  padding-top: 12px;
+}
+
+.comparisonStrategy > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.comparisonStrategy .comparisonModeTabs {
+  margin-top: 6px;
+}
+
+.comparisonStrategy small {
+  display: block;
+  margin-top: 6px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.comparisonLabelGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
+}
+
+.comparisonCatalog {
+  margin-top: 14px;
+  padding: 16px;
+}
+
+.comparisonDiscoverButton,
+.comparisonCustomModel button,
+.comparisonRunButton,
+.comparisonExportButtons button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--green);
+  border-radius: 4px;
+  background: #152204;
+  color: var(--text);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.comparisonDiscoverButton:disabled,
+.comparisonCustomModel button:disabled,
+.comparisonRunButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.comparisonCatalogTools {
+  gap: 12px;
+  margin-top: 13px;
+}
+
+.comparisonCatalogTools input {
+  flex: 1;
+}
+
+.comparisonCatalogTools span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.comparisonModelList {
+  display: grid;
+  max-height: 300px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 11px;
+  overflow: auto;
+  padding-right: 3px;
+}
+
+.comparisonModelList > button {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #343434;
+  border-radius: 5px;
+  background: #090909;
+  color: var(--text);
+  padding: 9px;
+  text-align: left;
+}
+
+.comparisonModelList > button.selected {
+  border-color: var(--green);
+  background: #111b05;
+}
+
+.comparisonModelList > button.unavailable {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.comparisonModelCheck {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #666;
+  border-radius: 3px;
+  color: #050505;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.selected .comparisonModelCheck {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.comparisonModelCopy {
+  min-width: 0;
+}
+
+.comparisonModelCopy strong,
+.comparisonModelCopy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparisonModelCopy strong {
+  font-size: 11px;
+}
+
+.comparisonModelCopy small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.comparisonCustomModel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.comparisonRunRow {
+  margin-top: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #050505;
+  padding: 12px 14px;
+}
+
+.comparisonRunRow > div {
+  display: grid;
+  gap: 3px;
+}
+
+.comparisonRunRow strong {
+  font-size: 12px;
+}
+
+.comparisonRunRow span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.comparisonRunButton {
+  min-height: 38px;
+  border: 0;
+  background: var(--green);
+  color: #050505;
+}
+
+.comparisonResults {
+  margin-top: 14px;
+  padding: 16px;
+}
+
+.comparisonResultsHeader h3 {
+  margin: 2px 0 0;
+  font-size: 17px;
+}
+
+.comparisonResultsHeader > div:first-child > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.comparisonExportButtons {
+  gap: 7px;
+}
+
+.comparisonExportButtons button {
+  border-color: #444;
+  background: #0a0a0a;
+}
+
+.comparisonResultGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.comparisonResultCard {
+  min-width: 0;
+  border: 1px solid #383838;
+  border-top: 3px solid var(--green);
+  border-radius: 6px;
+  background: #070707;
+  padding: 12px;
+}
+
+.comparisonResultCard.error {
+  border-top-color: var(--danger);
+}
+
+.comparisonResultTopline {
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.comparisonStatus {
+  border-radius: 99px;
+  padding: 3px 7px;
+}
+
+.comparisonStatus.success {
+  background: #1b3100;
+  color: var(--green);
+}
+
+.comparisonStatus.error {
+  background: #391519;
+  color: #ff9aa0;
+}
+
+.comparisonResultCard h4 {
+  overflow-wrap: anywhere;
+  margin: 9px 0 0;
+  font-size: 13px;
+}
+
+.comparisonTiming {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.comparisonError {
+  margin-top: 9px;
+  border-left: 3px solid var(--danger);
+  background: #1c0c0e;
+  color: #ffb4b8;
+  padding: 7px 9px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.comparisonResponse {
+  max-height: 250px;
+  margin: 10px 0 0;
+  overflow: auto;
+  border: 1px solid #242424;
+  border-radius: 4px;
+  background: #030303;
+  padding: 10px;
+  color: #ddd;
+  font-family: "Roboto Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 17px;
+  white-space: pre-wrap;
+}
+
+.comparisonShape {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.comparisonShape summary {
+  cursor: pointer;
+  color: var(--green);
+  font-weight: 700;
+}
+
+.comparisonShape pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 7px 0 0;
+  border: 1px solid #252525;
+  background: #050505;
+  padding: 8px;
+  color: #c9c9c9;
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.spin {
+  animation: comparison-spin 0.85s linear infinite;
+}
+
+@keyframes comparison-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 900px) {
+  .comparisonWorkbench {
+    width: calc(100% - 24px);
+    padding: 15px;
+  }
+
+  .comparisonHeader,
+  .comparisonCatalogHeader,
+  .comparisonRunRow,
+  .comparisonResultsHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .comparisonBaselineBadge {
+    min-width: 0;
+  }
+
+  .comparisonSetupGrid,
+  .comparisonResultGrid,
+  .comparisonModelList {
+    grid-template-columns: 1fr;
+  }
+
+  .comparisonRunButton,
+  .comparisonDiscoverButton {
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .comparisonLabelGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .comparisonCatalogTools,
+  .comparisonKeyActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .comparisonCustomModel {
+    grid-template-columns: 1fr;
+  }
+
+  .comparisonExportButtons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

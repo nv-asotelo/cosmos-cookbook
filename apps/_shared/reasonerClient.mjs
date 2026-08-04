@@ -187,7 +187,8 @@ export function buildReasoningPayload({
   mediaKind,
   mediaFrames,
   framesPerSecond,
-  params
+  params,
+  forceMaxTokens = false
 } = {}) {
   const baseUrl = resolveBaseUrl();
   const p = params || {};
@@ -213,7 +214,7 @@ export function buildReasoningPayload({
   // themselves. Alpamayo is local generation, so honoring max_tokens is the
   // fastest user-visible way to reduce full-response latency.
   if (
-    (inferenceBackend === "alpamayo" || process.env.REASONER_SEND_MAX_TOKENS === "1") &&
+    (forceMaxTokens || inferenceBackend === "alpamayo" || process.env.REASONER_SEND_MAX_TOKENS === "1") &&
     Number.isFinite(Number(p.max_tokens))
   ) {
     payload.max_tokens = Number(p.max_tokens);

@@ -1,5 +1,6 @@
 import express from "express";
 import { execFile, spawn } from "node:child_process";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { setMaxListeners } from "node:events";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -42,6 +43,102 @@ const DEFAULT_NIM_FRAME_FALLBACK_IMAGES = 5;
 const LONG_VIDEO_MAX_IMAGES_PER_CHUNK = 5;
 const REQUEST_LOG_PREFIX = "[vite-build-reason]";
 const REQUEST_DIAGNOSTICS_ENABLED = String(process.env.REASONER_REQUEST_LOG || "1").toLowerCase() !== "0";
+const HOSTED_COMPARE_DEFAULT_BASE_URL = "https://inference-api.nvidia.com/v1";
+const HOSTED_COMPARE_MAX_MODELS = 8;
+const HOSTED_COMPARE_TIMEOUT_MS = Math.max(
+  10000,
+  Number.parseInt(process.env.NVIDIA_HOSTED_TIMEOUT_MS || "180000", 10) || 180000
+);
+const HOSTED_COMPARE_FRAME_LIMIT = Math.max(
+  1,
+  Math.min(32, Number.parseInt(process.env.NVIDIA_HOSTED_FRAME_FALLBACK_MAX_IMAGES || "8", 10) || 8)
+);
+const HOSTED_CATALOG_CAPABILITY_TTL_MS = 15 * 60 * 1000;
+const HOSTED_CATALOG_CAPABILITY_SIGNING_KEY = randomBytes(32);
+const HOSTED_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,239}$/;
+const HOSTED_SECRET_LIKE_PATTERN = /\b(?:nvapi|sk)-[A-Za-z0-9._-]{16,}\b/i;
+const CURATED_HOSTED_MODELS = Object.freeze([
+  {
+    id: "",
+    label: "Cosmos3 Nano Reasoner",
+    family: "Cosmos",
+    matchPattern: "(?:^|/)cosmos3[-_.]?nano[-_.]?reasoner(?:$|[-_.:])",
+    capabilities: ["video", "image", "text"],
+    note: "Catalog label only; live discovery resolves the callable request ID"
+  },
+  {
+    id: "",
+    label: "Cosmos3 Super Reasoner",
+    family: "Cosmos",
+    matchPattern: "(?:^|/)cosmos3[-_.]?super[-_.]?reasoner(?:$|[-_.:])",
+    capabilities: ["video", "image", "text"],
+    note: "Catalog label only; live discovery resolves the callable request ID"
+  },
+  {
+    id: "",
+    label: "Latest Qwen",
+    family: "Qwen",
+    matchPattern: "(?:^|/)qwen3[._-]?6[-_.]?35b[-_.]?a3b(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved to the current Qwen reasoning request ID during live discovery; video uses sampled image frames"
+  },
+  {
+    id: "",
+    label: "Nemotron 3 Nano Omni",
+    family: "Nemotron",
+    matchPattern: "(?:^|/)nemotron[-_.]?3[-_.]?nano[-_.]?omni[-_.]?30b[-_.]?a3b[-_.]?reasoning(?:$|[-_.:])",
+    capabilities: ["video", "image", "text"],
+    note: "Resolved from the live catalog"
+  },
+  {
+    id: "",
+    label: "Gemma 4",
+    family: "Gemma",
+    matchPattern: "(?:^|/)gemma[-_.]?4[-_.]?31b[-_.]?it(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Catalog label only; live discovery resolves the callable request ID and video uses sampled image frames"
+  },
+  {
+    id: "",
+    label: "Gemini 3.6 Flash",
+    family: "Gemini",
+    matchPattern: "(?:^|/)gemini[-_.]?3[._-]?6[-_.]?flash(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved from the live catalog; video comparisons use sampled image frames"
+  },
+  {
+    id: "",
+    label: "Claude 5",
+    family: "Claude",
+    matchPattern: "(?:^|/)claude[-_.]?opus[-_.]?5(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved from the live catalog; video comparisons use sampled image frames"
+  },
+  {
+    id: "",
+    label: "Claude 4.8",
+    family: "Claude",
+    matchPattern: "(?:^|/)claude[-_.]?opus[-_.]?4[-_.]?8(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved from the live catalog; video comparisons use sampled image frames"
+  },
+  {
+    id: "",
+    label: "GPT 5.6",
+    family: "GPT",
+    matchPattern: "(?:^|/)gpt[-_.]?5[._-]?6[-_.]?sol(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved from the live catalog; video comparisons use sampled image frames"
+  },
+  {
+    id: "",
+    label: "Kimi K2.6",
+    family: "Kimi",
+    matchPattern: "(?:^|/)kimi[-_.]?k2[._-]?6(?:$|[-_.:])",
+    capabilities: ["image", "text"],
+    note: "Resolved from the live catalog; video comparisons use sampled image frames"
+  }
+]);
 
 function requestLogId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
@@ -144,6 +241,439 @@ function logReasonError(requestId, event, error, fields = {}) {
       error: error instanceof Error ? error.message : String(error || "unknown error")
     })}`
   );
+}
+
+function normalizeHostedEndpoint(configured, defaultPath) {
+  const parsed = new URL(String(configured || "").trim());
+  const allowInsecure = String(process.env.NVIDIA_HOSTED_ALLOW_HTTP || "0") === "1";
+  const loopback = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+  if (
+    parsed.protocol !== "https:" &&
+    !(allowInsecure && parsed.protocol === "http:" && loopback.has(parsed.hostname.toLowerCase()))
+  ) {
+    throw new Error("Hosted comparison endpoint must use HTTPS");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("Hosted comparison endpoint must not contain credentials, a query, or a fragment");
+  }
+  if (defaultPath && !parsed.pathname.match(/\/(?:models|chat\/completions)\/?$/i)) {
+    parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}/${defaultPath.replace(/^\//, "")}`;
+  }
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function hostedInferenceEndpointUrl() {
+  const configured =
+    process.env.NVIDIA_HOSTED_INFERENCE_URL ||
+    process.env.HOSTED_OPENAI_INFERENCE_URL ||
+    process.env.NVIDIA_HOSTED_BASE_URL ||
+    HOSTED_COMPARE_DEFAULT_BASE_URL;
+  return normalizeHostedEndpoint(configured, "chat/completions");
+}
+
+function hostedCatalogEndpointUrl() {
+  const configured =
+    process.env.NVIDIA_HOSTED_CATALOG_URL ||
+    process.env.HOSTED_OPENAI_CATALOG_URL ||
+    process.env.NVIDIA_HOSTED_BASE_URL ||
+    HOSTED_COMPARE_DEFAULT_BASE_URL;
+  return normalizeHostedEndpoint(configured, "models");
+}
+
+function takeHostedCredential(body) {
+  const runtimeKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+  if (body && Object.prototype.hasOwnProperty.call(body, "apiKey")) delete body.apiKey;
+  if (!runtimeKey || /[\r\n]/.test(runtimeKey)) return "";
+  return runtimeKey;
+}
+
+function hostedModelIdContainsSecret(value, credential = "") {
+  const modelId = typeof value === "string" ? value : "";
+  const exactCredential = String(credential || "");
+  return Boolean((exactCredential && modelId.includes(exactCredential)) || HOSTED_SECRET_LIKE_PATTERN.test(modelId));
+}
+
+function isValidHostedModelId(value) {
+  return typeof value === "string" && !value.includes("://") && HOSTED_MODEL_ID_PATTERN.test(value);
+}
+
+function hostedProviderId() {
+  return "hosted_endpoint";
+}
+
+function hostedModelFamily(modelId) {
+  const id = String(modelId || "").toLowerCase();
+  if (id.includes("gemini")) return "Gemini";
+  if (id.includes("gemma")) return "Gemma";
+  if (id.includes("claude") || id.includes("anthropic")) return "Claude";
+  if (id.includes("gpt") || id.includes("openai")) return "GPT";
+  if (id.includes("qwen")) return "Qwen";
+  if (id.includes("nemotron")) return "Nemotron";
+  if (id.includes("cosmos")) return "Cosmos";
+  if (id.includes("kimi") || id.includes("moonshot")) return "Kimi";
+  return "Other";
+}
+
+function sanitizeCapabilities(value, fallback = ["text"]) {
+  const supported = new Set(["video", "image", "text"]);
+  const capabilities = (Array.isArray(value) ? value : [])
+    .map((item) => String(item || "").toLowerCase())
+    .filter((item) => supported.has(item));
+  return capabilities.length > 0 ? Array.from(new Set(capabilities)) : fallback;
+}
+
+function inferredHostedCapabilities(modelId) {
+  const normalizedId = String(modelId || "").toLowerCase();
+  const curated = curatedModelForDiscoveredId(normalizedId);
+  if (curated) return [...curated.capabilities];
+  // Unknown request IDs are text-only until the user explicitly chooses the
+  // sampled-frame strategy for a video comparison.
+  return ["text"];
+}
+
+function catalogModelCapabilityProfile(model, modelId) {
+  const explicitFields = [
+    "capabilities",
+    "input_modalities",
+    "modalities",
+    "supports_video",
+    "supports_image",
+    "supports_vlm",
+    "supports_vision",
+    "supports_multimodal",
+    "supports_text"
+  ];
+  const hasExplicitMetadata =
+    model &&
+    typeof model === "object" &&
+    explicitFields.some((field) => Object.prototype.hasOwnProperty.call(model, field));
+  const raw = [];
+  const collectCapabilityValues = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(collectCapabilityValues);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) {
+        if (item === true) raw.push(String(key).toLowerCase());
+        else collectCapabilityValues(item);
+      }
+      return;
+    }
+    if (typeof value === "string") raw.push(value.toLowerCase());
+  };
+  collectCapabilityValues(model?.capabilities);
+  collectCapabilityValues(model?.input_modalities);
+  collectCapabilityValues(model?.modalities);
+  const translated = [];
+  if (raw.some((value) => value.includes("video"))) translated.push("video");
+  if (raw.some((value) => value.includes("image") || value.includes("vision"))) translated.push("image");
+  if (raw.some((value) => value.includes("text") || value.includes("chat"))) translated.push("text");
+  if (model?.supports_video === true) translated.push("video");
+  if (
+    model?.supports_image === true ||
+    model?.supports_vlm === true ||
+    model?.supports_vision === true ||
+    model?.supports_multimodal === true
+  ) {
+    translated.push("image");
+  }
+  if (model?.supports_text === true) translated.push("text");
+  if (hasExplicitMetadata) {
+    return {
+      capabilities: sanitizeCapabilities(translated, ["text"]),
+      source: "live_catalog"
+    };
+  }
+  const confirmed = Boolean(curatedModelForDiscoveredId(modelId));
+  return {
+    capabilities: inferredHostedCapabilities(modelId),
+    source: confirmed ? "confirmed_contract" : "unconfirmed"
+  };
+}
+
+function modelMatchesCurated(modelId, curated) {
+  const id = String(modelId || "").toLowerCase();
+  if (curated.id && (id === curated.id.toLowerCase() || id.endsWith(`/${curated.id.toLowerCase()}`))) return true;
+  if (!curated.matchPattern) return false;
+  try {
+    return new RegExp(curated.matchPattern, "i").test(id);
+  } catch {
+    return false;
+  }
+}
+
+function curatedModelForDiscoveredId(modelId) {
+  return CURATED_HOSTED_MODELS.find((candidate) => modelMatchesCurated(modelId, candidate)) || null;
+}
+
+function redactSecretText(value, secrets = []) {
+  let redacted = String(value || "");
+  for (const secret of Array.isArray(secrets) ? secrets : [secrets]) {
+    const normalized = String(secret || "");
+    if (normalized) redacted = redacted.split(normalized).join("<redacted-key>");
+  }
+  return redacted
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer <redacted>")
+    .replace(/\b(?:nvapi|sk)-[A-Za-z0-9._-]+\b/gi, "<redacted-key>")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "<configured-endpoint>")
+    .replace(/\/(?:Users|home|tmp|var\/tmp|workspace)\/[^\s"'<>]+/g, "<redacted-path>")
+    .replace(/[A-Za-z]:\\[^\r\n"'<>]+/g, "<redacted-path>")
+    .slice(0, 4000);
+}
+
+function redactSecretsDeep(value, secrets = []) {
+  if (typeof value === "string") return redactSecretText(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactSecretsDeep(item, secrets));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [redactSecretText(key, secrets), redactSecretsDeep(item, secrets)])
+  );
+}
+
+function textFingerprint(value) {
+  return createHash("sha256").update(String(value || ""), "utf8").digest("hex").slice(0, 16);
+}
+
+function sanitizeLabel(value, fallback = "") {
+  const label = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return (label || fallback).slice(0, 240);
+}
+
+function reportSafeModelLabel(value, fallback = "loaded-model") {
+  const raw = sanitizeLabel(value, fallback);
+  if (raw.startsWith("file://") || path.isAbsolute(raw)) {
+    return path.basename(raw.replace(/^file:\/\//, "").replace(/[\\/]+$/, "")) || fallback;
+  }
+  return raw;
+}
+
+function hostedAuthHeaders(credential, scope) {
+  const prefix = scope === "catalog" ? "NVIDIA_HOSTED_CATALOG" : "NVIDIA_HOSTED_INFERENCE";
+  const mode = String(process.env[`${prefix}_AUTH_MODE`] || process.env.NVIDIA_HOSTED_AUTH_MODE || "bearer").toLowerCase();
+  if (mode === "header" || mode === "api-key" || mode === "api_key") {
+    const headerName = String(
+      process.env[`${prefix}_API_KEY_HEADER`] || process.env.NVIDIA_HOSTED_API_KEY_HEADER || "x-api-key"
+    ).trim();
+    if (!/^[A-Za-z0-9-]+$/.test(headerName)) throw new Error("Configured hosted API-key header name is invalid");
+    return { [headerName]: credential };
+  }
+  const scheme = String(process.env[`${prefix}_AUTH_SCHEME`] || process.env.NVIDIA_HOSTED_AUTH_SCHEME || "Bearer").trim();
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(scheme)) throw new Error("Configured hosted auth scheme is invalid");
+  return { Authorization: `${scheme} ${credential}` };
+}
+
+async function fetchHosted(endpointUrl, credential, scope, options = {}, timeoutMs = HOSTED_COMPARE_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(endpointUrl, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...hostedAuthHeaders(credential, scope),
+        ...(options.headers || {})
+      },
+      redirect: "error",
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function hostedErrorMessage(response, credential) {
+  const raw = await response.text().catch(() => "");
+  let detail = raw;
+  try {
+    const data = raw ? JSON.parse(raw) : null;
+    detail = data?.error?.message || data?.message || raw;
+  } catch {}
+  return redactSecretText(detail || `Hosted model returned HTTP ${response.status}`, credential);
+}
+
+function curatedHostedModels() {
+  return CURATED_HOSTED_MODELS.map((model, index) => {
+    const { matchPattern: _matchPattern, ...publicModel } = model;
+    return {
+      ...publicModel,
+      catalog_key: model.id || `catalog-label-${index}-${model.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      available: false,
+      curated: true,
+      capability_source: "confirmed_contract",
+      discovery_required: true,
+      recommended: false
+    };
+  });
+}
+
+function encodeHostedCatalogCapabilityToken(models) {
+  const payload = {
+    expires_at: Date.now() + HOSTED_CATALOG_CAPABILITY_TTL_MS,
+    models: (Array.isArray(models) ? models : [])
+      .filter((model) => model?.available && isValidHostedModelId(model.id))
+      .map((model) => ({
+        id: model.id,
+        capabilities: sanitizeCapabilities(model.capabilities, ["text"]),
+        source: ["live_catalog", "confirmed_contract", "unconfirmed"].includes(model.capability_source)
+          ? model.capability_source
+          : "unconfirmed"
+      }))
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", HOSTED_CATALOG_CAPABILITY_SIGNING_KEY)
+    .update(encoded, "utf8")
+    .digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function decodeHostedCatalogCapabilityToken(value) {
+  const token = typeof value === "string" ? value.trim() : "";
+  if (!token) return new Map();
+  if (token.length > 262144) throw new Error("Catalog capability token is invalid");
+  const [encoded, signature, ...extra] = token.split(".");
+  if (!encoded || !signature || extra.length > 0) throw new Error("Catalog capability token is invalid");
+  const expected = createHmac("sha256", HOSTED_CATALOG_CAPABILITY_SIGNING_KEY)
+    .update(encoded, "utf8")
+    .digest();
+  let actual;
+  try {
+    actual = Buffer.from(signature, "base64url");
+  } catch {
+    throw new Error("Catalog capability token is invalid");
+  }
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new Error("Catalog capability token is invalid");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Catalog capability token is invalid");
+  }
+  if (!Number.isFinite(Number(payload?.expires_at)) || Number(payload.expires_at) <= Date.now()) {
+    throw new Error("Catalog capability token has expired");
+  }
+  const profiles = new Map();
+  for (const model of Array.isArray(payload?.models) ? payload.models : []) {
+    if (!isValidHostedModelId(model?.id)) continue;
+    const source = ["live_catalog", "confirmed_contract", "unconfirmed"].includes(model?.source)
+      ? model.source
+      : "unconfirmed";
+    profiles.set(model.id, {
+      capabilities: sanitizeCapabilities(model.capabilities, ["text"]),
+      source
+    });
+  }
+  return profiles;
+}
+
+function discoveredHostedModels(data, credential = "") {
+  const upstream = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.data)
+      ? data.data
+      : Array.isArray(data?.models)
+        ? data.models
+        : Array.isArray(data?.items)
+          ? data.items
+          : [];
+  const discovered = upstream
+    .map((model) => {
+      const rawId = typeof model === "string" ? model : model?.id || model?.name;
+      const id = typeof rawId === "string" ? rawId.trim() : "";
+      if (!isValidHostedModelId(id) || hostedModelIdContainsSecret(id, credential)) return null;
+      if (
+        ["embed", "embedding", "rerank", "retrieval", "tts", "asr", "whisper", "parakeet", "ocr"].some(
+          (token) => id.toLowerCase().includes(token)
+        )
+      ) {
+        return null;
+      }
+      const curated = curatedModelForDiscoveredId(id);
+      const capabilityProfile = catalogModelCapabilityProfile(model, id);
+      return {
+        id,
+        label: curated?.label || id,
+        family: hostedModelFamily(id),
+        capabilities: capabilityProfile.capabilities,
+        capability_source: capabilityProfile.source,
+        note: curated?.note || "Discovered from the live hosted catalog",
+        created: Number.isFinite(Number(model?.created)) ? Number(model.created) : null,
+        owned_by: sanitizeLabel(model?.owned_by),
+        available: true,
+        curated: Boolean(curated),
+        discovery_required: false,
+        recommended: false
+      };
+    })
+    .filter(Boolean);
+
+  const targetLabelsByFamily = new Map([
+    ["Qwen", ["Latest Qwen"]],
+    ["Nemotron", ["Nemotron 3 Nano Omni"]],
+    ["Gemma", ["Gemma 4"]],
+    ["Gemini", ["Gemini 3.6 Flash"]],
+    ["Claude", ["Claude 5", "Claude 4.8"]],
+    ["GPT", ["GPT 5.6"]],
+    ["Kimi", ["Kimi K2.6"]]
+  ]);
+  const routePreference = (modelId) => {
+    const id = String(modelId || "").toLowerCase();
+    if (id.startsWith("openai/openai/") || id.startsWith("nvidia/nvidia/") || id.startsWith("nvidia/qwen/")) return 4;
+    if (id.startsWith("azure/")) return 3;
+    if (id.startsWith("gcp/")) return 3;
+    if (id.startsWith("aws/")) return 2;
+    return 0;
+  };
+  for (const [family, preferredLabels] of targetLabelsByFamily) {
+    let candidates = [];
+    for (const label of preferredLabels) {
+      candidates = discovered.filter((model) => model.family === family && model.label === label);
+      if (candidates.length > 0) break;
+    }
+    candidates.sort((left, right) => {
+      const createdDelta = Number(right.created || 0) - Number(left.created || 0);
+      const routeDelta = routePreference(right.id) - routePreference(left.id);
+      return (
+        createdDelta ||
+        routeDelta ||
+        right.id.localeCompare(left.id, undefined, { numeric: true, sensitivity: "base" })
+      );
+    });
+    if (candidates[0]) candidates[0].recommended = true;
+  }
+
+  const matchedLabels = new Set(
+    discovered
+      .map((model) => (model.curated ? model.label : curatedModelForDiscoveredId(model.id)?.label))
+      .filter(Boolean)
+  );
+  for (const [index, curated] of CURATED_HOSTED_MODELS.entries()) {
+    if (matchedLabels.has(curated.label)) continue;
+    discovered.push({
+      ...curated,
+      catalog_key: curated.id || `catalog-label-${index}-${curated.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      created: null,
+      owned_by: "",
+      available: false,
+      curated: true,
+      capability_source: "confirmed_contract",
+      discovery_required: true,
+      recommended: false
+    });
+  }
+
+  return discovered.sort((left, right) => {
+    if (left.recommended !== right.recommended) return left.recommended ? -1 : 1;
+    if (left.available !== right.available) return left.available ? -1 : 1;
+    return `${left.family}/${left.id || left.label}`.localeCompare(`${right.family}/${right.id || right.label}`, undefined, {
+      numeric: true,
+      sensitivity: "base"
+    });
+  });
 }
 const FRAME_EXTRACTOR_PY = String.raw`
 import json
@@ -2194,6 +2724,64 @@ app.get("/api/active-model", async (_request, response) => {
   });
 });
 
+app.get("/api/compare/config", (_request, response) => {
+  response.json({
+    provider: hostedProviderId(),
+    runtime_key_required: true,
+    max_models: HOSTED_COMPARE_MAX_MODELS,
+    target_families: ["Cosmos", "Qwen", "Nemotron", "Gemma", "Gemini", "Claude", "GPT", "Kimi"],
+    curated_models: curatedHostedModels(),
+    redaction: {
+      credentials: "omitted",
+      media_payloads: "omitted",
+      prompt_text: "fingerprint_only"
+    }
+  });
+});
+
+app.post("/api/compare/models", async (request, response) => {
+  const credential = takeHostedCredential(request.body || {});
+  if (!credential) {
+    response.status(401).json({
+      code: "API_KEY_REQUIRED",
+      message: "A runtime API key is required to discover the hosted model catalog.",
+      models: curatedHostedModels()
+    });
+    return;
+  }
+
+  try {
+    const upstream = await fetchHosted(hostedCatalogEndpointUrl(), credential, "catalog", { method: "GET" }, 20000);
+    if (!upstream.ok) {
+      response.status(upstream.status === 401 || upstream.status === 403 ? 401 : 502).json({
+        code: upstream.status === 401 || upstream.status === 403 ? "API_KEY_REJECTED" : "CATALOG_UNAVAILABLE",
+        message: await hostedErrorMessage(upstream, credential),
+        models: curatedHostedModels()
+      });
+      return;
+    }
+    const data = await upstream.json();
+    const models = discoveredHostedModels(data, credential);
+    response.json(
+      redactSecretsDeep(
+        {
+          discovered_at: new Date().toISOString(),
+          models,
+          catalog_capability_token: encodeHostedCatalogCapabilityToken(models),
+          target_families: ["Cosmos", "Qwen", "Nemotron", "Gemma", "Gemini", "Claude", "GPT", "Kimi"]
+        },
+        credential
+      )
+    );
+  } catch (error) {
+    response.status(502).json({
+      code: "CATALOG_UNAVAILABLE",
+      message: redactSecretText(error instanceof Error ? error.message : "Hosted model discovery failed", credential),
+      models: curatedHostedModels()
+    });
+  }
+});
+
 app.get("/api/example-media", async (request, response) => {
   const rawUrl = String(request.query.url || "");
   const requestedName = String(request.query.name || "");
@@ -2289,7 +2877,7 @@ async function prepareReasonRequest(body = {}, options = {}) {
   };
 }
 
-function preparedReasoningOptions(prepared) {
+function preparedReasoningOptions(prepared, options = {}) {
   return {
     model: prepared.selectedModel,
     prompt: prepared.prompt,
@@ -2298,14 +2886,476 @@ function preparedReasoningOptions(prepared) {
     mediaKind: prepared.mediaKind,
     mediaFrames: prepared.mediaFrames,
     framesPerSecond: prepared.params.frames_per_second,
-    params: prepared.params
+    params: prepared.params,
+    forceMaxTokens: options.forceMaxTokens === true
   };
 }
 
-async function submitPreparedReasoning(prepared) {
-  const result = await submitReasoning(preparedReasoningOptions(prepared));
+async function submitPreparedReasoning(prepared, options = {}) {
+  const result = await submitReasoning(preparedReasoningOptions(prepared, options));
   result.media = prepared.media;
   return result;
+}
+
+function numericParam(params, key, fallback) {
+  const value = Number(params?.[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+async function resolveHostedComparisonMedia(body = {}) {
+  const source = body.video || body.image || body.mediaDataUrl;
+  const kind = body.video ? "video" : body.image ? "image" : body.mediaKind || null;
+  if (!source || !kind) return null;
+  if (!String(source).startsWith("data:")) {
+    throw new Error("Hosted comparisons require an uploaded or browser-prepared data URL");
+  }
+  const decoded = dataUrlToBuffer(source);
+  const expectedPrefix = kind === "video" ? "video/" : "image/";
+  if (!decoded.mime.startsWith(expectedPrefix)) {
+    throw new Error(`Comparison media type ${decoded.mime} does not match ${kind}`);
+  }
+  return {
+    dataUrl: source,
+    kind,
+    mime: decoded.mime,
+    bytes: decoded.buffer.length
+  };
+}
+
+function hostedComparisonPayload({ capabilities, media, mediaFrames, model, params, prompt, systemPrompt }) {
+  const supported = sanitizeCapabilities(capabilities, inferredHostedCapabilities(model));
+  const content = [];
+  let mediaMode = "none";
+  if (Array.isArray(mediaFrames) && mediaFrames.length > 0) {
+    if (!supported.includes("image")) throw new Error(`${model} does not advertise image input for frame fallback`);
+    mediaMode = "image-frame-fallback";
+    for (const frame of mediaFrames) {
+      content.push({ type: "image_url", image_url: { url: frame } });
+    }
+  } else if (media?.kind === "image") {
+    if (!supported.includes("image")) throw new Error(`${model} does not advertise image input`);
+    mediaMode = "image_url";
+    content.push({ type: "image_url", image_url: { url: media.dataUrl } });
+  } else if (media?.kind === "video") {
+    if (!supported.includes("video")) throw new Error(`${model} does not advertise native video input`);
+    mediaMode = "video_url";
+    content.push({ type: "video_url", video_url: { url: media.dataUrl } });
+  }
+  content.push({ type: "text", text: prompt || "Describe the provided media." });
+
+  const messages = [];
+  if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+  messages.push({ role: "user", content });
+  const payload = {
+    model,
+    messages,
+    temperature: numericParam(params, "temperature", 0.6),
+    top_p: numericParam(params, "top_p", 0.95),
+    stream: false
+  };
+  payload.max_tokens = Math.max(1, Math.round(numericParam(params, "max_tokens", 512)));
+  return { payload, mediaMode, capabilities: supported };
+}
+
+function hostedRequestShape({ body, capabilities, media, mediaMode, mediaFrames, model, payload }) {
+  const userMessage = payload.messages.find((message) => message.role === "user");
+  const contentTypes = Array.isArray(userMessage?.content)
+    ? userMessage.content.map((entry) => entry.type).filter(Boolean)
+    : ["text"];
+  return {
+    model,
+    advertised_capabilities: sanitizeCapabilities(capabilities, inferredHostedCapabilities(model)),
+    transport: "hosted_openai_compatible",
+    endpoint_path: "/v1/chat/completions",
+    message_roles: payload.messages.map((message) => message.role),
+    content_types: contentTypes,
+    prompt_chars: String(body.prompt || body.userPrompt || "").length,
+    prompt_sha256_16: textFingerprint(body.prompt || body.userPrompt || ""),
+    system_prompt_chars: String(body.systemPrompt || body.system_prompt || "").length,
+    system_prompt_sha256_16: textFingerprint(body.systemPrompt || body.system_prompt || ""),
+    media: media
+      ? {
+          kind: media.kind,
+          mime: media.mime,
+          bytes: media.bytes,
+          mode: mediaMode,
+          frame_count: Array.isArray(mediaFrames) ? mediaFrames.length : undefined,
+          payload: "<redacted>"
+        }
+      : { kind: "none", mode: "none" },
+    parameters_sent: definedValues({
+      temperature: payload.temperature,
+      top_p: payload.top_p,
+      max_tokens: payload.max_tokens,
+      stream: payload.stream
+    }),
+    settings_snapshot: summarizeReasonParams(body.params || {})
+  };
+}
+
+async function postHostedComparison(payload, credential) {
+  const promptSecrets = [credential];
+  for (const message of payload.messages || []) {
+    if (typeof message?.content === "string") promptSecrets.push(message.content);
+    if (!Array.isArray(message?.content)) continue;
+    for (const item of message.content) {
+      if (item?.type === "text" && typeof item.text === "string") promptSecrets.push(item.text);
+    }
+  }
+  let upstream;
+  try {
+    upstream = await fetchHosted(hostedInferenceEndpointUrl(), credential, "inference", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      error: redactSecretText(error instanceof Error ? error.message : "Hosted request failed", promptSecrets)
+    };
+  }
+
+  const raw = await upstream.text().catch(() => "");
+  let data = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    data = null;
+  }
+  if (!upstream.ok) {
+    return {
+      ok: false,
+      status: upstream.status,
+      error: redactSecretText(
+        data?.error?.message || data?.message || raw || `Hosted model returned HTTP ${upstream.status}`,
+        promptSecrets
+      )
+    };
+  }
+  if (!data) {
+    return { ok: false, status: upstream.status, error: "Hosted model returned a non-JSON response" };
+  }
+  return { ok: true, status: upstream.status, data };
+}
+
+async function runHostedComparisonCandidate({
+  body,
+  capabilities,
+  credential,
+  getFrameFallback,
+  media,
+  mediaStrategy,
+  model
+}) {
+  const startedAt = Date.now();
+  const prompt = body.prompt || body.userPrompt || "";
+  const systemPrompt = body.systemPrompt || body.system_prompt || "";
+  const params = body.params || {};
+  const supported = sanitizeCapabilities(capabilities, inferredHostedCapabilities(model));
+  let mediaFrames;
+  let attempts = 0;
+  const forceSampledFrames = media?.kind === "video" && mediaStrategy === "sampled_frames";
+  if (media?.kind === "video" && (forceSampledFrames || !supported.includes("video"))) {
+    if (!supported.includes("image")) {
+      return {
+        role: "candidate",
+        provider: hostedProviderId(),
+        model,
+        status: "error",
+        elapsed_ms: elapsedMs(startedAt),
+        attempts,
+        http_status: null,
+        error: forceSampledFrames
+          ? `${model} does not advertise image input required by the sampled-frame strategy`
+          : `${model} does not advertise video or image input`,
+        response: "",
+        request_shape: {
+          model,
+          advertised_capabilities: supported,
+          transport: "hosted_openai_compatible",
+          media: {
+            kind: "video",
+            mode: "blocked_by_capability_gate",
+            strategy_requested: mediaStrategy,
+            payload: "<redacted>"
+          },
+          prompt_chars: String(prompt).length,
+          prompt_sha256_16: textFingerprint(prompt),
+          settings_snapshot: summarizeReasonParams(params)
+        }
+      };
+    }
+    try {
+      mediaFrames = (await getFrameFallback()).frames;
+    } catch (error) {
+      return {
+        role: "candidate",
+        provider: hostedProviderId(),
+        model,
+        status: "error",
+        elapsed_ms: elapsedMs(startedAt),
+        attempts,
+        http_status: null,
+        error: `Could not prepare image frames for ${model}. Verify the frame extraction runtime and retry.`,
+        response: "",
+        request_shape: {
+          model,
+          advertised_capabilities: supported,
+          transport: "hosted_openai_compatible",
+          media: {
+            kind: "video",
+            mode: "image-frame-fallback",
+            strategy_requested: mediaStrategy,
+            payload: "<redacted>"
+          },
+          prompt_chars: String(prompt).length,
+          prompt_sha256_16: textFingerprint(prompt),
+          settings_snapshot: summarizeReasonParams(params)
+        }
+      };
+    }
+  }
+  if (media?.kind === "image" && !supported.includes("image")) {
+    return {
+      role: "candidate",
+      provider: hostedProviderId(),
+      model,
+      status: "error",
+      elapsed_ms: elapsedMs(startedAt),
+      attempts,
+      http_status: null,
+      error: `${model} does not advertise image input`,
+      response: "",
+      request_shape: {
+        model,
+        advertised_capabilities: supported,
+        transport: "hosted_openai_compatible",
+        media: { kind: "image", mode: "blocked_by_capability_gate", payload: "<redacted>" },
+        prompt_chars: String(prompt).length,
+        prompt_sha256_16: textFingerprint(prompt),
+        settings_snapshot: summarizeReasonParams(params)
+      }
+    };
+  }
+
+  let built = hostedComparisonPayload({ capabilities: supported, media, mediaFrames, model, params, prompt, systemPrompt });
+  let posted = await postHostedComparison(built.payload, credential);
+  attempts += 1;
+
+  if (
+    !posted.ok &&
+    media?.kind === "video" &&
+    !mediaFrames &&
+    supported.includes("image") &&
+    (posted.status === 400 || posted.status === 422)
+  ) {
+    try {
+      const fallback = await getFrameFallback();
+      mediaFrames = fallback.frames;
+      built = hostedComparisonPayload({
+        capabilities: supported,
+        media,
+        mediaFrames,
+        model,
+        params,
+        prompt,
+        systemPrompt
+      });
+      posted = await postHostedComparison(built.payload, credential);
+      attempts += 1;
+    } catch (error) {
+      posted = {
+        ok: false,
+        status: posted.status,
+        error: `${posted.error}; sampled-frame fallback could not be prepared.`
+      };
+    }
+  }
+
+  const requestShape = hostedRequestShape({
+    body,
+    capabilities: supported,
+    media,
+    mediaMode: built.mediaMode,
+    mediaFrames,
+    model,
+    payload: built.payload
+  });
+  if (requestShape.media && typeof requestShape.media === "object") {
+    requestShape.media.strategy_requested = mediaStrategy;
+  }
+  if (!posted.ok) {
+    return {
+      role: "candidate",
+      provider: hostedProviderId(),
+      model,
+      status: "error",
+      elapsed_ms: elapsedMs(startedAt),
+      attempts,
+      http_status: posted.status || null,
+      error: posted.error,
+      response: "",
+      request_shape: requestShape
+    };
+  }
+
+  const normalized = normalizeReasonerMessage(posted.data);
+  const reportedModel =
+    isValidHostedModelId(posted.data?.model) && !hostedModelIdContainsSecret(posted.data.model, credential)
+      ? posted.data.model
+      : model;
+  return {
+    role: "candidate",
+    provider: hostedProviderId(),
+    model: reportedModel,
+    requested_model: model,
+    status: "success",
+    elapsed_ms: elapsedMs(startedAt),
+    attempts,
+    http_status: posted.status,
+    response: redactSecretText(normalized.combined, credential),
+    answer: redactSecretText(normalized.answer, credential),
+    reasoning: redactSecretText(normalized.reasoning, credential),
+    schema: normalized.schema,
+    usage: posted.data?.usage || null,
+    finish_reason: posted.data?.choices?.[0]?.finish_reason || null,
+    request_shape: requestShape
+  };
+}
+
+async function runLoadedComparisonBaseline(body) {
+  const startedAt = Date.now();
+  let prepared;
+  try {
+    prepared = await prepareReasonRequest(body);
+    const result = await submitPreparedReasoning(prepared, { forceMaxTokens: true });
+    const content = responseContent(result);
+    return {
+      role: "baseline",
+      provider: "loaded_endpoint",
+      model: reportSafeModelLabel(result?.openai?.model || prepared.selectedModel),
+      status: result.status === "error" || result.error ? "error" : "success",
+      elapsed_ms: elapsedMs(startedAt),
+      response: redactSecretText(content),
+      answer: redactSecretText(result?.content || content),
+      reasoning: redactSecretText(result?.reasoning || ""),
+      schema: result?.schema || null,
+      usage: result?.openai?.usage || result?.raw?.usage || null,
+      finish_reason: result?.openai?.choices?.[0]?.finish_reason || null,
+      error:
+        result.status === "error" || result.error
+          ? "Loaded baseline inference did not return a usable result."
+          : undefined,
+      request_shape: {
+        model: reportSafeModelLabel(prepared.selectedModel),
+        transport: "loaded_openai_compatible",
+        endpoint_path: "/v1/chat/completions",
+        prompt_chars: String(prepared.prompt || "").length,
+        prompt_sha256_16: textFingerprint(prepared.prompt),
+        system_prompt_chars: String(prepared.systemPrompt || "").length,
+        system_prompt_sha256_16: textFingerprint(prepared.systemPrompt),
+        media: { ...prepared.media, kind: prepared.mediaKind, payload: "<redacted>" },
+        parameters_sent: definedValues({
+          temperature: result?.payload?.temperature,
+          top_p: result?.payload?.top_p,
+          max_tokens: result?.payload?.max_tokens,
+          repetition_penalty: result?.payload?.repetition_penalty,
+          presence_penalty: result?.payload?.presence_penalty,
+          top_k: result?.payload?.top_k,
+          seed: result?.payload?.seed
+        }),
+        settings_snapshot: summarizeReasonParams(prepared.params)
+      }
+    };
+  } catch (error) {
+    return {
+      role: "baseline",
+      provider: "loaded_endpoint",
+      model: reportSafeModelLabel(body.model, defaultModel),
+      status: "error",
+      elapsed_ms: elapsedMs(startedAt),
+      response: "",
+      error: "Loaded baseline inference failed before a result was produced.",
+      request_shape: {
+        transport: "loaded_openai_compatible",
+        prompt_chars: String(body.prompt || body.userPrompt || "").length,
+        prompt_sha256_16: textFingerprint(body.prompt || body.userPrompt || ""),
+        settings_snapshot: summarizeReasonParams(body.params || {})
+      }
+    };
+  } finally {
+    if (prepared?.frameTempDir) await fs.rm(prepared.frameTempDir, { recursive: true, force: true });
+  }
+}
+
+function comparisonMetadata(body = {}) {
+  const comparison = body.comparison || {};
+  const mode = comparison.mode === "ablation" ? "ablation" : "spot";
+  return {
+    mode,
+    media_strategy:
+      comparison.mediaStrategy === "sampled_frames" ? "sampled_frames" : "native_video_when_confirmed",
+    workflow_label: sanitizeLabel(comparison.workflowLabel, mode === "ablation" ? "workflow-ablation" : "spot-check"),
+    variant_label: sanitizeLabel(comparison.variantLabel, mode === "ablation" ? "variant" : "current"),
+    changed_setting: sanitizeLabel(
+      comparison.changedSetting,
+      mode === "ablation" ? "system prompt removed" : ""
+    ),
+    hypothesis: sanitizeLabel(comparison.hypothesis)
+  };
+}
+
+function comparisonRunVariants(body, metadata) {
+  const control = {
+    id: metadata.mode === "ablation" ? "control" : "spot",
+    label: metadata.mode === "ablation" ? "Control" : metadata.variant_label,
+    body: {
+      ...body,
+      comparison: { ...(body.comparison || {}), variantLabel: metadata.mode === "ablation" ? "Control" : metadata.variant_label }
+    }
+  };
+  if (metadata.mode !== "ablation") return [control];
+
+  const rawVariant = body.comparison?.variant || {};
+  const promptOverride =
+    typeof rawVariant.promptOverride === "string" ? rawVariant.promptOverride.slice(0, 20000) : "";
+  const removeSystemPrompt = rawVariant.removeSystemPrompt !== false;
+  const hasTemperatureOverride =
+    rawVariant.temperatureOverride !== undefined &&
+    rawVariant.temperatureOverride !== null &&
+    rawVariant.temperatureOverride !== "";
+  const temperatureOverride = hasTemperatureOverride ? Number(rawVariant.temperatureOverride) : Number.NaN;
+  const variantParams = { ...(body.params || {}) };
+  if (Number.isFinite(temperatureOverride)) {
+    variantParams.temperature = Math.max(0, Math.min(2, temperatureOverride));
+  }
+  const variantBody = {
+    ...body,
+    prompt: promptOverride.trim() ? promptOverride : body.prompt || body.userPrompt || "",
+    userPrompt: promptOverride.trim() ? promptOverride : body.userPrompt,
+    systemPrompt: removeSystemPrompt ? "" : body.systemPrompt || body.system_prompt || "",
+    system_prompt: removeSystemPrompt ? "" : body.system_prompt,
+    params: variantParams,
+    comparison: { ...(body.comparison || {}), variantLabel: metadata.variant_label }
+  };
+  return [
+    control,
+    {
+      id: "variant",
+      label: metadata.variant_label,
+      body: variantBody
+    }
+  ];
+}
+
+function withComparisonVariant(result, variant) {
+  return {
+    ...result,
+    variant_id: variant.id,
+    variant_label: variant.label
+  };
 }
 
 function sse(response, event, data) {
@@ -2639,6 +3689,227 @@ async function stitchLongVideo({ chunks, config, durationSeconds, endpoints, fai
     if (reducerProgressTimer) clearInterval(reducerProgressTimer);
   }
 }
+
+app.post("/api/compare/run", async (request, response) => {
+  const body = request.body || {};
+  const credential = takeHostedCredential(body);
+  if (!credential) {
+    response.status(401).json({
+      code: "API_KEY_REQUIRED",
+      message: "A runtime API key is required for hosted comparisons."
+    });
+    return;
+  }
+
+  const rawCatalogCapabilityToken = body.catalogCapabilityToken;
+  if (Object.prototype.hasOwnProperty.call(body, "catalogCapabilityToken")) {
+    delete body.catalogCapabilityToken;
+  }
+  let catalogCapabilityProfiles;
+  try {
+    catalogCapabilityProfiles = decodeHostedCatalogCapabilityToken(rawCatalogCapabilityToken);
+  } catch {
+    response.status(400).json({
+      code: "INVALID_CATALOG_CONTEXT",
+      message: "The catalog context is invalid or expired. Discover models again before comparing."
+    });
+    return;
+  }
+
+  const workflowFields = JSON.stringify({
+    prompt: body.prompt,
+    userPrompt: body.userPrompt,
+    systemPrompt: body.systemPrompt,
+    system_prompt: body.system_prompt,
+    comparison: body.comparison,
+    params: body.params
+  });
+  if (workflowFields.includes(credential)) {
+    response.status(400).json({
+      code: "INVALID_WORKFLOW_INPUT",
+      message: "Credentials must not be included in prompt or workflow fields."
+    });
+    return;
+  }
+
+  const baselineModelId = typeof body.model === "string" ? body.model : "";
+  if (hostedModelIdContainsSecret(baselineModelId, credential)) {
+    response.status(400).json({ code: "INVALID_MODEL_ID", message: "One or more model IDs are invalid." });
+    return;
+  }
+
+  const rawRequestedModels = Array.isArray(body.models) ? body.models : [];
+  const validatedEntries = [];
+  for (const entry of rawRequestedModels) {
+    const rawId = typeof entry === "string" ? entry : entry?.id;
+    const id = typeof rawId === "string" ? rawId.trim() : "";
+    if (!isValidHostedModelId(id) || hostedModelIdContainsSecret(id, credential)) {
+      response.status(400).json({ code: "INVALID_MODEL_ID", message: "One or more model IDs are invalid." });
+      return;
+    }
+    validatedEntries.push({ id });
+  }
+
+  const metadata = comparisonMetadata(body);
+  const requestedModelMap = new Map();
+  for (const { id } of validatedEntries) {
+    if (requestedModelMap.has(id)) continue;
+    const catalogProfile = catalogCapabilityProfiles.get(id);
+    const explicitSampledFrames = metadata.media_strategy === "sampled_frames";
+    const capabilities = catalogProfile?.capabilities ||
+      (explicitSampledFrames ? ["image", "text"] : inferredHostedCapabilities(id));
+    const capabilitySource = catalogProfile?.source ||
+      (explicitSampledFrames
+        ? "explicit_strategy"
+        : curatedModelForDiscoveredId(id)
+          ? "confirmed_contract"
+          : "unconfirmed");
+    requestedModelMap.set(id, {
+      id,
+      capabilities,
+      capability_source: capabilitySource
+    });
+    if (requestedModelMap.size >= HOSTED_COMPARE_MAX_MODELS) break;
+  }
+  const requestedModels = Array.from(requestedModelMap.values());
+  if (requestedModels.length === 0) {
+    response.status(400).json({ code: "MODELS_REQUIRED", message: "Select at least one hosted model." });
+    return;
+  }
+
+  let hostedMedia = null;
+  let hostedMediaError = null;
+  try {
+    hostedMedia = await resolveHostedComparisonMedia(body);
+  } catch (error) {
+    hostedMediaError = redactSecretText(error instanceof Error ? error.message : "Could not prepare comparison media");
+  }
+
+  let frameFallbackPromise = null;
+  const getFrameFallback = async () => {
+    if (!hostedMedia || hostedMedia.kind !== "video") throw new Error("Video frame fallback is not available");
+    if (!frameFallbackPromise) {
+      frameFallbackPromise = extractFrameDataUrls(
+        hostedMedia.dataUrl,
+        numericParam(body.params || {}, "frames_per_second", 1),
+        HOSTED_COMPARE_FRAME_LIMIT
+      );
+    }
+    return frameFallbackPromise;
+  };
+
+  try {
+    const variants = comparisonRunVariants(body, metadata);
+    const resultPromises = variants.flatMap((variant) => {
+      const baselinePromise = runLoadedComparisonBaseline(variant.body).then((result) =>
+        withComparisonVariant(result, variant)
+      );
+      const candidatePromises = requestedModels.map((candidate) =>
+        (hostedMediaError
+          ? Promise.resolve({
+              role: "candidate",
+              provider: hostedProviderId(),
+              model: candidate.id,
+              status: "error",
+              elapsed_ms: 0,
+              response: "",
+              error: hostedMediaError,
+              request_shape: {
+                model: candidate.id,
+                advertised_capabilities: candidate.capabilities,
+                capability_source: candidate.capability_source,
+                transport: "hosted_openai_compatible",
+                media: {
+                  kind: variant.body.video ? "video" : variant.body.image ? "image" : "unknown",
+                  strategy_requested: metadata.media_strategy,
+                  payload: "<redacted>"
+                },
+                prompt_chars: String(variant.body.prompt || variant.body.userPrompt || "").length,
+                prompt_sha256_16: textFingerprint(variant.body.prompt || variant.body.userPrompt || ""),
+                settings_snapshot: summarizeReasonParams(variant.body.params || {})
+              }
+            })
+          : runHostedComparisonCandidate({
+              body: variant.body,
+              capabilities: candidate.capabilities,
+              credential,
+              getFrameFallback,
+              media: hostedMedia,
+              mediaStrategy: metadata.media_strategy,
+              model: candidate.id
+            })
+        ).then((result) =>
+          withComparisonVariant(
+            {
+              ...result,
+              request_shape: {
+                ...(result.request_shape || {}),
+                capability_source: candidate.capability_source
+              }
+            },
+            variant
+          )
+        )
+      );
+      return [baselinePromise, ...candidatePromises];
+    });
+    const results = await Promise.all(resultPromises);
+    const baseline = results.find((result) => result.role === "baseline") || results[0];
+    response.json(
+      redactSecretsDeep(
+        {
+          schema_version: "1.0",
+          generated_at: new Date().toISOString(),
+          status: results.every((result) => result.status === "success") ? "success" : "partial",
+          comparison: metadata,
+          baseline_model: baseline?.model || reportSafeModelLabel(body.model, defaultModel),
+          variants: variants.map((variant) => ({ id: variant.id, label: variant.label })),
+          input: {
+            media_name: sanitizeLabel(body.mediaName, hostedMedia?.kind ? "current-media" : "none"),
+            media_kind: hostedMedia?.kind || (body.video ? "video" : body.image ? "image" : "none"),
+            media_mime: hostedMedia?.mime || null,
+            media_bytes: hostedMedia?.bytes || null,
+            media_payload: hostedMedia ? "<redacted>" : null,
+            prompt_chars: String(body.prompt || body.userPrompt || "").length,
+            prompt_sha256_16: textFingerprint(body.prompt || body.userPrompt || ""),
+            prompt_text: "<redacted>",
+            system_prompt_chars: String(body.systemPrompt || body.system_prompt || "").length,
+            system_prompt_sha256_16: textFingerprint(body.systemPrompt || body.system_prompt || ""),
+            system_prompt_text: "<redacted>"
+          },
+          settings: summarizeReasonParams(body.params || {}),
+          redaction: {
+            credentials: "omitted",
+            authorization_headers: "omitted",
+            media_payloads: "omitted",
+            prompt_text: "fingerprint_only"
+          },
+          results
+        },
+        credential
+      )
+    );
+  } catch (error) {
+    response.status(502).json(
+      redactSecretsDeep(
+        {
+          code: "COMPARISON_FAILED",
+          message: redactSecretText(error instanceof Error ? error.message : "Comparison failed", credential)
+        },
+        credential
+      )
+    );
+  } finally {
+    if (frameFallbackPromise) {
+      try {
+        const extracted = await frameFallbackPromise;
+        if (extracted?.tempDir) await fs.rm(extracted.tempDir, { recursive: true, force: true });
+      } catch {
+        // Frame extraction errors are already represented in candidate results.
+      }
+    }
+  }
+});
 
 app.post("/api/reason", async (request, response) => {
   let prepared;
